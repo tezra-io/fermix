@@ -12,7 +12,7 @@
 (*  - the LLM and tools (one "loop" step), streaming drafts, typing;       *)
 (*  - the access gate's parked confirmation: run_message_loop hands        *)
 (*    AgentLoop the owner-inbox closure and the Live call id               *)
-(*    (turn_runner.ex:612, :612); a parked call is a held tool result      *)
+(*    (turn_runner.ex:670, :674); a parked call is a held tool result      *)
 (*    inside the one loop step, and the owner's confirm later runs it on   *)
 (*    a task outside the Queue, not as a new turn;                         *)
 (*  - what a turn tells its channel's stream (a hand-off's word, before   *)
@@ -21,7 +21,7 @@
 (*  - a turn's attachments (M67): run_message_loop composes their          *)
 (*    manifest into the user text persist_user_message stores and, on      *)
 (*    the owner's chat turn, first saves them to the workspace             *)
-(*    (turn_runner.ex:484): file writes while the task is at "start",      *)
+(*    (turn_runner.ex:506): file writes while the task is at "start",      *)
 (*    no Queue state, and nothing in history until PersistUser;            *)
 (*  - the empty-completion path (queue.ex:541-544, :724-733): it delivers *)
 (*    a canned retry and commits nothing, leaving the user message        *)
@@ -33,10 +33,20 @@
 (*    hand-off keys into the one its trusted voice_call names, the chat's  *)
 (*    unless the call is private, and is then one more message of that     *)
 (*    FIFO;                                                                *)
+(*  - a phone call's backend turn (M94), on a conversation and lane of     *)
+(*    its own ({"phone_call", call_id, :root}, which no other message      *)
+(*    keys into): the Queue runs it as any turn, but run/5 hands it to     *)
+(*    PhoneCallTurn.run/2 before run_message_loop (turn_runner.ex:         *)
+(*    106-118), so it persists no user message, and commit/4 writes        *)
+(*    nothing for it (:199-206). That conversation's history stays empty,  *)
+(*    a stop's marker finds no user message to close, and its Queue steps  *)
+(*    are the ones here;                                                   *)
 (*  - consumers other than Acp.Peer: Companion.Turns, which settles the    *)
 (*    turns of the companion socket and the phone alike, answers the       *)
-(*    Queue's :DOWN the Peer's way (a turn_error, interrupted); voice      *)
-(*    watches no Queue.                                                    *)
+(*    Queue's :DOWN the Peer's way (a turn_error, interrupted); a phone    *)
+(*    call's delegation watcher (PhoneCalls.Bridge) answers once, on the   *)
+(*    turn's reply or end, its deadline (a named stop) or the Queue's      *)
+(*    :DOWN; voice watches no Queue.                                       *)
 (*                                                                         *)
 (* One step = one indivisible thing in the code: one Queue callback, or   *)
 (* one step of the turn task between two calls into another process.     *)
@@ -50,7 +60,7 @@
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/acp/peer.ex#@moduledoc,handle_info,start_prompt,hand_off,watch_queue,ingest,handle_ingest,apply_turn_result,cancel_turn,cancel_prompt_request,stop_turn,settle_queue_down,close_turn,demonitor_queue,apply_if_open @ 37fc57942bd1
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/acp/session.ex#start_turn,clear_turn,turn_open?,put_queue_ref,queue_ref,queue @ ad21422f117f
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway.ex#ingest,do_deliver_to_agent @ a988106fa5ca
-\* SOURCE: apps/fermix_core/lib/fermix_core/agents/turn_runner.ex#run_message_loop,persist_user_message,commit @ 7ed8cf5f8270
+\* SOURCE: apps/fermix_core/lib/fermix_core/agents/turn_runner.ex#run,run_message_loop,persist_user_message,commit,commit_turn @ 67e5fa7a942d
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/conversation_store.ex @ a81b127db387
 EXTENDS Naturals, Sequences, FiniteSets
 
@@ -375,7 +385,7 @@ CheckoutFail(m) ==
     /\ Show(m, "error")
     /\ QueueUnchanged /\ UNCHANGED <<holding, outcomes, history>>
 
-\* TurnRunner persist_user_message (turn_runner.ex:1422), before AgentLoop.
+\* TurnRunner persist_user_message (turn_runner.ex:1493), before AgentLoop.
 PersistUser(m) ==
     /\ pc[m] = "start"
     /\ MoveTo(m, "loop")
@@ -405,8 +415,9 @@ MarkDelivered(m) ==
     /\ UNCHANGED <<unsent, pending, active, held, claimed, restarting, dropped, holding,
                    outcomes, shown, history>>
 
-\* runner.commit/4 (queue.ex:551 -> turn_runner.ex:164): persist the reply,
-\* then synchronous auto-compaction; the claim comes only after it returns.
+\* runner.commit/4 (queue.ex:551 -> turn_runner.ex:199, commit_turn/4
+\* :208-257): persist the reply, then synchronous auto-compaction; the
+\* claim comes only after it returns.
 \* An orphan that passed fresh? before its Queue died still commits here,
 \* until QueueRestart kills it.
 Commit(m) ==
@@ -595,8 +606,9 @@ OnlyNamedTurnCancelled ==
 SingleFlight == Cardinality({m \in Msgs : pc[m] \in Alive}) <= 1
 
 \* TurnRunner.commit assumes the conversation is single-flight
-\* (turn_runner.ex:171-173). Read as: no turn commits its reply while
-\* another turn of the same conversation is starting or running its loop.
+\* (commit_turn/4, turn_runner.ex:215-217). Read as: no turn commits its
+\* reply while another turn of the same conversation is starting or running
+\* its loop.
 NoOrphanCommitBesideNewTurn ==
     ~(\E a, b \in Msgs :
         /\ a /= b

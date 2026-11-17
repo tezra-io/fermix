@@ -515,7 +515,7 @@ describes, and the **Fix** bullets cite the code as it is now.
   - **The CLI side.** After the delete, `fermix plugins auth logout` and
     `fermix auth logout` send `auth_forget` with the profile
     (`plugins_command.ex:278`, `:520-545`; `auth_command.ex:361-379`,
-    `:405-420`; `cli/daemon/client.ex:60-74`); `fermix auth logout` for codex
+    `:405-420`; `cli/daemon/client.ex:70-84`); `fermix auth logout` for codex
     sends it after ChatGPT's sign-out (`auth_command.ex:328-354`). Both also
     send it when the entry was already gone (`auth_command.ex:333-335`,
     `:370-374`, `:432-435`; `plugins_command.ex:285-289`), so rerunning the
@@ -749,3 +749,17 @@ code: `:1088` for `auth_forget`, `:1331-1361` for its reply and
 `forget_signed_out/2`, `:706-808` for the route and `guarded/2`. The
 TOKEN-6 fix bullet still named `:892` and `:1135-1165`, lines an earlier
 change had already moved; it now names the same two.
+
+## Re-read for outbound phone calls (2026-11-17)
+
+`16727975` staled the `cli/daemon/client.ex` pin. The client gains
+`owner_restart_prepare/1`, which picks the method `fermix restart` asks the
+daemon for its drain window: `lifecycle.prepare_restart`, which a phone call
+in progress holds, where the daemon's `hello` answer publishes it, and
+`lifecycle.prepare` otherwise. It reads a `hello` answer it is given and sends
+nothing. `request/2`, `with_connection/2`, `classify/2` and
+`forget_auth_profile/2` are as they were, so the `auth_forget` notice a CLI
+logout sends, and how its answer is read, are unchanged. No modelled step
+changed. The new lines sit below `forget_auth_profile/2`, so
+`cli/daemon/client.ex:70-84` stands; the TOKEN-6 fix bullet's `:60-74`, which
+an earlier change had moved, now names the same lines.

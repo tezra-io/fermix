@@ -164,8 +164,8 @@ watch was added to the model).
 
 - The LLM and tools (one "loop" step), streaming drafts, and typing.
 - The access gate's parked confirmation. `run_message_loop` hands AgentLoop
-  the owner-inbox closure and the Live call id (`turn_runner.ex:611`,
-  `:609`). A parked call is a held tool result inside the one loop step, and
+  the owner-inbox closure and the Live call id (`turn_runner.ex:670`,
+  `:674`). A parked call is a held tool result inside the one loop step, and
   the owner's confirm later runs it on a task outside the Queue, not as a
   new turn.
 - The `terminal_error_owner?` branch, which only changes who sends the error
@@ -189,7 +189,7 @@ watch was added to the model).
 - What a turn does with its attachments before its loop (M67).
   `run_message_loop` composes their manifest into the user text that
   `persist_user_message` stores and, on the owner's chat turn, first saves
-  them to the workspace (`with_attachments`, `turn_runner.ex:483`). These are
+  them to the workspace (`with_attachments`, `turn_runner.ex:487`). These are
   file writes inside the turn's own steps, before its user message is
   persisted, and move no Queue state: a stop or crash during them is one at
   the turn's start, with nothing of the turn in history yet.
@@ -222,7 +222,19 @@ watch was added to the model).
   handed each turn to and answers the turn the Peer's way, with one
   `turn_error` (`interrupted`), dropping a result that arrives after it. It
   holds the request's fence, so the request is failed once, not released for a
-  re-run. Voice watches nothing.
+  re-run. A phone call's delegation watcher (`PhoneCalls.Bridge`, M94) watches
+  the Queue it enqueued its turn on and answers the call's worker once, on the
+  first of the turn's reply, its end, its deadline (after a named stop) and the
+  Queue's `:DOWN`. Voice watches nothing.
+- A phone call's backend turn (M94). It has a conversation, and so a Queue
+  lane, of its own (`{"phone_call", call_id, :root}`), which no other message
+  keys into, and the Queue runs it as any turn. `run/5` hands it to
+  `PhoneCallTurn.run/2` before `run_message_loop` (`turn_runner.ex:106-118`),
+  so it persists no user message, and `commit/4` writes nothing for it
+  (`:199-206`; the owner's commit is `commit_turn/4`). That conversation's
+  history stays empty, a stop's or crash's marker finds no user message to
+  close (`conversation_store.ex:173`), and its Queue steps are the ones the
+  spec models.
 
 ## Findings
 
@@ -265,7 +277,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
 - **Check:** 10 (6 states).
 - **Counterexample:** the reply is delivered (`deliver_final`, `queue.ex:547`).
   `/stop` then arrives before `runner.commit` persists it (`:551` →
-  `turn_runner.ex:163`).
+  `turn_runner.ex:199`, `commit_turn/4` `:231`).
 - **Code:**
   - `stop_active_turn` kills the task and writes the stopped marker
     (`queue.ex:1101-1106`, `:1151-1164`).
@@ -290,7 +302,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
 - **Counterexample:** the reply is delivered, then `/stop` arrives before the
   task claims its result.
 - **Code:** `commit/4` runs auto-compaction synchronously (`queue.ex:551` →
-  `turn_runner.ex:200`). The claim happens only after that returns
+  `turn_runner.ex:199`, `commit_turn/4` `:245`). The claim happens only after that returns
   (`finish_turn`, `queue.ex:519`), so the window also covers post-delivery
   auto-compaction: seconds to tens of seconds when it runs. The kill aborts
   that compaction (safely: `replace_history` is one atomic call) and skips
@@ -559,3 +571,22 @@ a private call's hand-off, the screen's on a call in the chat), `08e03f95`. It i
 context key and a pure choice with no Queue state; no claim, start, stop, result
 or answer the spec models changed, and the line references into `turn_runner.ex`
 moved with the code.
+
+## Re-read for outbound phone calls (M94, 2026-11-17)
+
+`16727975` staled the `turn_runner.ex` pin. `run/5` hands a phone call's
+backend turn to `Agents.PhoneCallTurn.run/2` before anything of the owner's
+turn is composed, and `commit/4` writes nothing for such a turn; its old body
+is now `commit_turn/4`, unchanged. `run_message_loop` puts the turn's own
+`request_id` (`Agents.RequestIdentity`) and, on a call's result turn, its
+`phone_call_result` in the tool context, and outside-source seeding picks the
+call's source or the coding run's (`continuation_source/1`): context keys with
+no Queue state. A phone call's turns run on a conversation and lane of their
+own through the same Queue (see *Not modelled*), so for every other message
+the turn task's steps are as before: the user message persisted before the
+loop, the reply persisted after delivery and before the claim. No claim,
+start, stop, result or answer the spec models changed. `run` and
+`commit_turn` join the pin, since `run/5` now decides whether those steps run
+at all and `commit_turn/4` holds the commit the spec describes. The line
+references into `turn_runner.ex`, several of which had drifted before this
+change, point at the committed code.

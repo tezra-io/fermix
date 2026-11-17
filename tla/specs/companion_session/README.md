@@ -245,6 +245,20 @@ used, titles kept in Unicode NFC, and a day's move before `day_id`'s day. No eve
 field, step or rule the spec reads changed. A later change said in words that a device's add or move after a day's own
 row puts the stop first in that day; nothing the spec reads changed.
 
+The re-read for outbound phone calls (M94, 2026-11-17) found the token's
+window chosen per request in `store_pending_grant`: an access-sensitive
+request may name its own (`ttl_ms`, at most 15 minutes, `grant_ttl_ms`), which
+the access gate's new kind, a phone call the owner confirms, sets to five
+minutes and shows as its card's `ttl_s`; every other token still lives 60
+seconds, as its card says. The token and its card still expire together, the
+first `take` still consumes the token, and the confirm and deny paths are
+unchanged, so nothing the spec models changed. `grant_ttl_ms` and
+`grant_pending_record`, which set the expiry `validate_pending` reads, are now
+pinned beside `store_pending_grant`. A phone call's result turn that parked
+on an approval now carries its call (`phone_call_result`) into the turn its
+confirmation re-ingests, a part of the grant resume the spec leaves out. The
+line references into `sandbox.ex` moved with the code.
+
 **The Queue is one abstract process.** The runner takes one `.tla` per spec,
 and `turn_queue` proves the Queue's rules against `queue.ex`, so this spec takes
 them as given:

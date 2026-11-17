@@ -29,15 +29,15 @@ what is left out and every step folded into another.
   what the platform took survive. This also covers a crash of any core child
   started before the `RunnerSupervisor` (`CommandHostSupervisor` through
   `MainAgent`, `Memory.Repo`, `Trace` and `Finch` among them,
-  `application.ex:292-376`) or of the `RunnerSupervisor` itself, since
-  `:rest_for_one` restarts every job process in each case (`:187`). A
+  `application.ex:338-422`) or of the `RunnerSupervisor` itself, since
+  `:rest_for_one` restarts every job process in each case (`:209`). A
   runner's send helper and its AgentLoop are linked to it, so none outlives
   the restart; `LoopDiesWithRunner` off lets the loop outlive it (JOB-8).
 - `SchedulerCrashes`: how many times the Scheduler alone may die, at any point
   of any callback, including its own init. A Repo timeout no longer kills it
   (`SchedulerTimeouts`); another cause still does, such as `:rest_for_one`
   restarting it when `MeetingsSupervisor`, started between the
-  `RunnerSupervisor` and the Scheduler, dies (`application.ex:377-384`).
+  `RunnerSupervisor` and the Scheduler, dies (`application.ex:423-430`).
   Runners keep running. When it dies waiting on the reaper's write, that write
   may still land (see late writes).
 - `SchedulerTimeouts`: how many of the Scheduler's Repo calls may time out.
@@ -1182,6 +1182,31 @@ the committed file, the cue tree at `application.ex:464` and
 JobRunnerSupervisor before JobScheduler at `:377` and `:384`, which an
 earlier change had left at `:371` and `:378`.
 
+## Re-read for outbound phone calls (2026-11-17)
+
+`16727975` staled the `application.ex` pin. `supervision_children` gains the
+phone-call subtree (`PhoneCalls.Supervisor`, M94) right after
+`Harness.Supervisor`, primary-only, so after `JobRunnerSupervisor`,
+`MeetingsSupervisor` and `JobScheduler`, which keep their order: a crash of it
+restarts only the children after it, none of the job rail. The application
+also gains `prep_stop/1`, which on an orderly stop asks a phone call in
+progress to end, for at most twelve seconds, before the tree stops; the job
+processes stop with the tree after it, as before, which the model's daemon
+crash covers. The access gate's new kind, a phone call's start, is never
+parked from a scheduled run (where it asks, it refuses one), so the
+assumption below that a scheduled run never parks a call for the owner
+stands. No modelled row, helper, delivery or
+report changed. The citations had fallen behind the file: two changes after
+`d195aa17` moved the tree fourteen lines down without touching a pinned
+function, and this one adds aliases and `prep_stop/1` above it. They now point
+at the committed file: the core children before the `RunnerSupervisor` at
+`application.ex:338-422`, the tree's strategy at `:209`, JobRunnerSupervisor
+before JobScheduler at `:423` and `:430`, the parked confirmations and the
+place records at `:410` and `:414`, and the cue tree at `:518`. The
+access gate's citation for a scheduled run's refusal, which had drifted
+before, now names `command_decision/3` and `scheduled_decision/2`, and the
+new kind's `effect_decision/2` beside them.
+
 ## Assumptions
 
 - Every Repo call completes, or its caller dies, or, for the Scheduler, it
@@ -1221,14 +1246,16 @@ earlier change had left at `:371` and `:378`.
   AgentLoop survives it (JOB-8).
 - The access gate is outside the model. A run's access-sensitive tool call
   that its job row does not name is refused inside the one `Loop` step; a
-  scheduled run never parks a call for the owner (`access_gate.ex:487-512`).
+  scheduled run never parks a call for the owner (`access_gate.ex:320-330`,
+  `:898-907`), nor a phone call's start, the gate's external effect
+  (`:714-724`).
   An owner edit, resume or run now of a job naming such a tool, from a turn
   that could not run it directly, is refused by the tool before any registry
   write or Scheduler call (`job_registry_support.ex:36-41`): a request the owner
   never made. That check's job-row read feeds no modelled column. The store
   of parked confirmations (`Capabilities.AccessGate.Pending`,
-  `application.ex:364`) and the holder of a conversation's place records
-  (`ReplyBlocks`, `:368`, which no job process reads) are two more core
+  `application.ex:410`) and the holder of a conversation's place records
+  (`ReplyBlocks`, `:414`, which no job process reads) are two more core
   children started before the `RunnerSupervisor`, so a crash of either is the
   daemon crash above.
 - The run-row value `unset` stands for the `"none"` the claim writes before a

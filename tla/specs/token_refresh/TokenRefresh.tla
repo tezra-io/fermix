@@ -96,7 +96,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix/cli/plugins_command.ex @ be9afb0398a5
 \* SOURCE: apps/fermix_core/lib/fermix/cli/auth_command.ex @ 248ca48a51fc
 \* SOURCE: apps/fermix_core/lib/fermix/cli/daemon.ex @ 5e9f53c9e8bd
-\* SOURCE: apps/fermix_core/lib/fermix/cli/daemon/client.ex @ 1abb139ada33
+\* SOURCE: apps/fermix_core/lib/fermix/cli/daemon/client.ex @ d8237e7757e7
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS

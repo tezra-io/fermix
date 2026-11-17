@@ -220,7 +220,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/mobile_sql.ex#history,cancel_request,cancelled_request,append_in_tx,next_server_seq,increment_server_seq,claim_request_in_tx,classify_claim,complete_request,settle_request_in_tx,request_transition,append_client_output_in_tx,ensure_running_attempt @ 1ec47b7ff12f
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/request_coordinator.ex#handle_call @ 176aadf6651d
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/queue.ex#stop_turn,stop_named_turn,stop_named_in,maybe_start_next_request,claim_active_turn,stop_conversation_runtime,stop_active_turn,cancel_pending @ 0dc22aada1ac
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/sandbox.ex#store_pending_grant,confirm,deny,notify_approval,take_pending,validate_pending @ 5bec893c9fe6
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/sandbox.ex#store_pending_grant,grant_ttl_ms,grant_pending_record,confirm,deny,notify_approval,take_pending,validate_pending @ dfb39e66e401
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/sandbox/confirmations.ex @ 7f77c69d0c1a
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/voice/bridge.ex#chat_call @ d1c29597e959
 \* SOURCE: apps/fermix_core/lib/fermix_core/agents/main_agent.ex#turn_state,live_call @ 4c76bdeeb9fd
@@ -282,7 +282,7 @@ CONSTANTS
                          \* sent through Fanout.announce; FALSE announces no user row
     SingleAnswer,        \* an approval token is consumed once: Confirmations.take is
                          \* an :ets.take (confirmations.ex:21-26, take_pending
-                         \* sandbox.ex:730-739)
+                         \* sandbox.ex:747-756)
     ResendsPendingApprovals, \* the Connection writes every card still waiting right
                          \* after server_hello, in the step that joined the registry
                          \* (join, send_pending_approvals, connection.ex:638-727, from
@@ -628,11 +628,11 @@ OnCancel(m) ==
                       dupWhileRunning, refused, told>>
 
 \* /confirm TOKEN or /deny TOKEN: a command request through the same path,
-\* answered by the Gateway's command (confirm, deny, sandbox.ex:293-313).
+\* answered by the Gateway's command (confirm, deny, sandbox.ex:309-329).
 \* take_pending peeks, checks the expiry and origin, then takes the token
-\* (sandbox.ex:730-747, Confirmations.take, confirmations.ex:21-26). Only a
+\* (sandbox.ex:747-764, Confirmations.take, confirmations.ex:21-26). Only a
 \* take that finds the token applies the answer and announces
-\* approval_resolved (notify_approval, sandbox.ex:384-392 ->
+\* approval_resolved (notify_approval, sandbox.ex:400-408 ->
 \* approval_resolution_fn, requests.ex:619-624 -> Approvals.resolve,
 \* approvals.ex:97-105, :136-143, which forgets the card first). Without
 \* SingleAnswer the token survives its first answer.
@@ -928,7 +928,7 @@ TurnsNext ==
 
 \* A tool of m's turn needs the owner's approval (a directory grant, or a
 \* coding run's vendor-config change to acknowledge; one path for both): the
-\* gateway stores a pending token (store_pending_grant, sandbox.ex:240-252)
+\* gateway stores a pending token (store_pending_grant, sandbox.ex:246-259)
 \* and the channel's approval store keeps the card, then announces it to this
 \* transport's connections alone, through the announce it announces the
 \* card's end with (send_approval, channels/companion.ex:288-291 ->
@@ -942,11 +942,14 @@ Ask(m) ==
                    applied, reqs, queue, store, env, obs>>
 
 \* The card's ttl_s runs out: the token is refused from then on
-\* (validate_pending, sandbox.ex:741-747), and Approvals drops the card and
+\* (validate_pending, sandbox.ex:758-764), and Approvals drops the card and
 \* announces approval_resolved{expired} to its transport (handle_info
 \* {:approval_expired, ...}, expire, approvals.ex:150-155, :208-217). The two
-\* clocks start a moment apart; either order leaves no card that can be
-\* approved, so they are one step here. Time, so no fairness.
+\* clocks run the same window, 60 s or the one an access-sensitive request
+\* names (a phone call's 5 minutes, grant_ttl_ms, sandbox.ex:261-268, which
+\* its card carries as ttl_s), and start a moment apart; either order leaves
+\* no card that can be approved, so they are one step here. Time, so no
+\* fairness.
 Expire ==
     /\ appr = "pending"
     /\ appr' = "expired"

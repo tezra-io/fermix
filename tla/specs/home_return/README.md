@@ -587,6 +587,25 @@ channels `candidate.ex` pins, beside the `always_on.ex` and
 No modelled step changed. The comments' line numbers into `home_summary.ex`
 move by seven with the new fact and point at this code.
 
+Walked again for outbound phone calls (M94, 2026-11-17): `16727975`
+committed the `application.ex`, `home/role.ex` and
+`management/placement.ex` changes beside this spec's pinned functions, so the
+pins M102 staled can be taken again. `supervision_children` gains
+the phone-call subtree, primary-only in `Home.Role`: the server while it
+serves and the Mac once it serves start it, and neither does as a device or a
+candidate. `prep_stop/1` asks a phone call in progress to end, for at most
+twelve seconds, before an orderly stop takes the tree down, the server's
+restart into its move worker and the Mac's after its activation included;
+with no phone-call manager running it returns at once, and it touches no
+role, marker, return record or candidate file. `Placement` adds
+`phone_calls.` to the database families a device with no link refuses as
+retired, beside `cues.`; `unconfirmed_on_loss?/1`, `unconfirmed/1` and
+`@unconfirmed_methods`, which the spec reads, are as they were, and no step
+here sends a phone-call method. `prepare_home`, `finish_activation` and
+`finish_return` are as they were. No modelled step changed. `MacBoots`'
+citation into `application.ex`, which had drifted, now points at
+`prepare_home` through `finish_return`.
+
 ## Done
 
 Deadlock checking is on. `Done` has these ends:

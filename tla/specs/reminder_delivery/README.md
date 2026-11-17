@@ -42,7 +42,7 @@ attempt like every platform's, so nothing here models it separately.
   (`delivery_worker.ex:197-200`, `:66`).
 - `SchedulerCanRestart`: the scheduler crashes while the BEAM stays up. Any
   earlier child of the flat `:rest_for_one` list (`Repo`, `MainAgent`,
-  `JobScheduler`, …; `application.ex:292-384`) restarts it too. A scheduler
+  `JobScheduler`, …; `application.ex:338-430`) restarts it too. A scheduler
   Repo call that times out no longer does: it returns an error (see
   `RepoCanFail`).
 - `DaemonCanCrash`: the whole daemon dies and boots again.
@@ -71,7 +71,7 @@ least one check):
   (`:1033`) repeat it inside the same Repo callback (`repo.ex:3134-3137`), where
   no other writer can interleave, so removing only them would change nothing.
 - `WorkersDieWithScheduler`: `DeliverySupervisor` starts after the scheduler
-  under `:rest_for_one` (`application.ex:392-393`, `:187`).
+  under `:rest_for_one` (`application.ex:438-439`, `:209`).
 - `SendsDieWithWorker`: a worker's send process is spawned linked to it
   (`Process.spawn(fun, [:link, :monitor])`, `channel_send.ex:219-224`), so a
   worker killed mid-send takes its send with it. Off, it is the code before the
@@ -97,7 +97,7 @@ least one check):
   - No sixth attempt (`scheduler.ex:332-335`). This rests on `AttemptCap`
     (check 02).
   - Never two workers for the row (`delivery_supervisor.ex:5-10`,
-    `application.ex:385-393`). This rests on `ClaimRequiresPending` (check 03),
+    `application.ex:431-439`). This rests on `ClaimRequiresPending` (check 03),
     `WorkersDieWithScheduler` (check 04) and `ResetSkipsMonitored` (check 05),
     and on the timing fact `DownHandledBeforeRetryDue` (check 20).
   - Never two sends for the row either (the premise of M30 §19.10's no-lease
@@ -575,6 +575,23 @@ build check, its child comment reworded in place. No child moved or changed
 order, and `TemporalScheduler` still starts before
 `TemporalDeliverySupervisor`. No delivery path the spec models changed, and
 the spec cites no `application.ex` line.
+
+Re-read on 2026-11-17 for outbound phone calls (`16727975`, M94), which
+staled the `application.ex` pin. `supervision_children` gains the phone-call
+subtree (`PhoneCalls.Supervisor`) right after `Harness.Supervisor`,
+primary-only, so after `TemporalScheduler` and `TemporalDeliverySupervisor`,
+which keep their order: a crash of it restarts only the children after it,
+none of the temporal rail. The application also gains `prep_stop/1`, which
+on an orderly stop asks a phone call in progress to end, for at most twelve
+seconds, before the tree stops; the scheduler, its workers and their sends
+stop with the tree after it, as before, which the model's daemon crash
+covers. No delivery path the spec models changed. The citations had fallen
+behind the file: two changes after `d195aa17` moved the tree fourteen lines
+down without touching a pinned function, and this one adds aliases and
+`prep_stop/1` above it. They now point at the committed file:
+`application.ex:338-430` for the children before the scheduler, `:431-439`
+and `:438-439` for the temporal rail, `:209` for the tree's strategy, and
+`:410` and `:414` for the parked confirmations and the place records.
 
 ## Code and doc drift
 

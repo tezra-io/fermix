@@ -98,9 +98,9 @@
 (* the server.                                                             *)
 (***************************************************************************)
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/move_worker.ex @ b07d6b9515a7
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/home/candidate.ex @ 433d4ef550e0
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/home/candidate.ex @ d93c30ee7062
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/move_responder.ex @ 834af9c6f6cb
-\* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate/activation.ex @ 5a71862e2f64
+\* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate/activation.ex @ f7e445093ddd
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate.ex#prepare_return,returnable,return_checks,returnable_engine,returnable_home,linked_and_still,no_move_here,replaceable_return,present?,remove @ 1c0fff782879
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/device_supervisor.ex#children,dial_children,start_candidate,stop_candidate,start_candidate_subtree,candidate_spec @ a88690ba7d95
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/link.ex#start_return,stop_return @ c80b94d3aa36
@@ -112,9 +112,9 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/home_move.ex#move_start @ 125bb5abc0ed
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/placement.ex#unconfirmed_on_loss?,unconfirmed,@unconfirmed_methods @ e658e2077081
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/desktop/relay.ex#lost_answer @ dfb459724267
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/always_on.ex @ 8fd2754d2746
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/always_on.ex @ 9d23dd731fa1
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/home.ex#restoring? @ 10524f88be3d
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/home_summary.ex#screen,target,device,settled,retired,away,away_here,on,returning,return_view,return_ready,return_moving,return_undone,return_stopped,restore_view,return_cancel,restoring,restore_running?,restore_offer,restorable,started?,stale?,silent?,server_move,server_idle?,move_back,readable_or_update,@before_move,@ended,@server_moves @ c900bc1b2da9
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/home_summary.ex#screen,target,device,settled,retired,away,away_here,on,returning,return_view,return_ready,return_moving,return_undone,return_stopped,restore_view,return_cancel,restoring,restore_running?,restore_offer,restorable,started?,stale?,silent?,server_move,server_idle?,move_back,readable_or_update,@before_move,@ended,@server_moves @ d7f97e59ee60
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/local_return.ex#restore,restored,staged,placed,failed,restart @ a9fe927a65e2
 EXTENDS Naturals
 
@@ -756,7 +756,7 @@ GDone ==
 \* (DeviceSupervisor.children/1), whose process carries on (carry_on/1,
 \* candidate.ex:206-216): activating finishes the activation; a local
 \* candidate in any other phase is removed (drop_local/1, :735-745). A
-\* primary boot runs prepare_home (application.ex:202-241) first:
+\* primary boot runs prepare_home (application.ex:249-289) first:
 \* finish_activation/1 removes a candidate whose settings are in place
 \* (activation.ex:288-300), and Return.done/2 records moved_at
 \* (return.ex:117-132); then the memory repo opens memory.db, making a fresh

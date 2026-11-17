@@ -524,3 +524,19 @@ names the seam `:drop_desktop_rows`, and the candidate's moduledoc says a
 return stages without any computer's row. A move's staging (`stage/5`),
 the activation and the candidate's steps are as before, and a return is
 `home_return`'s: no modelled step changed, and no line the spec cites moved.
+
+## Re-read for outbound phone calls (M94, 2026-11-17)
+
+`16727975` committed the `application.ex` and `home/role.ex` changes beside
+this spec's pinned functions, so the pins M102 D6 staled can be taken again.
+`supervision_children` gains the phone-call subtree, which `Home.Role` lists
+among the primary-only children: a device, the engine a move's worker runs in,
+never starts it, and a candidate keeps only its own list. The application
+gains `prep_stop/1`: on every orderly stop, the restarts of a move's source
+and of its candidate included, it asks a phone call in progress to end, for at
+most twelve seconds, before the tree stops, and with no phone-call manager
+running (a device, a candidate) it returns at once. It reads and writes no
+role, marker, move phase or candidate file, and `prepare_home`,
+`finish_activation`, `finish_move` and `left_to_status` are as they were. No
+modelled step changed. `Restart`'s citation into `application.ex`, which had
+drifted, now points at `prepare_home` and `finish_activation`.

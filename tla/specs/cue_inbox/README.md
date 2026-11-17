@@ -662,3 +662,16 @@ On: the boot drops the release gate's alias, and `Home.ReleaseTable` fetches
 on an Always On server's primary with no build check, its child comment
 reworded in place. No child moved or changed order. The cue tree is still last.
 Nothing the spec models changed, and it cites no `application.ex` line.
+
+## Re-read for outbound phone calls (2026-11-17)
+
+`16727975` staled the `application.ex` pin. `supervision_children` gains the
+phone-call subtree (`PhoneCalls.Supervisor`, M94) right after
+`Harness.Supervisor`, primary-only, after `Jobs.Scheduler` and before the cue
+tree, which is still last: a crash of it restarts the children after it, the
+cue tree among them, which the model takes as `FiltersRestart`, and leaves
+`Jobs.Scheduler` and its runners alone. The application also gains
+`prep_stop/1`, which on an orderly stop asks a phone call in progress to end,
+for at most twelve seconds, before the tree stops; the cue tree stops with
+the tree after it, as before. Nothing the spec models changed, and it cites
+no `application.ex` line.
