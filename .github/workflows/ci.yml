@@ -43,7 +43,9 @@ jobs:
           - { os: ubuntu-24.04, leg: linux-x64, timeout: 45, fetch_depth: 0 }
           - { os: ubuntu-24.04-arm, leg: linux-arm64, timeout: 30, fetch_depth: 1 }
           - { os: macos-15, leg: macos-arm64, timeout: 45, fetch_depth: 1 }
-          - { os: macos-15-intel, leg: macos-x64, timeout: 45, fetch_depth: 1 }
+          # The Intel runner is the slowest leg: a full compile takes about 7
+          # minutes and the core suite about 32, so it needs the longest bound.
+          - { os: macos-15-intel, leg: macos-x64, timeout: 60, fetch_depth: 1 }
     env:
       MIX_ENV: test
       ELIXIR_VERSION: "1.19.7"
@@ -66,7 +68,10 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-${{ runner.arch }}-mix-test-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('**/mix.lock') }}
+          # config/*.exs is in the key because a change there makes Mix
+          # recompile every app: with mix.lock alone the saved build never
+          # refreshes, and each later run pays that full compile again.
+          key: ${{ runner.os }}-${{ runner.arch }}-mix-test-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('**/mix.lock', 'config/*.exs') }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-mix-test-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-
 
