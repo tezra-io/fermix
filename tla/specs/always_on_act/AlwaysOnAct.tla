@@ -175,8 +175,8 @@ Press(c) ==
     /\ Goto(c, "queued")
     /\ UNCHANGED <<job_vars, drawn, acts, holder, hist_vars>>
 
-\* The serializer takes the act (act/2, always_on.ex:280-288, handle_call,
-\* :293-295): one at a time.
+\* The serializer takes the act (act/2, always_on.ex:288-296, handle_call,
+\* :301-303): one at a time.
 Take(c) ==
     /\ pc[c] = "queued"
     /\ Serialized => holder = "none"
@@ -184,8 +184,8 @@ Take(c) ==
     /\ Goto(c, "check")
     /\ UNCHANGED <<job_vars, drawn, acts, hist_vars>>
 
-\* run/3 and offered/4 (:299-325): the summary as it is now, and the key
-\* rule; then restore_here/3 (:853-862), whose copy is chosen first (a read).
+\* run/3 and offered/4 (:307-333): the summary as it is now, and the key
+\* rule; then restore_here/3 (:872-881), whose copy is chosen first (a read).
 Check(c) ==
     /\ pc[c] = "check"
     /\ IF KeyRule /\ "restore_here" \notin Offered
@@ -193,7 +193,7 @@ Check(c) ==
           ELSE Goto(c, "request") /\ UNCHANGED changedSeen
     /\ UNCHANGED <<job_vars, drawn, acts, holder, busySeen, crashed>>
 
-\* keep_record/2 of restore_record/3 (:873-876, :785-790): the request in
+\* keep_record/2 of restore_record/3 (:892-895, :804-809): the request in
 \* return.json, before the job.
 Request(c) ==
     /\ pc[c] = "request"
@@ -201,7 +201,7 @@ Request(c) ==
     /\ request' = TRUE
     /\ UNCHANGED <<jobs, drawn, acts, holder, hist_vars>>
 
-\* start_restore/3 (:886-901): Jobs.start/2, refused busy beside a running
+\* start_restore/3 (:905-920): Jobs.start/2, refused busy beside a running
 \* job of the kind (jobs.ex:251-259); else the job runs, its ending kept.
 Start(c) ==
     /\ pc[c] = "start"
@@ -214,8 +214,8 @@ Start(c) ==
                /\ UNCHANGED busySeen
     /\ UNCHANGED <<request, drawn, acts, holder, changedSeen, crashed>>
 
-\* The refused start takes the request back (request_done/1, always_on.ex:944-952); the
-\* refusal names a restore only when one runs (busy_with/1, :905-909).
+\* The refused start takes the request back (request_done/1, always_on.ex:963-971); the
+\* refusal names a restore only when one runs (busy_with/1, :924-928).
 Unstart(c) ==
     /\ pc[c] = "unstart"
     /\ Goto(c, "done")
@@ -250,8 +250,8 @@ RunCrashes(j) ==
     /\ crashed' = TRUE
     /\ UNCHANGED <<request, caller_vars, changedSeen, busySeen>>
 
-\* The ending (restore_ended/3, always_on.ex:918-942) takes the request back
-\* (request_done/1, :944-952), which tells the watch, then settles a local
+\* The ending (restore_ended/3, always_on.ex:937-961) takes the request back
+\* (request_done/1, :963-971), which tells the watch, then settles a local
 \* candidate a run stopped from outside left (home_return's RhSettle: no
 \* request here); the job still runs until the family hears the ending is
 \* done.
