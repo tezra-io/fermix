@@ -126,6 +126,51 @@ defmodule FermixChannels.Desktop.CallBridgeTest do
       assert_receive {:opened, "call-2"}
     end
 
+    # The server's `idle` can reach the app before its `call_close` reaches
+    # the bridge, so an app that calls again at once sends its `call_start`
+    # while the call it hung up is still open here. That call takes no more
+    # controls on the server, so the start waits for its close and opens the
+    # next call, never goes up as a control of the call that ended.
+    test "a call_start before the hung-up call's close opens the next call once it is in", ctx do
+      bridge = call_up!(ctx.relay)
+      {:cont, bridge} = CallBridge.event(bridge, event("call_stop"))
+      assert_receive {:up, "call_line", %{"control_seq" => 2}, _stop}
+      {:cont, bridge} = down(bridge, "call_line", ~s({"type":"state","state":"idle"}))
+
+      {:cont, bridge} = CallBridge.event(bridge, event("call_start"))
+      _ = :sys.get_state(ctx.relay)
+      refute_received {:up, _type, _fields, _bytes}
+      refute_received {:opened, _call_id}
+
+      assert {:cont, _bridge} = down(bridge, "call_close", <<>>, %{"reason" => "ended"})
+      assert_receive {:closed, "call-1"}
+      assert_receive {:opened, "call-2"}
+      assert_receive {:up, "call_open", %{"resume" => false}, <<>>}
+      assert_receive {:up, "call_line", %{}, hello}
+      assert %{"type" => "client_hello"} = Jason.decode!(hello)
+      assert_receive {:up, "call_line", %{"control_seq" => 1}, start}
+      assert Jason.decode!(start) == %{"type" => "call_start"}
+    end
+
+    test "a hang-up before that next call opened takes its start back", ctx do
+      bridge = call_up!(ctx.relay)
+      {:cont, bridge} = CallBridge.event(bridge, event("call_stop"))
+      assert_receive {:up, "call_line", %{"control_seq" => 2}, _stop}
+      {:cont, bridge} = down(bridge, "call_line", ~s({"type":"state","state":"idle"}))
+      {:cont, bridge} = CallBridge.event(bridge, event("call_start"))
+
+      assert {:cont, bridge} = CallBridge.event(bridge, event("call_stop"))
+      assert_received {:app_event, %{type: "state", state: "idle"}}
+
+      assert {:cont, %CallBridge{call: nil}} =
+               down(bridge, "call_close", <<>>, %{"reason" => "ended"})
+
+      assert_receive {:closed, "call-1"}
+      _ = :sys.get_state(ctx.relay)
+      refute_received {:opened, _call_id}
+      refute_received {:up, _type, _fields, _bytes}
+    end
+
     test "an end after an error line closes the connection, as the local socket does", ctx do
       bridge = call_up!(ctx.relay)
       {:cont, bridge} = down(bridge, "call_line", ~s({"type":"error","reason":"session_down"}))

@@ -34,8 +34,12 @@ defmodule FermixChannels.Desktop.CallBridge do
   `call_ended`, or an end the server started with no error) keeps the
   connection for a fresh `call_start`, as the local socket does; an end
   after an error line, or one with no call left to resume, closes it after
-  the error, the way the local socket closes after most errors. A bridge
-  refusal carries the engine's `sentence`, which the app shows as it is.
+  the error, the way the local socket closes after most errors. The server's
+  `idle` after a hang-up can reach the app before its `call_close` reaches
+  the bridge: a `call_start` the app sends in between waits for that close,
+  then opens the next call, and a `call_stop` meanwhile takes it back. A
+  bridge refusal carries the engine's `sentence`, which the app shows as it
+  is.
 
   ## A dropped link
 
@@ -127,6 +131,22 @@ defmodule FermixChannels.Desktop.CallBridge do
   def event(%__MODULE__{} = bridge, %{type: "playback_progress", payload: payload}),
     do: {:cont, line_up(bridge, line("playback_progress", payload))}
 
+  # A call that was hung up takes no more controls on the server, and its
+  # `call_close` can come after the `idle` the app already read: a start sent
+  # meanwhile opens the next call once that close is in (`closed/2`).
+  def event(%__MODULE__{call: %{hung_up?: true} = call} = bridge, %{type: "call_start"}),
+    do: {:cont, %{bridge | call: %{call | start_next?: true}}}
+
+  # A hang-up before that next call opened takes its start back, said as a
+  # hang-up with no call is.
+  def event(%__MODULE__{call: %{start_next?: true} = call} = bridge, %{type: "call_stop"}) do
+    _ = bridge.emit.(%{type: "state", state: "idle"})
+    {:cont, %{bridge | call: %{call | start_next?: false}}}
+  end
+
+  def event(%__MODULE__{} = bridge, %{type: "call_stop", payload: payload}),
+    do: {:cont, hang_up(bridge, line("call_stop", payload))}
+
   def event(%__MODULE__{} = bridge, %{type: type, payload: payload}) when type in @controls,
     do: {:cont, control(bridge, line(type, payload))}
 
@@ -149,7 +169,7 @@ defmodule FermixChannels.Desktop.CallBridge do
     do: say_ended(bridge, move_ended(why))
 
   def info(%__MODULE__{call: %{}} = bridge, {:call_bridge_end, why}) do
-    bridge = control(bridge, line("call_stop", %{}))
+    bridge = hang_up(bridge, line("call_stop", %{}))
     {:cont, %{bridge | call: %{bridge.call | ended_for: move_ended(why)}}}
   end
 
@@ -221,6 +241,8 @@ defmodule FermixChannels.Desktop.CallBridge do
       hello: hello,
       answered?: false,
       failed?: false,
+      hung_up?: false,
+      start_next?: false,
       ended_for: nil,
       window: nil,
       relay_monitor: monitor(bridge.relay)
@@ -278,6 +300,13 @@ defmodule FermixChannels.Desktop.CallBridge do
 
   defp send_control(bridge, call_id, seq, json),
     do: :ok = Relay.send_call(bridge.relay, call_id, "call_line", %{"control_seq" => seq}, json)
+
+  # The call's `call_stop`: from now on the server's close is the call's last
+  # word, and a `call_start` waits for it.
+  defp hang_up(bridge, json) do
+    bridge = control(bridge, json)
+    %{bridge | call: %{bridge.call | hung_up?: true}}
+  end
 
   defp line_up(%{call: %{phase: :away}} = bridge, _json), do: bridge
 
@@ -369,9 +398,10 @@ defmodule FermixChannels.Desktop.CallBridge do
     end
   end
 
-  # The call is over. A normal end keeps the connection for a fresh call; an
-  # end after an error closes it, as the local socket closes after most
-  # errors; a call the server no longer holds is said, then closes it.
+  # The call is over. A normal end keeps the connection for a fresh call, and
+  # opens the one the app already asked for; an end after an error closes it,
+  # as the local socket closes after most errors; a call the server no longer
+  # holds is said, then closes it.
   defp closed(%{call: call} = bridge, reason) do
     bridge = forget(bridge)
 
@@ -384,6 +414,9 @@ defmodule FermixChannels.Desktop.CallBridge do
 
       call.failed? or reason != "ended" ->
         {:stop, bridge}
+
+      call.start_next? ->
+        start_call(bridge)
 
       true ->
         {:cont, bridge}
