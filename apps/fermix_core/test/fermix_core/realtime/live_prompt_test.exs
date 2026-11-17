@@ -2,6 +2,7 @@ defmodule FermixCore.Realtime.LivePromptTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.Agents.VoiceCall
+  alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.HostFacts
@@ -11,6 +12,7 @@ defmodule FermixCore.Realtime.LivePromptTest do
   alias FermixCore.Prompt.VoicePresence
   alias FermixCore.Realtime.LivePrompt
   alias FermixCore.Realtime.LiveText
+  alias FermixCore.Tools.PhoneCall
 
   @title "# LIVE.md — Live Voice Companion"
   @voice_in_chat_suite Path.expand("../../../../../benchmark/suites/voice_in_chat.yaml", __DIR__)
@@ -386,6 +388,23 @@ defmodule FermixCore.Realtime.LivePromptTest do
       lines = LivePrompt.capability_lines(capabilities)
       assert lines =~ "open_loop_note"
       refute lines =~ "open_loop_respond"
+    end
+
+    # M94 §06, §07: a call's prompt is built when it starts, so it names
+    # `phone_call` exactly while phone calls are on. It is the one phone tool
+    # a registry holds: the in-call controls are in none
+    # (`PhoneCallToolsTrustInvariantTest`), so no prompt read from one names them.
+    test "names phone_call only while phone calls are on" do
+      previous = Application.fetch_env(:fermix_core, :phone_calls)
+      on_exit(fn -> restore_env({:phone_calls, previous}) end)
+
+      capabilities = [Builtin.from_tool_module(PhoneCall), capability("read_file", :file)]
+
+      Application.put_env(:fermix_core, :phone_calls, [])
+      assert LivePrompt.capability_lines(capabilities) == "- File & Code: read_file"
+
+      Application.put_env(:fermix_core, :phone_calls, enabled: true)
+      assert LivePrompt.capability_lines(capabilities) =~ "phone_call"
     end
   end
 

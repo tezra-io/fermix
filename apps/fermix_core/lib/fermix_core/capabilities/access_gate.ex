@@ -12,10 +12,7 @@ defmodule FermixCore.Capabilities.AccessGate do
   (`metadata.host_command?`: `shell`, `git_write`, a command the owner
   declared, and the local coding runs `codex_run` and `claude_code_run`) is
   decided only when the turn read outside content and Fermix cannot sandbox the
-  call. `phone_call` opts in the same way, unconfined, and only its `start` is
-  decided (`metadata.phone_call?`): a dial is a side effect no sandbox holds,
-  and checking or stopping a call never waits. The taint is rule 5's
-  `:outside_sources` half alone: a shared Buzz
+  call. The taint is rule 5's `:outside_sources` half alone: a shared Buzz
   channel does not hold one by itself, since a Buzz session answers through
   `shell`. Fermix cannot sandbox the call anywhere but macOS
   (`Sandbox.OsSandbox.seatbelt?/1` false, read through the context's
@@ -32,6 +29,19 @@ defmodule FermixCore.Capabilities.AccessGate do
   runs, and every command on a Linux computer waits for the owner's confirm,
   whose prompt names the computer. That confirm is a yes to one call inside
   what that computer allows, never a widening of it.
+
+  One more kind is decided here: a built-in marked `external_effect?`,
+  whose call makes an effect outside the machine (`phone_call`'s `start`
+  places a call). It is no command: no sandbox holds it or is asked about it,
+  and it is no part of a job's reach (`check_job_tools/2`). Only the calls its
+  module names are decided (`effect_call?/1`, `Capabilities.Builtin.Tool`),
+  and only in a turn that read outside content or came from a shared Buzz
+  channel; then the owner confirms it in their own chat, reading what the
+  module renders (`confirmation/2`, shown whole or not asked at all), for
+  `@effect_ttl_ms`. A turn that cannot ask them (a voice call, a delegated
+  worker, a cue or scheduled run, any turn that is not the owner's attended
+  one) is refused in the kind's own sentences. Every other call goes on to
+  the tool, whose own checks stay its barrier.
 
   `Capability.execute/3` — the single invoke boundary for the agent loop and the
   realtime voice bridge — asks `admit/3` first, and every other capability
@@ -141,6 +151,15 @@ defmodule FermixCore.Capabilities.AccessGate do
   @max_source_labels 5
   @after_confirm "Once you confirm, Fermix runs exactly this command."
   @after_confirm_in_call "Fermix goes ahead only once you confirm."
+  # An effect outside the machine: the owner reads a whole rendering (a phone
+  # call's brief) before answering, so its confirmation waits longer than a
+  # command's 60 seconds, and is refused rather than cut when it cannot be
+  # shown whole in one message (a chat message carries about 4,000 characters,
+  # the reason and the approval line included).
+  @effect_ttl_ms 5 * 60_000
+  @max_effect_chars 3_500
+  # What an effect's module must say (`Capabilities.Builtin.Tool`).
+  @effect_callbacks [effect: 0, effect_name: 0, effect_call?: 1, confirmation: 2, confirmed: 1]
 
   @affirmatives MapSet.new(
                   ~w(yes yeah yep yup confirm confirmed) ++
@@ -161,6 +180,9 @@ defmodule FermixCore.Capabilities.AccessGate do
   @snapshot_keys [
     :session_id,
     :parent_session,
+    # The owner request's identity (`Agents.RequestIdentity`): a confirmed
+    # call is still the request that asked for it.
+    :request_id,
     :agent_name,
     :redact_values,
     :conversation_key,
@@ -208,7 +230,7 @@ defmodule FermixCore.Capabilities.AccessGate do
           | :sign_in_not_allowed
           | :sign_in_not_on_voice
   @type decision :: :dispatch | :chained | {:confirm, surface()} | {:refuse, refusal()}
-  @type gate_kind :: :access_sensitive | :host_command | :sign_in | nil
+  @type gate_kind :: :access_sensitive | :host_command | :external_effect | :sign_in | nil
   @type in_call_result ::
           {:ok, :confirmed} | {:error, :denied | :unanswered | {:not_delivered, term()}}
 
@@ -243,7 +265,7 @@ defmodule FermixCore.Capabilities.AccessGate do
 
     hold(
       %{capability: capability, args: args, context: context},
-      waiting_text(),
+      waiting_text(waiting_effect(context)),
       "refused_waiting"
     )
   end
@@ -261,6 +283,23 @@ defmodule FermixCore.Capabilities.AccessGate do
     end
   end
 
+  # What waits for the owner, when it is an effect outside the machine: its
+  # module's name for one, read from the record this turn parked. Anything
+  # else that waits (a command, or nothing this store can name) is `:none`.
+  defp waiting_effect(context) do
+    with session_id when is_binary(session_id) <- Map.get(context, :session_id),
+         {:ok, id} <- Pending.pending_from(session_id, pending(context)),
+         {:ok, tool} <- Pending.tool(id, pending(context)),
+         {:ok, capability} <- CapabilityRegistry.find(registry(context), tool),
+         :external_effect <- gate_kind(capability, %{}) do
+      {:ok, effect_module!(capability).effect_name()}
+    else
+      _command_or_none -> :none
+    end
+  end
+
+  defp registry(context), do: Map.get(context, :capability_registry) || CapabilityRegistry
+
   @doc """
   Whether a call `admit/3` decides here (the moduledoc's two kinds) may run now
   in `context`, must wait for the owner on a surface, or is refused. `args` are
@@ -271,9 +310,11 @@ defmodule FermixCore.Capabilities.AccessGate do
   @spec decide(Capability.t(), map(), map()) :: decision()
   def decide(%Capability{} = capability, context, args \\ %{})
       when is_map(context) and is_map(args) do
-    if gate_kind(capability, args) == :sign_in,
-      do: sign_in_decision(context),
-      else: command_decision(capability, context, args)
+    case gate_kind(capability, args) do
+      :sign_in -> sign_in_decision(context)
+      :external_effect -> effect_decision(capability, context)
+      _command -> command_decision(capability, context, args)
+    end
   end
 
   defp command_decision(capability, context, args) do
@@ -369,9 +410,10 @@ defmodule FermixCore.Capabilities.AccessGate do
 
   @doc """
   Which kind of call `admit/3` decides here, from the capability and the call's
-  arguments: a plugin command flagged access-sensitive, a built-in host
-  command, the built-in `browser` tool's `act` of kind `sign_in` (matched on
-  the tool module, so no plugin tool of that name is one), or none.
+  arguments: a plugin command flagged access-sensitive, a built-in effect
+  outside the machine, a built-in host command, the built-in `browser` tool's
+  `act` of kind `sign_in` (matched on the tool module, so no plugin tool of
+  that name is one), or none.
   """
   @spec gate_kind(Capability.t(), map()) :: gate_kind()
   def gate_kind(%Capability{metadata: %{tool_module: Browser}}, %{"kind" => "sign_in"}),
@@ -379,6 +421,9 @@ defmodule FermixCore.Capabilities.AccessGate do
 
   def gate_kind(%Capability{metadata: %{access_sensitive?: true}}, args) when is_map(args),
     do: :access_sensitive
+
+  def gate_kind(%Capability{metadata: %{external_effect?: true}}, args) when is_map(args),
+    do: :external_effect
 
   def gate_kind(%Capability{metadata: %{host_command?: true}}, args) when is_map(args),
     do: :host_command
@@ -497,15 +542,27 @@ defmodule FermixCore.Capabilities.AccessGate do
   delivery: the one token-visibility rule, and a promise that matches what
   happens. For a parked call (`:parked`) the daemon runs the command and
   nothing resumes; for a call waiting in `ask_in_call/3` (`:in_call`) that call
-  goes ahead only on a yes.
+  goes ahead only on a yes; for a parked effect outside the machine
+  (`{:effect, promise}`) the line ends with what its own rendering promises,
+  and says the longer window it waits for.
   """
-  @spec approval_line(String.t(), map(), :parked | :in_call) :: String.t()
-  def approval_line(token, context, kind \\ :parked)
-      when is_binary(token) and is_map(context) and kind in [:parked, :in_call],
-      do: RequestDirectoryAccess.approval_line(token, context, after_confirm(kind))
+  @spec approval_line(String.t(), map(), :parked | :in_call | {:effect, String.t()}) ::
+          String.t()
+  def approval_line(token, context, kind \\ :parked) when is_binary(token) and is_map(context),
+    do: RequestDirectoryAccess.approval_line(token, context, after_confirm(kind), expires(kind))
 
   defp after_confirm(:parked), do: @after_confirm
   defp after_confirm(:in_call), do: @after_confirm_in_call
+  defp after_confirm({:effect, promise}) when is_binary(promise), do: promise
+
+  defp expires({:effect, _promise}), do: effect_window()
+  defp expires(kind) when kind in [:parked, :in_call], do: "60s"
+
+  defp effect_window, do: "#{div(@effect_ttl_ms, 60_000)} minutes"
+
+  @doc "How long the owner has to confirm an effect outside the machine, in milliseconds."
+  @spec effect_ttl_ms() :: pos_integer()
+  def effect_ttl_ms, do: @effect_ttl_ms
 
   @doc """
   Control, format and line-separator characters (a line break, a bidi
@@ -637,16 +694,51 @@ defmodule FermixCore.Capabilities.AccessGate do
 
   # The one predicate for whether a call meets `decide/3`: a flagged command
   # and a sign-in always; a host command only where the kernel does not hold
-  # it, and only in a tainted turn. Metadata first, so every other call returns
-  # without reading the context.
+  # it, and only in a tainted turn; an effect outside the machine only for a
+  # call its module names, in a tainted turn. Metadata first, so every other
+  # call returns without reading the context.
   defp gated?(capability, args, context) do
     case gate_kind(capability, args) do
       :access_sensitive -> true
       :sign_in -> true
-      :host_command -> host_command_gated?(capability, args, context)
+      :host_command -> host_command_gated?(capability, context)
+      :external_effect -> effect_call?(capability, args) and tainted?(capability, context)
       nil -> false
     end
   end
+
+  # The owner confirms an effect outside the machine in their own chat, so only
+  # their attended turn can ask them, and never by voice: a voice call cannot
+  # show them what they would confirm. A turn that read nothing is the owner's
+  # own request, and goes on to the tool.
+  defp effect_decision(capability, context) do
+    cond do
+      Access.worker?(context) -> {:refuse, :worker}
+      cue_run?(context) -> {:refuse, :cue_run}
+      Authorization.scheduled?(context) -> {:refuse, :scheduled}
+      not Access.attended_operator_turn?(context) -> {:refuse, :unattended}
+      not tainted?(capability, context) -> :dispatch
+      voice_turn?(context) -> {:refuse, :voice_surface}
+      true -> confirm_on(surface(context))
+    end
+  end
+
+  # The module of a capability of this kind, which must say what it does,
+  # which of its calls make it and what the owner reads: a kind declared
+  # without them is a defect, and raises.
+  defp effect_module!(%Capability{name: name} = capability) do
+    module = Map.get(capability.metadata, :tool_module)
+
+    if is_atom(module) and Code.ensure_loaded?(module) and
+         Enum.all?(@effect_callbacks, fn {fun, arity} ->
+           function_exported?(module, fun, arity)
+         end),
+       do: module,
+       else:
+         raise(ArgumentError, "#{name} is an external effect whose module does not render one")
+  end
+
+  defp effect_call?(capability, args), do: effect_module!(capability).effect_call?(args)
 
   # A sign-in only refuses: it never parks, and an admitted one asks the owner
   # from its own call. Who is refused is `sign_in_refusal/1`'s answer.
@@ -680,7 +772,13 @@ defmodule FermixCore.Capabilities.AccessGate do
     end
   end
 
-  defp voice_turn?(context),
+  @doc """
+  Whether `context` is a voice turn: a live call's own (`voice_call_id`), or
+  one its origin marks as voice. The one definition, which a tool that answers
+  a voice turn differently reads too.
+  """
+  @spec voice_turn?(map()) :: boolean()
+  def voice_turn?(context) when is_map(context),
     do:
       is_binary(Map.get(context, :voice_call_id)) or
         Map.get(context, :computer_use_origin) == :voice
@@ -691,17 +789,10 @@ defmodule FermixCore.Capabilities.AccessGate do
   # even there (the `codex`/`claude_code` presets, the coding runs). Its taint is
   # only what the turn read, never the shared Buzz channel on its own (owner
   # decision): a Buzz session answers by running the `buzz` CLI through `shell`.
-  defp host_command_gated?(capability, args, context) do
-    decided_call?(capability, args) and read_outside?(capability, context) and
+  defp host_command_gated?(capability, context) do
+    read_outside?(capability, context) and
       (not confined_call?(capability) or not OsSandbox.seatbelt?(os_opts(context)))
   end
-
-  # A phone call is decided when it would dial: any action but a status read or
-  # a stop, so a call with no arguments (a job's tools) counts as one.
-  defp decided_call?(%Capability{metadata: %{phone_call?: true}}, args),
-    do: Map.get(args, "action") not in ["status", "cancel"]
-
-  defp decided_call?(%Capability{}, _args), do: true
 
   # What a chained run may carry: its task and folder, and settings that widen
   # nothing it can reach or how. Every other argument (extra directories, a
@@ -841,9 +932,21 @@ defmodule FermixCore.Capabilities.AccessGate do
 
   defp outside_labels(capability, sources) do
     sources
-    |> MapSet.delete(UntrustedContent.outside_source(capability))
+    |> MapSet.delete(own_plugin_reads(capability))
     |> Enum.map(fn {_kind, label} -> label end)
     |> Enum.sort()
+  end
+
+  # The one read a call leaves out of its own taint: a plugin's command may act
+  # on what that plugin read from its own service, the owner's account there
+  # (owner decision). A built-in's own relayed output is someone else's words
+  # (`phone_call`'s status is what a called party said), so it counts like any
+  # other read, and a later start of that built-in waits for the owner.
+  defp own_plugin_reads(capability) do
+    case UntrustedContent.outside_source(capability) do
+      {:plugin, _plugin} = own -> own
+      _relayed_or_none -> nil
+    end
   end
 
   defp source_set(context) do
@@ -899,10 +1002,32 @@ defmodule FermixCore.Capabilities.AccessGate do
   # question; never when it is too long to show. Both are refused instead, and a
   # plugin command keeps the surface `decide/2` chose, a spoken yes included.
   defp park_or_refuse(%{capability: capability} = call, surface) do
-    cond do
-      gate_kind(capability, %{}) != :host_command ->
-        park(call, surface)
+    case gate_kind(capability, %{}) do
+      :host_command -> park_command(call, surface)
+      :external_effect -> park_effect(call, surface)
+      _flagged -> park(call, surface)
+    end
+  end
 
+  # What the owner confirms is what the effect's module renders, shown whole
+  # or not asked at all: a rendering past `@max_effect_chars` is refused with
+  # the module's own sentence, as is a call with nothing to confirm.
+  defp park_effect(%{capability: capability, args: args, context: context} = call, surface) do
+    case effect_module!(capability).confirmation(args, context) do
+      {:ok, %{promise: promise, too_long: too_long} = confirmation} when is_binary(promise) ->
+        call = call |> Map.put(:confirmation, confirmation) |> with_sources()
+
+        if String.length(owner_prompt(call)) > @max_effect_chars,
+          do: hold(call, too_long, "refused_confirmation_too_long"),
+          else: park(call, surface)
+
+      {:error, sentence} when is_binary(sentence) ->
+        hold(call, sentence, "refused_unconfirmable")
+    end
+  end
+
+  defp park_command(%{capability: capability} = call, surface) do
+    cond do
       surface == :voice ->
         refuse(call, :voice_surface)
 
@@ -934,7 +1059,8 @@ defmodule FermixCore.Capabilities.AccessGate do
     Map.merge(call, %{
       sources: outside_labels(capability, source_set(context)),
       shared_channel?:
-        gate_kind(capability, %{}) == :access_sensitive and shared_channel?(context)
+        gate_kind(capability, %{}) in [:access_sensitive, :external_effect] and
+          shared_channel?(context)
     })
   end
 
@@ -949,9 +1075,13 @@ defmodule FermixCore.Capabilities.AccessGate do
       binding: binding(surface, context),
       sources: call.sources,
       snapshot:
-        context |> Map.take(snapshot_keys(capability)) |> Map.put(:source_trust, :operator)
+        context |> Map.take(snapshot_keys(capability)) |> Map.put(:source_trust, :operator),
+      ttl_ms: window_ms(call)
     }
   end
+
+  defp window_ms(%{confirmation: _rendered}), do: @effect_ttl_ms
+  defp window_ms(_call), do: Pending.ttl_ms()
 
   defp snapshot_keys(%Capability{metadata: %{coding_run?: true}}),
     do: @snapshot_keys ++ @harness_snapshot_keys
@@ -984,9 +1114,9 @@ defmodule FermixCore.Capabilities.AccessGate do
   # means the owner has no live token for this call (first ask, or the last one
   # was denied or expired), so the prompt goes out; `:existing` sends nothing.
   defp deliver(:this_chat, call, _fresh) do
-    case call.context.approval_fn.(%{access_sensitive: call.id}) do
+    case call.context.approval_fn.(approval_request(call)) do
       {:ok, token, :new} ->
-        call.context.reply_fn.({:approval_prompt, chat_prompt(call, token), token})
+        call.context.reply_fn.(approval_prompt(call, token))
         hold_parked(call, chat_text(call), "held_this_chat")
 
       {:ok, _token, :existing} ->
@@ -995,10 +1125,7 @@ defmodule FermixCore.Capabilities.AccessGate do
   end
 
   defp deliver(:owner_inbox, call, _fresh) do
-    case call.context.owner_inbox_approval_fn.(%{
-           access_sensitive: call.id,
-           prompt: owner_prompt(call)
-         }) do
+    case call.context.owner_inbox_approval_fn.(inbox_request(call)) do
       {:ok, _token, :new} ->
         hold_parked(call, inbox_text(call), "held_owner_inbox")
 
@@ -1019,6 +1146,39 @@ defmodule FermixCore.Capabilities.AccessGate do
     do: hold_parked(call, voice_text(call.capability.name), "held_voice")
 
   defp deliver(:voice, call, :existing), do: hold_parked(call, existing_text(), "held_voice")
+
+  # The token a parked call's prompt carries, and the prompt: an effect's lives
+  # for its own window, which a channel that draws a card shows (`ttl_s`).
+  defp approval_request(%{confirmation: _rendered} = call),
+    do: %{access_sensitive: call.id, ttl_ms: @effect_ttl_ms}
+
+  defp approval_request(call), do: %{access_sensitive: call.id}
+
+  defp approval_prompt(%{confirmation: _rendered} = call, token) do
+    {:approval_prompt,
+     %{
+       kind: :sandbox,
+       text: chat_prompt(call, token),
+       token: token,
+       ttl_s: div(@effect_ttl_ms, 1_000)
+     }}
+  end
+
+  defp approval_prompt(call, token), do: {:approval_prompt, chat_prompt(call, token), token}
+
+  # What the owner's inbox is asked: the prompt, and for an effect the promise
+  # its own rendering ends with and its window, so the inbox's confirm line
+  # comes from the same rendering as this chat's.
+  defp inbox_request(%{confirmation: %{promise: promise}} = call) do
+    %{
+      access_sensitive: call.id,
+      prompt: owner_prompt(call),
+      after_confirm: promise,
+      ttl_ms: @effect_ttl_ms
+    }
+  end
+
+  defp inbox_request(call), do: %{access_sensitive: call.id, prompt: owner_prompt(call)}
 
   defp refuse(%{capability: capability, args: args} = call, reason) do
     call = with_sources(call)
@@ -1222,7 +1382,7 @@ defmodule FermixCore.Capabilities.AccessGate do
         Map.get(metadata, :plugin) == record.plugin and
           Map.get(metadata, :auth_profile) == record.auth_profile
 
-      :host_command ->
+      kind when kind in [:host_command, :external_effect] ->
         command_ref(capability) == record.command_ref
 
       _neither_command ->
@@ -1249,7 +1409,19 @@ defmodule FermixCore.Capabilities.AccessGate do
 
   # What the owner reads in their chat once a confirmed call ran, redacted and
   # made `visible/1` as the prompt was, since a command's output or error can
-  # carry anything its target wrote.
+  # carry anything its target wrote. An effect outside the machine answers in
+  # its module's own words (`confirmed/1`), never its raw result: the effect
+  # under way, or, refused after the confirmation, the refusal's own sentence.
+  defp confirmed_outcome(
+         {:ok, %{success: success} = result},
+         %Capability{metadata: %{external_effect?: true}} = capability,
+         record
+       )
+       when is_boolean(success) do
+    {status, line} = effect_module!(capability).confirmed(result)
+    {status, shown_outcome(line, record)}
+  end
+
   defp confirmed_outcome({:ok, %{success: true, output: output}}, capability, record),
     do: {:ok, ran_text(capability, record, output)}
 
@@ -1277,14 +1449,25 @@ defmodule FermixCore.Capabilities.AccessGate do
 
   # Whether this turn could not run `capability` itself, so a job naming it may
   # not be set up from here either. No call's arguments: a job's run is never
-  # the next run of a coding-run chain.
+  # the next run of a coding-run chain. An effect outside the machine is no
+  # part of a job's reach: every scheduled run is refused it (`decide/3`).
   defp held_for_job?(capability, context),
-    do: gated?(capability, %{}, context) and decide(capability, context) != :dispatch
+    do:
+      gate_kind(capability, %{}) != :external_effect and gated?(capability, %{}, context) and
+        decide(capability, context) != :dispatch
 
   # --- owner-facing text (Fermix-authored; never quotes the model or a sender)
 
   # A plugin command shows its description and JSON arguments; a host command
-  # shows everything that will run, verbatim (`shown_command/1`).
+  # shows everything that will run, verbatim (`shown_command/1`); an effect
+  # outside the machine shows what its module rendered (`effect_lines/2`).
+  defp owner_prompt(%{capability: capability, confirmation: confirmation} = call) do
+    ["Confirm #{capability.name}? " <> visible(confirmation.head)]
+    |> Kernel.++(effect_lines(confirmation.lines, call.context))
+    |> Kernel.++(["Asked because #{reason_phrase(call)}."])
+    |> Enum.join("\n")
+  end
+
   defp owner_prompt(%{capability: %{metadata: %{host_command?: true}} = capability} = call) do
     [
       "Confirm #{capability.name}? " <> prompt_head(capability, call.context),
@@ -1302,9 +1485,6 @@ defmodule FermixCore.Capabilities.AccessGate do
     """
   end
 
-  defp prompt_head(%Capability{metadata: %{phone_call?: true}}, _context),
-    do: "It places a phone call from your number, made by Fermix as your AI assistant."
-
   defp prompt_head(%Capability{}, %{computer: %Computer{name: name}}),
     do: "It runs a command on #{name}, which Fermix cannot sandbox there."
 
@@ -1315,11 +1495,35 @@ defmodule FermixCore.Capabilities.AccessGate do
     do: "It runs a command on this computer, which Fermix cannot sandbox here."
 
   defp command_label(%Capability{metadata: %{coding_run?: true}}), do: "Task"
-  defp command_label(%Capability{metadata: %{phone_call?: true}}), do: "Brief"
   defp command_label(%Capability{}), do: "Command"
 
   defp chat_prompt(call, token),
-    do: owner_prompt(call) <> "\n\n" <> approval_line(token, call.context)
+    do: owner_prompt(call) <> "\n\n" <> approval_line(token, call.context, approval_kind(call))
+
+  defp approval_kind(%{confirmation: %{promise: promise}}), do: {:effect, promise}
+  defp approval_kind(_call), do: :parked
+
+  # An effect's lines as the owner reads them: a label and its value on one
+  # line, or a label and its values numbered on the lines under it ("none" for
+  # an empty list). Every label and value is redacted and made `visible/1`, so
+  # no value can break a line, start one, or reorder what the owner reads.
+  defp effect_lines(lines, context), do: Enum.flat_map(lines, &effect_line(&1, context))
+
+  defp effect_line({label, []}, context), do: [shown(label, context) <> ": none"]
+
+  defp effect_line({label, values}, context) when is_list(values) do
+    numbered =
+      values
+      |> Enum.with_index(1)
+      |> Enum.map(fn {value, n} -> "  #{n}. " <> shown(value, context) end)
+
+    [shown(label, context) <> ":" | numbered]
+  end
+
+  defp effect_line({label, value}, context) when is_binary(value),
+    do: [shown(label, context) <> ": " <> shown(value, context)]
+
+  defp shown(text, context) when is_binary(text), do: text |> redacted(context) |> visible()
 
   defp args_text(%{args: args, context: context}) do
     args
@@ -1369,10 +1573,6 @@ defmodule FermixCore.Capabilities.AccessGate do
 
   defp command_text(%Capability{metadata: %{coding_run?: true}}, args),
     do: argument_value(Map.get(args, "prompt"))
-
-  # The whole brief a call would carry, so the owner confirms its every term.
-  defp command_text(%Capability{metadata: %{phone_call?: true}}, args),
-    do: argument_value(Map.get(args, "brief"))
 
   defp command_text(%Capability{}, args), do: Jason.encode!(args)
 
@@ -1526,10 +1726,25 @@ defmodule FermixCore.Capabilities.AccessGate do
     end
   end
 
+  # An effect outside the machine waits for the owner in its own words: what it
+  # does (its module's `effect/0`) and its own window.
+  defp chat_text(%{confirmation: _rendered, capability: %{name: tool} = capability} = call) do
+    "Not done yet: #{tool} #{effect_of(capability)}, and #{reason_phrase(call)}, so the owner " <>
+      "must confirm it. A confirmation is now in this chat and expires in #{effect_window()}. " <>
+      "Tell the owner and stop. Do not call #{tool} again: it goes ahead the moment they confirm."
+  end
+
   defp chat_text(%{capability: %{name: tool}} = call) do
     "Not sent. #{tool} #{what(call)} and #{reason_phrase(call)}, so the " <>
       "owner must confirm it. A confirmation is now in this chat and expires in 60 seconds. " <>
       "Tell the owner and stop. Do not call #{tool} again: it runs the moment they confirm."
+  end
+
+  defp inbox_text(%{confirmation: _rendered, capability: %{name: tool} = capability} = call) do
+    "Not done yet: #{tool} #{effect_of(capability)}, and #{reason_phrase(call)}, so the " <>
+      "confirmation went to the owner's own chat and expires in #{effect_window()}. Say it is " <>
+      "waiting on the owner's confirmation there, then stop. Do not call #{tool} again: it " <>
+      "goes ahead the moment they confirm."
   end
 
   defp inbox_text(%{capability: %{name: tool}} = call) do
@@ -1544,7 +1759,12 @@ defmodule FermixCore.Capabilities.AccessGate do
       "it hears their yes and tells you what happened."
   end
 
-  defp waiting_text do
+  defp waiting_text({:ok, effect_name}) do
+    "Not run: #{effect_name} the owner has not confirmed yet is waiting on their answer, and " <>
+      "nothing else runs until they give it. Tell the owner it is waiting, then stop."
+  end
+
+  defp waiting_text(:none) do
     "Not run: a command that needs the owner's confirmation is already waiting on their " <>
       "answer, and nothing else runs until they give it. Tell the owner it is waiting, then stop."
   end
@@ -1586,6 +1806,14 @@ defmodule FermixCore.Capabilities.AccessGate do
   defp refusal_text(:access_sensitive, reason, call),
     do: refusal_text(reason, call.capability.name)
 
+  # An effect outside the machine, refused where the owner cannot be asked: it
+  # says what the call does, why the owner must confirm it, and why this turn
+  # cannot ask them, never a word about commands or sandboxes.
+  defp refusal_text(:external_effect, reason, %{capability: %{name: tool} = capability} = call) do
+    "#{tool} was not run: it #{effect_of(capability)}, and #{reason_phrase(call)}, so the " <>
+      "owner must confirm it in their own chat. " <> effect_rule(reason)
+  end
+
   defp refusal_text(:sign_in, :sign_in_not_allowed, _call) do
     "Not signed in: Fermix signs in to a website only when the owner asks in their own " <>
       "chat or the Fermix app, never from a delegated worker, a cue, a scheduled job or a " <>
@@ -1619,6 +1847,36 @@ defmodule FermixCore.Capabilities.AccessGate do
   end
 
   defp chain_note(_call), do: ""
+
+  defp effect_rule(:worker),
+    do: "A delegated worker cannot ask them. Report that the owner must ask for it directly."
+
+  defp effect_rule(:cue_run) do
+    "A task woken by a cue cannot ask them. Report what you found; the owner can ask for it " <>
+      "in their own chat."
+  end
+
+  defp effect_rule(:scheduled) do
+    "A scheduled run cannot ask them. Report what you found; the owner can ask for it in their " <>
+      "own chat."
+  end
+
+  defp effect_rule(:unattended) do
+    "Only a request the owner makes in their own chat or the Fermix app can ask them, and " <>
+      "this turn is not one. Tell the owner to ask for it there."
+  end
+
+  defp effect_rule(:voice_surface) do
+    "A voice call cannot show them what they would confirm. Tell the owner to ask for it in " <>
+      "their own chat or the Fermix app."
+  end
+
+  defp effect_rule(:no_surface) do
+    "Fermix has no private chat to ask them on. Tell the owner to ask for it in their own " <>
+      "chat or the Fermix app."
+  end
+
+  defp effect_of(capability), do: effect_module!(capability).effect()
 
   defp host_rule(:worker, _tool) do
     "A delegated worker never runs one after such content. Report that the owner must ask " <>

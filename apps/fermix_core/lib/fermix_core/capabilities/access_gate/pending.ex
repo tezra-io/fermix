@@ -11,7 +11,9 @@ defmodule FermixCore.Capabilities.AccessGate.Pending do
 
   One GenServer serializes every lookup and write, so two identical parks can
   never both be new and one record can never be taken twice. A record lives for
-  the `/confirm` family's 60 seconds; parking the same call again while it waits
+  the `/confirm` family's 60 seconds, or for the window its park names
+  (`:ttl_ms`, at most `max_ttl_ms/0`: the gate's longer one for an effect the
+  owner reads a whole brief for); parking the same call again while it waits
   answers `:existing` and restarts that window, because the gate may then have
   sent the owner a fresh token for it (the last one was denied or expired).
   Taking a record marks it running (`:running` to a re-park, never a second
@@ -36,6 +38,7 @@ defmodule FermixCore.Capabilities.AccessGate.Pending do
   require Logger
 
   @ttl_ms 60_000
+  @max_ttl_ms 15 * 60_000
   @max_live 64
 
   @type binding :: {:conversation, term()} | {:voice_call, String.t()}
@@ -63,6 +66,7 @@ defmodule FermixCore.Capabilities.AccessGate.Pending do
           binding: binding(),
           sources: [String.t()],
           snapshot: map(),
+          ttl_ms: pos_integer(),
           seq: non_neg_integer(),
           expires_at_ms: integer(),
           status: status()
@@ -79,9 +83,13 @@ defmodule FermixCore.Capabilities.AccessGate.Pending do
     GenServer.start_link(__MODULE__, opts, name: name)
   end
 
-  @doc "How long a parked call waits for the owner, in milliseconds."
+  @doc "How long a parked call waits for the owner, in milliseconds, unless its park names a window."
   @spec ttl_ms() :: pos_integer()
   def ttl_ms, do: @ttl_ms
+
+  @doc "The longest window a park may name."
+  @spec max_ttl_ms() :: pos_integer()
+  def max_ttl_ms, do: @max_ttl_ms
 
   @doc "The most records the store holds at once."
   @spec max_live() :: pos_integer()
@@ -90,12 +98,18 @@ defmodule FermixCore.Capabilities.AccessGate.Pending do
   @doc """
   Park a call, or find the live record for the same binding and arguments.
   `attrs` carries every `record()` field except `:id`, `:seq`, `:expires_at_ms`
-  and `:status`, which the store assigns.
+  and `:status`, which the store assigns, and `:ttl_ms`, which is optional
+  (`ttl_ms/0` when absent; a window past `max_ttl_ms/0` raises).
   """
   @spec park(map(), GenServer.server()) :: park_result()
   def park(%{binding: _binding, digest: digest} = attrs, server \\ __MODULE__)
       when is_binary(digest) do
-    GenServer.call(server, {:park, attrs})
+    ttl_ms = Map.get(attrs, :ttl_ms, @ttl_ms)
+
+    unless is_integer(ttl_ms) and ttl_ms > 0 and ttl_ms <= @max_ttl_ms,
+      do: raise(ArgumentError, "a park's window must be 1..#{@max_ttl_ms} ms: #{inspect(ttl_ms)}")
+
+    GenServer.call(server, {:park, Map.put(attrs, :ttl_ms, ttl_ms)})
   end
 
   @doc "Take a pending record for its one confirmed run. Marks it running."
@@ -241,7 +255,7 @@ defmodule FermixCore.Capabilities.AccessGate.Pending do
   defp handle({:take, id}, state) do
     case Map.fetch(state.records, id) do
       {:ok, %{status: :pending} = record} ->
-        running = %{record | status: :running, expires_at_ms: expiry(state)}
+        running = %{record | status: :running, expires_at_ms: expiry(state, record)}
         {{:ok, running}, put_record(state, running)}
 
       _missing_or_used ->
@@ -250,7 +264,7 @@ defmodule FermixCore.Capabilities.AccessGate.Pending do
   end
 
   defp handle({:finish, record, outcome}, state) do
-    tombstone = %{record | status: {:done, outcome}, expires_at_ms: expiry(state)}
+    tombstone = %{record | status: {:done, outcome}, expires_at_ms: expiry(state, record)}
     {:ok, put_record(state, tombstone)}
   end
 
@@ -267,7 +281,7 @@ defmodule FermixCore.Capabilities.AccessGate.Pending do
         waiter: waiter,
         monitor: Process.monitor(waiter),
         seq: state.seq,
-        expires_at_ms: expiry(state),
+        expires_at_ms: state.clock.() + @ttl_ms,
         status: :in_call
       }
 
@@ -370,7 +384,7 @@ defmodule FermixCore.Capabilities.AccessGate.Pending do
   end
 
   defp refresh(record, state) do
-    refreshed = %{record | expires_at_ms: expiry(state)}
+    refreshed = %{record | expires_at_ms: expiry(state, record)}
     {{:ok, record.id, :existing}, put_record(state, refreshed)}
   end
 
@@ -394,9 +408,11 @@ defmodule FermixCore.Capabilities.AccessGate.Pending do
           :command_ref,
           :binding,
           :sources,
-          :snapshot
+          :snapshot,
+          :ttl_ms
         ])
-        |> Map.merge(%{id: id, seq: state.seq, expires_at_ms: expiry(state), status: :pending})
+        |> Map.merge(%{id: id, seq: state.seq, status: :pending})
+        |> then(&Map.put(&1, :expires_at_ms, expiry(state, &1)))
 
       {{:ok, id, :new}, put_record(%{state | seq: state.seq + 1}, record)}
     end
@@ -417,7 +433,8 @@ defmodule FermixCore.Capabilities.AccessGate.Pending do
     %{state | records: live}
   end
 
-  defp expiry(state), do: state.clock.() + @ttl_ms
+  # A parked record lives for the window its park named.
+  defp expiry(state, %{ttl_ms: ttl_ms}), do: state.clock.() + ttl_ms
 
   defp new_id, do: 8 |> :crypto.strong_rand_bytes() |> Base.encode16(case: :lower)
 end

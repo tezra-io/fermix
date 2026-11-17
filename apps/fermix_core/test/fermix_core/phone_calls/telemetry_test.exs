@@ -21,7 +21,8 @@ defmodule FermixCore.PhoneCalls.TelemetryTest do
     Map.merge(
       %{
         id: id,
-        request_id: "main-77",
+        request_id: "req_0a1b2c3d4e5f6a7b8c9d0e1f",
+        parent_session: "main-77",
         origin_kind: "chat",
         model: "gpt-live-1",
         carrier_profile: "telnyx_credential_v1",
@@ -58,7 +59,8 @@ defmodule FermixCore.PhoneCalls.TelemetryTest do
 
     assert_receive {:telemetry, _event, _measurements, meta}
     encoded = inspect(meta)
-    refute encoded =~ "555"
+    # The destination's digits, not "555", which a random call id can hold.
+    refute encoded =~ "5550123"
     refute encoded =~ "table"
     refute Map.has_key?(meta, :destination)
     refute Map.has_key?(meta, :mandate)

@@ -98,6 +98,29 @@ guard, and both runners bind exactly that port (`evallib.fixture_server`), so a
 fixture page is readable by `web_fetch` as well as the browser. A home without
 the manifest (one seeded before it existed) gets neither.
 
+`--phone-calls` (M94) turns phone calls on for the phone_call suite
+(suites/phone_call.yaml): `[fermix_core.phone_calls]` enabled with an invented
+caller number in the fiction-only 555-01xx range and an invented trunk username,
+the trunk password and the OpenAI Platform key the phone engine reuses (the
+`openai` provider's slot) as invented values in the home's own file store
+(`secrets/PHONE_CALLS_SIP_PASSWORD`, `secrets/OPENAI_API_KEY`, the names
+`SecretWriter.File` reads; the config holds `@file`), and a manifest,
+`eval-fixtures/phone_calls.json`, that says so. Every value is
+`evallib.phone_sim.SEEDED`, the one the runners' simulated GPT-Live endpoint
+checks each create against. Turning the section on is the one setup decision a
+call needs; the owner's confirmation of a call that outside content asked for
+(the access gate) is not pre-granted, because one scenario is about it. The
+daemon reaches the simulator, never OpenAI or a carrier: a development build
+decides at boot where its calls go (`FermixCore.Application.phone_call_transport_opts/2`)
+and sends them to `FERMIX_EVAL_FIXTURE_ORIGIN` when this home's
+`eval-fixtures/fixture_server.json` honours it, refusing every call when it is set
+and not honoured. `capability-daemon.sh` sets the variable from that manifest each
+time it starts the daemon, which is only after this seed has written it, and drops
+an `OPENAI_API_KEY` the caller's environment carries for such a home, so the
+invented key is the one in use. Refused with a scored `openai` provider or the
+`openai_live` voice engine, which need that real key. A seed without it removes
+what a previous phone seed wrote, and the suite is held out as NOT EVALUATED.
+
 `--coding-signed-out` (M98 D10) gives coding_harness's signed-out case a Claude
 Code that fails every run as signed out: a stub `claude` in `<home>/eval-bin`
 (`capability-daemon.sh` puts that folder first on the daemon's PATH) that
@@ -128,6 +151,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from evallib import safe_rm  # noqa: E402
 from evallib.fixture_server import FIXTURE_MANIFEST  # noqa: E402
+from evallib.phone_sim import SEEDED as PHONE_SEEDED  # noqa: E402
 
 DEV_HOME = os.path.expanduser("~/.fermix-dev")
 # This computer's own settings, beside config.toml (M97 §4): the engine reads
@@ -356,6 +380,12 @@ COMPUTERS = (
                 {"id": "places", "state": "unavailable",
                  "sentence": "Looking places up in Apple Maps needs the Fermix app on a Mac."}]},
 )
+# Phone calls (M94), with --phone-calls: the manifest the runners read, and the
+# two secrets in the home's file store, by the names `SecretWriter.File` reads
+# (the registry's environment name), with the invented values the simulator checks.
+PHONE_CALLS_MANIFEST = os.path.join("eval-fixtures", "phone_calls.json")
+PHONE_SECRETS = {"PHONE_CALLS_SIP_PASSWORD": PHONE_SEEDED["sip_password"],
+                 "OPENAI_API_KEY": PHONE_SEEDED["openai_api_key"]}
 _ENV_KEY_PROVIDERS = {
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
@@ -401,7 +431,7 @@ def dev_provider(dev: dict, pid: str) -> tuple[str, dict, str | None]:
 def render_config(
     home: str, pid: str, blk: dict, profile: str | None,
     explicit: bool = False, voice: str | None = None, cues: dict | None = None,
-    computers: bool = False, voice_conversation: str = "chat",
+    computers: bool = False, voice_conversation: str = "chat", phone_calls: bool = False,
 ) -> str:
     uses_key = "api_key" in blk
     if explicit:
@@ -507,7 +537,63 @@ def render_config(
         # Places are looked up on the studio Mac, as a server's are (D13): a Mac
         # dev daemon carries the Apple helper and would search Apple Maps itself.
         lines += ["[fermix_core.tools.place_search]", 'backend = "computer"', ""]
+    if phone_calls:
+        lines += phone_call_lines()
     return "\n".join(lines)
+
+
+def phone_call_lines() -> list[str]:
+    """Phone calls on, for the phone_call suite: the switch and the invented trunk,
+    its password and the phone engine's OpenAI key in the home's file store
+    (`write_phone_fixtures` writes them). The `openai` provider block holds only
+    that key; the scored provider stays this home's primary."""
+    return ["# Phone calls (M94) for the phone_call suite. Every value is invented; the",
+            "# daemon's calls reach the runners' simulated GPT-Live endpoint and nothing else.",
+            "[fermix_core.phone_calls]", "enabled = true",
+            f"caller_number = {json.dumps(PHONE_SEEDED['caller_number'])}",
+            f"sip_username = {json.dumps(PHONE_SEEDED['sip_username'])}",
+            'sip_password = "@file"', "",
+            "[fermix_core.providers.openai]", 'api_key = "@file"', ""]
+
+
+def write_phone_fixtures(home: str) -> dict:
+    """The two secrets (directory 0700, files 0600, the store's own modes) and the
+    manifest that says this seed wrote them. Rewritten whole on every seed."""
+    directory = os.path.join(home, "secrets")
+    make_private_dir(directory)
+    for name, value in PHONE_SECRETS.items():
+        write_private(os.path.join(directory, name), value)
+    manifest = {"caller_number": PHONE_SEEDED["caller_number"],
+                "sip_username": PHONE_SEEDED["sip_username"],
+                "secrets": sorted(PHONE_SECRETS),
+                "simulator": "benchmark/bin/evallib/phone_sim.py"}
+    write_private(os.path.join(home, PHONE_CALLS_MANIFEST), json.dumps(manifest, indent=2))
+    return manifest
+
+
+def clear_phone_fixtures(home: str) -> None:
+    """A seed without --phone-calls: remove what a previous phone seed wrote (its
+    manifest says so), so the suite is held out and no stored key lingers."""
+    if not os.path.isfile(os.path.join(home, PHONE_CALLS_MANIFEST)):
+        return
+    for name in [*(os.path.join("secrets", secret) for secret in PHONE_SECRETS),
+                 PHONE_CALLS_MANIFEST]:
+        path = os.path.join(home, name)
+        if os.path.isfile(path):
+            os.remove(safe_rm.check(path, home, min_below=1))
+
+
+def phone_calls_error(pid: str, voice_engine: str | None) -> str | None:
+    """Why this seed cannot turn phone calls on, or None. The phone engine reuses
+    the `openai` provider's key, which the seed makes an invented one; a scored
+    `openai` provider or the GPT-Live voice engine needs the real one."""
+    if pid == "openai":
+        return ("--phone-calls stores an invented OpenAI key for the phone engine, which "
+                "the scored openai provider would use too; score another provider")
+    if voice_engine == "openai_live":
+        return ("--phone-calls stores an invented OpenAI key, which the openai_live voice "
+                "engine would use too; seed voice and phone calls in separate homes")
+    return None
 
 
 def render_machine(home: str, allowed_roots: tuple[str, ...] = (),
@@ -638,11 +724,14 @@ def free_fixture_port(door_port: int | None) -> int:
         f"in {FIXTURE_PORT_PROBES} probes")
 
 
-def write_fixture_manifest(home: str, door_port: int | None) -> int:
+def write_fixture_manifest(home: str, door_port: int | None, phone_calls: bool = False) -> int:
     """Record this seed's fixture port, rewritten on every seed: the port both runners
-    bind and the origin capability-daemon.sh hands the daemon's web_fetch."""
+    bind and the origin capability-daemon.sh hands the daemon's web_fetch. With
+    --phone-calls it also records that the same origin is the simulated GPT-Live
+    endpoint the daemon's calls go to."""
     port = free_fixture_port(door_port)
-    write_private(os.path.join(home, FIXTURE_MANIFEST), json.dumps({"port": port}) + "\n")
+    manifest = {"port": port, **({"phone_calls": True} if phone_calls else {})}
+    write_private(os.path.join(home, FIXTURE_MANIFEST), json.dumps(manifest) + "\n")
     return port
 
 
@@ -1129,6 +1218,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--computers", action="store_true",
                         help="link three computers to the home (studio Mac, loft Linux, "
                              "cellar Linux), all away, for the computers suite; off by default")
+    parser.add_argument("--phone-calls", dest="phone_calls", action="store_true",
+                        help="turn phone calls on with an invented trunk, for the phone_call "
+                             "suite: calls reach the runners' simulated GPT-Live endpoint; "
+                             "off by default")
     parser.add_argument("--coding-signed-out", dest="coding_signed_out", action="store_true",
                         help="put a stub claude first on the daemon's PATH that fails every "
                              "run as signed out, for coding_harness's signed-out case; off "
@@ -1194,6 +1287,10 @@ def main() -> None:
             pid, blk, profile = dev_provider(dev, args.dev_provider)
         else:
             pid, blk, profile = primary_provider(dev)
+    if args.phone_calls:
+        phone_error = phone_calls_error(pid, voice_engine)
+        if phone_error:
+            die(phone_error)
 
     workspace = os.path.join(home, "workspace")
     os.makedirs(workspace, exist_ok=True)
@@ -1216,10 +1313,16 @@ def main() -> None:
         write_signed_out_claude(home)
     else:
         clear_signed_out_claude(home)
-    fixture_port = write_fixture_manifest(home, cues["door_port"] if cues else None)
+    if args.phone_calls:
+        write_phone_fixtures(home)
+    else:
+        clear_phone_fixtures(home)
+    fixture_port = write_fixture_manifest(home, cues["door_port"] if cues else None,
+                                          phone_calls=args.phone_calls)
     config = render_config(home, pid, blk, profile, explicit=bool(args.provider),
                            voice=voice_engine, cues=cues, computers=args.computers,
-                           voice_conversation=voice_conversation)
+                           voice_conversation=voice_conversation,
+                           phone_calls=args.phone_calls)
     if args.extra_config:
         config += read_extra_config(config, args.extra_config)
     with open(os.path.join(home, "config.toml"), "w", encoding="utf-8") as fh:
@@ -1253,6 +1356,10 @@ def main() -> None:
     if args.coding_signed_out:
         print(f"coding signed out: {CLAUDE_STUB} fails every Claude Code run as signed out; "
               "capability-daemon.sh puts it first on the daemon's PATH")
+    if args.phone_calls:
+        print(f"phone calls: on, from {PHONE_SEEDED['caller_number']} through an invented "
+              f"trunk; the daemon's calls reach the simulated endpoint on 127.0.0.1:"
+              f"{fixture_port} only")
 
 
 if __name__ == "__main__":

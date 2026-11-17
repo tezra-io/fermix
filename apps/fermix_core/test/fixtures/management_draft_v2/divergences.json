@@ -3749,6 +3749,174 @@
       "field": "results[].vendors[].signed_out",
       "kind": "engine_only",
       "why": "M98 D10: an agent whose last run on this computer failed to sign in is marked signed out until a run of it works, its sign-in file changes or Check again is pressed. A new optional boolean beside auth, never a new auth value, because the app decodes auth as a closed set; an app built against the draft keeps drawing auth alone."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:phone_calls.list",
+      "kind": "engine_only",
+      "why": "M94 §12: the phone_calls.* methods (Fermix placing an outbound call through the owner's own Telnyx number) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:phone_calls.recovery.get",
+      "kind": "engine_only",
+      "why": "M94 §12: the phone_calls.* methods (Fermix placing an outbound call through the owner's own Telnyx number) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:phone_calls.status",
+      "kind": "engine_only",
+      "why": "M94 §12: the phone_calls.* methods (Fermix placing an outbound call through the owner's own Telnyx number) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:phone_calls.stop",
+      "kind": "engine_only",
+      "why": "M94 §12: the phone_calls.* methods (Fermix placing an outbound call through the owner's own Telnyx number) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:phone_calls.list=2",
+      "kind": "engine_only",
+      "why": "M94 §12: each phone_calls.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:phone_calls.recovery.get=2",
+      "kind": "engine_only",
+      "why": "M94 §12: each phone_calls.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:phone_calls.status=2",
+      "kind": "engine_only",
+      "why": "M94 §12: each phone_calls.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:phone_calls.stop=2",
+      "kind": "engine_only",
+      "why": "M94 §12: each phone_calls.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.phone_calls.list",
+      "kind": "engine_only",
+      "why": "M94 §12: hello publishes every method this daemon serves with its minimum version, the phone_calls.* methods included. The draft predates them; a client ignores a method it does not know."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.phone_calls.recovery.get",
+      "kind": "engine_only",
+      "why": "M94 §12: hello publishes every method this daemon serves with its minimum version, the phone_calls.* methods included. The draft predates them; a client ignores a method it does not know."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.phone_calls.status",
+      "kind": "engine_only",
+      "why": "M94 §12: hello publishes every method this daemon serves with its minimum version, the phone_calls.* methods included. The draft predates them; a client ignores a method it does not know."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.phone_calls.stop",
+      "kind": "engine_only",
+      "why": "M94 §12: hello publishes every method this daemon serves with its minimum version, the phone_calls.* methods included. The draft predates them; a client ignores a method it does not know."
+    },
+    {
+      "method": "phone_calls.stop",
+      "field": "params:call_id",
+      "kind": "engine_only",
+      "why": "M94 §12: phone_calls.stop names the owner's call to stop by its id. The draft predates the phone call methods."
+    },
+    {
+      "method": "settings.get:phone_calls",
+      "field": "rows:openai_api_key",
+      "kind": "engine_only",
+      "why": "M94 §12: the phone_calls section, under the voice pane and independent of Talk to Fermix, holds the five settings of [fermix_core.phone_calls] (the switch, the voice, the caller number, and the Telnyx connection's username and password), the status and the engine that calls as two read-only facts, and the OpenAI key as a second row for the OpenAI provider's own secret. It postdates the draft, and an app that has not re-vendored never asks for the section."
+    },
+    {
+      "method": "settings.get:phone_calls",
+      "field": "rows:phone_calls_caller_number",
+      "kind": "engine_only",
+      "why": "M94 §12: the phone_calls section, under the voice pane and independent of Talk to Fermix, holds the five settings of [fermix_core.phone_calls] (the switch, the voice, the caller number, and the Telnyx connection's username and password), the status and the engine that calls as two read-only facts, and the OpenAI key as a second row for the OpenAI provider's own secret. It postdates the draft, and an app that has not re-vendored never asks for the section."
+    },
+    {
+      "method": "settings.get:phone_calls",
+      "field": "rows:phone_calls_enabled",
+      "kind": "engine_only",
+      "why": "M94 §12: the phone_calls section, under the voice pane and independent of Talk to Fermix, holds the five settings of [fermix_core.phone_calls] (the switch, the voice, the caller number, and the Telnyx connection's username and password), the status and the engine that calls as two read-only facts, and the OpenAI key as a second row for the OpenAI provider's own secret. It postdates the draft, and an app that has not re-vendored never asks for the section."
+    },
+    {
+      "method": "settings.get:phone_calls",
+      "field": "rows:phone_calls_engine",
+      "kind": "engine_only",
+      "why": "M94 §12: the phone_calls section, under the voice pane and independent of Talk to Fermix, holds the five settings of [fermix_core.phone_calls] (the switch, the voice, the caller number, and the Telnyx connection's username and password), the status and the engine that calls as two read-only facts, and the OpenAI key as a second row for the OpenAI provider's own secret. It postdates the draft, and an app that has not re-vendored never asks for the section."
+    },
+    {
+      "method": "settings.get:phone_calls",
+      "field": "rows:phone_calls_sip_password",
+      "kind": "engine_only",
+      "why": "M94 §12: the phone_calls section, under the voice pane and independent of Talk to Fermix, holds the five settings of [fermix_core.phone_calls] (the switch, the voice, the caller number, and the Telnyx connection's username and password), the status and the engine that calls as two read-only facts, and the OpenAI key as a second row for the OpenAI provider's own secret. It postdates the draft, and an app that has not re-vendored never asks for the section."
+    },
+    {
+      "method": "settings.get:phone_calls",
+      "field": "rows:phone_calls_sip_username",
+      "kind": "engine_only",
+      "why": "M94 §12: the phone_calls section, under the voice pane and independent of Talk to Fermix, holds the five settings of [fermix_core.phone_calls] (the switch, the voice, the caller number, and the Telnyx connection's username and password), the status and the engine that calls as two read-only facts, and the OpenAI key as a second row for the OpenAI provider's own secret. It postdates the draft, and an app that has not re-vendored never asks for the section."
+    },
+    {
+      "method": "settings.get:phone_calls",
+      "field": "rows:phone_calls_status",
+      "kind": "engine_only",
+      "why": "M94 §12: the phone_calls section, under the voice pane and independent of Talk to Fermix, holds the five settings of [fermix_core.phone_calls] (the switch, the voice, the caller number, and the Telnyx connection's username and password), the status and the engine that calls as two read-only facts, and the OpenAI key as a second row for the OpenAI provider's own secret. It postdates the draft, and an app that has not re-vendored never asks for the section."
+    },
+    {
+      "method": "settings.get:phone_calls",
+      "field": "rows:phone_calls_voice",
+      "kind": "engine_only",
+      "why": "M94 §12: the phone_calls section, under the voice pane and independent of Talk to Fermix, holds the five settings of [fermix_core.phone_calls] (the switch, the voice, the caller number, and the Telnyx connection's username and password), the status and the engine that calls as two read-only facts, and the OpenAI key as a second row for the OpenAI provider's own secret. It postdates the draft, and an app that has not re-vendored never asks for the section."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:lifecycle.prepare_restart",
+      "kind": "engine_only",
+      "why": "M94 §12: lifecycle.prepare_restart is the owner's own restart, the drain window lifecycle.prepare opens, refused while a phone call is in progress. It postdates the draft and is published under minimum version 2 with no protocol bump; a client that has not re-vendored keeps taking lifecycle.prepare, which every stop still serves, and a daemon that does not publish it runs no phone calls."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:phone_calls.recovery.confirm",
+      "kind": "engine_only",
+      "why": "M94 §12: the phone_calls.* methods (Fermix placing an outbound call through the owner's own Telnyx number) postdate the draft. They are published under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods and minimum versions."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:lifecycle.prepare_restart=2",
+      "kind": "engine_only",
+      "why": "M94 §12: lifecycle.prepare_restart is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:phone_calls.recovery.confirm=2",
+      "kind": "engine_only",
+      "why": "M94 §12: each phone_calls.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.lifecycle.prepare_restart",
+      "kind": "engine_only",
+      "why": "M94 §12: hello publishes lifecycle.prepare_restart with its minimum version, which is how a client knows this daemon holds a restart for a phone call in progress. The draft predates it; a client ignores a method it does not know."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.phone_calls.recovery.confirm",
+      "kind": "engine_only",
+      "why": "M94 §12: hello publishes every method this daemon serves with its minimum version, the phone_calls.* methods included. The draft predates them; a client ignores a method it does not know."
+    },
+    {
+      "method": "phone_calls.recovery.confirm",
+      "field": "params:call_id",
+      "kind": "engine_only",
+      "why": "M94 §12: phone_calls.recovery.confirm names the unresolved call the owner checked in their Telnyx portal by its id. The draft predates the phone call methods."
     }
   ]
 }

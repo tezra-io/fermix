@@ -277,6 +277,18 @@
       "name": "list_meetings",
       "family": "F24"
     },
+    "PhoneCall": {
+      "name": "phone_call",
+      "family": "F19"
+    },
+    "PhoneCallPressKeys": {
+      "name": "phone_call_press_keys",
+      "family": "F23"
+    },
+    "PhoneCallEnd": {
+      "name": "phone_call_end",
+      "family": "F23"
+    },
     "ManageWatcher": {
       "name": "manage_watcher",
       "family": "F18"
@@ -714,6 +726,25 @@
         "closed",
         "any"
       ]
+    },
+    "phone_call": {
+      "/properties/brief/properties/destination_kind": [
+        "business",
+        "owner"
+      ],
+      "/properties/action": [
+        "start",
+        "status",
+        "cancel"
+      ]
+    },
+    "phone_call_end": {
+      "/properties/reason": [
+        "cannot_proceed",
+        "done",
+        "needs_owner",
+        "voicemail"
+      ]
     }
   },
   "context_profiles": {
@@ -790,6 +821,14 @@
       "obligations": [
         "open_loop_state",
         "delivery_receipt",
+        "actual_advertised_schemas"
+      ]
+    },
+    "phone_call": {
+      "runtime_status": "unavailable",
+      "obligations": [
+        "call_identity",
+        "granted_tools",
         "actual_advertised_schemas"
       ]
     }

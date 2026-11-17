@@ -136,6 +136,12 @@ review all agree. A trusted Live hand-off names it in its `voice_call` map
 (`Agents.VoiceCall`, believed only on an operator message on the `voice`
 channel); a phone message carries the Mac's chat in `conversation_key`, which
 only `Gateway.ingest/2` sets, from the adapter (M56 D9).
+A phone call's backend turn (`Agents.PhoneCallTurn`) is chosen before anything
+of the owner's turn is composed: it derives its whole context itself, and keeps
+no history and starts no memory review. `Agents.RequestIdentity` mints one
+owner request's identity once per turn (and once per function call on a
+Realtime session), which a tool whose effect outlives the turn records, so a
+repeated call inside that request finds what it already started.
 
 Architecture Invariant: `MainAgent` and `TurnRunner` do not know how Telegram,
 Slack, WhatsApp, Discord, Signal, ACP, mobile, voice, or CLI replies are
@@ -227,6 +233,10 @@ pins a public URL to the address the guard checked and builds the request to
 it (`Host` and the TLS name keep the original host), for `web_fetch`, link
 previews and Cue feeds.
 `FermixCore.Timeouts` names the non-HTTP deadlines.
+`Net.HttpClient.request_once/3` is the one request retried by neither the
+wrapper nor Req, and it says whether a failure provably never left
+(`:not_sent`) or may have been acted on (`:unknown`); a phone call's create
+uses it.
 
 Architecture Invariant: core boot aborts if `auth.json` exists with a mode other
 than 0600. `Net.TimeoutPolicy` has no default, so an unknown request kind raises.
@@ -294,6 +304,15 @@ reminders (`event_*`, `reminder_snooze`); messaging (`send_attachment`,
 `generate_image`, `request_directory_access`, and `tool_help`.
 `computer_use`, the coding-harness tools, and the meeting tools are registered
 only when their feature is ready.
+`phone_call` is registered always, because its switch is live both ways, and
+offered by `advertise?/1` on the owner's attended turn only; the text agent's
+capability catalog never names it, and a Live call's prompt names it only while
+phone calls are on. Its in-call controls (`phone_call_press_keys`,
+`phone_call_end`) are in no registry: a phone call's backend turn builds them
+from their modules (`Agents.PhoneCallTurn`), so no other turn can see or run
+one. `phone_call` meets the access gate as an effect outside the machine
+(`metadata.external_effect?`), decided only for `start`, so a call asked for
+after outside content waits for the owner's confirmation of its exact brief.
 
 Architecture Invariant: tools receive explicit context from the agent runtime
 (at least `agent_name` and `conversation_key`). They should not infer
@@ -762,6 +781,12 @@ before yesterday (`Retention.prune_bodies/3`), so a server keeps bodies about a
 day (through the previous UTC day) and the records 14. Readers of trace rows (`Setup.ProviderHealth`, the Doctor's
 sandbox check, `FermixOpik.TraceFile`) read `<type>.jsonl` and need no body.
 
+A phone call is a run kind (`PhoneCalls.Telemetry`, `session_id =
+"phone_call_<call id>"`, its bookends emitted only by `PhoneCalls.Manager`):
+its root outlives the turn that asked for it, whose session it carries as
+`parent_session`, correlation only, and its backend turns and its outcome
+extraction carry the call's own session, so their spans nest under it.
+
 Architecture Invariant: trace writes are best-effort. `Trace` is an early child of
 core's `:rest_for_one` supervisor, so it never raises on its I/O: an entry it
 cannot encode, open or write (a full disk's `:enospc`) is dropped, a failure to
@@ -1222,6 +1247,82 @@ untrusted, and delivers notes to the originating chat or the owner's inbox.
 Architecture Invariant: an unknown or unconfigured transcription backend fails
 loudly, and at most one meeting runs at a time.
 
+### `FermixCore.PhoneCalls`
+
+Outbound phone calls (M94) are the coding run's shape with a different worker.
+`PhoneCalls.Supervisor` is always started, a `:rest_for_one` subtree that is
+one of `Home.Role`'s primary-only children and independent of
+`Realtime.Supervisor`: `CallRegistry`, `HandoffSupervisor`, `Manager`,
+`CallSupervisor`, `DeliveryWorker`. `Manager` is the one owner of admission,
+terminal writes and reconciliation, and publishes whether a call holds the
+one-call slot for a turn to read without asking it (`slot_held?/2`).
+`start_call/2` re-reads readiness (`Readiness`: phone calls on, this engine
+the primary, durable memory on, a sendable OpenAI Platform key, the owner's
+Telnyx caller number and trunk credentials in `[fermix_core.phone_calls]`
+(`PhoneCalls.Config`), an egress route the call's control connection can take,
+and a backend for its turns), checks the server-owned authorization evidence
+(the owner request's identity, `Agents.RequestIdentity`, and the brief's hash:
+the same request and mandate find their existing call) and the brief's grants
+(`Grants`), and writes the row (`Ledger`, the `phone_calls` table behind
+`Memory.Repo`, migration 68: the request's own call, the one-call slot and the
+day's attempts, which count only calls that may have dialed, in one
+transaction) before it starts a `:temporary` `PhoneCalls.Call`.
+
+The worker is that one process over parts of its own (`Call.Delegations`,
+`Call.Keypad`, `Call.Ending`, `Call.Timers`, `Call.Tasks`, `Call.EndReport`,
+`Call.Printable`), and other modules reach it only through
+`PhoneCalls.CallControls`. It claims the dispatch, sends the one create through
+`CallTransport` (`OpenAILive`, `OpenAILive.Sideband`), records the session id
+before anything else, attaches the sideband, speaks the opening line on the
+first answered evidence, and runs each delegation as one scoped backend turn
+through the `PhoneCalls.Delegate` it was handed, fenced by a handle it mints per
+turn; it never waits on the delegate, and a turn's keys stop with the turn. At
+the end it hangs up once (sent again only when the first provably never left),
+writes a confirmed closure the moment it arrives (`Ledger.record_closure/3`),
+drains, reads the outcome once (`Outcome`: one bounded, tool-free extraction,
+then `verify/3`, which keeps `confirmed` under code's own rules and marks each
+fact `verified` or `read`) and sends the Manager one end report. An engine stop
+shortens that ending. The Manager writes the terminal row once and hands it
+off: a chat origin re-enters its conversation (`PhoneCalls.Continuation`,
+through the dispatcher `Delivery.Continuation` resolves for every run kind),
+anything else or a failed dispatch is one send (`PhoneCalls.Delivery`, over
+`Delivery.FrozenSend`), and `DeliveryWorker` owns the bounded rest.
+`Report.view/2` is the one view of a call, rendered for a person (`text/1`) and
+for a model (`notice/1`, the recipient's and OpenAI's words framed as
+untrusted). While a call is in progress `PhoneCalls.CallHold` holds the two
+credentials it reads and refuses the owner's restart
+(`lifecycle.prepare_restart`). `phone_call` (start, status, cancel) is the
+owner's tool and `Management.PhoneCalls` the apps'.
+
+Where a build's calls go is decided once, at the composition root
+(`FermixCore.Application.phone_call_transport_opts/2`, handed to every worker and
+to the Manager's cleanup): the vendor in a release, a development build's eval
+fixture origin when it is set and honoured, and a refusal of every call in a
+test build. The transport reads no environment. Boot reconciliation, pruning
+and the delivery ticks run only in the home's daemon process.
+
+Architecture Invariant: a mandate dials at most once. The row is written before
+any network I/O, the create is `Net.HttpClient.request_once/3` and is never
+sent again, a lost answer (or a 5xx without the vendor's own error envelope) is
+`dispatch_unknown`, and a known session whose end was not confirmed is
+`closure_unconfirmed`. Either holds the one-call slot until the owner confirms
+the call ended (`phone_calls.recovery.confirm`) or `Limits.slot_hold_ms/0`
+passes (the latest its session could start, then OpenAI's own bound on a call),
+and its outcome stays `unknown`. Supervision never restarts a worker, boot
+reconciliation settles a row by what it proves, and no switch, restart or
+report retry redials.
+
+Architecture Invariant: a phone call's backend turn is a principal of its own.
+`Agents.PhoneCallTurn` believes only a message on the `phone_call` channel at
+`phone_call` trust, which only `FermixChannels.PhoneCalls.Bridge` enqueues and
+the gateway never assigns. It runs on the call's own conversation and queue
+lane, unattended and tainted from its first token, with nothing of the owner's
+(no memory, persona, history, reply or approval surface), exactly the call's two
+controls, which it builds itself and no registry holds, and its granted
+read-only lookups (`web_search`, `place_search`), and a reply that passes
+`PhoneCalls.Disclosure` before the voice hears it. What the person called says
+is data, never authority.
+
 ### `FermixCore.SkillCuration` and `SoulCuration`
 
 `SkillCuration` proposes new skills from the owner's history on a slow cycle,
@@ -1246,6 +1347,12 @@ publishes the same setting descriptors the setup LiveView renders and saves them
 through `Setup.Wizard`. The canonical export is
 `apps/fermix_core/priv/management/` (`PROTOCOL.md`, the JSON schema, and golden
 fixtures).
+`Management.PhoneCalls` answers `phone_calls.status`, `phone_calls.list`,
+`phone_calls.stop`, `phone_calls.recovery.get` and `phone_calls.recovery.confirm`
+(the owner's word that an unresolved call ended), and the Phone calls section of
+the Voice pane (`Management.Settings.PhoneCalls`) applies its switch in the same
+operation as its write. `lifecycle.prepare_restart`, the owner's restart, is
+refused while a call is in progress.
 
 `Realtime` serves local full-duplex voice on `FERMIX_HOME/realtime.sock`
 (newline-delimited JSON defined by `Realtime.Protocol`, exported in
@@ -1930,6 +2037,13 @@ Current channels:
 
 `outbound/` holds pure long-form text helpers, and `harness/` re-ingests
 coding-harness completion notices.
+`PhoneCalls.Bridge` (in `phone_calls/`) is core's `PhoneCalls.Delegate`, named
+in config (`PhoneCalls.Delegate.configured/0`) and handed to every call's
+worker by the composition root: it enqueues one phone-call
+delegation straight onto the call's own conversation and queue lane, never
+through `Gateway.ingest/2`, and a watcher answers the call's worker with
+exactly one result. A finished call's report re-enters its chat through the
+same continuation dispatcher as a coding run's.
 
 `Gateway.WebhookIngress` is the one path a verified webhook payload takes: the
 adapter parses it, `Gateway.Idempotency` drops the ids it has seen, and the rest

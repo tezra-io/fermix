@@ -65,7 +65,11 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   @type grant_request ::
           %{path: String.t(), reason: String.t(), diff: String.t(), provenance: map()}
           | %{acknowledge_vendor_config: String.t(), provenance: map()}
-          | %{access_sensitive: String.t()}
+          | %{required(:access_sensitive) => String.t(), optional(:ttl_ms) => pos_integer()}
+
+  # The longest window a request may name for its token (`AccessGate.Pending`'s
+  # own bound): an effect whose owner reads a whole brief waits longer.
+  @max_ttl_ms 15 * 60_000
 
   @impl true
   def name, do: "sandbox"
@@ -233,7 +237,9 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   (the `request_directory_access` tool, and a coding-harness launch waiting on a
   vendor-config acknowledgment). Returns `{:ok, token, :existing}` when a live
   pending record for the same mutation + origin already exists (no second owner
-  prompt), otherwise stores a new record and returns `{:ok, token, :new}`.
+  prompt), otherwise stores a new record and returns `{:ok, token, :new}`. An
+  access-sensitive request may name its token's window (`ttl_ms`, at most 15
+  minutes); every other lives for 60 seconds.
   """
   @spec store_pending_grant(grant_request(), grant_origin()) ::
           {:ok, String.t(), :new | :existing}
@@ -246,10 +252,20 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
 
       :error ->
         token = token()
-        :ok = Confirmations.store(token, grant_pending_record(mutation, origin))
+        record = grant_pending_record(mutation, origin, grant_ttl_ms(request))
+        :ok = Confirmations.store(token, record)
         {:ok, token, :new}
     end
   end
+
+  defp grant_ttl_ms(%{access_sensitive: _intent, ttl_ms: ttl_ms})
+       when is_integer(ttl_ms) and ttl_ms > 0 and ttl_ms <= @max_ttl_ms,
+       do: ttl_ms
+
+  defp grant_ttl_ms(%{ttl_ms: ttl_ms}),
+    do: raise(ArgumentError, "a grant's window must be 1..#{@max_ttl_ms} ms: #{inspect(ttl_ms)}")
+
+  defp grant_ttl_ms(_request), do: @ttl_ms
 
   defp grant_mutation(%{path: path}) when is_binary(path), do: {:add_allowed_root, path}
 
@@ -277,7 +293,7 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
       Map.get(record, :ingress_context) == Map.get(origin, :ingress_context)
   end
 
-  defp grant_pending_record(mutation, origin) do
+  defp grant_pending_record(mutation, origin, ttl_ms) do
     %{
       mutation: mutation,
       channel: origin.channel,
@@ -285,7 +301,7 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
       thread_ts: origin.thread_ts,
       user_id: origin.user_id,
       resume: Map.get(origin, :resume),
-      expires_at: now_ms() + @ttl_ms
+      expires_at: now_ms() + ttl_ms
     }
     |> maybe_put(:ingress_context, Map.get(origin, :ingress_context))
   end
@@ -667,7 +683,8 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   # The re-run is the request that parked: it carries what that turn had read
   # (`resumed_sources`, which the turn seeds) and, in the metadata the turn and
   # the store read them from, a forwarded message's mark and, on a coding run's
-  # follow-up, its chain depth and finished run.
+  # follow-up, its chain depth and finished run, or on a phone call's result
+  # turn its depth and the call (`phone_call_result`).
   defp synthesize_resume_message(record, resume, token) do
     provenance = Map.fetch!(resume, :provenance)
 
@@ -681,7 +698,7 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
       thread_ts: record.thread_ts,
       metadata:
         provenance
-        |> Map.take([:harness_continuation_depth, :harness_run_id])
+        |> Map.take([:harness_continuation_depth, :harness_run_id, :phone_call_result])
         |> Map.merge(Map.take(resume, [:forwarded]))
         |> Map.merge(%{user_id: record.user_id, resumed_from_grant: token}),
       resumed_sources: Map.get(provenance, :outside_sources)

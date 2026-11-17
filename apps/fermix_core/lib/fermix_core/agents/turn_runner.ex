@@ -31,6 +31,8 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.Agents.IterationLimits
   alias FermixCore.Agents.LiveCallTurn
   alias FermixCore.Agents.MainAgent
+  alias FermixCore.Agents.PhoneCallTurn
+  alias FermixCore.Agents.RequestIdentity
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Agents.VoiceCall
   alias FermixCore.Attachments
@@ -103,7 +105,35 @@ defmodule FermixCore.Agents.TurnRunner do
         ) :: {:ok, String.t(), non_neg_integer()} | {:error, term()}
   def run(msg, turn_state, deliver, stream_callback \\ nil, activity_callback \\ nil)
       when is_function(deliver, 1) do
-    run_message_loop(msg, turn_state, deliver, stream_callback, activity_callback)
+    # A phone call's backend turn (M94 §11) is chosen before anything of the
+    # owner's turn is composed: it derives its whole context itself, and
+    # nothing below runs for it.
+    case PhoneCallTurn.from_message(msg) do
+      {:ok, phone_call} ->
+        PhoneCallTurn.run(phone_call, phone_call_runtime(turn_state, stream_callback))
+
+      :none ->
+        run_message_loop(msg, turn_state, deliver, stream_callback, activity_callback)
+    end
+  end
+
+  # What a phone call's backend turn runs with: the registry, this turn's
+  # provider route, the stream callback it tells its reply through, and the
+  # snapshot's seams.
+  defp phone_call_runtime(state, stream_callback) do
+    loop =
+      case resolve_loop_adapter(state) do
+        {:adapter, mod, opts} -> [adapter: mod, adapter_opts: opts]
+        {:routes, routes} -> [routes: routes]
+      end
+
+    %{
+      capability_registry: state.capability_registry,
+      loop: loop,
+      tell: stream_callback,
+      now_fn: Map.get(state, :now_fn),
+      controls: Map.get(state, :phone_call_controls)
+    }
   end
 
   @doc """
@@ -146,6 +176,10 @@ defmodule FermixCore.Agents.TurnRunner do
   # reason. The dispatcher's test pins the pair.
   def computer_use_origin(%{metadata: %{acp_turn: :detached}}), do: :unattended
 
+  # A phone call's backend turn (M94 §11): nobody who can watch or stop a host
+  # action is there, so it fails closed, whatever else the message says.
+  def computer_use_origin(%{source_trust: :phone_call}), do: :unattended
+
   def computer_use_origin(msg) when is_map(msg), do: chat_origin(VoiceCall.from_message(msg))
 
   defp chat_origin({:ok, _voice_call}), do: :voice
@@ -163,6 +197,15 @@ defmodule FermixCore.Agents.TurnRunner do
   """
   @spec commit(map(), map(), String.t(), non_neg_integer()) :: :ok | :compacted
   def commit(msg, turn_state, response, context_tokens) do
+    # A phone call's backend turn keeps no history and starts no memory review
+    # (M94 §11): nothing of the call is written.
+    case PhoneCallTurn.from_message(msg) do
+      {:ok, _phone_call} -> :ok
+      :none -> commit_turn(msg, turn_state, response, context_tokens)
+    end
+  end
+
+  defp commit_turn(msg, turn_state, response, context_tokens) do
     conversation_key = ConversationKey.from(msg)
 
     # Read the replayed conversation BEFORE persisting the reply: the stamp
@@ -560,6 +603,10 @@ defmodule FermixCore.Agents.TurnRunner do
       # adapter opts are byte-identical to before.
       session_id: session_id,
       parent_session: parent_session(voice_call),
+      # The owner request's own identity (`Agents.RequestIdentity`), one per
+      # turn and shared by every tool call in it: what a tool whose effect
+      # outlives the turn (a phone call) records as the request that asked.
+      request_id: RequestIdentity.mint(),
       capability_registry: state.capability_registry,
       provider: state.provider,
       # Turn-start route-chain snapshot for subagents (§7): static for the
@@ -653,6 +700,10 @@ defmodule FermixCore.Agents.TurnRunner do
       # follow-up turn start the next run of the chain without asking, only in
       # its folder and with its coding agent.
       harness_run_id: harness_run_id(msg),
+      # The finished phone call whose result this synthesized message carries
+      # (M94 §04), nil on every other turn: the turn's outside source names the
+      # call, and a request it parks for `/confirm` hands it on.
+      phone_call_result: phone_call_result(msg),
       # Reaction capability resolved by the gateway (nil on no-reaction channels).
       # Plain data, never the channel module — the `react` tool reads it to gate
       # its own advertisement and build the emoji enum (EMOJI_REACTION_ACKS §5.4).
@@ -758,18 +809,26 @@ defmodule FermixCore.Agents.TurnRunner do
   # The turn's message-borne outside content, before any tool runs: a
   # forwarded message and its attachments, when it re-enters as a finished
   # coding run's notice (the continuation marker, whose content is the vendor
-  # CLI's text) that run's provenance, and when it is a request re-run after
-  # the owner's `/confirm` what its parked turn had read (`:resumed_sources`,
-  # set only by that re-ingest).
+  # CLI's text) that run's provenance, or as a finished phone call's result
+  # (the same marker and the call's own, whose content frames the words of the
+  # person called) that call's, and when it is a request re-run after the
+  # owner's `/confirm` what its parked turn had read (`:resumed_sources`, set
+  # only by that re-ingest).
   defp initial_outside_sources(msg) do
     sources = UntrustedContent.message_sources(msg)
 
     sources =
       if harness_continuation_depth(msg) > 0,
-        do: MapSet.put(sources, UntrustedContent.harness_continuation_source()),
+        do: MapSet.put(sources, continuation_source(msg)),
         else: sources
 
     MapSet.union(sources, resumed_sources(msg))
+  end
+
+  defp continuation_source(msg) do
+    if phone_call_result(msg),
+      do: UntrustedContent.phone_call_source(),
+      else: UntrustedContent.harness_continuation_source()
   end
 
   defp resumed_sources(msg) do
@@ -807,6 +866,18 @@ defmodule FermixCore.Agents.TurnRunner do
 
     if harness_continuation_depth(msg) > 0 and is_binary(run_id) and run_id != "",
       do: run_id,
+      else: nil
+  end
+
+  # A phone call's result marker (M94 §04), read like the coding run's: under
+  # its atom key, on a continuation only, which only the continuation
+  # dispatcher and the grant resume hand the gateway.
+  defp phone_call_result(msg) do
+    metadata = Map.get(msg, :metadata) || %{}
+    call_id = Map.get(metadata, :phone_call_result)
+
+    if harness_continuation_depth(msg) > 0 and is_binary(call_id) and call_id != "",
+      do: call_id,
       else: nil
   end
 

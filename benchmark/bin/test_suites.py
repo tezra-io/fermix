@@ -805,7 +805,34 @@ def test_the_shipped_numbered_rubrics_parse():
                       "who_reads_notifications": 3,
                       "greeted_then_asked_about_the_rota": 3, "okay_thanks_bye": 2,
                       "alright_goodbye_for_now": 2, "say_bye_to_the_van_driver": 2,
-                      "dont_hang_up_yet": 2}
+                      "dont_hang_up_yet": 2,
+                      # phone_call.yaml
+                      "book_table_readback_confirmed": 4, "book_table_other_phrasing": 3,
+                      "reminder_to_own_cell": 3, "ring_me_with_reminder": 3,
+                      "neighbor_cat_sitting": 3, "friend_dinner_invite": 3,
+                      "sister_message": 3, "toronto_bakery": 2, "london_pub": 2,
+                      "car_alarm_911": 3, "smoke_next_door": 3, "dentist_no_number": 2,
+                      "hotel_no_number": 2, "copperleaf_next_weekend": 2,
+                      "marlow_the_twelfth": 2, "seven_full_eight_fifteen": 3,
+                      "leading_question_corrected": 3, "deposit_options_then_choice": 3,
+                      "deposit_then_go_ahead": 2, "deposit_status_check": 3,
+                      "quick_yes_over_the_readback": 3, "talked_over_then_record": 2,
+                      "talked_over_so_are_we_set": 2,
+                      "bike_shop_no_answer": 2, "bike_shop_no_redial": 2,
+                      "bike_shop_no_answer_third_phrasing": 2,
+                      "vet_voicemail_no_message": 2, "vet_voicemail_what_now": 2,
+                      "vet_voicemail_third_phrasing": 2, "print_shop_busy": 2,
+                      "print_shop_busy_then_ask": 2, "print_shop_busy_third_phrasing": 2,
+                      "dental_menu_cleaning": 2, "dental_menu_other_phrasing": 2,
+                      "host_asks_for_private_details": 3, "host_tries_other_number": 3,
+                      "host_wants_instructions": 2, "page_says_call_booking_line": 2,
+                      "forwarded_lease_note": 2, "page_do_what_it_says": 2,
+                      "stop_call_on_hold": 3, "hang_up_on_them": 3, "status_then_stop": 3,
+                      "provider_refused_reason": 3, "provider_refused_what_to_fix": 2,
+                      "provider_refused_third_phrasing": 2,
+                      "lost_response_uncertain": 3, "lost_response_try_again": 3,
+                      "lost_response_third_phrasing": 2,
+                      "initialization_timeout_uncertain": 2}
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ defmodule FermixCore.Harness.ContinuationTest do
   # and restore it, so no async test may observe the mutation.
   use ExUnit.Case, async: false
 
+  alias FermixCore.Delivery.Continuation, as: DeliveryContinuation
   alias FermixCore.Harness.Continuation
 
   @frame_open "<untrusted_tool_result source=\"coding_harness\">"
@@ -547,27 +548,29 @@ defmodule FermixCore.Harness.ContinuationTest do
     end
   end
 
-  describe "dispatcher/1" do
+  # The lookup every run kind shares (`Delivery.Continuation`), over the
+  # coding run's configured key.
+  describe "the dispatcher lookup" do
     test "prefers the injected seam over app env" do
       Application.put_env(:fermix_core, :harness_continuation_dispatcher, FailingDispatcher)
-      assert {:ok, OkDispatcher} = Continuation.dispatcher(dispatcher: OkDispatcher)
+      assert {:ok, OkDispatcher} = DeliveryContinuation.dispatcher(dispatcher: OkDispatcher)
     end
 
     test "reads the configured module when no seam is injected" do
       Application.put_env(:fermix_core, :harness_continuation_dispatcher, OkDispatcher)
-      assert {:ok, OkDispatcher} = Continuation.dispatcher([])
+      assert {:ok, OkDispatcher} = DeliveryContinuation.dispatcher([])
     end
 
     test "is :none when nothing is configured (continuation off)" do
       Application.put_env(:fermix_core, :harness_continuation_dispatcher, nil)
-      assert :none = Continuation.dispatcher([])
+      assert :none = DeliveryContinuation.dispatcher([])
     end
 
     test "is :none for a module that cannot serve the behaviour" do
       Application.put_env(:fermix_core, :harness_continuation_dispatcher, NotADispatcher)
 
       assert ExUnit.CaptureLog.capture_log(fn ->
-               assert :none = Continuation.dispatcher([])
+               assert :none = DeliveryContinuation.dispatcher([])
              end) =~ "does not export dispatch/1"
     end
   end

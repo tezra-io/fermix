@@ -101,7 +101,11 @@ defmodule FermixCore.Home.ReadableTest do
     # 67 (M94 §09, the phone-call ledger) adds one table an engine at this
     # format never reads or writes, and changes nothing it does: the format
     # stays.
-    @migrations Enum.to_list(1..39) ++ [41, 42, 43] ++ Enum.to_list(45..67)
+    # 68 (M94 §09, §12, the call ledger as it stands) rebuilds that table with
+    # four nullable columns, a wider unique key and one more release reason,
+    # every row kept, and an engine at this format never reads it: the format
+    # stays.
+    @migrations Enum.to_list(1..39) ++ [41, 42, 43] ++ Enum.to_list(45..68)
     @manifest_keys ~w(created_at engine_version files format home_format home_root host links
                       primary_epoch)
     @entry_keys ~w(bytes mode path sha256)

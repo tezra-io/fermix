@@ -288,7 +288,11 @@ defmodule FermixCore.Management.Copy do
     "Settings",
     # The apps' pane of the meeting notetaker, where a move back says to
     # install it again (M97 §9.5).
-    "Meetings"
+    "Meetings",
+    # The carrier of the owner's own number and the engine that calls with it
+    # (M94 §3, §12).
+    "Telnyx",
+    "GPT-Live"
   ]
 
   @doc """

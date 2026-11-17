@@ -35,7 +35,8 @@ defmodule FermixChannels.Gateway do
 
   @doc """
   Ingest inbound messages. A coding-run chain's metadata
-  (`harness_continuation`, `harness_continuation_depth`, `harness_run_id`) is
+  (`harness_continuation`, `harness_continuation_depth`, `harness_run_id`) and
+  a phone call result's marker (`phone_call_result`) are
   dropped from every message unless the `keep_chain_metadata` option is set,
   which only the continuation dispatcher and the grant resume do, as
   `name_conversation/2` names the conversation whatever a message arrived with.
@@ -359,8 +360,15 @@ defmodule FermixChannels.Gateway do
   # decides what the access gate lets a turn start without asking, so only the
   # continuation dispatcher and the grant resume may hand it in
   # (`keep_chain_metadata`); every other message carries none, whatever it
-  # arrived with, under atom or string keys.
-  @chain_metadata_keys [:harness_continuation, :harness_continuation_depth, :harness_run_id]
+  # arrived with, under atom or string keys. A finished phone call's result
+  # re-enters through the same dispatcher under its own marker
+  # (`phone_call_result`, M94 §04), kept and dropped the same way.
+  @chain_metadata_keys [
+    :harness_continuation,
+    :harness_continuation_depth,
+    :harness_run_id,
+    :phone_call_result
+  ]
 
   defp drop_chain_metadata(%Message{} = message, true), do: message
 

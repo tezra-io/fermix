@@ -60,7 +60,7 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   @typedoc """
   Where outside content came from: a plugin, one named tool, a cue source (its
   `source_ref`), an attachment of the turn's message (by kind), the Recent
-  Activity note, a coding run's report, the turn's message itself when the
+  Activity note, a coding run's report, a phone call, the turn's message itself when the
   channel marked it forwarded, or a due open loop noted on a turn that had read
   outside content. `outside_source/1` returns the first two from a
   tool's result; a cue run's context arrives seeded with the third (M60 S2), and
@@ -75,6 +75,7 @@ defmodule FermixCore.Capabilities.UntrustedContent do
           | {:attachment, String.t()}
           | {:activity, String.t()}
           | {:harness, String.t()}
+          | {:phone_call, String.t()}
           | {:message, String.t()}
           | {:open_loop, String.t()}
           | {:checklist, String.t()}
@@ -311,11 +312,23 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   def harness_continuation_source, do: {:harness, "a coding run"}
 
   @doc """
+  The outside source a phone call brings into a turn (M94 §11): what the
+  person called said. A call's backend turn starts with it, since it reads
+  the call's transcript, and so does the turn its result starts in the
+  owner's conversation, whose message frames the person's words
+  (`Agents.TurnRunner`, from the result's own marker). Never a coding run's,
+  so a confirmation raised in either turn names the call.
+  """
+  @spec phone_call_source() :: outside_source()
+  def phone_call_source, do: {:phone_call, "a phone call"}
+
+  @doc """
   What a turn hands a request it parks for the owner and re-runs after their
   `/confirm` (a directory grant, a coding run's vendor-config acknowledgment),
   so the re-run is the same request rather than a clean one: the outside
   sources the turn had read and, on a finished coding run's follow-up turn, its
-  chain depth and that run's id. The gateway keeps it with the resume intent
+  chain depth and that run's id, or on a phone call's result turn its depth and
+  that call's id (`phone_call_result`). The gateway keeps it with the resume intent
   and `Agents.TurnRunner` seeds it on the resumed turn. A context the loop never
   stamped hands on a source of its own, so the re-run is never read as clean.
   """
@@ -324,6 +337,7 @@ defmodule FermixCore.Capabilities.UntrustedContent do
     %{outside_sources: provenance_sources(context)}
     |> put_positive(:harness_continuation_depth, Map.get(context, :harness_continuation_depth))
     |> put_binary(:harness_run_id, Map.get(context, :harness_run_id))
+    |> put_binary(:phone_call_result, Map.get(context, :phone_call_result))
   end
 
   defp provenance_sources(context) do
@@ -438,10 +452,13 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   # content cannot close the boundary early and escape the "DATA, not
   # instructions" frame. Inserting a space after the angle bracket leaves the
   # text readable while ensuring the only real `</untrusted_tool_result>` in
-  # the final string is the one `framed/2` appends.
+  # the final string is the one `framed/2` appends. A model reads a tag by its
+  # name, not byte for byte, so every case and spacing of it is defanged
+  # (`</UNTRUSTED_TOOL_RESULT>`, `< /untrusted_tool_result >`), and a tag
+  # already defanged stays as it is.
+  @wrapper_tag ~r/<\s*(\/?)\s*(untrusted_tool_result)/iu
+
   defp neutralize_delimiters(output) do
-    output
-    |> String.replace("</untrusted_tool_result>", "</ untrusted_tool_result>")
-    |> String.replace("<untrusted_tool_result", "< untrusted_tool_result")
+    Regex.replace(@wrapper_tag, output, fn _tag, slash, name -> "<" <> slash <> " " <> name end)
   end
 end

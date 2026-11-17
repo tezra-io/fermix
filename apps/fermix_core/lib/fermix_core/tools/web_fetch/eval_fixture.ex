@@ -31,9 +31,12 @@ defmodule FermixCore.Tools.WebFetch.EvalFixture do
   `{:error, refusal}` for every URL, and `web_fetch` fails every call.
 
   The URL is read with `URI.parse/1`, the parser `Net.Guard` and `Req` read
-  it with, so the origin decided on is the one dialled. Nothing but
-  `web_fetch` asks this module: the guard and `Net.PinnedUrl` refuse the
-  origin for every other caller in every build.
+  it with, so the origin decided on is the one dialled. Only `web_fetch`
+  asks `decide/2`: the guard and `Net.PinnedUrl` refuse the origin for every
+  other caller in every build. The composition root asks `origin/1`, the
+  same reading of the same variable and manifest, to wire the phone-call
+  transport under a build gate of its own that is narrower
+  (`FermixCore.Application.phone_call_transport_opts/2`).
   """
 
   alias FermixCore.Setup.ConfigStore
@@ -63,6 +66,16 @@ defmodule FermixCore.Tools.WebFetch.EvalFixture do
   @spec decide(String.t(), [option()]) :: decision()
   def decide(url, opts \\ []) when is_binary(url) and is_list(opts),
     do: decide_in(@compiled_env, URI.parse(url), opts)
+
+  @doc """
+  The origin this build honours, as `decide/2` reads the variable and the
+  manifest: `:none` in a build that reads neither or with the variable unset,
+  `{:ok, "http://127.0.0.1:<port>"}` when it is set in its one form and the
+  home (`:home`, the running home by default) records that port, and
+  `{:error, refusal}` when it is set and not honoured.
+  """
+  @spec origin([option()]) :: :none | {:ok, String.t()} | {:error, refusal()}
+  def origin(opts \\ []) when is_list(opts), do: origin_in(@compiled_env, opts)
 
   @doc "What `web_fetch` says, and logs, of a variable it refuses."
   @spec describe(refusal()) :: String.t()
@@ -100,6 +113,18 @@ defmodule FermixCore.Tools.WebFetch.EvalFixture do
     with {:ok, port} <- origin_port(flag),
          :ok <- recorded(port, flag, manifest_path(opts)) do
       if origin?(uri, port), do: :allow, else: :guard
+    end
+  end
+
+  defp origin_in(env, opts) when env in @envs, do: origin_flag(System.get_env(@flag), opts)
+  defp origin_in(_env, _opts), do: :none
+
+  defp origin_flag(nil, _opts), do: :none
+
+  defp origin_flag(flag, opts) do
+    with {:ok, port} <- origin_port(flag),
+         :ok <- recorded(port, flag, manifest_path(opts)) do
+      {:ok, @prefix <> Integer.to_string(port)}
     end
   end
 

@@ -4,12 +4,21 @@ defmodule FermixCore.PhoneCalls.OpenAILiveTest do
   stand-ins only: a Bandit server answering as the vendor documents, a
   loopback listener that reads a request and drops it unanswered, and a port
   nothing listens on. Every key, password and number is invented.
+
+  The create request, its body and the documented answers come from the wire
+  fixture the eval runners' simulated endpoint is held to as well
+  (`test/fixtures/phone_calls/gpt_live_wire.json`), so the two cannot drift;
+  the cases that file does not hold are typed here.
   """
 
   use ExUnit.Case, async: true
 
   alias FermixCore.Net.Egress
   alias FermixCore.PhoneCalls.OpenAILive
+
+  @fixture Path.expand("../../fixtures/phone_calls/gpt_live_wire.json", __DIR__)
+  @external_resource @fixture
+  @wire @fixture |> File.read!() |> Jason.decode!()
 
   @arrival_ms 10_000
   @api_key "sk-invented-key-0001"
@@ -18,8 +27,8 @@ defmodule FermixCore.PhoneCalls.OpenAILiveTest do
   @max_accepts 8
   @max_reads 64
 
-  # Answers every request with the status and body the test chose, after
-  # telling the test what arrived.
+  # Answers every request with the status, body and content type the test
+  # chose, after telling the test what arrived.
   defmodule FakeVendor do
     @moduledoc false
     @behaviour Plug
@@ -30,25 +39,23 @@ defmodule FermixCore.PhoneCalls.OpenAILiveTest do
     def init(opts), do: opts
 
     @impl true
-    def call(conn, %{test: test, status: status, body: body}) do
+    def call(conn, %{test: test, status: status, body: body, content_type: content_type}) do
       {:ok, raw, conn} = read_body(conn)
 
       send(test, {:vendor_saw, conn.method, conn.request_path, conn.req_headers, raw})
 
       conn
-      |> put_resp_content_type("application/json")
+      |> put_resp_content_type(content_type)
       |> send_resp(status, body)
     end
   end
 
-  defp vendor!(status, body) do
+  defp vendor!(status, body, content_type \\ "application/json") do
+    state = %{test: self(), status: status, body: body, content_type: content_type}
+
     server =
       start_supervised!(
-        {Bandit,
-         plug: {FakeVendor, %{test: self(), status: status, body: body}},
-         ip: {127, 0, 0, 1},
-         port: 0,
-         startup_log: false},
+        {Bandit, plug: {FakeVendor, state}, ip: {127, 0, 0, 1}, port: 0, startup_log: false},
         id: make_ref()
       )
 
@@ -84,38 +91,26 @@ defmodule FermixCore.PhoneCalls.OpenAILiveTest do
   end
 
   describe "create_session/2 on success" do
-    test "the create reference's 201 returns the session id unchanged" do
-      base = vendor!(201, ~s({"session":{"id":"live_u0_Inv/01"},"transport":{"type":"sip"}}))
+    test "the fixture's request is sent as the fixture's body, and its 201 returns the id unchanged" do
+      %{"status" => 201, "body" => answer} = @wire["create"]["answers"]["accepted"]
+      base = vendor!(201, Jason.encode!(answer))
+      wire_request = fixture_request(@wire["create"]["request"])
 
-      assert {:ok, %{session_id: "live_u0_Inv/01", http_status: 201, transport_type: "sip"}} =
-               create(base)
+      assert {:ok, %{session_id: id, http_status: 201, transport_type: "sip"}} =
+               OpenAILive.create_session(wire_request, origins(base))
+
+      assert id == answer["session"]["id"]
 
       assert_receive {:vendor_saw, "POST", "/v1/live/sessions", headers, raw}, @arrival_ms
-      assert {"authorization", "Bearer " <> @api_key} in headers
+      assert {"authorization", "Bearer " <> wire_request.api_key} in headers
       assert {"content-type", "application/json"} in headers
+      assert Jason.decode!(raw) == @wire["create"]["body"]
+    end
 
-      assert Jason.decode!(raw) == %{
-               "session" => %{
-                 "model" => "gpt-live-1",
-                 "instructions" => "Ask whether a table for two is free at seven tonight.",
-                 "audio" => %{"output" => %{"voice" => "marin"}},
-                 "delegation" => %{"type" => "client"},
-                 "store" => false
-               },
-               "transport" => %{
-                 "type" => "sip",
-                 "destination" => "+15555550123",
-                 "trunk" => %{
-                   "provider_url" => "sips:sip.invented-carrier.test:5061",
-                   "auth" => %{
-                     "type" => "digest",
-                     "username" => "invented-user",
-                     "password" => @password
-                   },
-                   "caller_number" => "+15555550100"
-                 }
-               }
-             }
+    test "an id with a path character is returned exactly as sent" do
+      base = vendor!(201, ~s({"session":{"id":"live_u0_Inv/01"},"transport":{"type":"sip"}}))
+
+      assert {:ok, %{session_id: "live_u0_Inv/01", http_status: 201}} = create(base)
     end
 
     test "the SIP guide's 200 is the same success" do
@@ -177,8 +172,31 @@ defmodule FermixCore.PhoneCalls.OpenAILiveTest do
                }}} = create(base)
     end
 
-    test "500 and the documented 502 transport-setup failure are refusals" do
-      for status <- [500, 502] do
+    test "the fixture's refused and malformed answers are refusals in the vendor's words" do
+      for name <- ["refused", "malformed"] do
+        %{"status" => status, "body" => %{"error" => error}} = @wire["create"]["answers"][name]
+        base = vendor!(status, Jason.encode!(%{"error" => error}))
+
+        assert {:error, {:rejected, ^status, vendor}} = create(base), name
+        assert vendor == %{message: error["message"], code: error["code"], type: error["type"]}
+      end
+    end
+
+    # A 4xx is the answer deciding: whoever sent it, the call was not placed.
+    test "a 4xx is a refusal whatever its body, an edge's own page included" do
+      base = vendor!(403, "<html><body>Access denied</body></html>", "text/html")
+
+      assert {:error, {:rejected, 403, %{message: "<html><body>Access denied</body></html>"}}} =
+               create(base)
+
+      base = vendor!(400, "")
+      assert {:error, {:rejected, 400, %{message: nil, code: nil, type: nil}}} = create(base)
+    end
+
+    # The origin saying, in its own error envelope, that the request failed; the
+    # SIP guide's transport-setup failure (502) among them.
+    test "a 5xx carrying the vendor's error envelope is a refusal" do
+      for status <- [500, 502, 503] do
         base = vendor!(status, ~s({"error":{"message":"trunk setup failed","code":"sip_error"}}))
 
         assert {:error, {:rejected, ^status, %{message: "trunk setup failed", code: "sip_error"}}} =
@@ -186,18 +204,64 @@ defmodule FermixCore.PhoneCalls.OpenAILiveTest do
       end
     end
 
-    test "the documented 504 initialization timeout is unknown, with the vendor's words" do
+    # A gateway standing in for a lost origin answer is the lost answer: the
+    # call may be ringing with no session id to hang up.
+    test "a 5xx without the vendor's error envelope is unknown, never a refusal" do
+      bodies = [
+        {500, "", "application/json"},
+        {500, "{not json", "application/json"},
+        {500, ~s({"error":"Internal Server Error"}), "application/json"},
+        {502, ~s({"message":"no error object"}), "application/json"},
+        {502, "<html><body>502 Bad Gateway</body></html>", "text/html"},
+        {503, "Service Unavailable", "text/plain"}
+      ]
+
+      for {status, body, content_type} <- bodies do
+        base = vendor!(status, body, content_type)
+
+        assert {:error, {:unknown, {:http_status, ^status, %{code: nil, type: nil}}}} =
+                 create(base),
+               "#{status} #{inspect(body)} was read as a refusal"
+      end
+    end
+
+    # An edge's own codes, which Plug cannot send: read through the classifier
+    # the request's answer goes to.
+    test "an edge's 520 or 524 page is unknown" do
+      for {status, body} <- [
+            {520, "<html><title>Web server is returning an unknown error</title></html>"},
+            {524, "<html><title>A timeout occurred</title></html>"}
+          ] do
+        answer = {:ok, Req.Response.new(status: status, body: body)}
+
+        assert {:error, {:unknown, {:http_status, ^status, %{message: ^body}}}} =
+                 OpenAILive.classify_create(answer, [@api_key, @password])
+
+        assert {:error, {:unknown, {:http_status, ^status, %{message: ^body}}}} =
+                 OpenAILive.classify_hangup(answer, [@api_key])
+      end
+    end
+
+    test "a gateway's page is kept as its words, bounded" do
+      base = vendor!(503, String.duplicate("x", 5_000), "text/plain")
+
+      assert {:error, {:unknown, {:http_status, 503, %{message: message}}}} = create(base)
+      assert String.length(message) == 1_000
+    end
+
+    test "the fixture's 504 initialization timeout is unknown, with the vendor's words" do
+      %{"status" => 504, "body" => body} = @wire["create"]["answers"]["initialization_timeout"]
+      base = vendor!(504, Jason.encode!(body))
+
+      assert {:error, {:unknown, {:http_status, 504, %{message: message}}}} = create(base)
+      assert message == body["error"]["message"]
+    end
+
+    test "a 504 is unknown even with the vendor's envelope" do
       base = vendor!(504, ~s({"error":{"message":"initialization timed out"}}))
 
       assert {:error, {:unknown, {:http_status, 504, %{message: "initialization timed out"}}}} =
                create(base)
-    end
-
-    test "a body that is not the vendor's envelope is kept as its words, bounded" do
-      base = vendor!(503, String.duplicate("x", 5_000))
-
-      assert {:error, {:rejected, 503, %{message: message, code: nil}}} = create(base)
-      assert String.length(message) == 1_000
     end
 
     test "vendor words never carry the trunk password or the API key back" do
@@ -208,6 +272,33 @@ defmodule FermixCore.PhoneCalls.OpenAILiveTest do
       refute message =~ @password
       refute message =~ @api_key
       assert message =~ "[REDACTED]"
+    end
+
+    # OpenAI's refused-key message quotes the key back, masked but with its
+    # last characters, which an exact-match scrub cannot see. The engine's own
+    # sentence stands in for it, as `Realtime.SessionServer` does.
+    test "a refused key's message is withheld, with the vendor's code kept" do
+      masked =
+        ~s({"error":{"message":"Incorrect API key provided: sk-inve************0001. ) <>
+          ~s(You can find your API key at https://platform.openai.com/account/api-keys.",) <>
+          ~s("type":"invalid_request_error","param":null,"code":"invalid_api_key"}})
+
+      for status <- [401, 403] do
+        base = vendor!(status, masked)
+
+        assert {:error, {:rejected, ^status, vendor}} = create(base)
+
+        assert vendor == %{
+                 message: "OpenAI did not accept the API key (invalid_api_key).",
+                 code: "invalid_api_key",
+                 type: "invalid_request_error"
+               }
+      end
+
+      base = vendor!(401, "<html>Incorrect API key provided: sk-inve****0001</html>", "text/html")
+
+      assert {:error, {:rejected, 401, %{message: "OpenAI did not accept the API key."}}} =
+               create(base)
     end
   end
 
@@ -247,6 +338,13 @@ defmodule FermixCore.PhoneCalls.OpenAILiveTest do
         {%{destination: "5555550123"}, :destination},
         {%{destination: "sip:front-desk@invented.test"}, :destination},
         {%{api_key: ""}, :api_key},
+        # A key no request could carry: the HTTP/1 client would raise on the
+        # header and quote it back. A stored secret's trailing newline is the
+        # common one.
+        {%{api_key: @api_key <> "\n"}, :api_key},
+        {%{api_key: @api_key <> "\r\nX-Injected: 1"}, :api_key},
+        {%{api_key: "sk-invented key-0001"}, :api_key},
+        {%{api_key: "sk-invénted-key-0001"}, :api_key},
         {%{model: nil}, :model},
         {%{instructions: "  "}, :instructions},
         {%{voice: ""}, :voice},
@@ -305,6 +403,130 @@ defmodule FermixCore.PhoneCalls.OpenAILiveTest do
     end
   end
 
+  # Every reason this module returns becomes a call's failure words: the
+  # owner's chat, the model, the ledger, the management list, telemetry. So
+  # every shape is grepped for both invented secrets, in the forms they can
+  # take inside a message (as stored, trimmed, and as `inspect/1` prints them).
+  describe "no result carries a secret" do
+    @stored_key @api_key <> "\n"
+
+    defp secret_answers do
+      echo = "#{@api_key} #{@password} #{inspect(@stored_key)}"
+      envelope = Jason.encode!(%{"error" => %{"message" => echo, "code" => echo, "type" => echo}})
+
+      [
+        {:ok, Req.Response.new(status: 400, body: envelope)},
+        {:ok, Req.Response.new(status: 404, body: envelope)},
+        {:ok, Req.Response.new(status: 500, body: envelope)},
+        {:ok, Req.Response.new(status: 502, body: "<html>#{echo}</html>")},
+        {:ok, Req.Response.new(status: 504, body: envelope)},
+        {:error,
+         {:unknown,
+          %Req.HTTPError{
+            protocol: :http1,
+            reason: {:invalid_header_value, "authorization", "Bearer " <> @stored_key}
+          }}},
+        {:error, {:unknown, %Req.TransportError{reason: {:unexpected, "Bearer " <> @api_key}}}},
+        {:error, {:not_sent, RuntimeError.exception("pool for #{@api_key} #{@password} broke")}}
+      ]
+    end
+
+    test "create: every error shape is free of the key and the trunk password" do
+      for answer <- secret_answers() do
+        printed = inspect(OpenAILive.classify_create(answer, [@stored_key, @password]))
+
+        refute printed =~ @api_key, printed
+        refute printed =~ @password, printed
+      end
+    end
+
+    test "hangup: every error shape is free of the key" do
+      for answer <- secret_answers() do
+        printed = inspect(OpenAILive.classify_hangup(answer, [@stored_key]))
+
+        refute printed =~ @api_key, printed
+      end
+    end
+
+    test "a transport reason with no secret in it is kept as it was" do
+      alert = {:tls_alert, {:unknown_ca, ~c"invented"}}
+
+      assert {:error, {:unknown, {:transport, ^alert}}} =
+               OpenAILive.classify_create(
+                 {:error, {:unknown, %Req.TransportError{reason: alert}}},
+                 [@api_key, @password]
+               )
+    end
+  end
+
+  # The one scrub the sideband passes every message through (`scrubber/1`).
+  describe "scrubber/1" do
+    # A password with characters `inspect/1` and JSON write escaped.
+    @odd_password ~s(pw"In\\vent/é-7731)
+
+    test "every form a message can carry a secret in is scrubbed" do
+      scrub = OpenAILive.scrubber([@api_key <> "\n", @odd_password])
+
+      for carried <- [
+            @api_key,
+            "Bearer " <> @api_key,
+            @odd_password,
+            inspect(@odd_password),
+            Jason.encode!(%{"password" => @odd_password}),
+            Jason.encode!(%{"password" => @odd_password}, escape: :unicode_safe),
+            Jason.encode!(%{"password" => @odd_password}, escape: :html_safe),
+            Jason.encode!(%{"auth" => "Bearer " <> @api_key})
+          ] do
+        scrubbed = scrub.("vendor said: " <> carried)
+        assert scrubbed =~ "[REDACTED]", carried
+        refute scrubbed =~ @api_key, carried
+        refute scrubbed =~ "In", carried
+      end
+    end
+
+    test "every string of a term is scrubbed, its keys too, and its shape kept" do
+      scrub = OpenAILive.scrubber([@api_key, @password])
+
+      event =
+        {:unknown, "vendor.#{@api_key}",
+         %{
+           "detail" => ["ok", %{@password => {:nested, "Bearer #{@api_key}"}}],
+           "count" => 3
+         }}
+
+      assert scrub.(event) ==
+               {:unknown, "vendor.[REDACTED]",
+                %{
+                  "detail" => ["ok", %{"[REDACTED]" => {:nested, "Bearer [REDACTED]"}}],
+                  "count" => 3
+                }}
+
+      error = %RuntimeError{message: "refused #{@password}"}
+
+      assert scrub.({:transport, error}) ==
+               {:transport, %RuntimeError{message: "refused [REDACTED]"}}
+
+      assert scrub.({:closed, :local_close, 1000, self()}) ==
+               {:closed, :local_close, 1000, self()}
+    end
+
+    test "a part nested past the bound is replaced whole, never passed on unread" do
+      scrub = OpenAILive.scrubber([@api_key])
+      deep = Enum.reduce(1..40, @api_key, fn _level, inner -> [inner] end)
+
+      refute inspect(scrub.(deep), limit: :infinity) =~ @api_key
+      assert inspect(scrub.(deep), limit: :infinity) =~ "[REDACTED]"
+    end
+
+    test "the function prints none of the secrets it scrubs" do
+      scrub = OpenAILive.scrubber([@api_key, @password])
+      printed = inspect(scrub, limit: :infinity, printable_limit: :infinity)
+
+      refute printed =~ @api_key
+      refute printed =~ @password
+    end
+  end
+
   describe "hangup/2" do
     test "200 with an empty body is accepted; one POST, no body, the session's path" do
       base = vendor!(200, "")
@@ -321,25 +543,69 @@ defmodule FermixCore.PhoneCalls.OpenAILiveTest do
       assert {"authorization", "Bearer " <> @api_key} in headers
     end
 
-    test "404, 409 and 410 read as already ended, with the vendor's words" do
-      for status <- [404, 409, 410] do
+    test "the fixture's answers: 200 accepted, its 404 already ended in the vendor's words" do
+      %{"status" => 200, "body" => ""} = @wire["hangup"]["accepted"]
+      base = vendor!(200, "")
+      assert {:ok, :accepted} = hangup(base)
+
+      %{"status" => 404, "body" => %{"error" => error}} = @wire["hangup"]["ended"]
+      base = vendor!(404, Jason.encode!(%{"error" => error}))
+
+      assert {:ok, {:already_ended, 404, %{message: message, code: code}}} = hangup(base)
+      assert {message, code} == {error["message"], error["code"]}
+    end
+
+    test "409 and 410 in the vendor's envelope read as already ended too" do
+      for status <- [409, 410] do
         base = vendor!(status, ~s({"error":{"message":"session not found","code":"not_found"}}))
 
-        assert {:ok, {:already_ended, ^status, %{message: "session not found"}}} =
-                 OpenAILive.hangup("live_123", api_key: @api_key, base_url: base, egress: @direct)
+        assert {:ok, {:already_ended, ^status, %{message: "session not found"}}} = hangup(base)
       end
     end
 
-    test "any other refusal keeps its words; a 504 is unknown" do
-      base = vendor!(401, ~s({"error":{"message":"Incorrect API key provided."}}))
+    # Only the origin can say the session is gone. An edge's 404 is a refusal
+    # to act: the call may still be up.
+    test "a 404 without the vendor's envelope is a refusal, not an ended session" do
+      base = vendor!(404, "<html><body>Not Found</body></html>", "text/html")
 
-      assert {:error, {:rejected, 401, %{message: "Incorrect API key provided."}}} =
-               OpenAILive.hangup("live_123", api_key: @api_key, base_url: base, egress: @direct)
+      assert {:error, {:rejected, 404, %{message: "<html><body>Not Found</body></html>"}}} =
+               hangup(base)
+    end
+
+    test "any other refusal keeps its words; a refused key's are withheld" do
+      base = vendor!(400, ~s({"error":{"message":"Hangup is only for SIP sessions."}}))
+
+      assert {:error, {:rejected, 400, %{message: "Hangup is only for SIP sessions."}}} =
+               hangup(base)
+
+      base = vendor!(401, ~s({"error":{"message":"Incorrect API key provided: sk-i***0001"}}))
+
+      assert {:error, {:rejected, 401, %{message: "OpenAI did not accept the API key."}}} =
+               hangup(base)
+    end
+
+    test "a 5xx is a refusal only in the vendor's envelope; otherwise, and a 504, unknown" do
+      base = vendor!(500, ~s({"error":{"message":"hangup failed","type":"server_error"}}))
+      assert {:error, {:rejected, 500, %{message: "hangup failed"}}} = hangup(base)
+
+      for {status, body} <- [{500, ""}, {502, "<html>Bad Gateway</html>"}, {503, "busy"}] do
+        base = vendor!(status, body, "text/html")
+        assert {:error, {:unknown, {:http_status, ^status, _vendor}}} = hangup(base)
+      end
 
       base = vendor!(504, ~s({"error":{"message":"upstream timed out"}}))
 
       assert {:error, {:unknown, {:http_status, 504, %{message: "upstream timed out"}}}} =
-               OpenAILive.hangup("live_123", api_key: @api_key, base_url: base, egress: @direct)
+               hangup(base)
+    end
+
+    test "a key no request could carry is refused before any I/O" do
+      assert {:error, {:not_sent, {:invalid, :api_key}}} =
+               OpenAILive.hangup("live_123",
+                 api_key: @api_key <> "\n",
+                 base_url: "http://127.0.0.1:1",
+                 egress: @direct
+               )
     end
 
     test "a refused connection was never sent; an empty id is refused before any I/O" do
@@ -355,35 +621,28 @@ defmodule FermixCore.PhoneCalls.OpenAILiveTest do
     end
   end
 
-  describe "redact/1" do
-    test "a redacted create body holds neither secret anywhere, and keeps the rest" do
-      redacted = request() |> OpenAILive.create_body() |> OpenAILive.redact()
-      encoded = Jason.encode!(redacted)
+  defp origins(base), do: [base_url: base, ws_base_url: "ws://127.0.0.1:1", egress: @direct]
 
-      refute encoded =~ @password
-      assert redacted["transport"]["trunk"]["auth"]["password"] == "[REDACTED]"
-      assert redacted["transport"]["trunk"]["auth"]["username"] == "invented-user"
-      assert redacted["transport"]["destination"] == "+15555550123"
-      assert redacted["session"]["model"] == "gpt-live-1"
-    end
+  defp hangup(base),
+    do: OpenAILive.hangup("live_123", api_key: @api_key, base_url: base, egress: @direct)
 
-    test "atom-keyed requests and nested auth are redacted the same way" do
-      redacted = OpenAILive.redact(%{transport: %{trunk: %{auth: %{password: @password}}}})
+  defp fixture_request(raw) do
+    trunk = raw["trunk"]
 
-      refute inspect(redacted) =~ @password
-    end
-
-    test "headers lose the bearer token in every shape Req keeps them" do
-      pairs = [{"Authorization", "Bearer " <> @api_key}, {"content-type", "application/json"}]
-      map = %{"authorization" => ["Bearer " <> @api_key]}
-
-      for headers <- [pairs, map] do
-        redacted = OpenAILive.redact(headers)
-        refute inspect(redacted) =~ @api_key
-      end
-
-      assert {"content-type", "application/json"} in OpenAILive.redact(pairs)
-    end
+    %{
+      api_key: raw["api_key"],
+      model: raw["model"],
+      instructions: raw["instructions"],
+      input: raw["input"],
+      voice: raw["voice"],
+      destination: raw["destination"],
+      trunk: %{
+        provider_url: trunk["provider_url"],
+        username: trunk["username"],
+        password: trunk["password"],
+        caller_number: trunk["caller_number"]
+      }
+    }
   end
 
   defp drop_after_reading(_listener, _posts, accepted) when accepted >= @max_accepts, do: :ok

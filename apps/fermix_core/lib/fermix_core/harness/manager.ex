@@ -62,6 +62,7 @@ defmodule FermixCore.Harness.Manager do
 
   alias FermixCore.CommandHost.Supervisor, as: CommandHostSupervisor
   alias FermixCore.CommandRunner
+  alias FermixCore.Delivery.Continuation, as: DeliveryContinuation
   alias FermixCore.Harness.Adapters.CodexCloud
   alias FermixCore.Harness.Artifacts
   alias FermixCore.Harness.Config
@@ -1205,7 +1206,7 @@ defmodule FermixCore.Harness.Manager do
   end
 
   defp dispatcher_or_disabled(state) do
-    case Continuation.dispatcher(state.continuation_opts) do
+    case DeliveryContinuation.dispatcher(state.continuation_opts) do
       {:ok, dispatcher} -> {:ok, dispatcher}
       :none -> {:none, :continuation_disabled}
     end

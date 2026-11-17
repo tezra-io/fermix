@@ -9,6 +9,7 @@ defmodule FermixCore.Setup.Wizard do
   alias FermixCore.Management.Settings.Channels.Inventory
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Net.Egress
+  alias FermixCore.PhoneCalls.CallHold
   alias FermixCore.Prompt.SetupSeeder
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
@@ -689,11 +690,20 @@ defmodule FermixCore.Setup.Wizard do
       "before it matters. #{destination} Enable? (yes/no; blank = no)"
   end
 
-  @spec save_answers(WizardState.t(), [answer()]) :: {:ok, report()} | {:error, term()}
-  def save_answers(%WizardState{} = state, answers) when is_list(answers) do
+  @doc """
+  Saves `answers` through the shared write tail. A secret a phone call in
+  progress reads (`PhoneCalls.CallHold`) refuses the whole save before
+  anything lands, the store choice included; `opts[:phone_calls]` names the
+  hold's ledger, for a test.
+  """
+  @spec save_answers(WizardState.t(), [answer()], keyword()) ::
+          {:ok, report()} | {:error, term()}
+  def save_answers(%WizardState{} = state, answers, opts \\ [])
+      when is_list(answers) and is_list(opts) do
     {store_answer, answers} = Keyword.pop(answers, :secret_store)
 
-    with {:ok, state, store_report} <- apply_secret_store_answer(state, store_answer),
+    with :ok <- CallHold.check_credentials(answered_secrets(state, answers), hold_opts(opts)),
+         {:ok, state, store_report} <- apply_secret_store_answer(state, store_answer),
          {:ok, verdict} <- refuse_unstorable_secrets(answers) do
       case {answers, store_report} do
         {[], %{} = report} -> {:ok, report}
@@ -701,6 +711,27 @@ defmodule FermixCore.Setup.Wizard do
       end
     end
   end
+
+  # The secrets this save writes, each by the key it is stored under: a
+  # provider's own secret answers, and the voice key, which is the key of the
+  # provider the engine this save leaves dials (`put_voice_api_key/2`).
+  defp answered_secrets(state, answers) do
+    provider_secrets =
+      for descriptor <- Descriptor.all(),
+          %{secret?: true, key: key} <- descriptor.setup_fields,
+          not blank?(Keyword.get(answers, key)),
+          do: key
+
+    provider_secrets ++ answered_voice_key(state.config_snapshot, answers)
+  end
+
+  defp answered_voice_key(snapshot, answers) do
+    if blank?(Keyword.get(answers, :realtime_api_key)),
+      do: [],
+      else: [snapshot |> put_realtime_config(answers) |> voice_key_provider() |> voice_key_slot()]
+  end
+
+  defp hold_opts(opts), do: Keyword.get(opts, :phone_calls, [])
 
   # A secret write inside the commit pipeline that fails (an unlock prompt
   # cancelled, a helper that errored) unwinds here as the same typed refusal
@@ -982,15 +1013,21 @@ defmodule FermixCore.Setup.Wizard do
   The settings file's write guard (`RestartState.writable/0`) runs before the
   store is asked, so a write refused for an outside edit changes nothing: the
   refusal says nothing was saved, and the stored value stays the one it was.
+  So does the hold on a credential a phone call in progress reads
+  (`PhoneCalls.CallHold`, `{:credential_held, key, sentence}`);
+  `opts[:phone_calls]` names its ledger, for a test.
   """
-  @spec put_secret(atom(), String.t()) ::
-          {:ok, report()} | {:error, {:secret_store_failed, atom(), term()} | term()}
-  def put_secret(key, value) when is_atom(key) and is_binary(value) and value != "" do
+  @spec put_secret(atom(), String.t(), keyword()) ::
+          {:ok, report()}
+          | {:error, {:secret_store_failed, atom(), term()} | CallHold.refusal() | term()}
+  def put_secret(key, value, opts \\ [])
+      when is_atom(key) and is_binary(value) and value != "" and is_list(opts) do
     secret = SecretPaths.fetch!(key)
 
     # The guard `commit_snapshot/2` consults, asked before the store is touched,
     # so a refusal never follows a write it reports as not made.
     with :ok <- RestartState.writable(),
+         :ok <- CallHold.check_credentials([key], hold_opts(opts)),
          :ok <- store_secret(key, value) do
       commit_secret_reference(secret, SecretWriter.current_sentinel())
     end
@@ -1080,14 +1117,17 @@ defmodule FermixCore.Setup.Wizard do
   is reported rather than followed by dropping the reference, which would leave
   the value on the machine with nothing naming it. The settings file's write
   guard runs before either, so a forget refused for an outside edit deletes
-  nothing and leaves no reference pointing at a deleted item.
+  nothing and leaves no reference pointing at a deleted item; so does the hold
+  on a credential a phone call in progress reads, as for `put_secret/3`.
   """
-  @spec clear_secret(atom()) ::
-          {:ok, report()} | {:error, {:secret_store_failed, atom(), term()} | term()}
-  def clear_secret(key) when is_atom(key) do
+  @spec clear_secret(atom(), keyword()) ::
+          {:ok, report()}
+          | {:error, {:secret_store_failed, atom(), term()} | CallHold.refusal() | term()}
+  def clear_secret(key, opts \\ []) when is_atom(key) and is_list(opts) do
     secret = SecretPaths.fetch!(key)
 
     with :ok <- RestartState.writable(),
+         :ok <- CallHold.check_credentials([key], hold_opts(opts)),
          :ok <- delete_secret(key) do
       commit_secret_reference(secret, nil)
     end
@@ -1546,13 +1586,7 @@ defmodule FermixCore.Setup.Wizard do
   defp put_voice_api_key(snapshot, value) when value in [nil, ""], do: snapshot
 
   defp put_voice_api_key(snapshot, api_key) do
-    provider =
-      snapshot
-      |> Map.get(:fermix_core, [])
-      |> Keyword.get(:realtime, [])
-      |> realtime_engine()
-      |> voice_provider()
-
+    provider = voice_key_provider(snapshot)
     sentinel = secret_snapshot_value(voice_key_slot(provider), api_key)
 
     if is_nil(sentinel) do
@@ -1560,6 +1594,15 @@ defmodule FermixCore.Setup.Wizard do
     else
       update_provider_block(snapshot, provider, :api_key, sentinel)
     end
+  end
+
+  # The provider the voice engine `snapshot` holds dials.
+  defp voice_key_provider(snapshot) do
+    snapshot
+    |> Map.get(:fermix_core, [])
+    |> Keyword.get(:realtime, [])
+    |> realtime_engine()
+    |> voice_provider()
   end
 
   defp voice_provider(engine) do

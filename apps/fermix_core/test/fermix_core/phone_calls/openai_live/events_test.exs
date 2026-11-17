@@ -3,49 +3,48 @@ defmodule FermixCore.PhoneCalls.OpenAILive.EventsTest do
   `Events.normalize/1` and `Events.dedupe/2` against fixtures shaped exactly as
   OpenAI's *Sideband WebSocket* reference and *Telephony and SIP* guide print
   them. Ids, numbers and words are invented.
+
+  Every shape the eval runners' simulated endpoint sends comes from the one
+  wire fixture both sides read (`test/fixtures/phone_calls/gpt_live_wire.json`),
+  so the two cannot drift; the cases that file does not hold (missing fields,
+  reflected audio, unknown types, keys the called party presses) are typed
+  here.
   """
 
   use ExUnit.Case, async: true
 
+  alias FermixCore.PhoneCalls.Limits
   alias FermixCore.PhoneCalls.OpenAILive.Events
+
+  @fixture Path.expand("../../../fixtures/phone_calls/gpt_live_wire.json", __DIR__)
+  @external_resource @fixture
+  @server_events (@fixture |> File.read!() |> Jason.decode!())["server_events"]
 
   @session "live_u0_inv01"
 
+  defp wire(type), do: Map.fetch!(@server_events, type)["event"]
+
   describe "transport progress" do
     test "ringing, answered and failed keep the vendor's ids and words" do
-      assert {:ringing, %{session_id: @session, event_id: "event_call_1"}} =
-               Events.normalize(%{
-                 "type" => "transport.ringing",
-                 "event_id" => "event_call_1",
-                 "session_id" => @session
-               })
+      for {type, kind} <- [{"transport.ringing", :ringing}, {"transport.answered", :answered}] do
+        event = wire(type)
 
-      assert {:answered, %{session_id: @session, event_id: "event_call_2"}} =
-               Events.normalize(%{
-                 "type" => "transport.answered",
-                 "event_id" => "event_call_2",
-                 "session_id" => @session
-               })
+        assert {^kind, %{session_id: session_id, event_id: event_id}} = Events.normalize(event)
+        assert {session_id, event_id} == {event["session_id"], event["event_id"]}
+      end
 
-      assert {:call_failed,
-              %{
-                session_id: @session,
-                code: "provider_invite_failed",
-                message: "provider rejected the call",
-                param: "",
-                event_id: "event_call_4"
-              }} =
-               Events.normalize(%{
-                 "type" => "transport.failed",
-                 "event_id" => "event_call_4",
-                 "session_id" => @session,
-                 "error" => %{
-                   "type" => "call_error",
-                   "code" => "provider_invite_failed",
-                   "message" => "provider rejected the call",
-                   "param" => ""
-                 }
-               })
+      failed = wire("transport.failed")
+      error = failed["error"]
+
+      assert Events.normalize(failed) ==
+               {:call_failed,
+                %{
+                  session_id: failed["session_id"],
+                  code: error["code"],
+                  message: error["message"],
+                  param: error["param"],
+                  event_id: failed["event_id"]
+                }}
     end
 
     test "a failure with no error object is still a failure, with no invented reason" do
@@ -71,29 +70,32 @@ defmodule FermixCore.PhoneCalls.OpenAILive.EventsTest do
 
   describe "transcript" do
     test "input is the remote party, output is the assistant, both verbatim with offsets" do
-      assert {:transcript,
-              %{
-                speaker: :remote,
-                text: " Table for two?",
-                start_ms: 1_000,
-                end_ms: 1_200,
-                event_id: "event_transcript_1"
-              }} =
+      for {type, speaker} <- [
+            {"session.input_transcript.delta", :remote},
+            {"session.output_transcript.delta", :assistant}
+          ] do
+        event = wire(type)
+
+        assert Events.normalize(event) ==
+                 {:transcript,
+                  %{
+                    speaker: speaker,
+                    text: event["delta"],
+                    start_ms: event["start_ms"],
+                    end_ms: event["end_ms"],
+                    event_id: event["event_id"]
+                  }}
+      end
+    end
+
+    test "a fragment's own spacing is kept verbatim" do
+      assert {:transcript, %{text: " Table for two?"}} =
                Events.normalize(%{
                  "type" => "session.input_transcript.delta",
                  "event_id" => "event_transcript_1",
                  "delta" => " Table for two?",
                  "start_ms" => 1_000,
                  "end_ms" => 1_200
-               })
-
-      assert {:transcript, %{speaker: :assistant, text: "Yes, at seven."}} =
-               Events.normalize(%{
-                 "type" => "session.output_transcript.delta",
-                 "event_id" => "event_transcript_2",
-                 "delta" => "Yes, at seven.",
-                 "start_ms" => 1_300,
-                 "end_ms" => 1_900
                })
     end
 
@@ -115,23 +117,16 @@ defmodule FermixCore.PhoneCalls.OpenAILive.EventsTest do
 
   describe "delegation" do
     test "carries the id unchanged, the target and the offset, and no request text" do
-      assert {:delegation,
-              %{
-                id: "item_9tA2bF3h7K9m2P5q8R1s4",
-                target: "client",
-                offset_ms: 1_000,
-                event_id: "event_delegation"
-              }} =
-               Events.normalize(%{
-                 "type" => "session.delegation.created",
-                 "event_id" => "event_delegation",
-                 "offset_ms" => 1_000,
-                 "delegation" => %{
-                   "id" => "item_9tA2bF3h7K9m2P5q8R1s4",
-                   "type" => "delegation",
-                   "target" => "client"
-                 }
-               })
+      event = wire("session.delegation.created")
+
+      assert Events.normalize(event) ==
+               {:delegation,
+                %{
+                  id: event["delegation"]["id"],
+                  target: event["delegation"]["target"],
+                  offset_ms: event["offset_ms"],
+                  event_id: event["event_id"]
+                }}
     end
 
     test "a delegation with no id cannot be answered and says so" do
@@ -167,16 +162,29 @@ defmodule FermixCore.PhoneCalls.OpenAILive.EventsTest do
       assert {:malformed, "session.usage.updated", ^event} = Events.normalize(event)
     end
 
+    test "the wire's usage snapshot is flagged cumulative" do
+      event = wire("session.usage.updated")
+
+      assert Events.normalize(event) ==
+               {:usage,
+                %{
+                  seconds: event["usage"]["seconds"],
+                  cumulative: true,
+                  context_usage_ratio: event["context_window"]["usage_ratio"],
+                  event_id: event["event_id"]
+                }}
+    end
+
     test "session.closed carries the vendor's reason and the final usage" do
-      assert {:session_closed,
-              %{reason: "remote_hangup", seconds: 95, event_id: "event_closed_1"}} =
-               Events.normalize(%{
-                 "type" => "session.closed",
-                 "event_id" => "event_closed_1",
-                 "reason" => "remote_hangup",
-                 "usage" => %{"seconds" => 95},
-                 "session" => %{"id" => @session, "status" => "active"}
-               })
+      event = wire("session.closed")
+
+      assert Events.normalize(event) ==
+               {:session_closed,
+                %{
+                  reason: event["reason"],
+                  seconds: event["usage"]["seconds"],
+                  event_id: event["event_id"]
+                }}
     end
 
     test "a close with no usage leaves the final seconds unknown, not zero" do
@@ -205,14 +213,18 @@ defmodule FermixCore.PhoneCalls.OpenAILive.EventsTest do
 
   describe "keypad, acknowledgements and errors" do
     test "a DTMF acknowledgement names the send it answers" do
-      assert {:dtmf_sent, %{key: "#", client_event_id: "ev_dtmf_1", event_id: "event_dtmf_1"}} =
-               Events.normalize(%{
-                 "type" => "transport.dtmf.sent",
-                 "event_id" => "event_dtmf_1",
-                 "event" => "#",
-                 "client_event_id" => "ev_dtmf_1"
-               })
+      event = wire("transport.dtmf.sent")
 
+      assert Events.normalize(event) ==
+               {:dtmf_sent,
+                %{
+                  key: event["event"],
+                  client_event_id: event["client_event_id"],
+                  event_id: event["event_id"]
+                }}
+    end
+
+    test "a key the called party pressed is reported with its key" do
       assert {:dtmf_received, %{key: "5", event_id: "event_dtmf_2"}} =
                Events.normalize(%{
                  "type" => "transport.dtmf.received",
@@ -227,37 +239,41 @@ defmodule FermixCore.PhoneCalls.OpenAILive.EventsTest do
             {"session.thinking.appended", :thinking},
             {"session.commentary.appended", :commentary}
           ] do
-        assert {:append_acked, %{kind: ^kind, client_event_id: "ev_9"}} =
-                 Events.normalize(%{
-                   "type" => type,
-                   "event_id" => "event_ack",
-                   "client_event_id" => "ev_9",
-                   "start_ms" => 0,
-                   "end_ms" => 10
-                 })
+        event = wire(type)
+
+        assert Events.normalize(event) ==
+                 {:append_acked,
+                  %{
+                    kind: kind,
+                    client_event_id: event["client_event_id"],
+                    event_id: event["event_id"]
+                  }}
       end
     end
 
     test "a vendor error keeps its words and the client event it refuses" do
-      assert {:vendor_error,
-              %{
-                type: "invalid_request_error",
-                code: "unknown_parameter",
-                message: "Unknown parameter: 'session.voice'.",
-                param: "session.voice",
-                client_event_id: "ev_dtmf_2",
-                event_id: "event_error"
-              }} =
+      event = wire("error")
+      error = event["error"]
+
+      assert Events.normalize(event) ==
+               {:vendor_error,
+                %{
+                  type: error["type"],
+                  code: error["code"],
+                  message: error["message"],
+                  param: error["param"],
+                  client_event_id: error["client_event_id"],
+                  event_id: event["event_id"]
+                }}
+    end
+
+    test "a vendor error's client event id may ride at the top level instead" do
+      assert {:vendor_error, %{client_event_id: "ev_dtmf_3", code: "unknown_parameter"}} =
                Events.normalize(%{
                  "type" => "error",
-                 "event_id" => "event_error",
-                 "error" => %{
-                   "type" => "invalid_request_error",
-                   "code" => "unknown_parameter",
-                   "message" => "Unknown parameter: 'session.voice'.",
-                   "param" => "session.voice",
-                   "client_event_id" => "ev_dtmf_2"
-                 }
+                 "event_id" => "event_error_2",
+                 "client_event_id" => "ev_dtmf_3",
+                 "error" => %{"type" => "invalid_request_error", "code" => "unknown_parameter"}
                })
     end
   end
@@ -318,7 +334,7 @@ defmodule FermixCore.PhoneCalls.OpenAILive.EventsTest do
     end
 
     test "the production cap holds well over a 3-second replay" do
-      assert Events.seen_cap() >= 1_000
+      assert Limits.max_seen_event_ids() >= 1_000
     end
   end
 end

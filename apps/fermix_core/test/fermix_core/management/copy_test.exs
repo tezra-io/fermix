@@ -67,6 +67,7 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.McpServers.Row, as: McpRow
   alias FermixCore.Management.Mobile
+  alias FermixCore.Management.PhoneCalls
   alias FermixCore.Management.Placement
   alias FermixCore.Management.Plugins
   alias FermixCore.Management.Plugins.Row, as: PluginRow
@@ -74,6 +75,7 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Management.Router
   alias FermixCore.Management.Settings
   alias FermixCore.Management.Settings.CodingMachine
+  alias FermixCore.Management.Settings.PhoneCalls, as: PhoneCallsSection
   alias FermixCore.Management.Settings.ThisComputer
   alias FermixCore.Providers.DecisionModel
   alias FermixCore.Providers.Descriptor
@@ -335,6 +337,20 @@ defmodule FermixCore.Management.CopyTest do
       for sentence <- Accessories.sentences() do
         assert_clean(sentence, :prose, [], "accessories sentence")
         assert internal_terms(sentence) == []
+      end
+    end
+
+    # M94 §12: what Phone calls says, composed ones and the readiness reasons
+    # its summary carries included, and what its write refuses with.
+    test "every phone call sentence obeys the rules" do
+      sentences = PhoneCalls.sentences() ++ PhoneCallsSection.refusal_sentences()
+
+      assert length(sentences) > 40
+
+      for sentence <- sentences do
+        assert_clean(sentence, :prose, [], "phone calls sentence")
+        assert internal_terms(sentence) == []
+        refute_command(sentence, "phone calls sentence")
       end
     end
 

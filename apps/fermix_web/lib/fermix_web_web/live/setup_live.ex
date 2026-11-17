@@ -70,6 +70,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixWebWeb.SetupLive.Components
   alias FermixWebWeb.SetupLive.CuesState
   alias FermixWebWeb.SetupLive.Phone
+  alias FermixWebWeb.SetupLive.PhoneCalls
 
   require AnthropicLogin
   require Logger
@@ -255,6 +256,8 @@ defmodule FermixWebWeb.SetupLive do
       |> assign(:accessories, Accessories.initial())
       |> Accessories.load()
       |> Accessories.watch()
+      |> assign(:phone_calls, PhoneCalls.initial())
+      |> PhoneCalls.load()
       |> assign_report(report)
       |> AlwaysOn.watch()
       |> AlwaysOn.on_tab(active_tab)
@@ -484,6 +487,16 @@ defmodule FermixWebWeb.SetupLive do
   # restart notice.
   def handle_event("accessories_" <> _rest = event, params, socket) do
     case Accessories.handle_event(event, params, socket) do
+      {socket, nil} -> {:noreply, socket}
+      {socket, _write} -> {:noreply, assign_report(socket, Wizard.report())}
+    end
+  end
+
+  # The Phone calls section's events (M94 §12), before the Phone card's, whose
+  # prefix they share: its switch, its settings, a stop, the owner's word that
+  # an unresolved call ended. A settings write refreshes the report.
+  def handle_event("phone_calls_" <> _rest = event, params, socket) do
+    case PhoneCalls.handle_event(event, params, socket) do
       {socket, nil} -> {:noreply, socket}
       {socket, _write} -> {:noreply, assign_report(socket, Wizard.report())}
     end
@@ -978,23 +991,12 @@ defmodule FermixWebWeb.SetupLive do
   # Only where something brings Fermix back once it stops: the Mac app's
   # engine, Fermix's own systemd unit, a `fermix service` install
   # (`Lifecycle.restarts_itself?/0`, the one predicate a move's review reads).
+  # Never while a phone call is in progress, which the stop would hang up
+  # with no outcome (M94 §12).
   def handle_event("apply_restart", _params, socket) do
-    if restarts_itself?() do
-      Process.send_after(self(), :perform_restart, 600)
-      # Stamp the current tab into the URL so the post-restart reconnect lands
-      # here instead of next_action_tab bouncing the operator to a partial tab.
-      # push_patch keeps this process alive so :perform_restart still fires.
-      {:noreply,
-       socket
-       |> assign(:restarting, true)
-       |> push_patch(to: ~p"/setup?#{restart_patch_params(socket)}")}
-    else
-      {:noreply,
-       flash_error(
-         socket,
-         "Nothing to restart from here; no OS-supervised Fermix service is running this process. " <>
-           "In dev, stop and re-run `mix fermix.dev`; an installed service restarts itself from this button."
-       )}
+    case PhoneCalls.restart_hold() do
+      :ok -> apply_restart(socket)
+      {:error, sentence} -> {:noreply, flash_error(socket, sentence)}
     end
   end
 
@@ -1085,6 +1087,26 @@ defmodule FermixWebWeb.SetupLive do
     # Restart=on-failure on non-zero. The LiveView reconnects once it is back.
     restart_stop().()
     {:noreply, socket}
+  end
+
+  defp apply_restart(socket) do
+    if restarts_itself?() do
+      Process.send_after(self(), :perform_restart, 600)
+      # Stamp the current tab into the URL so the post-restart reconnect lands
+      # here instead of next_action_tab bouncing the operator to a partial tab.
+      # push_patch keeps this process alive so :perform_restart still fires.
+      {:noreply,
+       socket
+       |> assign(:restarting, true)
+       |> push_patch(to: ~p"/setup?#{restart_patch_params(socket)}")}
+    else
+      {:noreply,
+       flash_error(
+         socket,
+         "Nothing to restart from here; no OS-supervised Fermix service is running this process. " <>
+           "In dev, stop and re-run `mix fermix.dev`; an installed service restarts itself from this button."
+       )}
+    end
   end
 
   defp restarts_itself?,
@@ -1253,6 +1275,7 @@ defmodule FermixWebWeb.SetupLive do
       channels_form={@channels_form}
       phone={@phone}
       accessories={@accessories}
+      phone_calls={@phone_calls}
       doctor_result={@doctor_result}
       memory_form={@memory_form}
       personalization_form={@personalization_form}
@@ -1466,7 +1489,7 @@ defmodule FermixWebWeb.SetupLive do
 
   defp save_answers(socket, answers, message, nav, opts \\ []) do
     socket.assigns.report.wizard
-    |> Wizard.save_answers(answers)
+    |> Wizard.save_answers(answers, PhoneCalls.wizard_opts())
     |> save_result(socket, message, nav, opts)
   end
 
@@ -1545,6 +1568,11 @@ defmodule FermixWebWeb.SetupLive do
   # daemon's; before this the value was dropped with a log line and the save
   # reported success, so the operator saw a stored key and the runtime had none.
   defp format_config_error({:secret_store_failed, _key, sentence}) when is_binary(sentence),
+    do: sentence
+
+  # A credential a phone call in progress reads (M94 §12): nothing was saved,
+  # in the hold's own sentence.
+  defp format_config_error({:credential_held, _key, sentence}) when is_binary(sentence),
     do: sentence
 
   # A cue setting the config refused, with its own sentence (M60 §15).

@@ -29,6 +29,7 @@ defmodule FermixCore.PhoneCalls.Config do
 
   alias FermixCore.Config, as: CoreConfig
   alias FermixCore.PhoneCalls.CarrierProfile
+  alias FermixCore.PhoneCalls.OpenAILive
   alias FermixCore.PhoneCalls.UsNumbers
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Setup.SecretWriter
@@ -40,9 +41,6 @@ defmodule FermixCore.PhoneCalls.Config do
 
   # The provider's digest bounds (OpenAI's create reference): a username of at
   # most 256 bytes, a password of at most 4096, neither carrying CR, LF or NUL.
-  @max_username_bytes 256
-  @max_password_bytes 4096
-  @forbidden_bytes ["\r", "\n", <<0>>]
 
   @derive {Inspect, except: [:sip_password]}
   defstruct enabled: false,
@@ -198,16 +196,17 @@ defmodule FermixCore.PhoneCalls.Config do
     end
   end
 
-  defp username(value), do: digest_text(String.trim(value), @max_username_bytes)
+  defp username(value), do: credential(:username, String.trim(value))
 
   # Never trimmed: a password is the bytes the owner gave.
-  defp password(value), do: digest_text(value, @max_password_bytes)
+  defp password(value), do: credential(:password, value)
 
-  defp digest_text(value, max_bytes) do
-    cond do
-      byte_size(value) > max_bytes -> {:error, :too_long}
-      String.contains?(value, @forbidden_bytes) -> {:error, :control_characters}
-      true -> {:ok, value}
+  # The call's own create request's rule, so a saved credential is one the
+  # call can send (`OpenAILive.check_credential/2`).
+  defp credential(kind, value) do
+    case OpenAILive.check_credential(kind, value) do
+      :ok -> {:ok, value}
+      {:error, reason} -> {:error, reason}
     end
   end
 

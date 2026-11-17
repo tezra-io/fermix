@@ -53,12 +53,62 @@ defmodule FermixCore.Capabilities.Builtin.Tool do
   """
   @callback computer_capability() :: module()
 
+  @typedoc """
+  What the owner reads before an effect outside the machine goes ahead
+  (`Capabilities.AccessGate`, kind `:external_effect`): `head`, one
+  Fermix-authored sentence of what it does; `lines`, each a label and its
+  value, or a label and a list of values the gate numbers, every value data
+  the gate keeps on its own line; `promise`, what happens on the owner's yes;
+  `too_long`, the sentence the turn is told when all of it cannot be shown in
+  one confirmation.
+  """
+  @type confirmation :: %{
+          head: String.t(),
+          lines: [{String.t(), String.t() | [String.t()]}],
+          promise: String.t(),
+          too_long: String.t()
+        }
+
+  @doc """
+  What a tool of kind `:external_effect` does, as a verb phrase the gate's
+  sentences name it by ("places a phone call").
+  """
+  @callback effect() :: String.t()
+
+  @doc """
+  What one such effect is called, as a noun phrase the gate's sentences name
+  it by while it waits for the owner ("a phone call").
+  """
+  @callback effect_name() :: String.t()
+
+  @doc """
+  What the owner reads once a call they confirmed has run, from the tool's own
+  result: `{:ok, line}` for one that went ahead, `{:error, sentence}` for one
+  refused after the confirmation (the refusal's own words).
+  """
+  @callback confirmed(tool_result()) :: {:ok, String.t()} | {:error, String.t()}
+
+  @doc "Whether a call with `args` makes the effect, so the gate decides it."
+  @callback effect_call?(args :: map()) :: boolean()
+
+  @doc """
+  The confirmation for a call with `args` in `context`, rendered by the tool
+  from its own arguments, or the sentence why there is nothing the owner could
+  confirm (the arguments are unusable, the feature is off).
+  """
+  @callback confirmation(args :: map(), context()) :: {:ok, confirmation()} | {:error, String.t()}
+
   @optional_callbacks when_to_use: 0,
                       examples: 0,
                       failure_modes: 0,
                       requires_setup: 0,
                       category: 0,
-                      computer_capability: 0
+                      computer_capability: 0,
+                      effect: 0,
+                      effect_name: 0,
+                      effect_call?: 1,
+                      confirmation: 2,
+                      confirmed: 1
 
   @spec success(String.t()) :: tool_result()
   def success(output) when is_binary(output) do

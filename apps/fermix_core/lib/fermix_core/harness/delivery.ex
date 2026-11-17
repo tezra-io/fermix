@@ -36,6 +36,7 @@ defmodule FermixCore.Harness.Delivery do
 
   alias FermixCore.Acp.Identity
   alias FermixCore.Delivery.ChannelSend
+  alias FermixCore.Delivery.FrozenSend
   alias FermixCore.Harness.Adapters.ClaudeHeadless
   alias FermixCore.Harness.Adapters.CodexExec
   alias FermixCore.Harness.Artifacts
@@ -293,37 +294,15 @@ defmodule FermixCore.Harness.Delivery do
 
   # --- One bounded send ---------------------------------------------------
 
-  defp deliver_to_channel(row, opts),
-    do: send_text(row, compose(row, result_text_for(row), opts), opts)
-
-  @doc """
-  Makes ONE bounded send of `text` to `row`'s frozen destination
-  (`platform`, `destination`, `thread`, `send_opts`) through the shared
-  `Delivery.ChannelSend` seam, under the delivery watchdog (`opts[:timeout_ms]`,
-  default `deliver_timeout_ms/0`). It is `deliver/2`'s send half, shared with
-  the other run kind that freezes its destination this way (a phone call's
-  report, `PhoneCalls.Delivery`), so the watchdog, the single attempt and the
-  thread and send-option mapping stay one rule.
-  """
-  @spec send_text(map(), String.t(), keyword()) :: {:ok, :sent} | {:error, term()}
-  def send_text(row, text, opts \\ []) when is_map(row) and is_binary(text) and is_list(opts) do
-    timeout_ms = Keyword.get(opts, :timeout_ms, deliver_timeout_ms())
-
-    result =
-      ChannelSend.with_timeout(timeout_ms, fn ->
-        ChannelSend.send(
-          Map.get(row, :platform) || "",
-          Map.get(row, :destination) || "",
-          text,
-          build_send_opts(row),
-          Keyword.put(opts, :delivery_max_attempts, 1)
-        )
-      end)
-
-    case result do
-      :ok -> {:ok, :sent}
-      {:error, reason} -> {:error, reason}
-    end
+  # One bounded send through the frozen-destination rule every run kind shares
+  # (`Delivery.FrozenSend`), under this run kind's watchdog unless the caller
+  # names one.
+  defp deliver_to_channel(row, opts) do
+    FrozenSend.send_text(
+      row,
+      compose(row, result_text_for(row), opts),
+      Keyword.put_new(opts, :timeout_ms, deliver_timeout_ms())
+    )
   end
 
   defp send_notice(row, text, opts) do
@@ -332,7 +311,7 @@ defmodule FermixCore.Harness.Delivery do
         Map.get(row, :platform) || "",
         Map.get(row, :destination) || "",
         text,
-        build_send_opts(row),
+        FrozenSend.send_opts(row),
         Keyword.put(opts, :delivery_max_attempts, 1)
       )
 
@@ -346,38 +325,6 @@ defmodule FermixCore.Harness.Delivery do
     Logger.debug("harness notice send failed for #{Map.get(row, :id)}: #{inspect(reason)}")
     :ok
   end
-
-  defp build_send_opts(row) do
-    []
-    |> put_thread(Map.get(row, :thread))
-    |> merge_send_opts(Map.get(row, :send_opts))
-  end
-
-  defp put_thread(opts, thread) when is_binary(thread) and thread != "" do
-    Keyword.merge(opts, thread_ts: thread, message_thread_id: thread)
-  end
-
-  defp put_thread(opts, _thread), do: opts
-
-  defp merge_send_opts(opts, map) when is_map(map) do
-    Enum.reduce(map, opts, fn {key, value}, acc ->
-      case send_opt_key(key) do
-        nil -> acc
-        atom_key -> Keyword.put(acc, atom_key, value)
-      end
-    end)
-  end
-
-  defp merge_send_opts(opts, _map), do: opts
-
-  # A closed allowlist: `send_opts` is Fermix-generated at admission, but map its
-  # string keys through a fixed table so a malformed row can never trigger atom
-  # exhaustion via `String.to_atom/1`.
-  defp send_opt_key("thread_ts"), do: :thread_ts
-  defp send_opt_key("message_thread_id"), do: :message_thread_id
-  defp send_opt_key("reply_to"), do: :reply_to
-  defp send_opt_key("req_options"), do: :req_options
-  defp send_opt_key(_other), do: nil
 
   # --- Result harvest -----------------------------------------------------
 

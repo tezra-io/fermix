@@ -193,6 +193,8 @@ defmodule FermixCore.Capabilities.BuiltinTest do
                "open_loop_note",
                "open_loop_respond",
                "open_loop_update",
+               # Every phone call is the owner's own, placed on their mandate (M94 §06).
+               "phone_call",
                # On-device computer-history recall is owner data (MILESTONE_32 §11.2).
                "recall_activity",
                "reminder_snooze",

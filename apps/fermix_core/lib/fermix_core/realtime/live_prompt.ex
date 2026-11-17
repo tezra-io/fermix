@@ -33,6 +33,7 @@ defmodule FermixCore.Realtime.LivePrompt do
   alias FermixCore.Clock
   alias FermixCore.HostFacts
   alias FermixCore.Memory.PromptFiles
+  alias FermixCore.PhoneCalls.Config, as: PhoneCallsConfig
   alias FermixCore.Prompt.BootstrapLoader
   alias FermixCore.Prompt.CurrentDate
   alias FermixCore.Prompt.IdentityName
@@ -372,6 +373,12 @@ defmodule FermixCore.Realtime.LivePrompt do
   # the same catalog's rule (M78 §10): none while the feature is off, and never
   # the check-in run's own outcome tool.
   defp excluded?(%Capability{name: "screen_share"}), do: true
+
+  # The phone-call family (M94 §06, §07), whose one registered member is
+  # `phone_call`: this prompt is built when the call starts, so it names it
+  # exactly while phone calls are on.
+  defp excluded?(%Capability{metadata: %{category: :phone_call}}),
+    do: not PhoneCallsConfig.enabled?()
 
   defp excluded?(capability),
     do:

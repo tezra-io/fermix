@@ -93,6 +93,27 @@ defmodule FermixChannels.Gateway.OwnerInboxApprovalTest do
     assert record.resume == nil
   end
 
+  # An effect outside the machine (a phone call's start): the promise its own
+  # rendering makes ends the prompt, and its token lives for its own window.
+  test "an effect's prompt ends with its own promise, and its token lives for its window" do
+    request =
+      Map.merge(request(), %{
+        after_confirm: "Once you confirm, Fermix places exactly this call.",
+        ttl_ms: 300_000
+      })
+
+    before = System.monotonic_time(:millisecond)
+    assert {:ok, token, :new} = OwnerInboxApproval.request(request, telegram_owner())
+
+    assert_received {:stub_adapter, {:approval, _message, text, ^token}}
+    assert text =~ "`/confirm #{token}` (expires in 5 minutes)."
+    assert String.ends_with?(text, "Once you confirm, Fermix places exactly this call.")
+    refute text =~ "command"
+
+    assert {:ok, %{expires_at: expires_at}} = Confirmations.peek(token)
+    assert expires_at >= before + 300_000
+  end
+
   test "a repeat for a live prompt sends nothing" do
     request = request()
     assert {:ok, token, :new} = OwnerInboxApproval.request(request, telegram_owner())

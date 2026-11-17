@@ -96,6 +96,8 @@ defmodule Fermix.CLI.Daemon.Client do
     end
   end
 
+  @owner_restart_prepare "lifecycle.prepare_restart"
+
   @spec request(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def request(method, opts \\ []) when is_binary(method) do
     timeout = Keyword.get(opts, :timeout, @default_timeout_ms)
@@ -124,6 +126,20 @@ defmodule Fermix.CLI.Daemon.Client do
       {:error, reason} -> classify(reason, socket_path)
     end
   end
+
+  @doc """
+  The drain window the owner's restart (`fermix restart`) takes from the daemon
+  whose `hello` answer this is: `lifecycle.prepare_restart`, which a phone call
+  in progress holds (M94 §12), where the daemon publishes it, and
+  `lifecycle.prepare` from a daemon one release behind, which runs no phone
+  calls.
+  """
+  @spec owner_restart_prepare(map()) :: String.t()
+  def owner_restart_prepare(%{"capabilities" => %{"minimum_versions" => minimums}})
+      when is_map_key(minimums, @owner_restart_prepare),
+      do: @owner_restart_prepare
+
+  def owner_restart_prepare(hello) when is_map(hello), do: "lifecycle.prepare"
 
   @doc """
   Renders one `request_v1/3` failure as the sentence an operator reads.

@@ -7,6 +7,7 @@ defmodule FermixCore.PhoneCalls.LedgerTest do
   alias FermixCore.Memory.Repo
   alias FermixCore.PhoneCalls.Ledger
   alias FermixCore.PhoneCalls.Limits
+  alias FermixTestSupport.PhoneCallStores
 
   # Every name, number and id here is invented.
   @t0 ~U[2031-03-04 15:00:00.000000Z]
@@ -54,12 +55,36 @@ defmodule FermixCore.PhoneCalls.LedgerTest do
 
   defp at(seconds), do: DateTime.add(@t0, seconds, :second)
 
-  # A call that dialed and ended, so it no longer holds the slot.
+  # A call that dialed (the provider gave it a session) and ended, so it no
+  # longer holds the slot.
   defp dialed_and_ended!(ctx, now) do
     row = admit!(ctx, %{}, now)
     {:ok, _row} = Ledger.claim_dispatch(row.id, now, ctx.opts)
+    {:ok, _row} = Ledger.record_session(row.id, "sess_#{row.id}", now, ctx.opts)
     {:ok, ended} = Ledger.terminalize(row.id, "ended", %{ended_at: now}, ctx.opts)
     ended
+  end
+
+  # A create that placed nothing: claimed, then failed with no session (the
+  # provider refused it, or it provably never left).
+  defp refused_create!(ctx, now) do
+    row = admit!(ctx, %{}, now)
+    {:ok, _row} = Ledger.claim_dispatch(row.id, now, ctx.opts)
+
+    {:ok, failed} =
+      Ledger.terminalize(row.id, "failed", %{ended_at: now, failure_reason: "rejected"}, ctx.opts)
+
+    failed
+  end
+
+  # A store that never answers: every call to it reaches its timeout.
+  defmodule StalledStore do
+    use GenServer
+    def start_link, do: GenServer.start_link(__MODULE__, :ok)
+    @impl true
+    def init(:ok), do: {:ok, :ok}
+    @impl true
+    def handle_call(_request, _from, state), do: {:noreply, state}
   end
 
   test "a call id is pc_ and 12 lowercase hex characters" do
@@ -97,12 +122,52 @@ defmodule FermixCore.PhoneCalls.LedgerTest do
     end
 
     test "the same originating request answers the call it already made", ctx do
-      row = admit!(ctx, %{request_id: "main-41"})
+      row = admit!(ctx, %{request_id: "req_41"})
 
       assert {:ok, {:existing, ^row}} =
-               Ledger.admit(attrs(%{request_id: "main-41"}), at(5), ctx.opts)
+               Ledger.admit(attrs(%{request_id: "req_41"}), at(5), ctx.opts)
 
       assert {:ok, [^row]} = Ledger.list_recent("default", ctx.opts)
+    end
+
+    test "the same request with a different brief is a new mandate, admitted like any other",
+         ctx do
+      first = admit!(ctx, %{request_id: "req_42"})
+      other = String.duplicate("b3", 32)
+
+      assert {:error, {:slot_held, holder}} =
+               Ledger.admit(attrs(%{request_id: "req_42", mandate_hash: other}), at(1), ctx.opts)
+
+      assert holder == first.id
+      {:ok, _row} = Ledger.fail_undispatched(first.id, "cancelled_by_owner", at(2), ctx.opts)
+
+      assert {:ok, {:admitted, second}} =
+               Ledger.admit(attrs(%{request_id: "req_42", mandate_hash: other}), at(3), ctx.opts)
+
+      refute second.id == first.id
+
+      assert {:ok, {:existing, %{id: id}}} =
+               Ledger.admit(attrs(%{request_id: "req_42", mandate_hash: other}), at(4), ctx.opts)
+
+      assert id == second.id
+    end
+
+    # The review's scenario: a per-boot counter gave a turn "main-1" before a
+    # restart and again after it. A row an earlier boot wrote under that id
+    # never answers a new request, which carries an identity of its own.
+    test "a row from an earlier boot with an old-style id never captures a new request", ctx do
+      old = dialed_and_ended!(ctx, @t0)
+      {:ok, _row} = Ledger.mark_report(old.id, %{report_status: "written"}, ctx.opts)
+
+      assert {:ok, {:admitted, fresh}} =
+               Ledger.admit(
+                 attrs(%{request_id: "req_0a1b2c3d4e5f60718293a4b5"}),
+                 at(60),
+                 ctx.opts
+               )
+
+      refute fresh.id == old.id
+      assert fresh.status == "admitted"
     end
 
     test "a second request is refused while a call holds the slot, and consumes nothing", ctx do
@@ -127,6 +192,50 @@ defmodule FermixCore.PhoneCalls.LedgerTest do
   end
 
   describe "the day's attempts" do
+    test "a create that placed nothing uses no attempt", ctx do
+      for n <- 1..(Limits.max_attempts_per_day() + 2), do: refused_create!(ctx, at(n * 60))
+
+      assert {:ok, {:admitted, _row}} = Ledger.admit(attrs(), at(3_600), ctx.opts)
+    end
+
+    test "a dispatch whose answer is unknown, or one with a session that then failed, counts",
+         ctx do
+      for n <- 1..2, do: dialed_and_ended!(ctx, at(n * 60))
+
+      unknown = admit!(ctx, %{}, at(200))
+      {:ok, _row} = Ledger.claim_dispatch(unknown.id, at(200), ctx.opts)
+
+      {:ok, _row} =
+        Ledger.terminalize(unknown.id, "dispatch_unknown", %{ended_at: at(201)}, ctx.opts)
+
+      # Past the unknown dispatch's own slot, so only the day's count can refuse.
+      late =
+        DateTime.add(
+          at(201),
+          Limits.provider_lifetime_bound_ms() + Limits.max_create_wait_ms(),
+          :millisecond
+        )
+
+      for n <- 1..2 do
+        row = admit!(ctx, %{}, DateTime.add(late, n, :second))
+        {:ok, _row} = Ledger.claim_dispatch(row.id, DateTime.add(late, n, :second), ctx.opts)
+
+        {:ok, _row} =
+          Ledger.record_session(row.id, "sess_f#{n}", DateTime.add(late, n, :second), ctx.opts)
+
+        {:ok, _row} =
+          Ledger.terminalize(
+            row.id,
+            "failed",
+            %{ended_at: DateTime.add(late, n, :second)},
+            ctx.opts
+          )
+      end
+
+      assert {:error, {:daily_attempts_exhausted, 5}} =
+               Ledger.admit(attrs(), DateTime.add(late, 10, :second), ctx.opts)
+    end
+
     test "the sixth attempt in a rolling window is refused and writes nothing", ctx do
       for n <- 1..Limits.max_attempts_per_day(), do: dialed_and_ended!(ctx, at(n * 60))
 
@@ -161,6 +270,14 @@ defmodule FermixCore.PhoneCalls.LedgerTest do
   end
 
   describe "an uncertain call's slot" do
+    test "the slot outlasts the latest moment the session could have started", ctx do
+      row = admit!(ctx)
+      {:ok, claimed} = Ledger.claim_dispatch(row.id, @t0, ctx.opts)
+
+      bound = Limits.max_create_wait_ms() + Limits.provider_lifetime_bound_ms()
+      assert claimed.slot_expires_at == DateTime.add(@t0, bound, :millisecond)
+    end
+
     test "a dispatch_unknown call holds the slot until the provider's bound has passed", ctx do
       row = admit!(ctx)
       {:ok, claimed} = Ledger.claim_dispatch(row.id, @t0, ctx.opts)
@@ -168,7 +285,7 @@ defmodule FermixCore.PhoneCalls.LedgerTest do
       {:ok, unknown} =
         Ledger.terminalize(row.id, "dispatch_unknown", %{ended_at: at(30)}, ctx.opts)
 
-      bound_s = div(Limits.provider_lifetime_bound_ms(), 1_000)
+      bound_s = div(Limits.max_create_wait_ms() + Limits.provider_lifetime_bound_ms(), 1_000)
       assert claimed.slot_expires_at == at(bound_s)
       assert unknown.outcome == "unknown"
       assert unknown.usage_state == "incomplete"
@@ -219,7 +336,7 @@ defmodule FermixCore.PhoneCalls.LedgerTest do
       assert id == row.id
       assert {:ok, [%{id: ^id}]} = Ledger.outstanding(at(2), ctx.opts)
 
-      bound_s = div(Limits.provider_lifetime_bound_ms(), 1_000)
+      bound_s = div(Limits.max_create_wait_ms() + Limits.provider_lifetime_bound_ms(), 1_000)
       assert {:ok, []} = Ledger.unresolved(at(bound_s), ctx.opts)
     end
   end
@@ -290,16 +407,6 @@ defmodule FermixCore.PhoneCalls.LedgerTest do
                Ledger.record_session(ctx.id, "sess_other", at(3), ctx.opts)
     end
 
-    test "the carrier's call id is its own, recorded once", ctx do
-      {:ok, _row} = Ledger.record_session(ctx.id, "sess_invented_3", at(1), ctx.opts)
-      assert {:ok, row} = Ledger.record_carrier_call(ctx.id, "carrier-leg-9", ctx.opts)
-      assert row.carrier_call_id == "carrier-leg-9"
-      assert row.provider_session_id == "sess_invented_3"
-
-      assert {:error, :carrier_call_mismatch} =
-               Ledger.record_carrier_call(ctx.id, "carrier-leg-10", ctx.opts)
-    end
-
     test "steps go forward only; ringing is optional and a late one changes nothing", ctx do
       {:ok, _row} = Ledger.record_session(ctx.id, "sess_invented_4", at(1), ctx.opts)
 
@@ -353,6 +460,68 @@ defmodule FermixCore.PhoneCalls.LedgerTest do
     end
   end
 
+  describe "a recorded closure" do
+    setup ctx do
+      row = admit!(ctx)
+      {:ok, _row} = Ledger.claim_dispatch(row.id, @t0, ctx.opts)
+      %{id: row.id}
+    end
+
+    test "is kept on a live call once, never regresses, and changes no status", ctx do
+      {:ok, _row} = Ledger.record_session(ctx.id, "sess_close_1", at(1), ctx.opts)
+      {:ok, _row} = Ledger.advance(ctx.id, "active", at(2), ctx.opts)
+      closure = %{at: at(90), reason: "remote_hangup", voice_seconds: 87.6}
+
+      assert {:ok, row} = Ledger.record_closure(ctx.id, closure, ctx.opts)
+      assert row.status == "active"
+      assert row.closed_at == at(90)
+      assert row.closure_reason == "remote_hangup"
+      assert row.voice_seconds == 88
+
+      later = %{at: at(95), reason: "close_requested", voice_seconds: 3}
+      assert {:ok, ^row} = Ledger.record_closure(ctx.id, later, ctx.opts)
+    end
+
+    test "needs a known session and a live row", ctx do
+      closure = %{at: at(9), reason: nil, voice_seconds: nil}
+
+      assert {:error, {:not_connected, "dispatching"}} =
+               Ledger.record_closure(ctx.id, closure, ctx.opts)
+
+      {:ok, _row} = Ledger.record_session(ctx.id, "sess_close_2", at(1), ctx.opts)
+      {:ok, _row} = Ledger.terminalize(ctx.id, "ended", %{ended_at: at(5)}, ctx.opts)
+      assert {:error, :already_terminal} = Ledger.record_closure(ctx.id, closure, ctx.opts)
+    end
+
+    # Billing rounds a part second up, and so does every writer of voice time.
+    test "keeps its voice time in whole seconds, a part rounded up", ctx do
+      {:ok, _row} = Ledger.record_session(ctx.id, "sess_close_3", at(1), ctx.opts)
+      closure = %{at: at(70), reason: nil, voice_seconds: 61.2}
+
+      assert {:ok, %{voice_seconds: 62}} = Ledger.record_closure(ctx.id, closure, ctx.opts)
+      assert Ledger.whole_voice_seconds(61) == 61
+      assert Ledger.whole_voice_seconds(0.4) == 1
+    end
+
+    test "refuses what is not a closure", ctx do
+      assert {:error, {:invalid, :closure, _bad}} =
+               Ledger.record_closure(ctx.id, %{at: "later"}, ctx.opts)
+    end
+  end
+
+  describe "a stalled store" do
+    test "answers every call with a timeout instead of exiting the caller" do
+      {:ok, store} = StalledStore.start_link()
+      opts = [server: store, timeout: 20]
+
+      assert {:error, :timeout} = Ledger.get("pc_000000000000", opts)
+      assert {:error, :timeout} = Ledger.claim_dispatch("pc_000000000000", @t0, opts)
+      assert {:error, :timeout} = Ledger.admit(attrs(), @t0, opts)
+      assert {:error, :timeout} = Ledger.prune(@t0, opts)
+      assert Process.alive?(self())
+    end
+  end
+
   describe "the terminal write" do
     setup ctx do
       row = admit!(ctx)
@@ -377,6 +546,30 @@ defmodule FermixCore.PhoneCalls.LedgerTest do
       assert row.outcome == "unknown"
       assert row.usage_state == "incomplete"
       assert row.ended_at == at(9)
+    end
+
+    test "keeps the outcome's own uncertainty note, bounded, apart from the failure words",
+         ctx do
+      note =
+        "The recipient's words conflict on a detail that was never settled. " <>
+          String.duplicate("y", 900)
+
+      assert {:ok, row} =
+               Ledger.terminalize(
+                 ctx.id,
+                 "ended",
+                 %{ended_at: at(9), outcome: "unknown", uncertainty: note},
+                 ctx.opts
+               )
+
+      assert String.starts_with?(row.outcome_uncertainty, "The recipient's words conflict")
+      assert byte_size(row.outcome_uncertainty) <= 500
+      assert is_nil(row.failure_reason)
+    end
+
+    test "an outcome with no uncertainty note stores none", ctx do
+      assert {:ok, %{outcome_uncertainty: nil}} =
+               Ledger.terminalize(ctx.id, "ended", %{ended_at: at(9), uncertainty: nil}, ctx.opts)
     end
 
     test "confirmed needs evidence", ctx do
@@ -544,7 +737,7 @@ defmodule FermixCore.PhoneCalls.LedgerTest do
 
       {:ok, conn} = Sqlite3.open(ctx.db_path)
       :ok = Sqlite3.execute(conn, "DROP TABLE phone_calls")
-      :ok = Sqlite3.execute(conn, "DELETE FROM schema_migrations WHERE version = 67")
+      :ok = Sqlite3.execute(conn, "DELETE FROM schema_migrations WHERE version IN (67, 68)")
       :ok = Sqlite3.close(conn)
 
       reopened = :"#{ctx.repo}_at_66"
@@ -552,6 +745,69 @@ defmodule FermixCore.PhoneCalls.LedgerTest do
       assert {:ok, versions} = Repo.migration_versions(server: reopened)
       assert Enum.count(versions, &(&1 == 67)) == 1
       assert {:ok, {:admitted, _row}} = Ledger.admit(attrs(), @t0, server: reopened)
+    end
+
+    test "a fresh store is at the ledger's final shape and records 68 once", ctx do
+      assert {:ok, versions} = Repo.migration_versions(server: ctx.repo)
+      assert Enum.count(versions, &(&1 == 68)) == 1
+      assert :ok = Repo.migrate(server: ctx.repo)
+      assert {:ok, versions} = Repo.migration_versions(server: ctx.repo)
+      assert Enum.count(versions, &(&1 == 68)) == 1
+    end
+
+    # A call from before 68 used the requesting turn's session as its request
+    # id, so that session is kept as its trace parent; the table ends exactly
+    # as a fresh store's, its definition and its indexes.
+    test "a store 67 laid down is rebuilt on open, every call kept, as a fresh one", ctx do
+      row = admit!(ctx, %{request_id: "main-1"})
+      fresh = PhoneCallStores.schema!(ctx.db_path)
+      :ok = stop_supervised(ctx.repo)
+      :ok = PhoneCallStores.as_67!(ctx.db_path)
+      refute PhoneCallStores.schema!(ctx.db_path) == fresh
+
+      reopened = :"#{ctx.repo}_at_67"
+
+      start_supervised!({Repo, name: reopened, enabled: true, database_path: ctx.db_path},
+        id: reopened
+      )
+
+      assert {:ok, versions} = Repo.migration_versions(server: reopened)
+      assert Enum.count(versions, &(&1 == 68)) == 1
+
+      assert {:ok, %{id: id, outcome_uncertainty: nil, closed_at: nil, parent_session: "main-1"}} =
+               Ledger.get(row.id, server: reopened)
+
+      assert id == row.id
+      :ok = stop_supervised(reopened)
+      assert PhoneCallStores.schema!(ctx.db_path) == fresh
+    end
+
+    # Other features' upgrade tests forget every version after an old one and
+    # reopen the store, so 67 and 68 run again over a table already at the
+    # latest shape: each must recognise its own work and end where a fresh
+    # store ends.
+    test "a store at the latest schema rolled back to before 67 reopens as a fresh one", ctx do
+      row = admit!(ctx, %{request_id: "req_rolled_back"})
+      fresh = PhoneCallStores.schema!(ctx.db_path)
+      :ok = stop_supervised(ctx.repo)
+
+      {:ok, conn} = Sqlite3.open(ctx.db_path)
+      :ok = Sqlite3.execute(conn, "DELETE FROM schema_migrations WHERE version >= 67")
+      :ok = Sqlite3.close(conn)
+
+      reopened = :"#{ctx.repo}_rolled_back"
+
+      start_supervised!({Repo, name: reopened, enabled: true, database_path: ctx.db_path},
+        id: reopened
+      )
+
+      assert {:ok, versions} = Repo.migration_versions(server: reopened)
+      assert Enum.count(versions, &(&1 in [67, 68])) == 2
+      assert {:ok, %{id: id}} = Ledger.get(row.id, server: reopened)
+      assert id == row.id
+      :ok = stop_supervised(reopened)
+
+      assert PhoneCallStores.schema!(ctx.db_path) == fresh
     end
 
     test "the table refuses a row past admitted with no dispatch claim", ctx do

@@ -5,6 +5,7 @@ defmodule FermixCore.Tools.PhoneCallTest do
   # exec event assertion pins the test's own session id.
   use ExUnit.Case, async: true
 
+  alias FermixCore.Agents.RequestIdentity
   alias FermixCore.Capabilities.AccessGate
   alias FermixCore.Capabilities.AccessGate.Pending
   alias FermixCore.Capabilities.Builtin
@@ -15,6 +16,9 @@ defmodule FermixCore.Tools.PhoneCallTest do
   alias FermixCore.PhoneCalls.Brief
   alias FermixCore.PhoneCalls.Config
   alias FermixCore.PhoneCalls.Ledger
+  alias FermixCore.PhoneCalls.Limits
+  alias FermixCore.PhoneCalls.Manager
+  alias FermixCore.PhoneCalls.Prompt
   alias FermixCore.Tools.PhoneCall
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
   alias FermixTestSupport.TelemetryCapture
@@ -46,6 +50,29 @@ defmodule FermixCore.Tools.PhoneCallTest do
     end
   end
 
+  # A worker no test here starts: the real Manager below only boots.
+  defmodule NeverStarted do
+    def start_link(_args), do: {:error, :never_started_here}
+    def cancel(_pid, _why), do: :ok
+    def prompt_version, do: "phone-test-1"
+  end
+
+  # A store that tells the test it was asked, and answers that it is off.
+  defmodule TrapRepo do
+    use GenServer
+
+    def start_link(test), do: GenServer.start_link(__MODULE__, test)
+
+    @impl true
+    def init(test), do: {:ok, test}
+
+    @impl true
+    def handle_call(request, _from, test) do
+      send(test, {:repo_asked, request})
+      {:reply, {:error, :disabled}, test}
+    end
+  end
+
   setup do
     sid = "main-phone-#{System.unique_integer([:positive])}"
     TelemetryCapture.attach([[:fermix, :tool, :exec]], session_id: sid)
@@ -62,7 +89,7 @@ defmodule FermixCore.Tools.PhoneCallTest do
       Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
     end)
 
-    %{sid: sid, manager: manager, repo: repo}
+    %{sid: sid, request_id: RequestIdentity.mint(), manager: manager, repo: repo}
   end
 
   defp enabled, do: %Config{enabled: true, voice: "marin", caller_number: @caller}
@@ -73,6 +100,7 @@ defmodule FermixCore.Tools.PhoneCallTest do
       %{
         agent_name: "main",
         session_id: ctx.sid,
+        request_id: ctx.request_id,
         conversation_key: {"telegram", "40017", :root},
         source_trust: :operator,
         computer_use_origin: :interactive,
@@ -117,7 +145,8 @@ defmodule FermixCore.Tools.PhoneCallTest do
       assert_receive {:start_call, request}
       assert %Brief{contact_name: "Calloway Bistro", caller_number: @caller} = request.brief
       assert request.brief_hash == Brief.hash(request.brief)
-      assert request.request_id == ctx.sid
+      assert request.request_id == ctx.request_id
+      assert request.parent_session == ctx.sid
       assert request.owner_id == "default"
       assert request.operation == "phone_call.start"
       assert request.authorization == "direct"
@@ -129,6 +158,17 @@ defmodule FermixCore.Tools.PhoneCallTest do
 
       assert body["detail"] =~ "has not been answered"
       assert body["detail"] =~ "comes back into this conversation"
+    end
+
+    test "a turn with no request identity of its own dials nothing", ctx do
+      for request_id <- [nil, ctx.sid, "req_0a1b"] do
+        turn = owner_turn(ctx, %{request_id: request_id})
+
+        assert refusal(PhoneCall.execute(start_args(), turn)) =~
+                 "no request identity to authorize a call"
+      end
+
+      refute_received {:start_call, _request}
     end
 
     test "a call the owner confirmed through the access gate is recorded as confirmed", ctx do
@@ -207,6 +247,112 @@ defmodule FermixCore.Tools.PhoneCallTest do
       assert text =~ "pc_ffffffffffff"
       assert text =~ "Nothing was dialed"
     end
+
+    # What the owner reads once they confirmed a start (`AccessGate`) is read
+    # from the start's own answer, so it is tested on that answer.
+    test "the owner who confirmed a start reads its answer in words, never its JSON", ctx do
+      {:ok, accepted} = PhoneCall.execute(start_args(), owner_turn(ctx))
+
+      assert PhoneCall.confirmed(accepted) ==
+               {:ok,
+                "The call was accepted as pc_0a1b2c3d4e5f, and Fermix is placing it now. Its " <>
+                  "result will follow in the chat that asked for it."}
+
+      again = {:ok, %{call_id: "pc_0a1b2c3d4e5f", state: "ringing", reused: true}}
+      reused = start_supervised!({StubManager, {self(), again}}, id: :reused_manager)
+
+      {:ok, repeat} =
+        PhoneCall.execute(start_args(), owner_turn(ctx, %{phone_call_manager: reused}))
+
+      assert PhoneCall.confirmed(repeat) ==
+               {:ok,
+                "This request had already started call pc_0a1b2c3d4e5f; no second call was placed."}
+
+      held = {:error, {:slot_held, "pc_ffffffffffff"}}
+      busy = start_supervised!({StubManager, {self(), held}}, id: :taken_meanwhile)
+
+      {:ok, refused} =
+        PhoneCall.execute(start_args(), owner_turn(ctx, %{phone_call_manager: busy}))
+
+      assert PhoneCall.confirmed(refused) == {:error, refused.error}
+      assert refused.error =~ "Nothing was dialed"
+    end
+
+    test "a brief too large for the call's prompt is refused with its size and the bound", ctx do
+      big = {:error, {:prompt_too_large, :input, 30_123}}
+      large = start_supervised!({StubManager, {self(), big}}, id: :large_manager)
+
+      text =
+        refusal(PhoneCall.execute(start_args(), owner_turn(ctx, %{phone_call_manager: large})))
+
+      assert text =~ "too long to give the call whole"
+      assert text =~ "30123 bytes, past the #{Prompt.bounds().input}"
+      assert text =~ "no attempt was used"
+    end
+
+    test "a start while Fermix is stopping is refused in words of its own", ctx do
+      stopping =
+        start_supervised!({StubManager, {self(), {:error, :engine_stopping}}}, id: :stopping)
+
+      text =
+        refusal(PhoneCall.execute(start_args(), owner_turn(ctx, %{phone_call_manager: stopping})))
+
+      assert text =~ "Fermix is stopping"
+      assert text =~ "Nothing was dialed"
+    end
+  end
+
+  describe "the brief's schema" do
+    # The brief's own fields: the struct's keys but the server's caller number.
+    defp brief_fields,
+      do: (Map.keys(Map.from_struct(Brief.__struct__())) -- [:caller_number]) |> Enum.sort()
+
+    test "names exactly the brief's model-supplied fields, so the two cannot drift" do
+      %{properties: %{brief: brief}} = PhoneCall.parameters()
+
+      assert brief.properties |> Map.keys() |> Enum.sort() == brief_fields()
+      assert brief.additionalProperties == false
+    end
+
+    test "requires exactly what the brief requires" do
+      {:error, {:invalid_brief, problems}} =
+        Brief.new(%{}, caller_number: @caller, now: @t0)
+
+      missing = for {field, :missing} <- problems, do: Atom.to_string(field)
+      %{properties: %{brief: brief}} = PhoneCall.parameters()
+
+      assert Enum.sort(brief.required) == Enum.sort(missing)
+    end
+
+    test "states the brief's own bounds" do
+      b = Brief.bounds()
+      %{properties: %{brief: %{properties: p}}} = PhoneCall.parameters()
+
+      assert p.goal.maxLength == b.goal_bytes
+      assert p.contact_name.maxLength == b.contact_name_bytes
+      assert p.on_behalf_of.maxLength == b.on_behalf_of_bytes
+      assert p.number_source.maxLength == b.number_source_bytes
+      assert p.timezone.maxLength == b.timezone_bytes
+      assert p.opening_language.maxLength == b.language_bytes
+
+      assert {p.completion_criteria.minItems, p.completion_criteria.maxItems} ==
+               {1, b.completion_criteria}
+
+      assert p.completion_criteria.items.maxLength == b.item_bytes
+      assert p.must_not_commit.maxItems == b.list_items
+      assert p.alternatives.maxItems == b.list_items
+      assert p.shareable_facts.maxItems == b.shareable_facts
+      assert p.shareable_facts.items.properties.label.maxLength == b.label_bytes
+      assert p.shareable_facts.items.properties.value.maxLength == b.fact_value_bytes
+      assert p.tool_grants.maxItems == b.tool_grants
+      assert p.times.maxItems == b.times
+      assert p.times.items.properties.label.maxLength == b.label_bytes
+    end
+
+    test "a brief naming whom the call is for reaches the Manager", ctx do
+      PhoneCall.execute(start_args(%{"on_behalf_of" => "Ada Quill"}), owner_turn(ctx))
+      assert_receive {:start_call, %{brief: %Brief{on_behalf_of: "Ada Quill"}}}
+    end
   end
 
   describe "who may use it" do
@@ -238,7 +384,9 @@ defmodule FermixCore.Tools.PhoneCallTest do
 
       assert body["call_id"] == call_id
       assert body["state"] == "admitted"
-      assert body["usage"]["carrier_charges"] == "unknown"
+      # Not yet dialed, so it claims no charge.
+      assert body["placed"] == "no"
+      assert is_nil(body["usage"]["carrier_charges"])
 
       other = owner_turn(ctx, %{memory_owner_id: "someone-else"})
 
@@ -299,20 +447,20 @@ defmodule FermixCore.Tools.PhoneCallTest do
       refute PhoneCall.advertise?(owner_turn(ctx, %{harness_continuation_depth: 1}))
     end
 
-    test "while off, offered only to check or stop a recent call, and never start", ctx do
-      off = owner_turn(ctx, %{phone_call_config: &disabled/0})
+    # Exactly while a call holds the one-call slot, as the Manager publishes
+    # it at boot: an uncertain call holds it until its slot expires.
+    test "while off, offered only while a call holds the slot, and never start", ctx do
+      empty = boot_manager!(ctx, "empty")
+      off = off_turn(ctx, empty, @t0)
       refute PhoneCall.advertise?(off)
 
-      seed_call!(ctx, "default")
-      assert PhoneCall.advertise?(off)
+      seed_unresolved!(ctx)
+      held = boot_manager!(ctx, "held")
+      assert PhoneCall.advertise?(off_turn(ctx, held, @t0))
 
-      later =
-        owner_turn(ctx, %{
-          phone_call_config: &disabled/0,
-          phone_call_now: fn -> DateTime.add(@t0, 2, :day) end
-        })
-
-      refute PhoneCall.advertise?(later)
+      expires = DateTime.add(@t0, Limits.slot_hold_ms(), :millisecond)
+      assert PhoneCall.advertise?(off_turn(ctx, held, DateTime.add(expires, -1, :second)))
+      refute PhoneCall.advertise?(off_turn(ctx, held, expires))
 
       assert %{properties: %{action: %{enum: ["status", "cancel"]}} = props} =
                PhoneCall.dynamic_parameters(off)
@@ -321,6 +469,15 @@ defmodule FermixCore.Tools.PhoneCallTest do
 
       assert %{properties: %{action: %{enum: ["start", "status", "cancel"]}}} =
                PhoneCall.dynamic_parameters(owner_turn(ctx))
+    end
+
+    test "deciding whether to offer it never asks the store", ctx do
+      {:ok, trap} = start_supervised({TrapRepo, self()})
+      turn = owner_turn(ctx, %{phone_call_config: &disabled/0, memory_repo: trap})
+
+      refute PhoneCall.advertise?(turn)
+      assert PhoneCall.advertise?(owner_turn(ctx, %{memory_repo: trap}))
+      refute_received {:repo_asked, _request}
     end
   end
 
@@ -348,10 +505,10 @@ defmodule FermixCore.Tools.PhoneCallTest do
       Map.merge(ctx, %{capability: capability, gate: gate})
     end
 
-    test "the built-in is an unconfined host command marked as a phone call", ctx do
-      assert ctx.capability.metadata.host_command?
-      refute ctx.capability.metadata.host_command_confined?
-      assert ctx.capability.metadata.phone_call?
+    test "the built-in is an effect outside the machine, never a host command", ctx do
+      assert ctx.capability.metadata.external_effect?
+      refute Map.has_key?(ctx.capability.metadata, :host_command?)
+      assert AccessGate.gate_kind(ctx.capability, start_args()) == :external_effect
       assert ctx.capability.owner_only?
     end
 
@@ -361,11 +518,59 @@ defmodule FermixCore.Tools.PhoneCallTest do
 
       assert {:ok, %{success: false}} = Capability.execute(ctx.capability, start_args(), tainted)
       refute_received {:ran, _args}
-      assert_received {:reply, {:approval_prompt, prompt, @token}}
-      assert prompt =~ "Confirm phone_call?"
-      assert prompt =~ "places a phone call from your number"
-      assert prompt =~ "Brief: "
-      assert prompt =~ "Calloway Bistro"
+      assert_received {:reply, {:approval_prompt, %{text: prompt, token: @token, ttl_s: 300}}}
+      assert prompt =~ "Confirm phone_call? It places a phone call for you, from your number"
+      assert prompt =~ ~s(\nTask: "Ask for a table for two on Saturday at 19:30."\n)
+      assert prompt =~ ~s("Calloway Bistro")
+    end
+
+    test "the confirmation says what it dials, from which number, and that it places the call",
+         ctx do
+      tainted =
+        owner_turn(ctx, Map.put(ctx.gate, :outside_sources, MapSet.new([{:tool, "web_fetch"}])))
+
+      Capability.execute(ctx.capability, start_args(), tainted)
+      assert_received {:reply, {:approval_prompt, %{text: prompt}}}
+
+      assert prompt =~ ~s(\nCalls: +12125550101, "Calloway Bistro", a business\n)
+      assert prompt =~ "\nFrom: #{@caller}, your number\n"
+      assert String.ends_with?(prompt, "Once you confirm, Fermix places exactly this call.")
+      refute prompt =~ "command"
+    end
+
+    test "a confirmation sent to the owner's inbox is marked as a call's", ctx do
+      test = self()
+
+      inbox = fn request ->
+        send(test, {:inbox, request})
+        {:ok, @token, :new}
+      end
+
+      gate =
+        ctx.gate
+        |> Map.delete(:approval_fn)
+        |> Map.merge(%{
+          owner_inbox_approval_fn: inbox,
+          outside_sources: MapSet.new([{:tool, "web_fetch"}])
+        })
+
+      Capability.execute(ctx.capability, start_args(), owner_turn(ctx, gate))
+      assert_received {:inbox, %{prompt: prompt, ttl_ms: 300_000} = request}
+      assert request.after_confirm == "Once you confirm, Fermix places exactly this call."
+      assert prompt =~ ~s(\nCalls: +12125550101, "Calloway Bistro", a business\n)
+      refute_received {:ran, _args}
+    end
+
+    test "a brief granting a tool a call cannot use says so, and dials nothing", ctx do
+      refusal = {:error, {:tools_not_grantable, [{"shell", :not_grantable}]}}
+      refusing = start_supervised!({StubManager, {self(), refusal}}, id: :refusing_manager)
+      args = start_args(%{"tool_grants" => ["shell"]})
+
+      assert {:ok, %{success: false, error: error}} =
+               PhoneCall.execute(args, owner_turn(ctx, %{phone_call_manager: refusing}))
+
+      assert error =~ "grants tools a phone call cannot use (shell: not_grantable)"
+      assert error =~ "Nothing was dialed and no attempt was used."
     end
 
     test "the owner's confirm runs exactly the parked call, once, labelled confirmed", ctx do
@@ -376,9 +581,17 @@ defmodule FermixCore.Tools.PhoneCallTest do
       assert_received {:approval, %{access_sensitive: intent}}
       refute_received {:ran, _args}
 
-      assert {:ok, _text} = AccessGate.confirm(intent, ctx.gate.access_pending)
+      assert {:ok, text} = AccessGate.confirm(intent, ctx.gate.access_pending)
+
+      assert text ==
+               "The call was accepted as pc_0a1b2c3d4e5f, and Fermix is placing it now. Its " <>
+                 "result will follow in the chat that asked for it."
+
       assert_received {:ran, args}
       assert args == start_args()
+      # Still the request that asked: the gate keeps its identity.
+      assert_received {:ran_request, request_id}
+      assert request_id == ctx.request_id
       assert {:error, _expired} = AccessGate.confirm(intent, ctx.gate.access_pending)
       refute_received {:ran, _again}
     end
@@ -413,8 +626,48 @@ defmodule FermixCore.Tools.PhoneCallTest do
   # The access gate's stand-in executor: the run the gate let through.
   def ran(args, context, test) do
     send(test, {:ran, args})
+    send(test, {:ran_request, Map.get(context, :request_id)})
     ToolTelemetry.exec("phone_call", context, true, 0)
-    {:ok, %{success: true, output: "{}", error: nil}}
+    # A start's own answer, which the owner's line after a confirm is read from.
+    answer = %{call_id: "pc_0a1b2c3d4e5f", status: "accepted", state: "admitted", reused: false}
+    {:ok, %{success: true, output: Jason.encode!(answer), error: nil}}
+  end
+
+  defp off_turn(ctx, manager, now),
+    do:
+      owner_turn(ctx, %{
+        phone_call_config: &disabled/0,
+        phone_call_manager: manager,
+        phone_call_now: fn -> now end
+      })
+
+  # A real Manager on this test's ledger, booted: its boot has read whether a
+  # call holds the slot once `:sys.get_state/1` answers.
+  defp boot_manager!(ctx, label) do
+    name = :"phone_tool_manager_#{label}_#{System.unique_integer([:positive])}"
+
+    start_supervised!(
+      {Manager,
+       name: name,
+       call_module: NeverStarted,
+       hangup: fn _session -> {:error, :never_hung_up_here} end,
+       repo: ctx.repo,
+       now_fn: fn -> @t0 end,
+       timer_enabled: false},
+      id: name
+    )
+
+    _booted = :sys.get_state(name)
+    name
+  end
+
+  # A call whose dispatch answer was lost: terminal, uncertain, holding the
+  # slot until its expiry.
+  defp seed_unresolved!(ctx) do
+    id = seed_call!(ctx, "default")
+    {:ok, _row} = Ledger.claim_dispatch(id, @t0, server: ctx.repo)
+    {:ok, _row} = Ledger.terminalize(id, "dispatch_unknown", %{ended_at: @t0}, server: ctx.repo)
+    id
   end
 
   defp seed_call!(ctx, owner_id) do

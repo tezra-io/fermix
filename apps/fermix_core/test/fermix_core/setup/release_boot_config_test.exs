@@ -108,6 +108,7 @@ defmodule FermixCore.Setup.ReleaseBootConfigTest do
       :iteration_limits,
       :log,
       :max_conversation_history,
+      :phone_calls_delegate,
       :prompt_bootstrap,
       :snapshot_targets,
       :subagents,

@@ -14,12 +14,17 @@ defmodule FermixCore.Capabilities.Builtin do
   wraps it where the kernel enforces: true for `shell` and `git_write`, false
   for the coding agents, which run outside it. `coding_run?: true` marks those
   two, whose confirmation shows every argument handed to the vendor CLI and
-  whose chain a run's follow-up turn may continue in the same folder.
-  `phone_call?: true` marks `phone_call`, an unconfined host command whose
-  `start` alone is decided and whose confirmation shows its brief. All four
+  whose chain a run's follow-up turn may continue in the same folder. All three
   reach the capability's metadata, where `Capabilities.AccessGate` reads them: a
   host command in a turn that read outside content waits for the owner where
   the call is not confined or the host has no kernel enforcement.
+
+  `external_effect?: true` marks a built-in whose call makes an effect outside
+  the machine that the owner confirms when the turn read outside content
+  (`phone_call`, which places a call). It is no host command: no sandbox holds
+  it or is asked about it. Its module says which of its calls make the effect
+  and what the owner reads before it goes ahead (the `effect/0`,
+  `effect_call?/1` and `confirmation/2` callbacks of `Builtin.Tool`).
   """
 
   alias FermixCore.Capabilities.Capability
@@ -164,20 +169,30 @@ defmodule FermixCore.Capabilities.Builtin do
       coding_run?: true
     },
     "codex_cloud_run" => %{policy_class: :exec, hidden_from_agent?: false, owner_only?: false},
-    # Phone calls (M94 §06). A call is a side effect the model steers, placed
-    # outside anything Fermix can sandbox, so it opts into the access gate as an
-    # unconfined host command: a `start` in a turn that read outside content
-    # waits for the owner's confirmation of its exact brief on every platform.
-    # `phone_call?` narrows that to `start` and words the owner's prompt as a
-    # call. Owner-only: every row is the owner's call. The execute-time attended
-    # gate (`Tools.PhoneCall`) is the barrier.
+    # Phone calls (M94 §06). A call is an effect outside the machine the model
+    # steers: a `start` in a turn that read outside content waits for the
+    # owner's confirmation of the brief the tool renders (`external_effect?`).
+    # Owner-only: every row is the owner's call. The execute-time attended gate
+    # (`Tools.PhoneCall`) is the barrier for every other turn.
     "phone_call" => %{
       policy_class: :external_api,
       hidden_from_agent?: false,
       owner_only?: true,
-      host_command?: true,
-      host_command_confined?: false,
-      phone_call?: true
+      external_effect?: true
+    },
+    # A phone call's in-call controls (M94 §07): a key press and the hang-up,
+    # each a side effect on the line, run on the handle its worker minted. No
+    # registry holds them: only that call's backend turn builds them, from
+    # these entries (`Agents.PhoneCallTurn`).
+    "phone_call_press_keys" => %{
+      policy_class: :external_api,
+      hidden_from_agent?: false,
+      owner_only?: false
+    },
+    "phone_call_end" => %{
+      policy_class: :external_api,
+      hidden_from_agent?: false,
+      owner_only?: false
     },
     "list_coding_runs" => %{
       policy_class: :read_only,
@@ -312,7 +327,12 @@ defmodule FermixCore.Capabilities.Builtin do
       metadata:
         Map.merge(
           metadata(tool_module),
-          Map.take(defaults, [:host_command?, :host_command_confined?, :coding_run?, :phone_call?])
+          Map.take(defaults, [
+            :host_command?,
+            :host_command_confined?,
+            :coding_run?,
+            :external_effect?
+          ])
         )
     })
   end

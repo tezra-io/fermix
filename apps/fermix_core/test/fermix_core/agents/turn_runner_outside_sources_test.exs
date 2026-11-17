@@ -487,6 +487,72 @@ defmodule FermixCore.Agents.TurnRunnerOutsideSourcesTest do
     refute_received {:unlocked, _}
   end
 
+  # A finished phone call's result re-enters through the same dispatcher with
+  # the continuation marker and its own (M94 §04): its content frames the
+  # words of the person called, so its source names the call and never a
+  # coding run, it is no attended owner turn, and its message is stored as not
+  # the owner's words.
+  test "a phone call's result turn carries the call's provenance, not a coding run's", ctx do
+    chat_id = chat_id()
+
+    msg =
+      owner_msg(chat_id, %{
+        content: "the phone call ended; here is its report",
+        metadata: %{
+          chat_type: "private",
+          harness_continuation: true,
+          harness_continuation_depth: 1,
+          phone_call_result: "pc_0a1b2c3d4e5f"
+        }
+      })
+
+    {_messages, context} = run_turn(ctx, msg)
+
+    assert context.outside_sources == MapSet.new([UntrustedContent.phone_call_source()])
+    assert context.phone_call_result == "pc_0a1b2c3d4e5f"
+    assert context.harness_run_id == nil
+    refute FermixCore.Temporal.Access.attended_operator_turn?(context)
+    assert UntrustedContent.resume_provenance(context).phone_call_result == "pc_0a1b2c3d4e5f"
+
+    assert {:ok, %{success: false}} = unlock_from(context, ctx)
+    refute_received {:unlocked, _}
+    assert {:ok, %{success: false, error: refusal}} = shell_from(context, ctx)
+    refute_received {:ran, _args}
+    assert refusal =~ "(a phone call)"
+    refute refusal =~ "coding run"
+
+    [stored | _] = ConversationStore.get_history({"telegram", chat_id, :root}, server: ctx.store)
+    assert stored.role == "user"
+    assert stored.harness_continuation == true
+  end
+
+  test "a coding run's continuation names the run, never a call", ctx do
+    msg =
+      owner_msg(chat_id(), %{
+        content: "the coding run finished; here is its summary",
+        metadata: %{chat_type: "private", harness_continuation_depth: 1, phone_call_result: nil}
+      })
+
+    {_messages, context} = run_turn(ctx, msg)
+    assert context.outside_sources == MapSet.new([UntrustedContent.harness_continuation_source()])
+    assert context.phone_call_result == nil
+    refute Map.has_key?(UntrustedContent.resume_provenance(context), :phone_call_result)
+  end
+
+  # A call's marker means nothing on a turn the owner typed: only a
+  # continuation carries it.
+  test "a call's marker on an owner-typed turn is not a call's result", ctx do
+    msg =
+      owner_msg(chat_id(), %{
+        content: "hi",
+        metadata: %{chat_type: "private", phone_call_result: "pc_0a1b2c3d4e5f"}
+      })
+
+    {_messages, context} = run_turn(ctx, msg)
+    assert context.outside_sources == MapSet.new()
+    assert context.phone_call_result == nil
+  end
+
   # The gate reads the finished run from the ledger by the id the notice
   # carries, to chain the next run only in its folder, with its coding agent.
   test "a coding-run continuation turn carries the finished run's id", ctx do

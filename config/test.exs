@@ -123,6 +123,11 @@ config :fermix_core, :open_loops, enabled: false
 # Manager's `:continuation_dispatcher` seam.
 config :fermix_core, :harness_continuation_dispatcher, nil
 
+# A phone call's backend turns are OFF in tests for the same reason: `mix test`
+# must never put a call's turn on the live gateway queue. Tests inject their
+# own delegate, or start the bridge against a queue of their own.
+config :fermix_core, :phone_calls_delegate, nil
+
 # Hermetic default: the browser's address checks resolve names, and a suite
 # that reached a real nameserver would be host-dependent and stall on a DNS-less
 # runner. Every lookup answers nothing — a failed lookup, which the policy

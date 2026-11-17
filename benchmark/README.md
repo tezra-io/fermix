@@ -1104,6 +1104,53 @@ The fixture audio is regenerated, and checked for reproducibility, with
 `afconvert -f WAVE -d LEI16@24000 -c 1`); the clips' texts live in that script and
 `suites/fixtures/voice/manifest.json` records each WAV's text and sha256.
 
+### Phone calls (`suites/phone_call.yaml`, M94)
+
+The owner asks Fermix to phone a business or their own phone; every call reaches
+the runners' simulated GPT-Live endpoint (`bin/evallib/phone_sim.py`, on the
+fixture server, loopback only) and plays the script its destination number owns
+(`suites/fixtures/phone/`), so no carrier, no voice model and no OpenAI request
+is involved. The eval daemon is a development build, and where its calls go is
+decided once, at boot (`FermixCore.Application.phone_call_transport_opts/2`): to
+`FERMIX_EVAL_FIXTURE_ORIGIN` when the home's fixture manifest honours it
+(`Tools.WebFetch.EvalFixture.origin/1`), every call refused when it is set and not
+honoured, never the vendor's. So the manifest and the variable are in place before
+the daemon starts: `capability-daemon.sh` sets the variable from the manifest on
+every start (`up` after the seed, `reset` after the restore, which leaves
+`eval-fixtures/` alone), refuses to start a phone home without the manifest, and
+drops a caller's `OPENAI_API_KEY` so the seed's invented key is the one in use; the
+seed refuses a home whose daemon answers, so no manifest appears under a running
+daemon. The suite grades the agent path and what the owner
+is told, not how the voice converses (its header says what else it cannot prove).
+Each dial spends one of the home's five daily attempts and a lost create holds its
+one call slot for hours, so a phone case runs only with `--reset-home` (every
+attempt starts from the seeded world, one daemon restart each); without it every
+case is NOT EVALUATED. `phone_call` is registered in every home and offers `start`
+only while phone calls are on, which the seed does; the keypad and hang-up
+controls are built by a call's own backend turn and are in no registry. The simulator's wire shapes are the engine's: both
+`apps/fermix_core/test/fermix_core/phone_calls/gpt_live_wire_contract_test.exs`
+and `bin/test_phone_sim.py` read
+`apps/fermix_core/test/fixtures/phone_calls/gpt_live_wire.json`. The suite is in
+no CI tier.
+
+```sh
+# from benchmark/, the eval daemon DOWN; any scored provider but openai
+FERMIX_CAP_SEED_ARGS="--phone-calls" bin/capability-daemon.sh up
+# validate and plan, spending nothing
+FERMIX_EVAL_HOME=~/.fermix-capability-eval OPIK_PROJECT=fermix-capability-eval \
+  uv run bin/run_eval.py --suite phone_call --profile isolated_mutation --judge \
+  --reset-home --dry-run
+# one case first, then the suite
+FERMIX_EVAL_HOME=~/.fermix-capability-eval OPIK_PROJECT=fermix-capability-eval \
+  uv run bin/run_eval.py --suite phone_call --case book_table_readback_confirmed \
+  --profile isolated_mutation --judge --reset-home \
+  --confirm-daemon-isolated --confirm-isolated-env
+FERMIX_EVAL_HOME=~/.fermix-capability-eval OPIK_PROJECT=fermix-capability-eval \
+  uv run bin/run_eval.py --suite phone_call --profile isolated_mutation --judge \
+  --reset-home --confirm-daemon-isolated --confirm-isolated-env
+bin/capability-daemon.sh down
+```
+
 ---
 
 ## 5h. The desktop corpus and the computer-use baseline (`run_desktop.py`, `cu_baseline.py`)

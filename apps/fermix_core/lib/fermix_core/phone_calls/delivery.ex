@@ -18,25 +18,31 @@ defmodule FermixCore.PhoneCalls.Delivery do
       dispatch, one inline send (`deliver/2`). A send that fails counts as the
       first of `Limits.max_report_delivery_attempts/0` and leaves the row
       pending for the worker.
-    * **One send** (`deliver/2`) is `Harness.Delivery.send_text/3` with the
-      composed report (`PhoneCalls.Report.compose/1`), the coding run's bounded
-      single attempt. A resend after a failed attempt says the earlier one may
-      have arrived, since a timed-out send can still have been delivered.
+    * **One send** (`deliver/2`) is `Delivery.FrozenSend.send_text/3`, the
+      bounded single attempt every run kind shares, of the report a person
+      reads (`PhoneCalls.Report.text/1`: no prompt framing, no engine code),
+      under `Limits.report_send_wait_ms/0`, with link previews off: the report quotes words the called party said, and a
+      link among them is never fetched by the engine. A resend after a failed
+      attempt says the earlier one may have arrived, since a timed-out send can
+      still have been delivered.
 
   Nothing here ever dials: retrying a report never retries its call.
   """
 
   require Logger
 
+  alias FermixCore.Delivery.Continuation, as: DeliveryContinuation
+  alias FermixCore.Delivery.FrozenSend
   alias FermixCore.Delivery.OwnerInbox
   alias FermixCore.Harness.Delivery, as: HarnessDelivery
   alias FermixCore.PhoneCalls.Continuation
   alias FermixCore.PhoneCalls.DeliveryWorker
   alias FermixCore.PhoneCalls.Ledger
+  alias FermixCore.PhoneCalls.Limits
+  alias FermixCore.PhoneCalls.PromptText
   alias FermixCore.PhoneCalls.Report
 
   @resent_label "(Sent again: an earlier attempt to send this report may or may not have arrived.)"
-  @error_max 500
 
   @type snapshot :: %{
           origin_kind: String.t(),
@@ -120,12 +126,19 @@ defmodule FermixCore.PhoneCalls.Delivery do
   """
   @spec deliver(map(), keyword()) :: {:ok, :sent} | {:error, term()}
   def deliver(row, opts \\ []) when is_map(row) and is_list(opts),
-    do: HarnessDelivery.send_text(row, text(row), opts)
+    do:
+      FrozenSend.send_text(
+        row,
+        text(row),
+        opts
+        |> Keyword.put(:link_previews, false)
+        |> Keyword.put_new(:timeout_ms, Limits.report_send_wait_ms())
+      )
 
   defp text(row) do
     if (Map.get(row, :delivery_attempts) || 0) > 0,
-      do: @resent_label <> "\n" <> Report.compose(row),
-      else: Report.compose(row)
+      do: @resent_label <> "\n" <> Report.text(row),
+      else: Report.text(row)
   end
 
   @doc """
@@ -143,7 +156,7 @@ defmodule FermixCore.PhoneCalls.Delivery do
 
   defp continuation(row, opts) do
     if Continuation.continuable?(row),
-      do: Continuation.dispatcher(Keyword.get(opts, :continuation_opts, [])),
+      do: DeliveryContinuation.dispatcher(Keyword.get(opts, :continuation_opts, [])),
       else: :none
   end
 
@@ -191,5 +204,6 @@ defmodule FermixCore.PhoneCalls.Delivery do
 
   @doc "The bounded text an error is recorded under."
   @spec bounded_error(term()) :: String.t()
-  def bounded_error(reason), do: reason |> inspect() |> String.slice(0, @error_max)
+  def bounded_error(reason),
+    do: reason |> inspect() |> PromptText.cut(Limits.max_record_text_bytes())
 end

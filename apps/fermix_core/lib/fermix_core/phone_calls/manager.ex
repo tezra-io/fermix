@@ -17,16 +17,32 @@ defmodule FermixCore.PhoneCalls.Manager do
       event is emitted. The answer means accepted here, never answered.
     * **The single terminal writer.** A worker reports its end with one
       message (`report_end/3`); this process writes the terminal row once,
-      leasing the report to the hand-off (`@handoff_lease_ms`), emits the
+      leasing the report to the hand-off (`Limits.handoff_lease_ms/0`), emits the
       closer, and runs the hand-off (`PhoneCalls.Delivery.hand_off/2`) in a
       task of `PhoneCalls.HandoffSupervisor`.
     * **A lost worker** (its DOWN arrives with no end report) and **boot
       reconciliation** (every non-terminal row, in `handle_continue`) are
       settled by what the row proves (`settle/3`): never dispatched → `failed`,
-      nothing dialed; dispatch claimed with no session id → `dispatch_unknown`;
-      a known provider session → `closure_unconfirmed` and one cleanup request
-      for that session through the injected `:hangup`, asynchronously.
+      nothing dialed; a closure the provider confirmed
+      (`Ledger.record_closure/3`) → `ended` at that closure, its voice time as
+      recorded, its outcome `unknown` with a note that what was said was never
+      read (for a refused end report: could not be stored), no hang-up, the
+      slot free; dispatch claimed with no session id → `dispatch_unknown`; a
+      known provider session → `closure_unconfirmed`, and this process's one
+      cleanup request for that session through the injected `:hangup`,
+      asynchronously, only when the row counts no hang-up request already.
       Nothing is ever redialed, and supervision never restarts a worker.
+    * **A ledger that does not answer.** Every `Ledger` call answers
+      `{:error, :timeout}` instead of exiting. A terminal write the ledger
+      refuses or does not answer keeps its report and is tried again on a
+      timer, `Limits.max_terminal_write_attempts/0` in all, logged once when
+      it starts failing and once when it lands; spent, the row is the next
+      boot's. An admission it does not answer is refused as `:timeout`, and a
+      row it committed late after all fails with nothing dialed. A count that
+      pays for a side effect (the cleanup's) sends nothing unless written.
+    * **Whether a call holds the slot** is published for turns to read
+      without a call into this process (`slot_held?/2`): from the ledger at
+      boot, and from the row in hand at admission and each terminal write.
     * **Cancel (`cancel/3`)** stops new work: a call not yet dispatched ends at
       once with nothing dialed (its later dispatch claim fails); a dispatched
       one is asked to stop and reads `stopping` until its end is known.
@@ -35,6 +51,19 @@ defmodule FermixCore.PhoneCalls.Manager do
       a live call is asked to stop. Cleanup, status, recovery and report
       delivery stay alive. `enable/1` reopens admission and nothing else: it
       releases no uncertain slot and redials nothing.
+    * **The orderly stop's drain (`drain/1`)**, which
+      `FermixCore.Application.prep_stop/1` runs before the tree, the Repo and
+      the network stack stop: admission closes for good, work not yet
+      dispatched ends with nothing dialed, and a live call is asked to end
+      (`cancel(pid, :shutdown)`, so it reports the engine's stop, not the
+      owner's); the drain answers once every call has reported its end, or at
+      `Limits.shutdown_drain_ms/0`. Nothing is forced at the bound: a call
+      still running is left as the next boot's proof rules settle it, and a
+      worker the tree's own shutdown then ends is not settled here. A crash
+      or a kill is unchanged: boot reconciliation settles it.
+    * **A home with durable memory off** has no ledger: the boot scans and
+      prunes nothing and says so once. A prune that fails is logged once when
+      it starts failing and once when it works again.
 
   ## The worker contract
 
@@ -50,10 +79,16 @@ defmodule FermixCore.PhoneCalls.Manager do
         repo: GenServer.server(),       # the ledger's server: pass as `server:`
         now_fn: (-> DateTime.t()),
         session_id: String.t(),         # "phone_call_" <> call_id, its turns' too
-        parent_session: String.t()      # the requesting turn's session
+        parent_session: String.t(),     # the requesting turn's session (the row's parent_session)
+        registry: atom()                # the subtree's call registry, to register in
       }
 
-  It must also export `cancel(pid, :owner | :disabled) :: :ok`, asynchronous
+  merged over the `:call_args` option (a map, default empty): what the
+  composition root hands every call's worker beside these, which the
+  Manager passes through unread (`FermixCore.Application.phone_calls_opts/0`:
+  the transport's wiring and the backend a call's turns run on).
+
+  It must also export `cancel(pid, :owner | :disabled | :shutdown) :: :ok`, asynchronous
   (the Manager never waits on it), after which it stops new work, requests the
   hang-up of a known session, drains, and reports; and `prompt_version/0`, the
   version of its telephone instructions, snapshotted on the row at admission.
@@ -63,11 +98,15 @@ defmodule FermixCore.PhoneCalls.Manager do
   create request, which it sends only on `{:ok, _}` (a row cancelled or
   disabled first answers `{:error, {:not_admitted, status}}`);
   `record_session/4` as soon as the create returns a session id, before
-  attaching; `record_carrier_call/3` only for a carrier id the carrier
-  reported; `advance/4` for ringing, answered and closing; `consume/3` before
+  attaching; `advance/4` for ringing, answered and closing; `consume/3` before
   each backend turn, keypad key or cleanup attempt, acting only on `{:ok, _}`;
-  `record_usage/4` for each cumulative usage snapshot. It never writes a
-  terminal row. It ends with exactly one `report_end/3`, whose report is
+  `record_usage/4` for each cumulative usage snapshot; `record_closure/3` the
+  moment the provider says the call closed (`session.closed`), before any
+  result is read, so a restart cannot lose a verified end. Every one of them
+  can answer `{:error, :timeout}` (the store did not answer within its
+  bound): a write that pays for a side effect is then not made, so the side
+  effect does not happen, and a timed-out write may still land later. It
+  never writes a terminal row. It ends with exactly one `report_end/3`, whose report is
 
       %{
         status: "ended" | "failed" | "dispatch_unknown" | "closure_unconfirmed",
@@ -79,9 +118,12 @@ defmodule FermixCore.PhoneCalls.Manager do
         usage_state: "voice_duration_confirmed" | "incomplete",
         backend_usage: map() | nil,
         failure_reason: String.t() | nil,
-        vendor_message: String.t() | nil
+        vendor_message: String.t() | nil,
+        uncertainty: String.t() | nil
       }
 
+  (the outcome's four keys are `PhoneCalls.Outcome.to_report/1`'s; `uncertainty`
+  is its own note on what stays uncertain, stored as `outcome_uncertainty`)
   and then exits. A report the ledger refuses (say, `confirmed` with no
   evidence) is settled as a lost worker. A worker that exits without a report,
   whatever the exit reason, is settled by what its row proves.
@@ -96,22 +138,19 @@ defmodule FermixCore.PhoneCalls.Manager do
   alias FermixCore.PhoneCalls.CarrierProfile
   alias FermixCore.PhoneCalls.Config
   alias FermixCore.PhoneCalls.Delivery
+  alias FermixCore.PhoneCalls.Grants
   alias FermixCore.PhoneCalls.Ledger
   alias FermixCore.PhoneCalls.Limits
+  alias FermixCore.PhoneCalls.Prompt
   alias FermixCore.PhoneCalls.Readiness
   alias FermixCore.PhoneCalls.Report
   alias FermixCore.PhoneCalls.Telemetry
 
-  @start_call_timeout_ms 15_000
-  @default_prune_interval_ms 86_400_000
-  # The terminal write leases the report to the hand-off task before the
-  # DeliveryWorker may select it. The hand-off is at most a continuation
-  # dispatch (15 s watchdog), one inline send (60 s watchdog) and two ledger
-  # writes (5 s each): 85 s, so 120 s leaves margin. A sleep or clock jump
-  # past the lease is the designed at-least-once duplicate notification.
-  @handoff_lease_ms 120_000
   @end_statuses ~w(ended failed dispatch_unknown closure_unconfirmed)
-  @report_keys [
+  # The uncertainty note of a call settled by its recorded closure.
+  @closed_unread "The call ended, but what was said was never read, so the result is unknown."
+  @closed_unstored "The call ended, but its result could not be stored, so it is unknown."
+  @end_report_keys [
     :outcome,
     :outcome_facts,
     :evidence,
@@ -120,13 +159,15 @@ defmodule FermixCore.PhoneCalls.Manager do
     :usage_state,
     :backend_usage,
     :failure_reason,
-    :vendor_message
+    :vendor_message,
+    :uncertainty
   ]
 
   @type request :: %{
           required(:brief) => Brief.t(),
           required(:brief_hash) => String.t(),
           required(:request_id) => String.t(),
+          required(:parent_session) => String.t(),
           required(:owner_id) => String.t(),
           required(:operation) => String.t(),
           required(:authorization) => String.t(),
@@ -141,19 +182,22 @@ defmodule FermixCore.PhoneCalls.Manager do
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) when is_list(opts) do
     {name, opts} = Keyword.pop(opts, :name, __MODULE__)
-    GenServer.start_link(__MODULE__, opts, name: name)
+    GenServer.start_link(__MODULE__, [{:name, name} | opts], name: name)
   end
 
   @doc """
   Admits a call and starts its worker; answers its id and admission state.
   Refusals: `:disabled`, `{:needs_setup, reasons}`, `{:authorization_evidence,
-  field}`, `{:slot_held, call_id}`, `{:daily_attempts_exhausted, n}`,
+  field}`, `{:tools_not_grantable, [{tool, why}]}` (`PhoneCalls.Grants`),
+  `{:prompt_too_large, :instructions | :input, bytes}` (the brief would
+  not reach the voice model whole), `{:slot_held, call_id}`,
+  `{:daily_attempts_exhausted, n}`,
   `{:call_start_failed, reason}`, or the ledger's own error. The same request
   again answers its existing call with `reused: true`.
   """
   @spec start_call(request(), GenServer.server()) :: {:ok, started()} | {:error, term()}
   def start_call(request, server \\ __MODULE__) when is_map(request) do
-    GenServer.call(server, {:start_call, request}, @start_call_timeout_ms)
+    GenServer.call(server, {:start_call, request}, Limits.manager_reply_wait_ms())
   end
 
   @doc """
@@ -182,7 +226,7 @@ defmodule FermixCore.PhoneCalls.Manager do
           {:ok, :cancelled | :stopping} | {:error, term()}
   def cancel(call_id, owner_id, server \\ __MODULE__)
       when is_binary(call_id) and is_binary(owner_id) do
-    GenServer.call(server, {:cancel, call_id, owner_id})
+    GenServer.call(server, {:cancel, call_id, owner_id}, Limits.manager_reply_wait_ms())
   end
 
   @doc "The off switch (see the moduledoc). Answers how many calls it ended and asked to stop."
@@ -190,11 +234,73 @@ defmodule FermixCore.PhoneCalls.Manager do
           cancelled: non_neg_integer(),
           stopping: non_neg_integer()
         }
-  def disable(server \\ __MODULE__), do: GenServer.call(server, :disable)
+  def disable(server \\ __MODULE__),
+    do: GenServer.call(server, :disable, Limits.manager_reply_wait_ms())
 
-  @doc "Reopens admission. Releases no slot and redials nothing."
+  @doc """
+  Reopens admission. Releases no slot and redials nothing, and reopens
+  nothing once the engine's stop has drained (`drain/1`).
+  """
   @spec enable(GenServer.server()) :: :ok
   def enable(server \\ __MODULE__), do: GenServer.call(server, :enable)
+
+  @doc """
+  The owner's word that their unresolved call ended, which they checked in
+  their Telnyx portal (`Management.PhoneCalls.confirm_ended/2`, M94 §12): the
+  slot is released with the reason `owner_confirmed` at `now`
+  (`Ledger.release_slot/4`), the outcome stays `unknown`, and the published
+  slot fact (`slot_held?/2`) is read again, so admission and the `phone_call`
+  tool see the slot free. Only the owner's own call whose termination is
+  unconfirmed and that still holds the slot: `:not_found` for another
+  owner's, `:in_progress` for one not yet over, `{:not_releasable, status}`
+  for one already over, released, or past OpenAI's own limit.
+  """
+  @spec confirm_ended(String.t(), String.t(), DateTime.t(), GenServer.server()) ::
+          {:ok, map()}
+          | {:error, :not_found | :in_progress | {:not_releasable, String.t()} | term()}
+  def confirm_ended(call_id, owner_id, %DateTime{} = now, server \\ __MODULE__)
+      when is_binary(call_id) and is_binary(owner_id) do
+    GenServer.call(
+      server,
+      {:confirm_ended, call_id, owner_id, now},
+      Limits.manager_reply_wait_ms()
+    )
+  end
+
+  @doc """
+  The orderly stop's drain (see the moduledoc), run in the caller's process,
+  never in the Manager's: `:idle` when no call is in progress (or no Manager
+  runs), at once; `:drained` once every call has reported its end;
+  `{:timeout, call_ids}` when `Limits.shutdown_drain_ms/0` passed first, the
+  rows left for the next boot; `{:no_answer, reason}` when the Manager died
+  or gave no answer within the bound and a margin.
+  """
+  @spec drain(GenServer.server()) ::
+          :idle | :drained | {:timeout, [String.t()]} | {:no_answer, term()}
+  def drain(server \\ __MODULE__) do
+    case GenServer.whereis(server) do
+      nil -> :idle
+      pid when is_pid(pid) -> await_drain(pid)
+    end
+  end
+
+  defp await_drain(pid) do
+    ref = Process.monitor(pid)
+    send(pid, {:phone_call_drain, self(), ref})
+
+    receive do
+      {:phone_call_drained, ^ref, result} ->
+        Process.demonitor(ref, [:flush])
+        result
+
+      {:DOWN, ^ref, :process, _pid, reason} ->
+        {:no_answer, reason}
+    after
+      Limits.shutdown_drain_ms() + Limits.drain_reply_margin_ms() ->
+        Process.demonitor(ref, [:flush])
+        {:no_answer, :timeout}
+    end
+  end
 
   @doc """
   A worker's one end report (see the moduledoc), sent to the `manager` pid its
@@ -208,9 +314,21 @@ defmodule FermixCore.PhoneCalls.Manager do
     :ok
   end
 
-  @doc "How long the terminal write leases a report to the hand-off."
-  @spec handoff_lease_ms() :: pos_integer()
-  def handoff_lease_ms, do: @handoff_lease_ms
+  @doc """
+  Whether a call holds the one-call slot at `now`, as the Manager registered
+  as `server` last saw it: a call not yet terminal, or an uncertain one until
+  its slot expires. What the `phone_call` tool offers status and stop by
+  while phone calls are off. Read without a call into the Manager, so a turn
+  may ask every time; `false` until that Manager has read its ledger once.
+  """
+  @spec slot_held?(DateTime.t(), GenServer.server()) :: boolean()
+  def slot_held?(%DateTime{} = now, server \\ __MODULE__) do
+    case :persistent_term.get(slot_key(server), :free) do
+      :free -> false
+      :held -> true
+      until_ms when is_integer(until_ms) -> DateTime.to_unix(now, :millisecond) < until_ms
+    end
+  end
 
   # --- GenServer --------------------------------------------------------------------
 
@@ -220,10 +338,11 @@ defmodule FermixCore.PhoneCalls.Manager do
   end
 
   @impl true
-  def handle_continue(:reconcile, %{reconcile?: false} = state), do: {:noreply, state}
+  def handle_continue(:reconcile, %{reconcile?: false} = state),
+    do: {:noreply, state |> with_store() |> refresh_slot_fact()}
 
   def handle_continue(:reconcile, state) do
-    {:noreply, state |> reconcile() |> prune() |> arm_prune()}
+    {:noreply, state |> with_store() |> boot()}
   end
 
   @impl true
@@ -238,11 +357,16 @@ defmodule FermixCore.PhoneCalls.Manager do
   end
 
   def handle_call(:disable, _from, state) do
-    {reply, state} = disable_calls(%{state | admission: :closed})
+    {reply, state} = disable_calls(admit_as(state, :closed))
     {:reply, reply, state}
   end
 
-  def handle_call(:enable, _from, state), do: {:reply, :ok, %{state | admission: :open}}
+  def handle_call(:enable, _from, state), do: {:reply, :ok, admit_as(state, :open)}
+
+  def handle_call({:confirm_ended, call_id, owner_id, now}, _from, state) do
+    reply = release_on_owners_word(call_id, owner_id, now, state)
+    {:reply, reply, refresh_slot_fact(state)}
+  end
 
   @impl true
   def handle_info({:phone_call_ended, call_id, report}, state) do
@@ -253,11 +377,26 @@ defmodule FermixCore.PhoneCalls.Manager do
     {:noreply, down(ref, reason, state)}
   end
 
+  def handle_info({:phone_call_drain, from, ref}, state)
+      when is_pid(from) and is_reference(ref) do
+    {:noreply, begin_drain({from, ref}, state)}
+  end
+
+  def handle_info({:phone_call_drain_deadline, token}, state) do
+    {:noreply, drain_expired(token, state)}
+  end
+
   def handle_info({ref, result}, state) when is_reference(ref) do
     {:noreply, cleanup_result(ref, result, state)}
   end
 
+  def handle_info(:phone_call_prune, %{store?: false} = state), do: {:noreply, state}
   def handle_info(:phone_call_prune, state), do: {:noreply, state |> prune() |> arm_prune()}
+
+  def handle_info({:phone_call_retry_write, call_id, op, attempt}, state)
+      when is_binary(call_id) and is_integer(attempt) do
+    {:noreply, write_terminal(state, call_id, op, attempt)}
+  end
 
   def handle_info(_other, state), do: {:noreply, state}
 
@@ -267,16 +406,57 @@ defmodule FermixCore.PhoneCalls.Manager do
     with :ok <- admission_open(state),
          :ok <- ready(state),
          :ok <- check_evidence(request),
+         :ok <- grants_allowed(request.brief),
+         :ok <- prompt_fits(request.brief, state),
          {:ok, attrs} <- admission_attrs(request, state),
-         {:ok, admission} <- Ledger.admit(attrs, now(state), server: state.repo) do
+         {:ok, admission} <- admit_row(attrs, state) do
       start_admitted(admission, request.brief, state)
     else
-      {:error, reason} -> {{:error, reason}, state}
+      {:error, {:admission_unanswered, call_id}} ->
+        {{:error, :timeout}, admission_unanswered(call_id, state)}
+
+      {:error, reason} ->
+        {{:error, reason}, state}
+    end
+  end
+
+  # The admission goes out `skip_when_late` (`Ledger.admit/3`), so a Repo that
+  # reaches it late turns it away unrun, yet one begun in time still commits.
+  # Its id is this process's own, so the next message here fails that row with
+  # nothing dialed if it exists: the Repo runs requests in order, so that
+  # follow-up always comes after the admission, and an owner told the ledger
+  # did not answer is never called after all.
+  defp admit_row(attrs, state) do
+    case Ledger.admit(attrs, now(state), server: state.repo) do
+      {:error, :timeout} -> {:error, {:admission_unanswered, attrs.id}}
+      answer -> answer
+    end
+  end
+
+  defp admission_unanswered(call_id, state) do
+    Logger.warning("phone call #{call_id} admission unanswered by the ledger; nothing was dialed")
+    schedule_write(state, call_id, {:undispatched, "admission_unanswered"}, 1, 0)
+  end
+
+  # The one rule for a brief too large to send: the call's own prompt is
+  # rendered as the worker will render it, and refused here, before any row
+  # or attempt exists, when either part passes its bound. Sent whole or not at
+  # all; the worker renders again at dispatch.
+  defp prompt_fits(brief, state) do
+    case Prompt.render(brief, now: now(state)) do
+      {:ok, _rendered} -> :ok
+      {:error, {:prompt_too_large, _part, _bytes} = reason} -> {:error, reason}
     end
   end
 
   defp admission_open(%{admission: :open}), do: :ok
   defp admission_open(%{admission: :closed}), do: {:error, :disabled}
+  defp admission_open(%{admission: :stopping}), do: {:error, :engine_stopping}
+
+  # The engine's stop closes admission for good: neither the off switch nor
+  # the on switch moves it again.
+  defp admit_as(%{admission: :stopping} = state, _admission), do: state
+  defp admit_as(state, admission), do: %{state | admission: admission}
 
   defp ready(state) do
     case state.readiness.() do
@@ -292,6 +472,7 @@ defmodule FermixCore.PhoneCalls.Manager do
   defp check_evidence(request) do
     checks = [
       request_id: text?(Map.get(request, :request_id)),
+      parent_session: text?(Map.get(request, :parent_session)),
       owner_id: text?(Map.get(request, :owner_id)),
       operation: Map.get(request, :operation) == "phone_call.start",
       authorization: Map.get(request, :authorization) in ~w(direct confirmed),
@@ -309,6 +490,12 @@ defmodule FermixCore.PhoneCalls.Manager do
 
   defp brief_matches?(_request), do: false
 
+  # A brief grants only what a call's backend turn may use (`Grants`), so one
+  # that asks for more is refused here, before any row or attempt exists.
+  defp grants_allowed(%Brief{tool_grants: grants}) do
+    with {:ok, _grantable} <- Grants.resolve(grants), do: :ok
+  end
+
   defp admission_attrs(%{brief: brief, snapshot: snapshot} = request, state)
        when is_map(snapshot) do
     {:ok,
@@ -323,7 +510,9 @@ defmodule FermixCore.PhoneCalls.Manager do
          :origin_conversation
        ]),
        %{
+         id: Ledger.generate_id(),
          request_id: request.request_id,
+         parent_session: request.parent_session,
          owner_id: request.owner_id,
          authorization: request.authorization,
          access_intent: Map.get(request, :access_intent),
@@ -346,7 +535,8 @@ defmodule FermixCore.PhoneCalls.Manager do
   defp start_admitted({:admitted, row}, brief, state) do
     case DynamicSupervisor.start_child(state.call_supervisor, child_spec(row, brief, state)) do
       {:ok, pid} ->
-        {{:ok, %{call_id: row.id, state: row.status, reused: false}}, track(row, pid, state)}
+        {{:ok, %{call_id: row.id, state: row.status, reused: false}},
+         row |> track(pid, state) |> note_slot(row)}
 
       {:error, reason} ->
         start_failed(row, reason, state)
@@ -356,16 +546,18 @@ defmodule FermixCore.PhoneCalls.Manager do
   # Built here, not by the worker module, so a worker is `:temporary` whatever
   # it declares: supervision never restarts one, and so never replays a dial.
   defp child_spec(row, brief, state) do
-    args = %{
-      call_id: row.id,
-      row: row,
-      brief: brief,
-      manager: self(),
-      repo: state.repo,
-      now_fn: state.now_fn,
-      session_id: Telemetry.session_id(row.id),
-      parent_session: row.request_id
-    }
+    args =
+      Map.merge(state.call_args, %{
+        call_id: row.id,
+        row: row,
+        brief: brief,
+        manager: self(),
+        repo: state.repo,
+        now_fn: state.now_fn,
+        session_id: Telemetry.session_id(row.id),
+        parent_session: row.parent_session,
+        registry: state.call_registry
+      })
 
     %{
       id: {:phone_call, row.id},
@@ -401,46 +593,196 @@ defmodule FermixCore.PhoneCalls.Manager do
 
   # --- terminal writes ---------------------------------------------------------------
 
+  # Every terminal write, whichever path asks for it, is one `op`, tried by
+  # `write_terminal/4`:
+  #
+  #   * `{:end_report, status, fields}`: a worker's end report (`report_end/3`);
+  #   * `{:settle, reason}`: read the row and settle it by what it proves;
+  #   * `{:settle_as, status, fields, hangup?}`: what that settle decided;
+  #   * `{:undispatched, reason}`: work that never dispatched ends failed.
+  #
+  # A write the store refuses or does not answer is kept and tried again,
+  # `Limits.max_terminal_write_attempts/0` in all, each wait doubling from
+  # `Limits.terminal_write_retry_ms/0`, on a timer (`:write_schedule`), so this
+  # process never waits between tries; logged once when it starts failing and
+  # once when it lands. Spent, the row is left to the next boot's proof rules.
+  # Once only throughout: a row already terminal answers `:already_terminal`.
+  # A write that timed out still runs when the Repo reaches it, so a later
+  # `:already_terminal` for that call is that write landing late: its closer
+  # and hand-off run then, from the row.
+
   defp ended(call_id, report, state) do
     case Map.fetch(state.calls, call_id) do
-      {:ok, _call} -> state |> untrack(call_id) |> write_report(call_id, report)
-      :error -> log_untracked_report(call_id, state)
+      {:ok, _call} -> state |> untrack(call_id) |> write_end_report(call_id, report) |> drained?()
+      :error -> log_untracked_end_report(call_id, state)
     end
   end
 
-  defp log_untracked_report(call_id, state) do
+  defp log_untracked_end_report(call_id, state) do
     Logger.debug("phone call #{call_id} end report ignored: the call is not tracked")
     state
   end
 
-  defp write_report(state, call_id, report) do
-    case report_fields(report, state) do
-      {:ok, status, fields} -> terminalize(call_id, status, fields, state)
-      {:error, reason} -> refused_report(call_id, reason, state)
+  defp write_end_report(state, call_id, report) do
+    case end_report_fields(report, state) do
+      {:ok, status, fields} -> write_terminal(state, call_id, {:end_report, status, fields}, 1)
+      {:error, reason} -> refused_end_report(call_id, reason, state)
     end
   end
 
-  defp report_fields(%{status: status} = report, state) when status in @end_statuses do
-    fields =
-      report
-      |> Map.take(@report_keys)
-      |> Map.merge(%{ended_at: now(state), next_delivery_at: lease_end(state)})
-
-    {:ok, status, fields}
+  defp end_report_fields(%{status: status} = report, state) when status in @end_statuses do
+    {:ok, status, report |> Map.take(@end_report_keys) |> Map.put(:ended_at, now(state))}
   end
 
-  defp report_fields(report, _state), do: {:error, {:invalid, :status, Map.get(report, :status)}}
+  defp end_report_fields(report, _state),
+    do: {:error, {:invalid, :status, Map.get(report, :status)}}
 
-  defp terminalize(call_id, status, fields, state) do
-    case Ledger.terminalize(call_id, status, fields, server: state.repo) do
-      {:ok, row} -> post_terminal(row, state)
-      {:error, :already_terminal} -> state
-      {:error, {:invalid, _key, _value} = reason} -> refused_report(call_id, reason, state)
+  defp settle_id(call_id, reason, state), do: write_terminal(state, call_id, {:settle, reason}, 1)
+
+  defp fail_undispatched(call_id, reason, state),
+    do: write_terminal(state, call_id, {:undispatched, reason}, 1)
+
+  # A settle answers at most two more ops before a write (the undispatched
+  # fail, then a settle of the row that moved past it), as a status only
+  # moves forward, so this recursion ends.
+  defp write_terminal(state, call_id, op, attempt) do
+    case run_terminal(op, call_id, state) do
+      {:ok, row} -> state |> write_landed(call_id, attempt) |> after_terminal(row, op)
+      {:settled, next} -> write_terminal(state, call_id, next, attempt)
+      :already_terminal -> already_terminal(state, call_id, op, attempt)
+      :gone -> state |> clear_failure(call_id) |> log_gone(call_id)
+      {:refused, reason} -> refused_end_report(call_id, reason, clear_failure(state, call_id))
+      {:rejected, reason} -> state |> clear_failure(call_id) |> log_rejected(call_id, reason)
+      {:error, reason} -> write_failed(state, call_id, op, attempt, reason)
+    end
+  end
+
+  # A report the ledger refuses (`{:invalid, _, _}`) is settled by the row; a
+  # settlement it refuses is logged, never settled again, so settling cannot
+  # recurse.
+  defp run_terminal({:end_report, status, fields}, call_id, state) do
+    case terminal_answer(Ledger.terminalize(call_id, status, leased(fields, state), opts(state))) do
+      {:rejected, reason} -> {:refused, reason}
+      answer -> answer
+    end
+  end
+
+  defp run_terminal({:settle, reason}, call_id, state) do
+    case Ledger.get(call_id, opts(state)) do
+      {:ok, row} -> settle(row, reason, state)
+      other -> terminal_answer(other)
+    end
+  end
+
+  defp run_terminal({:settle_as, status, fields, _hangup?}, call_id, state),
+    do: terminal_answer(Ledger.terminalize(call_id, status, leased(fields, state), opts(state)))
+
+  defp run_terminal({:undispatched, reason}, call_id, state) do
+    opts = [server: state.repo, next_delivery_at: lease_end(state)]
+
+    case Ledger.fail_undispatched(call_id, reason, now(state), opts) do
+      {:error, {:dispatched, _status}} -> {:settled, {:settle, reason}}
+      other -> terminal_answer(other)
+    end
+  end
+
+  defp terminal_answer({:ok, row}), do: {:ok, row}
+  defp terminal_answer({:error, :already_terminal}), do: :already_terminal
+  defp terminal_answer({:error, :not_found}), do: :gone
+  defp terminal_answer({:error, {:invalid, _key, _value} = reason}), do: {:rejected, reason}
+  defp terminal_answer({:error, reason}), do: {:error, reason}
+
+  # The hand-off lease runs from each attempt, so a retried write never lands
+  # already due.
+  defp leased(fields, state), do: Map.put(fields, :next_delivery_at, lease_end(state))
+
+  defp opts(state), do: [server: state.repo]
+
+  defp after_terminal(state, row, {:settle_as, _status, _fields, true}),
+    do: row |> post_terminal(state) |> request_cleanup(row)
+
+  defp after_terminal(state, row, _op), do: post_terminal(row, state)
+
+  defp already_terminal(state, call_id, op, attempt) do
+    case Map.get(state.write_failures, call_id) do
+      :maybe_landed -> state |> write_landed(call_id, attempt) |> landed_late(call_id, op)
+      _none -> clear_failure(state, call_id)
+    end
+  end
+
+  defp landed_late(state, call_id, op) do
+    case Ledger.get(call_id, opts(state)) do
+      {:ok, row} -> after_terminal(state, row, op)
       {:error, reason} -> log_terminal_error(call_id, reason, state)
     end
   end
 
-  defp refused_report(call_id, reason, state) do
+  defp write_failed(state, call_id, op, attempt, reason) do
+    if attempt >= Limits.max_terminal_write_attempts() do
+      Logger.error(
+        "phone call #{call_id} terminal write not made after #{attempt} attempts " <>
+          "(#{inspect(reason)}); its row is left for the next boot"
+      )
+
+      clear_failure(state, call_id)
+    else
+      wait = Limits.terminal_write_retry_ms() * Bitwise.bsl(1, attempt - 1)
+      state |> note_failure(call_id, op, reason) |> schedule_write(call_id, op, attempt + 1, wait)
+    end
+  end
+
+  defp note_failure(state, call_id, op, reason) do
+    unless Map.has_key?(state.write_failures, call_id) do
+      Logger.warning(
+        "phone call #{call_id} terminal write failed (#{inspect(reason)}); trying again"
+      )
+    end
+
+    kind = failure_kind(op, reason)
+    failures = Map.update(state.write_failures, call_id, kind, &kept_kind(&1, kind))
+    %{state | write_failures: failures}
+  end
+
+  # A write that timed out may still land; a read, or a write the store
+  # answered with an error, did not. Once possibly landed, always so.
+  defp failure_kind({:settle, _reason}, _error), do: :not_written
+  defp failure_kind(_write, :timeout), do: :maybe_landed
+  defp failure_kind(_write, _error), do: :not_written
+
+  defp kept_kind(:maybe_landed, _kind), do: :maybe_landed
+  defp kept_kind(_old, kind), do: kind
+
+  defp schedule_write(state, call_id, op, attempt, wait) do
+    _timer = state.write_schedule.({:phone_call_retry_write, call_id, op, attempt}, wait)
+    state
+  end
+
+  defp write_landed(state, call_id, attempt) do
+    if Map.has_key?(state.write_failures, call_id) do
+      Logger.info("phone call #{call_id} terminal write landed on attempt #{attempt}")
+    end
+
+    clear_failure(state, call_id)
+  end
+
+  defp clear_failure(state, call_id),
+    do: %{state | write_failures: Map.delete(state.write_failures, call_id)}
+
+  defp log_gone(state, call_id) do
+    Logger.info("phone call #{call_id} has no ledger row to settle")
+    state
+  end
+
+  defp log_rejected(state, call_id, reason) do
+    Logger.error(
+      "phone call #{call_id} settlement refused by the ledger (#{inspect(reason)}); " <>
+        "its row is left for the next boot"
+    )
+
+    state
+  end
+
+  defp refused_end_report(call_id, reason, state) do
     Logger.error(
       "phone call #{call_id} end report refused (#{inspect(reason)}); settling by its row"
     )
@@ -449,24 +791,14 @@ defmodule FermixCore.PhoneCalls.Manager do
   end
 
   defp log_terminal_error(call_id, reason, state) do
-    Logger.error("phone call #{call_id} terminal write failed: #{inspect(reason)}")
+    Logger.error("phone call #{call_id} ledger write failed: #{inspect(reason)}")
     state
-  end
-
-  defp fail_undispatched(call_id, reason, state) do
-    opts = [server: state.repo, next_delivery_at: lease_end(state)]
-
-    case Ledger.fail_undispatched(call_id, reason, now(state), opts) do
-      {:ok, row} -> post_terminal(row, state)
-      {:error, {:dispatched, _status}} -> settle_id(call_id, reason, state)
-      {:error, :already_terminal} -> state
-      {:error, other} -> log_terminal_error(call_id, other, state)
-    end
   end
 
   # The closer, then the hand-off in a task of its own, so this process never
   # waits on a send. A task that cannot start leaves the report pending, and
-  # the DeliveryWorker sends it once the lease ends.
+  # the DeliveryWorker sends it once the lease ends. The call may have freed
+  # the slot.
   defp post_terminal(row, state) do
     Telemetry.run_end(row)
 
@@ -480,8 +812,8 @@ defmodule FermixCore.PhoneCalls.Manager do
     case Task.Supervisor.start_child(state.handoff_supervisor, fn ->
            Delivery.hand_off(row, opts)
          end) do
-      {:ok, _pid} -> state
-      {:error, reason} -> log_handoff_unstarted(row, reason, state)
+      {:ok, _pid} -> note_slot(state, row)
+      {:error, reason} -> row |> log_handoff_unstarted(reason, state) |> note_slot(row)
     end
   end
 
@@ -501,65 +833,92 @@ defmodule FermixCore.PhoneCalls.Manager do
         cleanup_down(ref, reason, state)
 
       {call_id, monitors} ->
-        lost_worker(call_id, reason, %{
-          state
-          | monitors: monitors,
-            calls: Map.delete(state.calls, call_id)
-        })
+        state = %{state | monitors: monitors, calls: Map.delete(state.calls, call_id)}
+        state |> worker_gone(call_id, reason) |> drained?()
     end
   end
+
+  # After a drain's bound, the tree's own shutdown ends what still runs: such a
+  # row is the next boot's to settle, by what it proves then.
+  defp worker_gone(%{stopping?: true} = state, call_id, reason) do
+    Logger.warning(
+      "phone call #{call_id} worker ended by the engine's stop (#{inspect(reason)}); " <>
+        "its row is left for the next boot"
+    )
+
+    state
+  end
+
+  defp worker_gone(state, call_id, reason), do: lost_worker(call_id, reason, state)
 
   defp lost_worker(call_id, reason, state) do
     Logger.warning("phone call #{call_id} worker ended without its report: #{inspect(reason)}")
     settle_id(call_id, "worker_lost", state)
   end
 
-  defp settle_id(call_id, reason, state) do
-    case Ledger.get(call_id, server: state.repo) do
-      {:ok, row} -> settle(row, reason, state)
-      {:error, other} -> log_terminal_error(call_id, other, state)
+  defp settle_row(row, reason, state) do
+    case settle(row, reason, state) do
+      {:settled, op} -> write_terminal(state, row.id, op, 1)
+      :already_terminal -> state
     end
   end
 
-  # Only for a row no live worker owns. Never dispatched: nothing was dialed.
-  # Claimed with no session id: whether the provider placed it is unknown, and
-  # it is never dialed again. A known session: it may still be live, so its
-  # end is unconfirmed and its hang-up is requested once.
-  defp settle(%{status: "admitted"} = row, reason, state),
-    do: fail_undispatched(row.id, reason, state)
-
+  # The one settle rule, for a row no live worker owns: it decides, and
+  # `write_terminal/4` writes. Never dispatched: nothing was dialed. A closure
+  # the provider confirmed (`Ledger.record_closure/3`): the call ended, so it
+  # ends `ended` at that closure, its voice time as recorded, its outcome
+  # unknown, with no hang-up, and its slot free. Claimed with no session id:
+  # whether the provider placed it is unknown, and it is never dialed again. A
+  # known session: it may still be live, so its end is unconfirmed, and this
+  # process sends its one hang-up only when the row counts none already
+  # (`Limits.max_immediate_termination_requests/0`).
   defp settle(%{status: status} = row, reason, state) do
     cond do
       Ledger.terminal?(status) ->
-        state
+        :already_terminal
+
+      status == "admitted" ->
+        {:settled, {:undispatched, reason}}
+
+      match?(%DateTime{}, row.closed_at) ->
+        {:settled, closed_end(row, reason)}
 
       is_nil(row.provider_session_id) ->
-        settle_terminal(row.id, "dispatch_unknown", reason, state)
+        {:settled, unknown_end("dispatch_unknown", reason, state)}
 
       true ->
-        row.id |> settle_terminal("closure_unconfirmed", reason, state) |> request_cleanup(row)
+        {:settled, unconfirmed_end(row, reason, state)}
     end
   end
 
-  defp settle_terminal(call_id, status, reason, state) do
+  defp closed_end(row, reason) do
     fields = %{
       outcome: "unknown",
+      uncertainty: closed_note(reason),
+      usage_state: "incomplete",
       failure_reason: reason,
-      ended_at: now(state),
-      next_delivery_at: lease_end(state)
+      ended_at: row.closed_at
     }
 
-    # Written directly, never through `terminalize/4`: a refused settlement is
-    # logged, not settled again, so settling cannot recurse.
-    case Ledger.terminalize(call_id, status, fields, server: state.repo) do
-      {:ok, row} -> post_terminal(row, state)
-      {:error, :already_terminal} -> state
-      {:error, reason} -> log_terminal_error(call_id, reason, state)
-    end
+    {:settle_as, "ended", fields, false}
+  end
+
+  defp closed_note("invalid_end_report"), do: @closed_unstored
+  defp closed_note(_reason), do: @closed_unread
+
+  defp unknown_end(status, reason, state) do
+    {:settle_as, status, %{outcome: "unknown", failure_reason: reason, ended_at: now(state)},
+     false}
+  end
+
+  defp unconfirmed_end(row, reason, state) do
+    {:settle_as, status, fields, false} = unknown_end("closure_unconfirmed", reason, state)
+    {:settle_as, status, fields, row.cleanup_attempts == 0}
   end
 
   # One cleanup request for a known session, consumed on the row before the
-  # request goes out, and run outside this process.
+  # request goes out, and run outside this process. A count the ledger refuses
+  # or does not answer sends nothing.
   defp request_cleanup(state, %{id: call_id, provider_session_id: session_id}) do
     with {:ok, _row} <- Ledger.consume(call_id, :cleanup_attempts, server: state.repo),
          %Task{ref: ref} <-
@@ -642,6 +1001,7 @@ defmodule FermixCore.PhoneCalls.Manager do
       {:ok, failed} -> {{:ok, :cancelled}, post_terminal(failed, state)}
       {:error, {:dispatched, _status}} -> {{:ok, :stopping}, mark_stopping(row.id, state)}
       {:error, :already_terminal} -> {{:error, :already_terminal}, state}
+      {:error, :timeout} -> {{:ok, :stopping}, stop_unanswered(row.id, state)}
       {:error, reason} -> {{:error, reason}, state}
     end
   end
@@ -649,6 +1009,14 @@ defmodule FermixCore.PhoneCalls.Manager do
   defp stop_tracked(row, why, state) do
     notify_worker(row.id, why, state)
     {{:ok, :stopping}, mark_stopping(row.id, state)}
+  end
+
+  # The worker was told. A fail that timed out still lands when the Repo
+  # reaches it, so the worker's own end report or its exit finds the row
+  # terminal and runs the closer and hand-off from it (`already_terminal/4`).
+  defp stop_unanswered(call_id, state) do
+    Logger.warning("phone call #{call_id} stop unanswered by the ledger; its worker was told")
+    %{state | write_failures: Map.put(state.write_failures, call_id, :maybe_landed)}
   end
 
   defp mark_stopping(call_id, state) do
@@ -662,7 +1030,7 @@ defmodule FermixCore.PhoneCalls.Manager do
   # settled here by what it proves.
   defp stop_untracked(%{status: status} = row, why, state) do
     reply = if status == "admitted", do: :cancelled, else: :stopping
-    {{:ok, reply}, settle(row, stop_reason(why), state)}
+    {{:ok, reply}, settle_row(row, stop_reason(why), state)}
   end
 
   defp notify_worker(call_id, why, state) do
@@ -676,6 +1044,70 @@ defmodule FermixCore.PhoneCalls.Manager do
 
   defp stop_reason(:owner), do: "cancelled_by_owner"
   defp stop_reason(:disabled), do: "phone_calls_disabled"
+  defp stop_reason(:shutdown), do: "engine_stopped"
+
+  # --- the orderly stop's drain ---------------------------------------------------
+
+  defp begin_drain(waiter, state) do
+    state = %{state | admission: :stopping}
+
+    cond do
+      map_size(state.calls) == 0 -> answer_drain([waiter], :idle, state)
+      is_nil(state.drain) -> state |> stop_for_shutdown() |> arm_drain([waiter])
+      true -> put_in(state.drain.waiters, [waiter | state.drain.waiters])
+    end
+  end
+
+  # Every call this process tracks is told the engine is stopping, by what its
+  # row says: undispatched work ends with nothing dialed, a live call is asked
+  # to end. A row no worker owns is the next boot's, as after any stop.
+  defp stop_for_shutdown(state) do
+    Enum.reduce(Map.keys(state.calls), state, fn call_id, acc ->
+      case Ledger.get(call_id, server: acc.repo) do
+        {:ok, row} -> row |> cancel_row(:shutdown, acc) |> elem(1)
+        {:error, reason} -> shutdown_unread(call_id, reason, acc)
+      end
+    end)
+  end
+
+  defp shutdown_unread(call_id, reason, state) do
+    notify_worker(call_id, :shutdown, state)
+    log_terminal_error(call_id, reason, state)
+  end
+
+  defp arm_drain(state, waiters) do
+    token = make_ref()
+    timer = state.drain_schedule.({:phone_call_drain_deadline, token}, Limits.shutdown_drain_ms())
+    %{state | drain: %{waiters: waiters, token: token, timer: timer}}
+  end
+
+  # The drain's answer once every call has left this process's care.
+  defp drained?(%{drain: %{} = drain, calls: calls} = state) when map_size(calls) == 0 do
+    cancel_drain_timer(drain.timer)
+    answer_drain(drain.waiters, :drained, %{state | drain: nil})
+  end
+
+  defp drained?(state), do: state
+
+  defp drain_expired(token, %{drain: %{token: token} = drain} = state) do
+    still = Map.keys(state.calls)
+
+    Logger.warning(
+      "phone calls still running when the engine's stop could wait no longer, left for " <>
+        "the next boot: #{Enum.join(still, ", ")}"
+    )
+
+    answer_drain(drain.waiters, {:timeout, still}, %{state | drain: nil})
+  end
+
+  defp drain_expired(_stale, state), do: state
+
+  defp answer_drain(waiters, result, state) do
+    Enum.each(waiters, fn {pid, ref} -> send(pid, {:phone_call_drained, ref, result}) end)
+    %{state | stopping?: true}
+  end
+
+  defp cancel_drain_timer(timer) when is_reference(timer), do: Process.cancel_timer(timer)
 
   defp disable_calls(state) do
     case Ledger.unsettled(server: state.repo) do
@@ -705,7 +1137,7 @@ defmodule FermixCore.PhoneCalls.Manager do
 
   defp reconcile(state) do
     case Ledger.unsettled(server: state.repo) do
-      {:ok, rows} -> Enum.reduce(rows, state, &settle(&1, "engine_restarted", &2))
+      {:ok, rows} -> Enum.reduce(rows, state, &settle_row(&1, "engine_restarted", &2))
       {:error, reason} -> log_scan_error(reason, state)
     end
   end
@@ -715,16 +1147,41 @@ defmodule FermixCore.PhoneCalls.Manager do
     state
   end
 
+  # Whether this home keeps a ledger at all, decided once: the Repo's own
+  # answer, which holds for the life of this subtree (a Repo restart restarts
+  # it too).
+  defp with_store(state), do: %{state | store?: Repo.enabled?(server: state.repo)}
+
+  defp boot(%{store?: false} = state) do
+    Logger.info("phone calls: durable memory is off, so there is no call ledger to reconcile")
+    refresh_slot_fact(state)
+  end
+
+  defp boot(state), do: state |> reconcile() |> refresh_slot_fact() |> prune() |> arm_prune()
+
   defp prune(state) do
     case Ledger.prune(now(state), server: state.repo) do
-      {:ok, _counts} -> state
-      {:error, reason} -> log_prune_error(reason, state)
+      {:ok, _counts} -> prune_works(state)
+      {:error, reason} -> prune_failed(reason, state)
     end
   end
 
-  defp log_prune_error(reason, state) do
+  # Logged once when it starts failing and once when it works again.
+  defp prune_failed(reason, %{prune_failures: 0} = state) do
     Logger.warning("phone call retention prune failed: #{inspect(reason)}")
-    state
+    %{state | prune_failures: 1}
+  end
+
+  defp prune_failed(_reason, state), do: %{state | prune_failures: state.prune_failures + 1}
+
+  defp prune_works(%{prune_failures: 0} = state), do: state
+
+  defp prune_works(state) do
+    Logger.info(
+      "phone call retention prune works again after #{state.prune_failures} failed prunes"
+    )
+
+    %{state | prune_failures: 0}
   end
 
   defp arm_prune(%{timer_enabled?: false} = state), do: state
@@ -734,14 +1191,90 @@ defmodule FermixCore.PhoneCalls.Manager do
     state
   end
 
+  # --- the owner's word that a call ended -------------------------------------------
+
+  defp release_on_owners_word(call_id, owner_id, now, state) do
+    with {:ok, row} <- Ledger.get_for_owner(call_id, owner_id, opts(state)),
+         :ok <- confirmable(row, now) do
+      Ledger.release_slot(call_id, :owner_confirmed, now, opts(state))
+    end
+  end
+
+  defp confirmable(row, now) do
+    cond do
+      not Ledger.terminal?(row.status) -> {:error, :in_progress}
+      Ledger.holds_slot?(row, now) -> :ok
+      true -> {:error, {:not_releasable, row.status}}
+    end
+  end
+
+  # --- whether a call holds the slot -------------------------------------------------
+
+  # Published where a turn reads it without a call here (`slot_held?/2`), by
+  # one rule (`publish_rows/2`) over the rows that hold the slot: read from
+  # the ledger at boot (`Ledger.outstanding/2`), and the row in hand at
+  # admission and at each terminal write, the one-call slot's own holder. As
+  # `:free`, `:held` (a call not yet terminal) or the unix millisecond an
+  # uncertain call's slot expires: immediates, so publishing one triggers no
+  # global garbage collection. A ledger that does not answer publishes
+  # `:held`: status and stop stay offered, never start.
+  defp refresh_slot_fact(%{store?: false} = state), do: publish_slot(state, :free)
+
+  defp refresh_slot_fact(state) do
+    case Ledger.outstanding(now(state), opts(state)) do
+      {:ok, rows} -> publish_rows(state, rows)
+      {:error, reason} -> slot_unread(reason, state)
+    end
+  end
+
+  defp note_slot(state, row), do: publish_rows(state, [row])
+
+  defp publish_rows(state, rows) do
+    now = now(state)
+
+    rows
+    |> Enum.filter(&Ledger.holds_slot?(&1, now))
+    |> Enum.reduce(:free, &wider(row_fact(&1), &2))
+    |> then(&publish_slot(state, &1))
+  end
+
+  defp row_fact(%{status: status, slot_expires_at: %DateTime{} = expires}) do
+    if Ledger.terminal?(status), do: DateTime.to_unix(expires, :millisecond), else: :held
+  end
+
+  defp row_fact(_row), do: :held
+
+  defp wider(:held, _fact), do: :held
+  defp wider(_fact, :held), do: :held
+  defp wider(fact, :free), do: fact
+  defp wider(one, other), do: max(one, other)
+
+  defp slot_unread(reason, state) do
+    Logger.warning(
+      "phone calls: the ledger did not say whether a call holds the slot: #{inspect(reason)}"
+    )
+
+    publish_slot(state, :held)
+  end
+
+  defp publish_slot(state, fact) do
+    :ok = :persistent_term.put(slot_key(state.name), fact)
+    state
+  end
+
+  defp slot_key(server), do: {__MODULE__, :slot, server}
+
   # --- state ------------------------------------------------------------------------
 
   defp build_state(opts) do
     %{
+      name: Keyword.get(opts, :name, __MODULE__),
       call_module: Keyword.fetch!(opts, :call_module),
       hangup: fetch_hangup!(opts),
       repo: Keyword.get(opts, :repo, Repo),
       call_supervisor: Keyword.get(opts, :call_supervisor, FermixCore.PhoneCalls.CallSupervisor),
+      call_registry: Keyword.get(opts, :call_registry, FermixCore.PhoneCalls.CallRegistry),
+      call_args: Keyword.get(opts, :call_args, %{}),
       handoff_supervisor:
         Keyword.get(opts, :handoff_supervisor, FermixCore.PhoneCalls.HandoffSupervisor),
       readiness: Keyword.get(opts, :readiness, &Readiness.current/0),
@@ -751,8 +1284,15 @@ defmodule FermixCore.PhoneCalls.Manager do
       continuation_opts: [dispatcher: Keyword.get(opts, :continuation_dispatcher)],
       reconcile?: Keyword.get(opts, :reconcile, true),
       timer_enabled?: Keyword.get(opts, :timer_enabled, true),
-      prune_interval_ms: Keyword.get(opts, :prune_interval_ms, @default_prune_interval_ms),
+      prune_interval_ms: Keyword.get(opts, :prune_interval_ms, Limits.prune_interval_ms()),
+      drain_schedule: Keyword.get(opts, :drain_schedule, &schedule_self/2),
+      write_schedule: Keyword.get(opts, :write_schedule, &schedule_self/2),
+      write_failures: %{},
       admission: :open,
+      store?: true,
+      stopping?: false,
+      drain: nil,
+      prune_failures: 0,
       calls: %{},
       monitors: %{},
       cleanups: %{}
@@ -782,7 +1322,12 @@ defmodule FermixCore.PhoneCalls.Manager do
     %{state | calls: calls, monitors: Map.delete(state.monitors, ref)}
   end
 
-  defp lease_end(state), do: DateTime.add(now(state), @handoff_lease_ms, :millisecond)
+  # Runs in this process, so the deadline comes back here.
+  defp schedule_self(message, ms), do: Process.send_after(self(), message, ms)
+
+  defp lease_end(state),
+    do: DateTime.add(now(state), Limits.handoff_lease_ms(), :millisecond)
+
   defp now(state), do: state.now_fn.()
 
   defp text?(value), do: is_binary(value) and value != ""

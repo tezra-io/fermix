@@ -898,5 +898,69 @@ def test_computers_refuse_a_devices_file_the_seed_did_not_write(tmp_path, monkey
     assert foreign.read_text() == "devices = []\n"
 
 
+def _seed_phone(monkeypatch, home, *flags):
+    monkeypatch.setattr(sys, "argv", ["seed_capability_home.py", str(home), "--provider",
+                                      "ollama", "--model", "brindle-7b", *flags])
+    seed.main()
+    return tomllib.loads((home / "config.toml").read_text())
+
+
+def test_phone_calls_turn_the_section_on_with_invented_values_in_the_homes_file_store(
+        tmp_path, monkeypatch):
+    # M94: the one setup decision a call needs, and the trunk and key it reads, all
+    # invented, the secrets in the home's own file store as `@file` names them.
+    home = tmp_path / "x-eval"
+    cfg = _seed_phone(monkeypatch, home, "--phone-calls")
+    phone = cfg["fermix_core"]["phone_calls"]
+    assert phone == {"enabled": True, "caller_number": "+16465550108",
+                     "sip_username": "fermix-eval-trunk-94", "sip_password": "@file"}
+    assert set(phone) <= {"enabled", "voice", "caller_number", "sip_username", "sip_password"}
+    # The phone engine's key is the openai provider's slot; the scored provider stays primary.
+    assert cfg["fermix_core"]["providers"]["openai"] == {"api_key": "@file"}
+    assert cfg["fermix_core"]["providers"]["ollama"]["primary"] is True
+    secrets_dir = home / "secrets"
+    assert oct(secrets_dir.stat().st_mode & 0o777) == "0o700"
+    for name, value in seed.PHONE_SECRETS.items():
+        path = secrets_dir / name
+        assert path.read_text() == value and oct(path.stat().st_mode & 0o777) == "0o600"
+    manifest = json.loads((home / seed.PHONE_CALLS_MANIFEST).read_text())
+    assert manifest["caller_number"] == phone["caller_number"]
+    assert manifest["secrets"] == sorted(seed.PHONE_SECRETS)
+    assert not any(value in json.dumps(manifest) for value in seed.PHONE_SECRETS.values())
+    # The fixture manifest records that its origin is where the daemon's calls go.
+    fixtures = json.loads((home / seed.FIXTURE_MANIFEST).read_text())
+    assert set(fixtures) == {"port", "phone_calls"} and fixtures["phone_calls"] is True
+
+
+def test_the_seeded_caller_number_is_a_fictional_number_in_a_us_area_code():
+    number = seed.PHONE_SEEDED["caller_number"]
+    assert re.fullmatch(r"\+1(646)5550(1\d\d)", number)
+
+
+def test_a_seed_without_phone_calls_takes_them_away(tmp_path, monkeypatch):
+    home = tmp_path / "x-eval"
+    _seed_phone(monkeypatch, home, "--phone-calls", "--cues")
+    cue_token = next((home / "secrets").glob("cue_source.*.token"))
+    off = _seed_phone(monkeypatch, home, "--cues")
+    assert "phone_calls" not in off["fermix_core"]
+    assert "openai" not in off["fermix_core"]["providers"]
+    assert not (home / seed.PHONE_CALLS_MANIFEST).exists()
+    assert not any((home / "secrets" / name).exists() for name in seed.PHONE_SECRETS)
+    # Only the phone seed's own files go; the cue tokens beside them are rewritten.
+    assert any((home / "secrets").glob("cue_source.*.token")) and cue_token.parent.is_dir()
+
+
+@pytest.mark.parametrize("flags", [("--provider", "openai", "--model", "gpt-x"),
+                                   ("--provider", "ollama", "--model", "brindle-7b",
+                                    "--voice", "--voice-engine", "openai_live")])
+def test_phone_calls_refuse_a_home_that_needs_the_real_openai_key(tmp_path, monkeypatch, flags):
+    home = tmp_path / "x-eval"
+    monkeypatch.setattr(sys, "argv", ["seed_capability_home.py", str(home), *flags,
+                                      "--phone-calls"])
+    with pytest.raises(SystemExit):
+        seed.main()
+    assert not (home / seed.PHONE_CALLS_MANIFEST).exists()
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

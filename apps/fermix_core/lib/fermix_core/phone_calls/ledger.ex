@@ -19,31 +19,53 @@ defmodule FermixCore.PhoneCalls.Ledger do
   `ended`, `failed`, `dispatch_unknown` and `closure_unconfirmed` are terminal;
   the last two are uncertain (the remote call is not proven gone).
 
+  The `carrier_call_id` column has no writer: no event the transport
+  normalizes carries the carrier's own call id, and that id is never derived
+  from the provider session id. It stays in the schema, read as `nil`, for the
+  carrier id a later transport may report.
+
   ## Admission (`admit/3`)
 
-  One `BEGIN IMMEDIATE`, in order: the same originating request (`request_id`,
-  the requesting turn's session id) answers the call it already made, as
-  `{:existing, row}`; the one-call slot; the day's attempts; the insert. A
-  refusal writes nothing and so consumes nothing.
+  One `BEGIN IMMEDIATE`, in order: the same originating request with the same
+  mandate (`request_id`, the owner request's own identity,
+  `Agents.RequestIdentity`, and `mandate_hash`) answers the call it already
+  made, as `{:existing, row}`, while the same request with another brief is a
+  new mandate and goes on; the one-call slot; the day's attempts; the insert.
+  A refusal writes nothing and so consumes nothing.
 
-    * **The slot** is held by every non-terminal row, and by an uncertain row
+    * **The slot** (`Limits.max_outstanding_calls/0` calls at once) is held
+      by every non-terminal row, and by an uncertain row
       until it is released on verified termination (`release_slot/3`) or the
       provider's own bound on one call (`Limits.provider_lifetime_bound_ms/0`:
-      its ringing limit plus its connected limit) has passed since the dispatch
-      claim (`slot_expires_at`). Its outcome stays `unknown` either way.
+      its ringing limit plus its connected limit) has passed since the latest
+      moment its session could have started, the dispatch claim plus
+      `Limits.max_create_wait_ms/0` (`Limits.slot_hold_ms/0`, written as
+      `slot_expires_at`), so it never frees early. Its outcome stays `unknown` either way.
     * **The day** is the rolling window `Limits.attempt_window_ms/0` ending at
       the admission's `now`, never a calendar day: no zone to choose, and never
       more than `Limits.max_attempts_per_day/0` attempts in any such window.
-      Every row admitted in the window counts except one proven never to have
-      dialed: terminal (`ended` or `failed`) with no dispatch claim.
+      An attempt is a row that may have dialed: one still on its way to a
+      dial or in it (`admitted`, `dispatching`), one the provider gave a
+      session, and one whose dispatch answer is unknown. A row that ended with
+      nothing sent or with the provider's refusal does not count.
+
+  ## A store that does not answer
+
+  Every function answers `{:error, :timeout}` when the Repo does not answer
+  within its call bound, never exits its caller (`Repo`'s `on_timeout:
+  :error`, the periodic callers' pattern). A late request can still run when
+  the Repo reaches it, so a caller treats a timed-out write as one that may or
+  may not have landed, and a write that guards a side effect as not made.
 
   ## Transitions
 
   The per-call worker writes its own non-terminal steps, each a guarded
   forward-only reducer: `claim_dispatch/3` (only from `admitted`, and durable
-  before any network I/O), `record_session/4`, `record_carrier_call/3`,
+  before any network I/O), `record_session/4`,
   `advance/4` (ringing is optional; a delayed event never regresses a row),
-  `consume/3`, `record_usage/4`. `PhoneCalls.Manager` is the single terminal
+  `consume/3`, `record_usage/4`, and `record_closure/3`, the provider's own
+  word that the call ended, the moment it arrives, so a restart before the
+  end report cannot lose a verified end. `PhoneCalls.Manager` is the single terminal
   writer: `terminalize/4` (once only, `:already_terminal` after) and
   `fail_undispatched/4` (only from `admitted`). `ended` never implies
   `confirmed`: an outcome defaults to `unknown`, and `confirmed` needs evidence.
@@ -56,16 +78,14 @@ defmodule FermixCore.PhoneCalls.Ledger do
 
   @id_prefix "pc_"
   @id_bytes 6
-  @text_max 500
-  @excerpt_max 400
-  @max_excerpts 8
-  @facts_json_max 4_096
+  # The table's CHECK on `closure_reason` holds the same 120.
+  @closure_reason_max 120
   @recent_max 20
 
   @timestamp_columns ~w(created_at dispatch_claimed_at connecting_at ringing_at answered_at
                         closing_at ended_at call_deadline_at ringing_deadline_at slot_expires_at
                         cancel_requested_at evidence_pruned_at slot_released_at next_delivery_at
-                        delivered_at)a
+                        delivered_at closed_at)a
   @json_columns %{
     origin_conversation: :origin_conversation,
     send_opts_json: :send_opts,
@@ -96,8 +116,9 @@ defmodule FermixCore.PhoneCalls.Ledger do
   @doc """
   Admits a call `admitted` in one transaction (see the moduledoc), assigning a
   fresh id when `attrs` has none. `attrs` carries the evidence and snapshot
-  columns: `request_id`, `owner_id`, `authorization` (`direct` | `confirmed`),
-  `access_intent`, `origin_kind`, `origin_conversation`, `delivery_mode`,
+  columns: `request_id` (the owner request's identity), `owner_id`,
+  `authorization` (`direct` | `confirmed`), `access_intent`, `parent_session`
+  (the requesting turn's session, the trace's parent), `origin_kind`, `origin_conversation`, `delivery_mode`,
   `platform`, `destination`, `thread`, `send_opts`, `mandate` (a JSON-safe map)
   and its `mandate_hash`, and `model`, `voice`, `prompt_version`,
   `carrier_profile`.
@@ -116,10 +137,15 @@ defmodule FermixCore.PhoneCalls.Ledger do
       bounds = %{
         now: stamp(now),
         window_start: stamp(window_start),
-        max_attempts: Limits.max_attempts_per_day()
+        max_attempts: Limits.max_attempts_per_day(),
+        max_outstanding: Limits.max_outstanding_calls()
       }
 
-      {:admit, row, bounds} |> call(opts) |> decode_admission()
+      # Turned away unrun when the Repo reaches it late, so a timed-out
+      # admission rarely leaves a row no worker owns.
+      {:admit, row, bounds}
+      |> call(Keyword.put(opts, :skip_when_late, true))
+      |> decode_admission()
     end
   end
 
@@ -138,7 +164,7 @@ defmodule FermixCore.PhoneCalls.Ledger do
       dispatch_claimed_at: stamp(now),
       call_deadline_at: stamp(DateTime.add(now, Limits.call_deadline_ms(), :millisecond)),
       ringing_deadline_at: stamp(DateTime.add(now, Limits.ringing_timeout_ms(), :millisecond)),
-      slot_expires_at: stamp(DateTime.add(now, Limits.provider_lifetime_bound_ms(), :millisecond))
+      slot_expires_at: stamp(DateTime.add(now, Limits.slot_hold_ms(), :millisecond))
     }
 
     {:claim_dispatch, id, fields} |> call(opts) |> decode_one()
@@ -155,18 +181,6 @@ defmodule FermixCore.PhoneCalls.Ledger do
   def record_session(id, session_id, %DateTime{} = now, opts \\ [])
       when is_binary(id) and is_binary(session_id) and session_id != "" and is_list(opts) do
     {:record_session, id, session_id, stamp(now)} |> call(opts) |> decode_one()
-  end
-
-  @doc """
-  Records the carrier's own call id once, only when the carrier reported one;
-  never derived from the provider session id.
-  """
-  @spec record_carrier_call(String.t(), String.t(), server_opts()) ::
-          {:ok, row()} | {:error, :carrier_call_mismatch | :not_found | term()}
-  def record_carrier_call(id, carrier_call_id, opts \\ [])
-      when is_binary(id) and is_binary(carrier_call_id) and carrier_call_id != "" and
-             is_list(opts) do
-    {:record_carrier_call, id, carrier_call_id} |> call(opts) |> decode_one()
   end
 
   @doc """
@@ -214,6 +228,53 @@ defmodule FermixCore.PhoneCalls.Ledger do
     end
   end
 
+  @doc """
+  Keeps the provider's own word that the call ended (`session.closed`): when
+  (`at`), why (`reason`, at most 120 bytes) and the final voice time
+  (`voice_seconds`, `whole_voice_seconds/1`), written the moment it arrives, before any
+  outcome is read. Guarded and idempotent: only on a live row whose session is
+  known (`{:error, {:not_connected, status}}` otherwise), never on a terminal
+  one (`{:error, :already_terminal}`), and a second closure answers the row
+  unchanged. It changes no status: the Manager's terminal write still ends the
+  call, and a row that carries a closure is settled `ended`, never as an
+  unconfirmed one.
+  """
+  @spec record_closure(
+          String.t(),
+          %{at: DateTime.t(), reason: String.t() | nil, voice_seconds: number() | nil},
+          server_opts()
+        ) ::
+          {:ok, row()}
+          | {:error,
+             :already_terminal
+             | {:not_connected, String.t()}
+             | {:invalid, :closure, term()}
+             | term()}
+  def record_closure(id, closure, opts \\ []) when is_binary(id) and is_list(opts) do
+    case closure_fields(closure) do
+      {:ok, {at, reason, seconds}} ->
+        {:record_closure, id, at, reason, seconds} |> call(opts) |> decode_one()
+
+      :error ->
+        {:error, {:invalid, :closure, closure}}
+    end
+  end
+
+  defp closure_fields(%{at: %DateTime{} = at} = closure) do
+    reason = Map.get(closure, :reason)
+    seconds = Map.get(closure, :voice_seconds)
+
+    if (is_nil(reason) or is_binary(reason)) and
+         (is_nil(seconds) or (is_number(seconds) and seconds >= 0)),
+       do:
+         {:ok,
+          {stamp(at), reason && bound(reason, @closure_reason_max),
+           seconds && whole_voice_seconds(seconds)}},
+       else: :error
+  end
+
+  defp closure_fields(_closure), do: :error
+
   @doc "Marks that the owner, or the off switch, asked a live call to stop."
   @spec mark_cancel_requested(String.t(), DateTime.t(), server_opts()) ::
           {:ok, row()} | {:error, term()}
@@ -251,9 +312,10 @@ defmodule FermixCore.PhoneCalls.Ledger do
   `dispatch_unknown` or `closure_unconfirmed`; `fields` may carry `outcome`
   (default `unknown`), `outcome_facts`, `evidence` (excerpts), `usage`,
   `voice_seconds`, `usage_state`, `backend_usage`, `failure_reason`,
-  `vendor_message` and `next_delivery_at` (the hand-off lease). The provider's
-  and the carrier's ids are never set here: each is written once, by its own
-  guarded step. `confirmed` needs at least one
+  `vendor_message`, `uncertainty` (the outcome's own note on what stays
+  uncertain, stored bounded as `outcome_uncertainty`) and `next_delivery_at`
+  (the hand-off lease). The provider's session id is never set here: it is
+  written once, by its own guarded step. `confirmed` needs at least one
   evidence excerpt and an `ended` or `closure_unconfirmed` call;
   `dispatch_unknown` is always `unknown`.
   """
@@ -276,15 +338,23 @@ defmodule FermixCore.PhoneCalls.Ledger do
   end
 
   @doc """
-  Releases the slot of an uncertain row on verified termination. Its outcome
-  is untouched. Only the evidence-backed reason exists: a model-supplied flag,
-  an absent search result or a local process exit is no reason.
+  Releases the slot of an uncertain row, on verified termination or on the
+  owner's word that they saw the call end in their Telnyx portal
+  (`:owner_confirmed`, `Management.PhoneCalls.confirm_ended/2`, M94 §12),
+  recorded with its reason and time. Its outcome is untouched. No other reason
+  exists: a model-supplied flag, an absent search result or a local process
+  exit is none.
   """
-  @spec release_slot(String.t(), :verified_termination, DateTime.t(), server_opts()) ::
+  @spec release_slot(
+          String.t(),
+          :verified_termination | :owner_confirmed,
+          DateTime.t(),
+          server_opts()
+        ) ::
           {:ok, row()} | {:error, {:not_releasable, String.t()} | term()}
-  def release_slot(id, :verified_termination, %DateTime{} = now, opts \\ [])
-      when is_binary(id) do
-    {:release_slot, id, "verified_termination", stamp(now)} |> call(opts) |> decode_one()
+  def release_slot(id, reason, %DateTime{} = now, opts \\ [])
+      when is_binary(id) and reason in [:verified_termination, :owner_confirmed] do
+    {:release_slot, id, Atom.to_string(reason), stamp(now)} |> call(opts) |> decode_one()
   end
 
   @doc """
@@ -353,6 +423,36 @@ defmodule FermixCore.PhoneCalls.Ledger do
     call({:prune, stamp(now), stamp(audit), stamp(excerpts)}, opts)
   end
 
+  @doc """
+  What a finished call's record keeps of its outcome, the bounds every writer
+  of one fits it to (`Outcome.Record`, `Outcome`): the facts' encoded JSON
+  (`facts_json_bytes`), how many evidence excerpts (`excerpts`) of how many
+  bytes each (`excerpt_bytes`), and the uncertainty note and failure words
+  (`text_bytes`). A terminal write past one is refused, or cut where it says so.
+  """
+  @spec report_bounds() :: %{
+          facts_json_bytes: pos_integer(),
+          excerpts: pos_integer(),
+          excerpt_bytes: pos_integer(),
+          text_bytes: pos_integer()
+        }
+  def report_bounds,
+    do: %{
+      facts_json_bytes: Limits.max_facts_json_bytes(),
+      excerpts: Limits.max_evidence_excerpts(),
+      excerpt_bytes: Limits.max_excerpt_bytes(),
+      text_bytes: Limits.max_record_text_bytes()
+    }
+
+  @doc """
+  Voice time as the ledger keeps it: whole seconds, a part rounded up, so a
+  call is never recorded shorter than it ran. The one rule for every writer
+  of `voice_seconds` (a closure here, a usage snapshot, an end report).
+  """
+  @spec whole_voice_seconds(number()) :: non_neg_integer()
+  def whole_voice_seconds(seconds) when is_integer(seconds) and seconds >= 0, do: seconds
+  def whole_voice_seconds(seconds) when is_float(seconds) and seconds >= 0, do: ceil(seconds)
+
   @doc "Whether `row` holds the one-call slot at `now` (the SQL rule, for a row in hand)."
   @spec holds_slot?(row(), DateTime.t()) :: boolean()
   def holds_slot?(%{status: status} = row, %DateTime{} = now) do
@@ -386,6 +486,7 @@ defmodule FermixCore.PhoneCalls.Ledger do
          operation: "phone_call.start",
          authorization: attrs.authorization,
          access_intent: optional_text(attrs[:access_intent]),
+         parent_session: optional_text(attrs[:parent_session]),
          origin_kind: attrs.origin_kind,
          origin_conversation: conversation,
          delivery_mode: attrs.delivery_mode,
@@ -451,6 +552,7 @@ defmodule FermixCore.PhoneCalls.Ledger do
          usage_state: usage_state(status, fields),
          failure_reason: optional_bound(Map.get(fields, :failure_reason)),
          vendor_message: optional_bound(Map.get(fields, :vendor_message)),
+         outcome_uncertainty: optional_bound(Map.get(fields, :uncertainty)),
          ended_at: stamp(ended_at)
        })
        |> put_lease(Map.get(fields, :next_delivery_at))
@@ -505,7 +607,7 @@ defmodule FermixCore.PhoneCalls.Ledger do
 
   defp encode_facts(facts) when is_map(facts) do
     with {:ok, json} <- encode(:outcome_facts, facts) do
-      if byte_size(json) <= @facts_json_max,
+      if byte_size(json) <= Limits.max_facts_json_bytes(),
         do: {:ok, json},
         else: {:error, {:invalid, :outcome_facts, :too_large}}
     end
@@ -513,13 +615,13 @@ defmodule FermixCore.PhoneCalls.Ledger do
 
   defp encode_facts(other), do: {:error, {:invalid, :outcome_facts, other}}
 
-  # Bounded evidence: at most `@max_excerpts` excerpts, each a speaker label and
-  # at most `@excerpt_max` bytes of what was said, stored under string keys
+  # Bounded evidence: at most `Limits.max_evidence_excerpts/0` excerpts, each a
+  # speaker label and at most `Limits.max_excerpt_bytes/0` bytes of what was said, stored under string keys
   # whichever keys it came with. An excerpt with no text is no evidence.
   defp bound_excerpts(excerpts) do
     excerpts
     |> Enum.flat_map(&excerpt/1)
-    |> Enum.take(@max_excerpts)
+    |> Enum.take(Limits.max_evidence_excerpts())
   end
 
   defp excerpt(%{} = excerpt) do
@@ -527,7 +629,12 @@ defmodule FermixCore.PhoneCalls.Ledger do
     speaker = Map.get(excerpt, :speaker) || Map.get(excerpt, "speaker")
 
     if is_binary(text) and String.trim(text) != "",
-      do: [%{"speaker" => to_string(speaker || "unknown"), "text" => bound(text, @excerpt_max)}],
+      do: [
+        %{
+          "speaker" => to_string(speaker || "unknown"),
+          "text" => bound(text, Limits.max_excerpt_bytes())
+        }
+      ],
       else: []
   end
 
@@ -627,7 +734,7 @@ defmodule FermixCore.PhoneCalls.Ledger do
   defp optional_bound(value) when is_binary(value) and value != "", do: bound(value)
   defp optional_bound(_value), do: nil
 
-  defp bound(text), do: bound(text, @text_max)
+  defp bound(text), do: bound(text, Limits.max_record_text_bytes())
 
   defp bound(text, max) when is_binary(text) and byte_size(text) <= max, do: text
   defp bound(text, max) when is_binary(text), do: utf8_prefix(text, max, 3)
@@ -654,6 +761,16 @@ defmodule FermixCore.PhoneCalls.Ledger do
     value
   end
 
-  defp call(request, opts),
-    do: Repo.phone_calls_call(request, Keyword.take(opts, [:server, :timeout, :on_timeout]))
+  # A store that does not answer is an error, never an exit (see the moduledoc).
+  defp call(request, opts) do
+    repo_opts =
+      opts
+      |> Keyword.take([:server, :timeout, :skip_when_late])
+      |> Keyword.put(:on_timeout, :error)
+
+    case Repo.phone_calls_call(request, repo_opts) do
+      {:error, :repo_timeout} -> {:error, :timeout}
+      other -> other
+    end
+  end
 end

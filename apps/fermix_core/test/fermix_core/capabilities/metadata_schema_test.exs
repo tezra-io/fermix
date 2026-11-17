@@ -17,7 +17,9 @@ defmodule FermixCore.Capabilities.MetadataSchemaTest do
     :scheduling,
     :delivery,
     :channel,
-    :system
+    :system,
+    # The phone-call family (M94), seeded always: its switch is live.
+    :phone_call
   ]
 
   setup do

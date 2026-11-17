@@ -55,6 +55,8 @@ defmodule Fermix.CLI.SettingsCommand.Render do
          fermix settings secret clear ID [--json]
          fermix settings primary [PROVIDER] [--json]
          fermix settings reload [SECTION] [--json]
+         fermix settings phone-calls recovery [--json]
+         fermix settings phone-calls confirm-ended CALL_ID [--json]
   """
 
   @type rendered :: {:ok, iodata()} | {:error, :invalid_reply}
@@ -201,6 +203,58 @@ defmodule Fermix.CLI.SettingsCommand.Render do
   end
 
   def reload(_result), do: invalid()
+
+  @doc """
+  `phone_calls.recovery.get`: each unresolved call as the daemon says it, the
+  steps at Telnyx, and the command that confirms it ended.
+  """
+  @spec phone_call_recovery(map()) :: rendered()
+  def phone_call_recovery(%{"calls" => []}),
+    do: {:ok, "No phone call's termination is unconfirmed.\n"}
+
+  def phone_call_recovery(%{"calls" => [_ | _] = calls}) do
+    if Enum.all?(calls, &recovery_call?/1),
+      do: {:ok, Enum.map_intersperse(calls, "\n", &recovery_lines/1)},
+      else: invalid()
+  end
+
+  def phone_call_recovery(_result), do: invalid()
+
+  @doc "`phone_calls.recovery.confirm`: the daemon's sentence."
+  @spec phone_call_confirmed(map()) :: rendered()
+  def phone_call_confirmed(%{"sentence" => sentence, "call" => %{}}) when is_binary(sentence),
+    do: {:ok, [paragraph(sentence), "\n"]}
+
+  def phone_call_confirmed(_result), do: invalid()
+
+  defp recovery_call?(%{"call_id" => id, "sentence" => s, "release" => r, "containment" => c}),
+    do: strings?([id, s, r]) and is_list(c) and strings?(c)
+
+  defp recovery_call?(_call), do: false
+
+  defp recovery_lines(call) do
+    called = Enum.reject([call["contact_name"], call["destination"]], &is_nil/1)
+
+    [
+      paragraph(call["sentence"]),
+      "\n",
+      "Call: ",
+      safe(call["call_id"]),
+      "\n",
+      if(called == [], do: [], else: ["Called: ", safe(Enum.join(called, " ")), "\n"]),
+      optional_line("OpenAI session: ", call["provider_session_id"]),
+      optional_line("Telnyx call: ", call["carrier_call_id"]),
+      paragraph(call["release"]),
+      "\n",
+      Enum.map(call["containment"], &["- ", paragraph(&1), "\n"]),
+      "Once your Telnyx portal shows it ended: fermix settings phone-calls confirm-ended ",
+      safe(call["call_id"]),
+      "\n"
+    ]
+  end
+
+  defp optional_line(label, value) when is_binary(value), do: [label, safe(value), "\n"]
+  defp optional_line(_label, _value), do: []
 
   @doc "A failure as `{exit_code, sentence}`: 3 for no daemon, 1 for every other."
   @spec error(term(), context()) :: {pos_integer(), String.t()}

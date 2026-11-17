@@ -29,7 +29,7 @@ scenarios:                     # required, >= 1
 ### `requires`
 
 What the suite needs the eval home to have been seeded with, beyond the defaults.
-Three values: `cues` — the home was seeded with `seed_capability_home.py
+Four values: `cues` — the home was seeded with `seed_capability_home.py
 --cues` and `seed_cues.exs` (`FERMIX_CAP_SEED_ARGS=--cues capability-daemon.sh up`
 does both), which turns cues on, writes the door, the local-push sources and the
 default filter model, and makes the watchers. It is opt-in because cues add
@@ -55,6 +55,24 @@ runs. On a home seeded without it `run_eval.py` holds the case out as **NOT
 EVALUATED** (it looks for the executable stub at `eval-bin/claude` in the home).
 With it every Claude Code run in the home fails, so a case that needs a real
 Claude Code is not run on that seed.
+
+`phone_calls` — the home was seeded with `seed_capability_home.py --phone-calls`
+(`FERMIX_CAP_SEED_ARGS=--phone-calls capability-daemon.sh up`), which turns phone
+calls on with an invented trunk and key (`evallib.phone_sim.SEEDED`), so the eval
+daemon's calls reach the runners' simulated GPT-Live endpoint and nothing else (a
+development build decides at boot, `FermixCore.Application.phone_call_transport_opts/2`,
+from the `FERMIX_EVAL_FIXTURE_ORIGIN` `capability-daemon.sh` starts it with)
+(what it records is under `phone` in *`fixture_state`*, and a case's turns may
+wait on its calls, `await` and `after` under *Case*). On a home seeded without it `run_eval.py` holds the
+case out as **NOT EVALUATED** (it reads `eval-fixtures/phone_calls.json` in the
+home). A case that requires it places calls: `run_eval.py` starts the fixture
+server with the simulator for it and binds it a token, whether or not its prompts
+name a page. It runs only with `--reset-home`, so every attempt starts from the
+seeded world (each dial spends one of the home's five daily attempts, and a lost
+create holds its one call slot for hours); without it the case is **NOT
+EVALUATED** with that reason, never failed or passed, decided in the one place
+the other requirements are (`run_eval.requirement_problem`). Only `run_eval.py`
+reads it; in a capability suite it is a load error.
 
 A **case** may declare `requires:` too, from the same values, when its suite runs
 without that seed (`coding_harness.yaml`'s `claude_code_signed_out_run`): the
@@ -265,7 +283,25 @@ the `query` shorthand; multi-turn uses `turns`.
   `defaults.expect`; the final turn's is merged over the case-level `expect` too,
   so a turn's own key always wins over a default. A key the case and its final
   turn both declare with different values is a load error (prohibition lists
-  accumulate instead).
+  accumulate instead). A case that requires `phone_calls` (and is `drive: ask`)
+  has two more turn keys, never on its first turn:
+  - `await: call_report`, with no `query` — this turn is the call's own report:
+    when a call ends, Fermix starts a turn of its own in the conversation that
+    asked for it. The runner waits for it (bounded by the case's `timeout_ms`
+    plus 60 s), finds it as the one `agent:main` trace on the case's thread that
+    none of the attempt's queries started, and grades it with the turn's
+    `expect` like any turn but for latency, which nothing measures. The judge
+    sees it as Fermix's report (its text) and the reply the owner heard. A
+    report Fermix sends as text instead of a turn (an owner's own stop) has no
+    trace: the turn, and the case, are INCOMPLETE, never failed. The case's
+    `fixture_state` is still graded then, on the simulator's record read when
+    the case stopped, so a second create or a leak fails it (a violated
+    `absent:` clause is conclusive); a positive clause that cannot hold yet
+    leaves it INCOMPLETE.
+  - `after: call_end`, with a `query` — before driving it, wait until every
+    call the attempt placed has ended on the simulator (`phone.calls.<n>.ended`),
+    reading its record once a second, bounded by the case's `timeout_ms`; a wait
+    that runs out leaves the case INCOMPLETE.
 - **Run placeholders** — four tokens `run_eval.py` substitutes before driving a
   turn, in `query` **and** in every string inside `expect` (at any depth):
   - `__EVAL_RUN_ID__` — this run's id, unique per invocation.
@@ -467,8 +503,8 @@ March statement; only this one can say which button was pressed, and only
   compact JSON). A path a page never reported is ABSENT, which is why a page
   reports a consequential press only when it happens.
 - A case declaring `fixture_state` must address the fixture server with
-  `__EVAL_FIXTURE_URL__`, or it is a load error: without a bound token every
-  `absent:` clause would be vacuously green forever. `defaults.expect` may not
+  `__EVAL_FIXTURE_URL__` or require `phone_calls`, or it is a load error: without
+  a bound token every `absent:` clause would be vacuously green forever. `defaults.expect` may not
   set it — each case asserts what its OWN page recorded — and neither may a
   TURN: the capability runner reads the case's expect, so a turn-level one would
   be scored by nobody, and page state accumulates across a case's turns anyway.
@@ -483,6 +519,38 @@ March statement; only this one can say which button was pressed, and only
   proof — the forbidden path being in the map is a report that arrived. The
   `page.ready` path is reserved, so it can neither satisfy nor violate a clause
   a suite writes.
+- **Phone calls are recorded under `phone`.** In a case that requires
+  `phone_calls`, the simulated GPT-Live endpoint (`bin/evallib/phone_sim.py`)
+  writes what the call did into the same map, under the reserved `phone` subtree
+  a page may never report into: `phone.creates` (every create this attempt sent),
+  `phone.extra_creates` (the destination of every create after the first), and
+  `phone.unmatched_hangups` (hangups for a session it never opened); per
+  destination `phone.calls.n<digits>.` `creates`, `script`, `refused`,
+  `create_status` (the status it answered the create with), `checks` (`ok` when
+  the create carried the seeded key and trunk), `brief` (the text of the
+  create's `session.input`, for value clauses on what the mandate carries:
+  `matches:` the party, the time in any form, the date, the name), `briefed`
+  (the first pattern the script forbids, or a seeded credential, that the
+  create's instructions or input carried), `attached`, `opening`, `replies`
+  (every reply Fermix sent for a delegation, in order, each `{text, at_ms}` on
+  the call's clock), `marks.<label>` (when the script passed a `mark` step) and
+  `said_after.<label>` (every commentary but the opening instruction sent once
+  that mark had passed: a voicemail case asserts it `absent:`), `keys`,
+  `hangups` (every hangup request for the session, those after its end too, so
+  `equals: 1` means exactly one), `hangup_ms` (when the first one came),
+  `leaked` (the first forbidden pattern any append carried), `protocol_errors`
+  and `ended` (`close_requested` is the close Fermix asked for; a script that
+  waits out its own hold ends `expired`, so a case asserting
+  `close_requested` fails then). Both speakers share one clock: a line starts
+  after the previous line of either speaker ended, plus a pause, and lasts as
+  long as its words, so nobody is talked over unless the script says so
+  (`cut_in`). A create belongs to the attempt bound last; everything after it to
+  that session's attempt. An `absent:` clause under `phone` is answered by the
+  simulator's own liveness key, `phone.ready` (written when the attempt is bound
+  on a server playing calls), not by a page, so "nothing was dialed" is
+  `{ path: phone.creates, absent: true }`. That proves the simulator served the
+  attempt, not that the daemon was pointed at it: the dial cases' `equals: 1` in
+  the same run are that proof.
 - **Always sticky, on the same evidence as the tool bans.** A violated `absent:`
   clause is the page's own record that the action happened, which no retry
   unmakes, so it fails the case in any attempt without a scenario declaring

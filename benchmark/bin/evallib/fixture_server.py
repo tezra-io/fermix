@@ -56,6 +56,18 @@ directory serving, no filesystem read per request, no path traversal), and
 nothing a request sends is ever reflected into an HTML response. `GET
 /s/<token>/state` answers JSON, for a person debugging a page by hand; the
 runner reads the same state in process.
+
+A SIMULATED PHONE ENDPOINT. Started with `phone_scripts` (a run with a case
+whose home must be seeded with `--phone-calls`), the same server also answers
+the three GPT-Live routes a phone call uses, `POST /v1/live/sessions`, `GET
+/v1/live/sessions/<id>/attach` (a WebSocket) and `POST
+/v1/live/sessions/<id>/hangup`, and plays the call the destination's script
+describes (`evallib/phone_sim.py`). What it records is the case attempt's, under
+the reserved `phone` subtree of the same state map, which a page may not
+report into: a create belongs to the attempt bound last, and everything after
+it to that session's attempt. Its liveness key is `phone.ready`, written when
+an attempt is bound on a server playing calls, so an `absent:` clause under
+`phone` (nothing was dialed) is answered without a page having loaded.
 """
 
 from __future__ import annotations
@@ -71,6 +83,8 @@ from dataclasses import dataclass
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
+
+from . import phone_sim
 
 # The run placeholder a suite writes instead of a literal port (suites/SCHEMA.md).
 # Expands to this server's per-attempt base URL, `http://127.0.0.1:<port>/s/<token>`.
@@ -92,6 +106,13 @@ EVENT_KEYS_PATH = "event_keys"
 # by the reports and not by the page fetch. Its own path is reserved, so it can
 # neither satisfy nor violate a clause a suite writes.
 PAGE_READY_PATH = "page.ready"
+# The simulated phone endpoint's own subtree, and its liveness key: a page may
+# report neither (`record`), so what a call did is the simulator's record alone.
+PHONE_KEY = phone_sim.PHONE_KEY
+PHONE_READY_PATH = phone_sim.PHONE_READY_PATH
+# Bound on what the simulator records for one attempt: one entry per create,
+# key, hangup and append, far above a case's few calls.
+MAX_PHONE_RECORDS_PER_TOKEN = 512
 # Bounds. A fixture event is a handful of short fields, so these are far above
 # anything a page legitimately sends and still cap what one run can hold.
 MAX_BODY_BYTES = 2048
@@ -151,13 +172,21 @@ class _TokenState:
     state: dict
     # The current sign-in's secret, or None before the first sign-in.
     session: str | None = None
+    # What the simulated phone endpoint recorded for this attempt, and how many
+    # records it wrote (`settle` counts them with the page's events).
+    phone: dict | None = None
+    phone_records: int = 0
 
 
 class FixtureServer:
-    def __init__(self, pages_dir: str, helper: str | None = None) -> None:
+    def __init__(self, pages_dir: str, helper: str | None = None,
+                 phone_scripts: str | None = None, phone_realtime: bool = True) -> None:
         """`helper` is the harness's own `fixture.js`, served beside a pages directory
         kept elsewhere (the private holdout's), so that directory never carries a copy
-        of the reporting contract that could drift from this server."""
+        of the reporting contract that could drift from this server. `phone_scripts`
+        is the directory of phone scripts, which makes this server the simulated
+        GPT-Live endpoint as well (`evallib/phone_sim.py`); `phone_realtime` False
+        keeps the calls' timeline and stops waiting it out (specs only)."""
         if not isinstance(pages_dir, str) or not pages_dir:
             raise ServerError("FixtureServer needs the fixture pages directory")
         self.pages_dir = os.path.realpath(os.path.expanduser(pages_dir))
@@ -169,6 +198,14 @@ class FixtureServer:
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._port: int | None = None
+        self._phone_token: str | None = None
+        self.phone = None
+        if phone_scripts is not None:
+            try:
+                scripts = phone_sim.load_scripts(phone_scripts)
+            except phone_sim.ScriptError as exc:
+                raise ServerError(f"phone scripts cannot be played: {exc}") from exc
+            self.phone = phone_sim.PhoneSimulator(self, scripts, realtime=phone_realtime)
 
     # --- lifecycle ---
 
@@ -192,6 +229,8 @@ class FixtureServer:
     def stop(self) -> None:
         if self._httpd is None:
             return
+        if self.phone is not None:
+            self.phone.close_all()
         self._httpd.shutdown()
         self._httpd.server_close()
         if self._thread is not None:
@@ -223,7 +262,11 @@ class FixtureServer:
                 raise ServerError(
                     f"fixture server holds the maximum {MAX_LIVE_TOKENS} tokens; "
                     "a run this large needs the cap raised deliberately, not silently")
-            self._tokens[token] = _TokenState(events=[], state={})
+            phone = {"ready": True} if self.phone is not None else None
+            self._tokens[token] = _TokenState(events=[], state={}, phone=phone)
+            if phone is not None:
+                # Every create from now on is this attempt's (one at a time per home).
+                self._phone_token = token
         return FixtureBinding(server=self, token=token, url=self.url_for(token))
 
     def url_for(self, token: str) -> str:
@@ -240,7 +283,10 @@ class FixtureServer:
             entry = self._tokens.get(token)
             if entry is None:
                 raise ServerError(f"no fixture token bound: {token!r}")
-            return json.loads(json.dumps(entry.state))
+            state = dict(entry.state)
+            if entry.phone is not None:
+                state[PHONE_KEY] = entry.phone
+            return json.loads(json.dumps(state))
 
     def events(self, token: str) -> list[dict]:
         with self._lock:
@@ -260,7 +306,7 @@ class FixtureServer:
         the cost on every case and still races), and never unbounded (which would
         hang a run on a page reporting in a loop). `clock`/`sleep` are injected
         so the bound is testable without waiting for it."""
-        count = len(self.events(token))
+        count = self._activity(token)
         quiet_until = clock() + SETTLE_QUIET_MS / 1000
         deadline = clock() + SETTLE_CAP_MS / 1000
         for _ in range(_SETTLE_MAX_POLLS):
@@ -268,10 +314,18 @@ class FixtureServer:
             if now >= quiet_until or now >= deadline:
                 return count
             sleep(SETTLE_POLL_MS / 1000)
-            current = len(self.events(token))
+            current = self._activity(token)
             if current != count:
                 count, quiet_until = current, clock() + SETTLE_QUIET_MS / 1000
         return count
+
+    def _activity(self, token: str) -> int:
+        """The page's reports and the simulator's records, counted together."""
+        with self._lock:
+            entry = self._tokens.get(token)
+            if entry is None:
+                raise ServerError(f"no fixture token bound: {token!r}")
+            return len(entry.events) + entry.phone_records
 
     def record(self, token: str, key, value) -> str | None:
         """Fold one reported event into the token's events and state. Returns the
@@ -284,6 +338,8 @@ class FixtureServer:
             return f"key may name at most {MAX_PATH_DEPTH} path segments"
         if key == EVENT_KEYS_PATH or key.startswith(EVENT_KEYS_PATH + "."):
             return f"{EVENT_KEYS_PATH} is derived by the server and cannot be reported"
+        if key == PHONE_KEY or key.startswith(PHONE_KEY + "."):
+            return f"{PHONE_KEY} is the simulated phone endpoint's record and cannot be reported"
         with self._lock:
             entry = self._tokens.get(token)
             if entry is None:
@@ -314,6 +370,46 @@ class FixtureServer:
         if session is None or not isinstance(presented, str):
             return False
         return hmac.compare_digest(session.encode("utf-8"), presented.encode("utf-8"))
+
+    # --- the simulated phone endpoint's record (phone_sim calls these) ---
+
+    def phone_token(self) -> str | None:
+        """The attempt a new create belongs to: the one bound last."""
+        with self._lock:
+            return self._phone_token
+
+    def phone_set(self, token: str, path: str, value) -> None:
+        self._phone_write(token, path, lambda _old: value)
+
+    def phone_set_once(self, token: str, path: str, value) -> None:
+        """The first value stays: the first leak is the one a case names."""
+        self._phone_write(token, path, lambda old: value if old is None else old)
+
+    def phone_add(self, token: str, path: str, delta: int) -> int:
+        return self._phone_write(token, path, lambda old: (old or 0) + delta)
+
+    def phone_append(self, token: str, path: str, item, cap: int) -> None:
+        self._phone_write(token, path, lambda old: (old or []) + ([item] if len(old or []) < cap
+                                                                  else []))
+
+    def phone_concat(self, token: str, path: str, text: str) -> None:
+        self._phone_write(token, path, lambda old: (old or "") + text)
+
+    def _phone_write(self, token: str, path: str, update):
+        """Apply `update` to the value at `phone.<path>`, bounded per attempt. A
+        record past the bound is dropped, and the drop itself is recorded."""
+        with self._lock:
+            entry = self._tokens.get(token)
+            if entry is None or entry.phone is None:
+                return None
+            if entry.phone_records >= MAX_PHONE_RECORDS_PER_TOKEN:
+                entry.phone["overflow"] = True
+                return None
+            present, old = read_path(entry.phone, path)
+            value = update(old if present else None)
+            assign_path(entry.phone, path, value)
+            entry.phone_records += 1
+            return value
 
     # --- request bodies (the handler's half, kept out of the HTTP class) ---
 
@@ -495,11 +591,22 @@ def check_state(state, clauses) -> StateVerdict:
         return StateVerdict(False, "; ".join(detail for _clause, detail in failed),
                             conclusive)
     unproven = [clause["path"] for clause in clauses if "absent" in clause]
-    if unproven and not read_path(state, PAGE_READY_PATH)[0]:
+    on_page = [path for path in unproven if not _phone_path(path)]
+    if on_page and not read_path(state, PAGE_READY_PATH)[0]:
         return StateVerdict(False, f"the page never reported in (no `{PAGE_READY_PATH}` "
-                            f"on this token), so absent clause(s) {', '.join(unproven)} "
+                            f"on this token), so absent clause(s) {', '.join(on_page)} "
+                            "prove nothing", False)
+    # A phone clause is the simulator's record, so its liveness is the simulator's.
+    on_phone = [path for path in unproven if _phone_path(path)]
+    if on_phone and not read_path(state, PHONE_READY_PATH)[0]:
+        return StateVerdict(False, f"no simulated phone endpoint served this attempt (no "
+                            f"`{PHONE_READY_PATH}`), so absent clause(s) {', '.join(on_phone)} "
                             "prove nothing", False)
     return StateVerdict(True, f"{len(clauses)} recorded-state clause(s) hold", True)
+
+
+def _phone_path(path: str) -> bool:
+    return path == PHONE_KEY or path.startswith(PHONE_KEY + ".")
 
 
 def _clause_failure(state: dict, clause: dict) -> str:
@@ -556,9 +663,21 @@ def _shown(value, limit: int = 120) -> str:
 # --- suite helpers ----------------------------------------------------------
 
 def case_uses_fixture(case) -> bool:
-    """Whether this case's prompts address the fixture server. The runners start
-    the server if and only if a SELECTED case does, before spending anything."""
-    return any(FIXTURE_URL_PLACEHOLDER in turn.query for turn in case.turns)
+    """Whether this case addresses the fixture server: its prompts name a page,
+    or it places phone calls (`case_uses_phone`). The runners start the server
+    if and only if a SELECTED case does, before spending anything."""
+    return case_uses_phone(case) or case_uses_pages(case)
+
+
+def case_uses_pages(case) -> bool:
+    """Whether this case's prompts name a fixture page (`FIXTURE_URL_PLACEHOLDER`)."""
+    return any(FIXTURE_URL_PLACEHOLDER in (turn.query or "") for turn in case.turns)
+
+
+def case_uses_phone(case) -> bool:
+    """Whether this case's home must be seeded with `--phone-calls`, so its calls
+    reach the simulated phone endpoint (the loader sets `phone_calls`)."""
+    return bool(getattr(case, "phone_calls", False))
 
 
 # --- HTTP -------------------------------------------------------------------
@@ -568,6 +687,10 @@ def _make_handler(fixtures: FixtureServer):
         protocol_version = "HTTP/1.1"
 
         def do_GET(self) -> None:  # noqa: N802 - stdlib callback name
+            path = urlparse(self.path).path
+            if fixtures.phone is not None and fixtures.phone.handles(path):
+                fixtures.phone.get(self, path)
+                return
             token, tail = _route(self.path)
             if token is None or not fixtures.token_exists(token):
                 self._refuse(404, b"")
@@ -591,6 +714,10 @@ def _make_handler(fixtures: FixtureServer):
             self._send(200, content_type, body)
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib callback name
+            path = urlparse(self.path).path
+            if fixtures.phone is not None and fixtures.phone.handles(path):
+                fixtures.phone.post(self, path)
+                return
             token, tail = _route(self.path)
             if token is None or tail not in ("event", "sign-in") \
                     or not fixtures.token_exists(token):
@@ -691,9 +818,11 @@ def _make_handler(fixtures: FixtureServer):
 
 
 def _route(raw_path: str) -> tuple[str | None, str]:
-    """The whole routing table: `/s/<token>/<tail>` and nothing else (a tail is a
+    """The page routing table: `/s/<token>/<tail>` and nothing else (a tail is a
     document, `state`, `event`, `sign-in` or `session`). Returns
-    (None, "") for every other shape, which the handler answers 404."""
+    (None, "") for every other shape, which the handler answers 404. The
+    simulated phone endpoint's three routes are checked before this, and only
+    on a server playing calls."""
     parts = urlparse(raw_path).path.split("/")
     if len(parts) != 4 or parts[0] != "" or parts[1] != "s":
         return None, ""

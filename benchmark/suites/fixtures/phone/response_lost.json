@@ -1,0 +1,6 @@
+{
+  "name": "response_lost",
+  "number": "+13035550157",
+  "party": "Flatirons Tire & Auto in Denver. The create is read in full and its answer is lost: the connection closes with no response, so whether a call was placed is unknown.",
+  "create": "lose_response"
+}

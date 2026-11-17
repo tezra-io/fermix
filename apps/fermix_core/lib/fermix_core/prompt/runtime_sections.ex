@@ -408,6 +408,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
       |> Enum.reject(&screen_out_of_reach?/1)
       |> Enum.reject(&credential_gated_when_unready?/1)
       |> Enum.reject(&call_scoped?/1)
+      |> Enum.reject(&phone_call_unlisted?/1)
       |> Enum.reject(&open_loop_unlisted?/1)
       |> Enum.reject(&kept_unlisted?/1)
       |> Enum.group_by(&(&1.metadata[:category] || :system))
@@ -473,6 +474,14 @@ defmodule FermixCore.Prompt.RuntimeSections do
   # a call names it instead, and the wire carries its schema then.
   defp call_scoped?(%{metadata: %{tool_module: VoiceCallContext}}), do: true
   defp call_scoped?(_capability), do: false
+
+  # The phone-call family (M94 §06, §07), whose one registered member is
+  # `phone_call`: it is offered per turn by a switch that is live both ways,
+  # which a catalog cached per profile cannot follow, so the catalog never
+  # names it, and the wire carries its schema on the turns that are offered
+  # it. Keyed on the family's category, which every member declares.
+  defp phone_call_unlisted?(%{kind: :builtin, metadata: %{category: :phone_call}}), do: true
+  defp phone_call_unlisted?(_capability), do: false
 
   @doc """
   Whether a capability is an open-loop tool no prompt may name right now (M78

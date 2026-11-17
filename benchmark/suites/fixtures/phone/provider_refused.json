@@ -1,0 +1,13 @@
+{
+  "name": "provider_refused",
+  "number": "+16025550139",
+  "party": "Copper Kettle Bakery in Phoenix. The provider refuses the create in its own words; nothing rings.",
+  "create": {
+    "refuse": {
+      "status": 403,
+      "message": "Outbound call rejected by the SIP trunk: the caller number is not enabled for outbound calls on this connection.",
+      "code": "sip_trunk_rejected",
+      "type": "invalid_request_error"
+    }
+  }
+}

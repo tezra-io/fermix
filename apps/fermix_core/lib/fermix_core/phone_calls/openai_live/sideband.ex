@@ -16,18 +16,24 @@ defmodule FermixCore.PhoneCalls.OpenAILive.Sideband do
   `start_link/1` links the sideband to its caller, the owner, and returns at
   once: the connection opens inside the sideband, so the owner keeps answering
   its own calls meanwhile. The TCP and TLS connect is bounded by
-  `connect_timeout_ms/0` and each read of the upgrade response by
-  `handshake_read_timeout_ms/0`. Those are per step; the owner bounds the whole
-  attach with its own timer (`attach_deadline_ms/0` is their sum) and stops a
-  sideband that has not reported `:attached` by then with `stop/1`.
+  `Limits.sideband_connect_ms/0` and each read of the upgrade response by
+  `Limits.sideband_handshake_read_ms/0`. Those are per step; the owner bounds
+  the whole attach with its own timer (`attach_deadline_ms/0` is their sum)
+  and stops a sideband that has not reported `:attached` by then with
+  `stop/1`.
 
-  The sideband never reconnects. The vendor replays only the last 3 seconds
-  (`replay_window_ms/0`) on an attach, so a second attach is not a resume, and
-  whether to make one is not this module's decision.
+  The sideband never reconnects. The vendor replays only the last 3 seconds on
+  an attach (OpenAI, *Telephony and SIP*), so a second attach is not a resume,
+  and whether to make one is not this module's decision.
 
   ## Messages to the owner
 
-  Every message is `{:phone_sideband, sideband_pid, payload}`:
+  Every message is `{:phone_sideband, sideband_pid, payload}`, its payload
+  passed whole through `OpenAILive.scrubber/1` over the call's API key and
+  the further `:secrets` it was started with (its trunk password): no word
+  the vendor sends (an error's message, a failure's, a close reason, an
+  event of a type this module does not know, raw or not) reaches the owner
+  holding either. The sideband keeps that function, never the secrets.
 
     * `:attached` — the upgrade succeeded. Events follow.
     * `{:attach_failed, reason}` — the attach did not happen. `reason` is
@@ -55,17 +61,13 @@ defmodule FermixCore.PhoneCalls.OpenAILive.Sideband do
   use WebSockex
 
   alias FermixCore.Net.Egress
+  alias FermixCore.PhoneCalls.Limits
+  alias FermixCore.PhoneCalls.OpenAILive
   alias FermixCore.PhoneCalls.OpenAILive.Controls
   alias FermixCore.PhoneCalls.OpenAILive.Events
   alias FermixCore.Realtime.OpenAILiveClient
 
   @ws_base_url "wss://api.openai.com"
-  @connect_timeout_ms 5_000
-  @handshake_read_timeout_ms 5_000
-  @replay_window_ms 3_000
-  # A send is one call into the socket process; past this it is unknown whether
-  # the frame was written.
-  @send_timeout_ms 5_000
   @describe_limit 200
 
   # Never on this socket: the session started at creation, and the call is the
@@ -80,21 +82,9 @@ defmodule FermixCore.PhoneCalls.OpenAILive.Sideband do
   @spec ws_base_url() :: String.t()
   def ws_base_url, do: @ws_base_url
 
-  @doc "The TCP and TLS connect bound."
-  @spec connect_timeout_ms() :: pos_integer()
-  def connect_timeout_ms, do: @connect_timeout_ms
-
-  @doc "The bound on each read of the WebSocket upgrade response."
-  @spec handshake_read_timeout_ms() :: pos_integer()
-  def handshake_read_timeout_ms, do: @handshake_read_timeout_ms
-
   @doc "The owner's bound on a whole attach: connect plus one upgrade read."
   @spec attach_deadline_ms() :: pos_integer()
-  def attach_deadline_ms, do: @connect_timeout_ms + @handshake_read_timeout_ms
-
-  @doc "How far back the vendor replays on an attach (OpenAI, *Telephony and SIP*)."
-  @spec replay_window_ms() :: pos_integer()
-  def replay_window_ms, do: @replay_window_ms
+  def attach_deadline_ms, do: Limits.sideband_connect_ms() + Limits.sideband_handshake_read_ms()
 
   @doc """
   The attach URL for `session_id` under `base_url` (`ws_base_url/0` in
@@ -111,24 +101,51 @@ defmodule FermixCore.PhoneCalls.OpenAILive.Sideband do
   Attaches to `opts[:session_id]` with `opts[:api_key]`, linked to the caller,
   which receives the messages above.
 
-  `:ws_base_url` (default `ws_base_url/0`) and `:egress` (default
-  `Egress.active/0`) are explicit for tests. A destination the configured
-  proxy would carry is refused (`{:error, :proxy_unsupported_transport}`): a
-  WebSocket cannot tunnel, and nothing dials around the proxy.
+  `:ws_base_url` (default `ws_base_url/0`; which origin a build's calls use is
+  the composition root's decision, handed down through
+  `PhoneCalls.CallTransport`) and `:egress` (default `Egress.active/0`). A
+  destination the configured proxy would carry is refused
+  (`{:error, :proxy_unsupported_transport}`): a WebSocket cannot tunnel, and
+  nothing dials around the proxy. A key no request could carry
+  (`OpenAILive.sendable_api_key?/1`) is refused before dialing
+  (`{:error, {:invalid, :api_key}}`). `:secrets` (default none) are the
+  call's other credentials, scrubbed from every message beside the key.
   """
   @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(opts) when is_list(opts) do
     session_id = Keyword.fetch!(opts, :session_id)
     api_key = Keyword.fetch!(opts, :api_key)
-    url = attach_url(Keyword.get(opts, :ws_base_url, @ws_base_url), session_id)
+    secrets = opts |> Keyword.get(:secrets, []) |> secrets!()
     egress = Keyword.get_lazy(opts, :egress, &Egress.active/0)
 
-    with :ok <- Egress.ensure_direct(url, egress),
+    url = attach_url(Keyword.get(opts, :ws_base_url, @ws_base_url), session_id)
+
+    with :ok <- sendable_key(api_key),
+         :ok <- Egress.ensure_direct(url, egress),
          {:ok, start_opts} <-
            OpenAILiveClient.start_options(url, OpenAILiveClient.headers(api_key)) do
-      state = %{owner: self(), seen: Events.new_seen(), attached?: false}
+      state = %{
+        owner: self(),
+        seen: Events.new_seen(),
+        attached?: false,
+        scrub: OpenAILive.scrubber([api_key | secrets])
+      }
+
       WebSockex.start_link(url, __MODULE__, state, start_opts ++ connect_options())
     end
+  end
+
+  # Never named in the error: each one is a credential.
+  defp secrets!(secrets) when is_list(secrets) do
+    if Enum.all?(secrets, &is_binary/1),
+      do: secrets,
+      else: raise(ArgumentError, "a sideband's :secrets must be strings")
+  end
+
+  # The upgrade request is written header by header, unchecked: a key with a
+  # line break would add a header of its own.
+  defp sendable_key(api_key) do
+    if OpenAILive.sendable_api_key?(api_key), do: :ok, else: {:error, {:invalid, :api_key}}
   end
 
   @doc """
@@ -168,27 +185,6 @@ defmodule FermixCore.PhoneCalls.OpenAILive.Sideband do
       sideband,
       Controls.commentary_event(Controls.new_event_id(), delegation_id, content)
     )
-  end
-
-  @doc "Quiet progress for a delegation, not spoken when it arrives."
-  @spec send_thinking(pid(), String.t() | nil, String.t()) :: send_result()
-  def send_thinking(sideband, delegation_id, content) when is_pid(sideband) do
-    send_event(sideband, Controls.thinking_event(Controls.new_event_id(), delegation_id, content))
-  end
-
-  @doc "A session-wide instruction."
-  @spec send_instructions(pid(), String.t()) :: send_result()
-  def send_instructions(sideband, content) when is_pid(sideband) do
-    send_event(sideband, Controls.instructions_event(Controls.new_event_id(), content))
-  end
-
-  @doc """
-  `session.close` over the sideband: the graceful close. Keep receiving until
-  `{:session_closed, _}` or the drain bound, then `close/1`.
-  """
-  @spec send_close(pid()) :: send_result()
-  def send_close(sideband) when is_pid(sideband) do
-    send_event(sideband, Controls.close_event(Controls.new_event_id()))
   end
 
   @doc """
@@ -257,8 +253,8 @@ defmodule FermixCore.PhoneCalls.OpenAILive.Sideband do
     [
       async: true,
       handle_initial_conn_failure: true,
-      socket_connect_timeout: @connect_timeout_ms,
-      socket_recv_timeout: @handshake_read_timeout_ms
+      socket_connect_timeout: Limits.sideband_connect_ms(),
+      socket_recv_timeout: Limits.sideband_handshake_read_ms()
     ]
   end
 
@@ -267,7 +263,7 @@ defmodule FermixCore.PhoneCalls.OpenAILive.Sideband do
   # one that timed out, or died under the call, may have written the frame. The
   # frame (call content) is never part of what is returned.
   defp write(sideband, payload, event_id) do
-    case WebSockex.send_frame(sideband, {:text, payload}, @send_timeout_ms) do
+    case WebSockex.send_frame(sideband, {:text, payload}, Limits.sideband_send_ms()) do
       :ok -> {:ok, event_id}
       {:error, %WebSockex.NotConnectedError{} = error} -> {:error, {:not_sent, error}}
       {:error, %WebSockex.FrameEncodeError{} = error} -> {:error, {:not_sent, error}}
@@ -310,5 +306,6 @@ defmodule FermixCore.PhoneCalls.OpenAILive.Sideband do
 
   defp describe(term), do: inspect(term, limit: 5, printable_limit: @describe_limit)
 
-  defp notify(%{owner: owner}, payload), do: send(owner, {:phone_sideband, self(), payload})
+  defp notify(%{owner: owner, scrub: scrub}, payload),
+    do: send(owner, {:phone_sideband, self(), scrub.(payload)})
 end

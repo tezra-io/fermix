@@ -189,7 +189,13 @@ defmodule FermixCore.Management.ProtocolTest do
              "accessories.check.start",
              "accessories.check.stop",
              "accessories.calibrate",
-             "accessories.set"
+             "accessories.set",
+             "phone_calls.status",
+             "phone_calls.list",
+             "phone_calls.stop",
+             "phone_calls.recovery.get",
+             "phone_calls.recovery.confirm",
+             "lifecycle.prepare_restart"
            ]
 
     assert Protocol.error_codes() == [

@@ -86,6 +86,9 @@ defmodule FermixCore.Home.Role do
     {FermixCore.OpenLoops.CheckInSupervisor, "runs an open loop's check-in turn"},
     {FermixCore.Harness.Supervisor,
      "reconciles coding runs and delivers a finished one as a continuation turn"},
+    {FermixCore.PhoneCalls.Supervisor,
+     "places the home's phone calls and settles their rows in memory.db; only the primary " <>
+       "dials, and a device opens no database"},
     {FermixCore.SkillCuration.Scheduler, "curates skills from conversations"},
     {FermixCore.Cues.Supervisor, "admits outside cues that start turns"},
     {FermixCore.Meetings.Supervisor,

@@ -97,6 +97,9 @@ defmodule FermixCore.Capabilities.Activity do
     "join_meeting" => "Joining a meeting",
     "leave_meeting" => "Leaving a meeting",
     "list_meetings" => "Looking at meetings",
+    "phone_call" => "Handling a call",
+    "phone_call_press_keys" => "Pressing keys on the call",
+    "phone_call_end" => "Hanging up the call",
     "manage_watcher" => "Changing a watcher",
     "list_cues" => "Looking at what your watchers received",
     "cue_history" => "Looking at what this watcher received before"

@@ -2,7 +2,9 @@ defmodule Fermix.CLI.SettingsCommand do
   @moduledoc """
   `fermix settings`: lists, shows and changes the running daemon's settings
   over the management protocol (`settings.*`, `secret.*`,
-  `providers.set_primary`, `setup.state.get`).
+  `providers.set_primary`, `setup.state.get`), and an unresolved phone call's
+  recovery view and the owner's word that it ended
+  (`phone_calls.recovery.get`, `phone_calls.recovery.confirm`).
 
   A daemon-only client. With no daemon it exits 3 and writes nothing itself: a
   tree-less VM has no restart-state baseline, so a local write would pass the
@@ -117,6 +119,22 @@ defmodule Fermix.CLI.SettingsCommand do
     deps
     |> call("settings.reload", reload_params(section), @write_ms)
     |> emit(&Render.reload/1, flags, ctx, deps)
+  end
+
+  defp exec({:phone_calls_recovery, flags}, deps) do
+    ctx = context("fermix settings phone-calls recovery", :read, @read_ms)
+
+    deps
+    |> call("phone_calls.recovery.get", %{}, @read_ms)
+    |> emit(&Render.phone_call_recovery/1, flags, ctx, deps)
+  end
+
+  defp exec({:phone_calls_confirm_ended, call_id, flags}, deps) do
+    ctx = context("fermix settings phone-calls confirm-ended", :change, @write_ms)
+
+    deps
+    |> call("phone_calls.recovery.confirm", %{"call_id" => call_id}, @write_ms)
+    |> emit(&Render.phone_call_confirmed/1, flags, ctx, deps)
   end
 
   defp reload_params(nil), do: %{}

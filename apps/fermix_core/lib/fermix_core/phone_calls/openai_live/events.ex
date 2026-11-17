@@ -66,11 +66,11 @@ defmodule FermixCore.PhoneCalls.OpenAILive.Events do
 
   The sideband replays the last 3 seconds when it attaches, and replayed events
   keep their original `event_id`. `dedupe/2` drops an id it has already seen,
-  within a bounded memory of the most recent `seen_cap/0` ids. Events with no
+  within a bounded memory of the most recent `Limits.max_seen_event_ids/0` ids. Events with no
   id (reflected audio) are never treated as duplicates.
   """
 
-  @seen_cap 1_024
+  alias FermixCore.PhoneCalls.Limits
 
   @type speaker :: :remote | :assistant
   @type append_kind :: :instructions | :thinking | :commentary
@@ -127,13 +127,9 @@ defmodule FermixCore.PhoneCalls.OpenAILive.Events do
     "session.commentary.appended" => :commentary
   }
 
-  @doc "How many recent event ids `dedupe/2` remembers."
-  @spec seen_cap() :: pos_integer()
-  def seen_cap, do: @seen_cap
-
-  @doc "An empty memory of seen event ids, bounded to `cap` (default `seen_cap/0`)."
+  @doc "An empty memory of seen event ids, bounded to `cap` (default `Limits.max_seen_event_ids/0`)."
   @spec new_seen(pos_integer()) :: seen()
-  def new_seen(cap \\ @seen_cap) when is_integer(cap) and cap > 0 do
+  def new_seen(cap \\ Limits.max_seen_event_ids()) when is_integer(cap) and cap > 0 do
     %{ids: MapSet.new(), order: :queue.new(), cap: cap}
   end
 

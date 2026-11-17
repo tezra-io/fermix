@@ -46,6 +46,7 @@ defmodule FermixCore.PhoneCalls.SupervisorTest do
 
     names = %{
       supervisor: :"phone_sup_#{unique}",
+      call_registry: :"phone_sup_registry_#{unique}",
       handoff_supervisor: :"phone_sup_handoff_#{unique}",
       manager: :"phone_sup_manager_#{unique}",
       call_supervisor: :"phone_sup_calls_#{unique}",
@@ -91,7 +92,8 @@ defmodule FermixCore.PhoneCalls.SupervisorTest do
     %{
       brief: brief,
       brief_hash: Brief.hash(brief),
-      request_id: "main-sup-#{System.unique_integer([:positive])}",
+      request_id: "req-sup-#{System.unique_integer([:positive])}",
+      parent_session: "main-sup-#{System.unique_integer([:positive])}",
       owner_id: "default",
       operation: "phone_call.start",
       authorization: "direct",
@@ -120,7 +122,7 @@ defmodule FermixCore.PhoneCalls.SupervisorTest do
     request = request()
 
     TelemetryCapture.attach([[:fermix, :phone_call, :run_error]],
-      parent_session: request.request_id
+      parent_session: request.parent_session
     )
 
     assert {:ok, %{call_id: id}} = Manager.start_call(request, ctx.names.manager)

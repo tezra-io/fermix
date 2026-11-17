@@ -78,6 +78,14 @@ defmodule FermixCore.PhoneCalls.UsNumbers do
           :not_e164 | :not_nanp_number | :destination_not_us | :emergency_or_special_number
 
   @doc """
+  Whether `value` is an E.164 number at all: a `+`, then one to fifteen digits,
+  the first not 0. Pure: the one shape the settings, the brief and the call's
+  own request check all mean by a number.
+  """
+  @spec e164?(term()) :: boolean()
+  def e164?(value), do: is_binary(value) and Regex.match?(@e164, value)
+
+  @doc """
   `:ok` for a number in a US state or DC that is not special, or the reason it
   is not one: `:not_e164` (not an E.164 number at all), `:not_nanp_number` (a
   +1 number NANP could never assign), `:destination_not_us`, or
@@ -86,7 +94,7 @@ defmodule FermixCore.PhoneCalls.UsNumbers do
   @spec classify(String.t()) :: :ok | {:error, reason()}
   def classify(number) when is_binary(number) do
     cond do
-      not Regex.match?(@e164, number) -> {:error, :not_e164}
+      not e164?(number) -> {:error, :not_e164}
       not String.starts_with?(number, "+1") -> {:error, :destination_not_us}
       true -> classify_nanp(Regex.run(@nanp, number, capture: :all_but_first))
     end

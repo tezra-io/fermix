@@ -2808,6 +2808,69 @@ defmodule FermixOpik.AggregationTest do
       refute span_named(turn.spans, "phone_call:pc_0a1b2c3d4e5f")
     end
 
+    # What a call's backend turns emit (`Agents.PhoneCallTurn`, each turn under
+    # the call's own session with no `parent_session`, `agent: "phone_call"`):
+    # a provider call and one exec event per tool call, the in-call controls'
+    # metadata as the tools write it, then the outcome extraction's one
+    # provider call. Every span nests under the call's wrapper, and the turns
+    # open no root of their own.
+    test "a call's backend turns and its outcome extraction nest whole under the call" do
+      turn_call = fn ms ->
+        {[:fermix, :provider, :call], %{duration_ms: ms},
+         %{
+           provider: :openai,
+           model: "gpt-5",
+           status: :ok,
+           session_id: @phone_session,
+           agent: "phone_call"
+         }}
+      end
+
+      tool = fn name, extra ->
+        {[:fermix, :tool, :exec], %{duration_ms: 3},
+         Map.merge(
+           %{tool: name, success: true, session_id: @phone_session, agent: "phone_call"},
+           extra
+         )}
+      end
+
+      {_state, closed} =
+        run([
+          {@phone_start, %{}, phone_meta(%{status: "admitted", max_duration_ms: 660_000})},
+          turn_call.(400),
+          tool.("phone_call_press_keys", %{key_count: 1}),
+          turn_call.(300),
+          turn_call.(350),
+          tool.("phone_call_end", %{reason: "done"}),
+          turn_call.(200),
+          {[:fermix, :provider, :call], %{duration_ms: 900},
+           %{
+             provider: :openai,
+             model: "gpt-5",
+             status: :ok,
+             session_id: @phone_session,
+             agent: "phone_call_outcome"
+           }},
+          {@phone_complete,
+           %{duration_ms: 95_000, voice_seconds: 95, core_turns: 2, dtmf_keys: 1},
+           phone_meta(%{status: "ended", outcome: "confirmed"})}
+        ])
+
+      assert [%{trace: trace, spans: spans}] = closed
+      assert trace.name == "phone_call:pc_0a1b2c3d4e5f"
+      wrapper = span_named(spans, "phone_call:pc_0a1b2c3d4e5f")
+
+      assert length(spans_of_type(spans, "llm")) == 5
+
+      assert spans |> spans_of_type("tool") |> Enum.map(& &1.name) |> Enum.sort() ==
+               ["phone_call_end", "phone_call_press_keys"]
+
+      for span <- spans, span.id != wrapper.id do
+        assert span.parent_span_id == wrapper.id, "#{span.name} did not nest under the call"
+        assert span.trace_id == trace.id
+      end
+    end
+
     test "an uncertain end exports as errored with its status word and the vendor's words" do
       {_state, closed} =
         run([

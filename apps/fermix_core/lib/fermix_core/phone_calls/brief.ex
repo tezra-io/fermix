@@ -2,8 +2,17 @@ defmodule FermixCore.PhoneCalls.Brief do
   @moduledoc """
   A phone call's mandate (M94 §6, "Brief fields"; §3, "Who may be called"):
   who is called and why, what finishes the task, what the call must not agree
-  to, what it may share, which backend tools it may use, and the number it
-  calls from.
+  to, what it may share, which backend tools it may use, the name it may say it
+  calls for, and the number it calls from.
+
+  The fields: `destination`, `destination_kind` (`:owner | :business`),
+  `number_source`, `contact_name`, `timezone`, `goal`, `completion_criteria`,
+  `must_not_commit`, `alternatives`, `shareable_facts` (`%{label, value}`),
+  `tool_grants`, `times` (`%{label, at}`), `opening_language`, `on_behalf_of`
+  and `caller_number`. `on_behalf_of` is the name the assistant may say it is
+  calling for (the owner's name as a restaurant should hear it), or `nil`: it
+  is shareable with the called party by definition, and a stored brief written
+  without it reads back as `nil`.
 
   `new/2` is the one way to build one. The model supplies the task, as the
   tool's string-keyed parameters; the server supplies its own facts in `opts`:
@@ -43,6 +52,7 @@ defmodule FermixCore.PhoneCalls.Brief do
   @bounds %{
     max_fields: 32,
     contact_name_bytes: 120,
+    on_behalf_of_bytes: 120,
     number_source_bytes: 300,
     goal_bytes: 1_000,
     item_bytes: 300,
@@ -57,7 +67,9 @@ defmodule FermixCore.PhoneCalls.Brief do
     language_bytes: 35
   }
 
-  # Each model-supplied field: its kind, and its default, or `:required`.
+  # Each model-supplied field: its kind, and its default, `:required`, or
+  # `:none`, which is `nil` when absent from parameters and from a stored brief
+  # alike, so a brief stored before the field existed still reads back.
   @fields [
     destination: {:destination, :required},
     destination_kind: {:kind, :required},
@@ -71,7 +83,8 @@ defmodule FermixCore.PhoneCalls.Brief do
     shareable_facts: {:facts, []},
     tool_grants: {:tool_grants, []},
     times: {:times, []},
-    opening_language: {:language, "en"}
+    opening_language: {:language, "en"},
+    on_behalf_of: {{:name, @bounds.on_behalf_of_bytes}, :none}
   ]
 
   @model_keys for {name, _spec} <- @fields, do: Atom.to_string(name)
@@ -96,8 +109,21 @@ defmodule FermixCore.PhoneCalls.Brief do
   @language_tag ~r/\A[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8}){0,3}\z/
   @local_date ~r/\A\d{4}-\d{2}-\d{2}\z/
   @local_time ~r/\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}\z/
-  @line_controls ~r/[\x00-\x1F\x7F]/
-  @text_controls ~r/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/
+  # The one character rule for every string a brief holds, at admission and
+  # from storage alike. A value the owner confirms and a model reads is honest
+  # text: nothing in it breaks a line where none shows, reorders what is read,
+  # or hides between letters. Refused, as `:control_characters`: the C0 and C1
+  # controls (NEL among them) and DEL; LINE and PARAGRAPH SEPARATOR; the
+  # bidirectional controls (LRE, RLE, PDF, LRO, RLO, LRI, RLI, FSI, PDI, LRM,
+  # RLM, ALM); and ZERO WIDTH SPACE and ZERO WIDTH NO-BREAK SPACE, invisible
+  # characters with no role inside a value that can split a word the owner
+  # reads whole. The zero-width joiners (U+200C, U+200D) are kept: Persian,
+  # Arabic and Indic spelling and emoji sequences need them, and neither breaks
+  # a line nor reorders text. A line field refuses every C0 control; a text
+  # field keeps tab, line feed and carriage return. Matched as code points,
+  # after the UTF-8 check.
+  @line_controls ~r/[\x00-\x1F\x7F\x{80}-\x{9F}\x{61C}\x{200B}\x{200E}\x{200F}\x{2028}-\x{202E}\x{2066}-\x{2069}\x{FEFF}]/u
+  @text_controls ~r/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F\x{80}-\x{9F}\x{61C}\x{200B}\x{200E}\x{200F}\x{2028}-\x{202E}\x{2066}-\x{2069}\x{FEFF}]/u
 
   @enforce_keys [:caller_number | Keyword.keys(@fields)]
   defstruct @enforce_keys
@@ -124,6 +150,7 @@ defmodule FermixCore.PhoneCalls.Brief do
           tool_grants: [String.t()],
           times: [%{label: String.t(), at: String.t()}],
           opening_language: String.t(),
+          on_behalf_of: String.t() | nil,
           caller_number: String.t()
         }
 
@@ -180,9 +207,14 @@ defmodule FermixCore.PhoneCalls.Brief do
       "tool_grants" => brief.tool_grants,
       "times" => Enum.map(brief.times, &%{"label" => &1.label, "at" => &1.at}),
       "opening_language" => brief.opening_language,
+      "on_behalf_of" => brief.on_behalf_of,
       "caller_number" => brief.caller_number
     }
   end
+
+  @doc "The schema version `to_map/1` and the canonical encoding carry."
+  @spec schema() :: pos_integer()
+  def schema, do: @schema
 
   @doc "The canonical encoding `hash/1` digests: `to_map/1` as JSON with every key sorted."
   @spec canonical_json(t()) :: String.t()
@@ -192,10 +224,6 @@ defmodule FermixCore.PhoneCalls.Brief do
   @spec hash(t()) :: String.t()
   def hash(%__MODULE__{} = brief),
     do: :sha256 |> :crypto.hash(canonical_json(brief)) |> Base.encode16(case: :lower)
-
-  @doc "The destination kinds a brief may name."
-  @spec destination_kinds() :: [String.t(), ...]
-  def destination_kinds, do: Map.keys(@kinds)
 
   @doc "Every refusal `new/2` returns."
   @spec refusal_reasons() :: [refusal(), ...]
@@ -321,6 +349,7 @@ defmodule FermixCore.PhoneCalls.Brief do
 
   # A stored brief holds every field, so none takes its default there.
   defp absent(:required, _mode), do: {:error, :missing}
+  defp absent(:none, _mode), do: {:ok, nil}
   defp absent(_default, :stored), do: {:error, :missing}
   defp absent(default, :admission), do: {:ok, default}
 
@@ -391,6 +420,17 @@ defmodule FermixCore.PhoneCalls.Brief do
   end
 
   defp value({:line, max}, text, _context), do: text(text, max, @line_controls)
+
+  # An optional name: null or blank is none, anything else one bounded line.
+  defp value({:name, _max}, nil, _context), do: {:ok, nil}
+
+  defp value({:name, max}, name, _context) when is_binary(name) do
+    case text(name, max, @line_controls) do
+      {:error, :blank} -> {:ok, nil}
+      result -> result
+    end
+  end
+
   defp value({:text, max}, text, _context), do: text(text, max, @text_controls)
 
   defp value(:timezone, zone, _context) do

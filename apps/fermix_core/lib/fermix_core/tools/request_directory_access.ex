@@ -289,18 +289,21 @@ defmodule FermixCore.Tools.RequestDirectoryAccess do
 
   `after_confirm` says what happens once the owner confirms: a resumed request
   here, or the daemon running the command itself (`Capabilities.AccessGate`).
+  `expires` is how long the token lives, as the line says it (`"60s"`, unless
+  the request named a longer window).
   """
-  @spec approval_line(String.t(), map(), String.t()) :: String.t()
-  def approval_line(token, context, after_confirm \\ @resume_note)
-      when is_binary(token) and is_map(context) and is_binary(after_confirm) do
+  @spec approval_line(String.t(), map(), String.t(), String.t()) :: String.t()
+  def approval_line(token, context, after_confirm \\ @resume_note, expires \\ "60s")
+      when is_binary(token) and is_map(context) and is_binary(after_confirm) and
+             is_binary(expires) do
     chat_type = Map.get(context, :chat_type)
     private_button? = Map.get(context, :private_approval_button?, false)
 
     if omit_token?(chat_type, private_button?) do
       "Approve with the button below, or privately via `/confirm` in a DM or the CLI " <>
-        "(expires in 60s). " <> after_confirm
+        "(expires in #{expires}). " <> after_confirm
     else
-      "Approve with `/confirm #{token}` (expires in 60s). " <> after_confirm
+      "Approve with `/confirm #{token}` (expires in #{expires}). " <> after_confirm
     end
   end
 

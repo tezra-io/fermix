@@ -3,6 +3,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
 
   alias FermixCore.Acp.Identity
   alias FermixCore.Agents.ConversationKey
+  alias FermixCore.Agents.RequestIdentity
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Agents.TurnRunner
   alias FermixCore.Agents.VoiceCall
@@ -4658,6 +4659,47 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     assert {:error, "adapter failed"} = TurnRunner.run(msg, turn_state, fn _part -> :ok end)
     assert_receive {:message_error, metadata}, 5_000
     metadata
+  end
+
+  # Each turn is the owner request its tools act for: every tool call in it
+  # shares one identity, and the next turn in the same conversation is a new
+  # request with its own.
+  describe "the owner request's identity" do
+    test "each turn mints its own, and a second request in the same chat gets another" do
+      registry_name = :"tr_request_reg_#{System.unique_integer([:positive])}"
+      store_name = :"tr_request_store_#{System.unique_integer([:positive])}"
+      start_supervised!({CapabilityRegistry, name: registry_name})
+
+      store =
+        start_supervised!(
+          {ConversationStore, name: store_name, max_messages: :infinity, repo: nil}
+        )
+
+      msg = %{channel: "cli", chat_id: "requests", sender: "user", content: "hi"}
+
+      turn_state =
+        turn_state(
+          adapter: RecordCwdAdapter,
+          adapter_opts: [model: "mock-model"],
+          capability_registry: registry_name,
+          conversation_store: store,
+          runtime_context: record_cwd_runtime_context(self())
+        )
+
+      [first, second] =
+        for _request <- 1..2 do
+          Process.delete(:record_cwd_step)
+          msg = Map.put(msg, :source_trust, :operator)
+          assert {:ok, "done", _tokens} = TurnRunner.run(msg, turn_state, fn _part -> :ok end)
+          assert_receive {:tool_context, context}
+          context
+        end
+
+      assert RequestIdentity.valid?(first.request_id)
+      assert RequestIdentity.valid?(second.request_id)
+      assert first.request_id != second.request_id
+      assert first.conversation_key == second.conversation_key
+    end
   end
 
   defp run_record_cwd_turn(trust, request_cwd, extra_msg \\ %{}) do

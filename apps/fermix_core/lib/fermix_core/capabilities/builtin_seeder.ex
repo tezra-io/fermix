@@ -20,6 +20,7 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.Harness.Vendors
   alias FermixCore.Meetings
+  alias FermixCore.PhoneCalls.Tools, as: PhoneCallTools
 
   require Logger
 
@@ -256,7 +257,9 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   @doc """
   Every built-in tool module that can be seeded into the capability registry —
   the unconditional ones plus the conditionally-seeded bridge, computer-use,
-  harness, and meetings tools. Exposed for the classification guard test that
+  harness, and meetings tools — and the phone call's in-call controls, which
+  are never seeded: its backend turn builds them through `Builtin` itself
+  (`Agents.PhoneCallTurn`). Exposed for the classification guard test that
   asserts every built-in has an explicit `policy_class` (see
   `FermixCore.Capabilities.Builtin`); membership here is about classification
   coverage, not whether a tool is seeded on a given boot.
@@ -265,6 +268,7 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   def builtin_tool_modules,
     do:
       @builtin_tool_modules ++
+        phone_call_modules() ++
         @bridge_tool_modules ++
         @computer_use_tool_modules ++
         @harness_tool_modules ++ @meetings_tool_modules ++ @cue_tool_modules
@@ -325,6 +329,7 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
 
       :error ->
         @builtin_tool_modules ++
+          PhoneCallTools.registered() ++
           bridge_modules() ++
           computer_use_modules([]) ++
           auto_harness_modules() ++ meetings_modules(opts) ++ cue_modules()
@@ -345,6 +350,19 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   defp bridge_modules do
     if Deferral.enabled?(), do: @bridge_tool_modules, else: []
   end
+
+  # Phone calls (M94 §06, §07): the family `PhoneCalls.Tools.modules/0`
+  # names, for classification coverage. Only `phone_call` is seeded
+  # (`PhoneCalls.Tools.registered/0`, `builtin_modules/1`), and always, like
+  # the open-loop family, because the switch is live both ways
+  # (`Management.PhoneCalls.apply_enabled/2`): a boot-time decision would leave
+  # calls turned on with no tool, or turned off with no status or stop. Its `advertise?/1` offers it only on the owner's
+  # attended turn, with `start` only while phone calls are on (and, while they
+  # are off, status and stop only while a call holds the one-call slot); its
+  # `execute/2` repeats that gate, and no catalog names it
+  # (`Prompt.RuntimeSections`). The two in-call controls are never seeded: a
+  # phone call's backend turn builds them itself (`Agents.PhoneCallTurn`).
+  defp phone_call_modules, do: PhoneCallTools.modules()
 
   @doc """
   The computer-use tool, when this boot can reach a screen: its own

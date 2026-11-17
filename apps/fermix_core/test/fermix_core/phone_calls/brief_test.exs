@@ -345,6 +345,174 @@ defmodule FermixCore.PhoneCalls.BriefTest do
     end
   end
 
+  describe "on_behalf_of, the name the call is made for" do
+    test "is none when absent, null or blank" do
+      for given <- [:absent, nil, "", "   "] do
+        brief_params =
+          if given == :absent, do: params(), else: params(%{"on_behalf_of" => given})
+
+        assert {:ok, %Brief{on_behalf_of: nil}} = Brief.new(brief_params, @opts), inspect(given)
+      end
+    end
+
+    test "is trimmed and kept" do
+      assert {:ok, %Brief{on_behalf_of: "Ada Quill"}} =
+               Brief.new(params(%{"on_behalf_of" => "  Ada Quill "}), @opts)
+    end
+
+    test "is one bounded line of text" do
+      bound = Brief.bounds().on_behalf_of_bytes
+      assert bound == 120
+
+      assert {:ok, _brief} =
+               Brief.new(params(%{"on_behalf_of" => String.duplicate("a", bound)}), @opts)
+
+      for {given, reason} <- [
+            {String.duplicate("a", bound + 1), :too_long},
+            {"Ada\nQuill", :control_characters},
+            {"Ada\u0000Quill", :control_characters},
+            {<<0xFF, 0xFE>>, :invalid_utf8},
+            {42, :not_a_string},
+            {["Ada Quill"], :not_a_string}
+          ] do
+        assert {:error, {:invalid_brief, [{:on_behalf_of, ^reason}]}} =
+                 Brief.new(params(%{"on_behalf_of" => given}), @opts),
+               inspect(given)
+      end
+    end
+
+    test "is part of the mandate's hash and its stored map" do
+      {:ok, none} = Brief.new(params(), @opts)
+      {:ok, named} = Brief.new(params(%{"on_behalf_of" => "Ada Quill"}), @opts)
+
+      assert Brief.hash(none) != Brief.hash(named)
+      assert Brief.to_map(named)["on_behalf_of"] == "Ada Quill"
+      assert Brief.canonical_json(named) =~ ~s("on_behalf_of":"Ada Quill")
+
+      assert {:ok, ^named} =
+               named |> Brief.to_map() |> Jason.encode!() |> Jason.decode!() |> Brief.from_map()
+
+      assert {:ok, ^none} =
+               none |> Brief.to_map() |> Jason.encode!() |> Jason.decode!() |> Brief.from_map()
+    end
+
+    test "a stored brief written without the key reads back as none" do
+      {:ok, named} = Brief.new(params(%{"on_behalf_of" => "Ada Quill"}), @opts)
+      stored = named |> Brief.to_map() |> Map.delete("on_behalf_of")
+
+      assert {:ok, %Brief{on_behalf_of: nil}} = Brief.from_map(stored)
+    end
+
+    test "a stored value is checked like a supplied one" do
+      {:ok, named} = Brief.new(params(%{"on_behalf_of" => "Ada Quill"}), @opts)
+      stored = Map.put(Brief.to_map(named), "on_behalf_of", "Ada\nQuill")
+
+      assert {:error, {:invalid_stored_brief, [{:on_behalf_of, :control_characters}]}} =
+               Brief.from_map(stored)
+    end
+  end
+
+  describe "characters that break a line, reorder text or hide inside it" do
+    # Written as escapes: Elixir refuses a raw bidirectional control in source.
+    @refused [
+      {"NEL", "\u{0085}"},
+      {"C1 first", "\u{0080}"},
+      {"C1 last", "\u{009F}"},
+      {"LINE SEPARATOR", "\u{2028}"},
+      {"PARAGRAPH SEPARATOR", "\u{2029}"},
+      {"LRE", "\u{202A}"},
+      {"RLE", "\u{202B}"},
+      {"PDF", "\u{202C}"},
+      {"LRO", "\u{202D}"},
+      {"RLO", "\u{202E}"},
+      {"LRI", "\u{2066}"},
+      {"RLI", "\u{2067}"},
+      {"FSI", "\u{2068}"},
+      {"PDI", "\u{2069}"},
+      {"LRM", "\u{200E}"},
+      {"RLM", "\u{200F}"},
+      {"ALM", "\u{061C}"},
+      {"ZERO WIDTH SPACE", "\u{200B}"},
+      {"ZERO WIDTH NO-BREAK SPACE", "\u{FEFF}"}
+    ]
+
+    # Each string field, with the value carrying `char` inside it and the
+    # problem that field reports.
+    defp carrying(char) do
+      at = fn text -> "Calloway" <> char <> text end
+
+      [
+        {%{"contact_name" => at.(" Bistro")}, {:contact_name, :control_characters}},
+        {%{"number_source" => at.(" website")}, {:number_source, :control_characters}},
+        {%{"goal" => at.(" table")}, {:goal, :control_characters}},
+        {%{"timezone" => "America/New" <> char <> "_York"}, {:timezone, :control_characters}},
+        {%{"opening_language" => "en" <> char <> "-US"},
+         {:opening_language, :control_characters}},
+        {%{"on_behalf_of" => at.(" Quill")}, {:on_behalf_of, :control_characters}},
+        {%{"completion_criteria" => [at.(" confirms")]},
+         {:completion_criteria, :item_control_characters}},
+        {%{"must_not_commit" => [at.(" deposit")]}, {:must_not_commit, :item_control_characters}},
+        {%{"alternatives" => [at.(" later")]}, {:alternatives, :item_control_characters}},
+        {%{"shareable_facts" => [%{"label" => at.(" name"), "value" => "Ada"}]},
+         {:shareable_facts, :invalid_fact}},
+        {%{"shareable_facts" => [%{"label" => "name", "value" => at.(" Ada")}]},
+         {:shareable_facts, :invalid_fact}},
+        {%{"times" => [%{"label" => at.(" slot"), "at" => "2026-11-21T19:30"}]},
+         {:times, :invalid_time_entry}}
+      ]
+    end
+
+    test "are refused in every string field the model supplies" do
+      for {name, char} <- @refused, {fields, problem} <- carrying(char) do
+        assert Brief.new(params(fields), @opts) == {:error, {:invalid_brief, [problem]}},
+               "#{name} in #{inspect(Map.keys(fields))}"
+      end
+    end
+
+    test "are refused in every string field a stored brief holds" do
+      {:ok, brief} = Brief.new(params(), @opts)
+      stored = Brief.to_map(brief)
+
+      for {name, char} <- @refused, {fields, problem} <- carrying(char) do
+        assert Brief.from_map(Map.merge(stored, fields)) ==
+                 {:error, {:invalid_stored_brief, [problem]}},
+               "#{name} in #{inspect(Map.keys(fields))}"
+      end
+    end
+
+    test "the joiners a script or an emoji needs, and ordinary letters, are kept" do
+      for text <- [
+            "Kabab\u{200C}khaneh",
+            "Family \u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} table",
+            "Café Niño",
+            "寿司 Kaito",
+            "Calloway\u{00A0}Bistro"
+          ] do
+        assert {:ok, brief} =
+                 Brief.new(params(%{"contact_name" => text, "goal" => text}), @opts),
+               text
+
+        assert brief.contact_name == text
+        assert {:ok, ^brief} = brief |> Brief.to_map() |> Brief.from_map()
+      end
+    end
+
+    test "a line break at either end is trimmed away, never kept" do
+      assert {:ok, %Brief{contact_name: "Calloway Bistro"}} =
+               Brief.new(params(%{"contact_name" => "\u{2028}Calloway Bistro\u{2029}"}), @opts)
+    end
+  end
+
+  describe "schema/0" do
+    test "is the schema the stored map and the canonical encoding carry" do
+      {:ok, brief} = Brief.new(params(), @opts)
+
+      assert Brief.schema() == 1
+      assert Brief.to_map(brief)["schema"] == Brief.schema()
+      assert Brief.canonical_json(brief) =~ ~s("schema":#{Brief.schema()})
+    end
+  end
+
   describe "hash/1" do
     test "is the same for the same mandate, whatever order the model wrote it in" do
       {:ok, one} = Brief.new(params(), @opts)

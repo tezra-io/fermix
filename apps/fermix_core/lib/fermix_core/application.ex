@@ -59,6 +59,13 @@ defmodule FermixCore.Application do
   alias FermixCore.OpenLoops.CheckInSupervisor, as: OpenLoopsCheckInSupervisor
   alias FermixCore.OpenLoops.Config, as: OpenLoopsConfig
   alias FermixCore.OpenLoops.Scheduler, as: OpenLoopsScheduler
+  alias FermixCore.PhoneCalls.Call, as: PhoneCallWorker
+  alias FermixCore.PhoneCalls.CallTransport, as: PhoneCallTransport
+  alias FermixCore.PhoneCalls.Delegate, as: PhoneCallDelegate
+  alias FermixCore.PhoneCalls.Manager, as: PhoneCallsManager
+  alias FermixCore.PhoneCalls.OpenAILive, as: PhoneCallOpenAILive
+  alias FermixCore.PhoneCalls.OpenAILive.Sideband, as: PhoneCallSideband
+  alias FermixCore.PhoneCalls.Supervisor, as: PhoneCallsSupervisor
   alias FermixCore.Plugins.CapabilitySeeder, as: PluginCapabilitySeeder
   alias FermixCore.Plugins.Dist.Installer, as: PluginInstaller
   alias FermixCore.Plugins.Dist.Reinstall, as: PluginReinstall
@@ -80,6 +87,7 @@ defmodule FermixCore.Application do
   alias FermixCore.SkillCuration.Scheduler, as: SkillCurationScheduler
   alias FermixCore.Temporal.DeliverySupervisor, as: TemporalDeliverySupervisor
   alias FermixCore.Temporal.Scheduler, as: TemporalScheduler
+  alias FermixCore.Tools.WebFetch.EvalFixture
   alias FermixCore.Trace
 
   # Compile-time env: the boot-time computer-use sidecar ensure is a network
@@ -202,6 +210,30 @@ defmodule FermixCore.Application do
 
     Supervisor.start_link(supervision_children(Egress.activate(), Role.current()), opts)
   end
+
+  # Every orderly stop of the engine (a restart, an upgrade, a move, the
+  # service manager's SIGTERM) passes here, before the supervision tree stops,
+  # so the Repo, the HTTP pools and the hand-off supervisor are all still up:
+  # the call in progress is asked to end and its end report written, within
+  # `PhoneCalls.Limits.shutdown_drain_ms/0`, before anything it needs goes
+  # away (M94 §04, §09). The subtree's own shutdown would run later, with its
+  # workers killed by their supervisor first, and also whenever a crash of an
+  # earlier sibling restarts it under `:rest_for_one`, when the Repo may be
+  # the thing that crashed. A crash or a kill of the engine runs nothing here:
+  # boot reconciliation settles it, as before.
+  @impl true
+  def prep_stop(state) do
+    log_phone_drain(PhoneCallsManager.drain())
+    state
+  end
+
+  defp log_phone_drain(:idle), do: :ok
+
+  defp log_phone_drain(:drained),
+    do: Logger.info("engine stop: the phone call in progress ended before the stop")
+
+  defp log_phone_drain(other),
+    do: Logger.warning("engine stop: phone calls not drained (#{inspect(other)})")
 
   # What a boot writes into its home before any child starts. A candidate
   # (M75 §2) writes nothing there: its home is where a move will rename a
@@ -418,6 +450,14 @@ defmodule FermixCore.Application do
         # feature is disabled; timers are gated by an init-time flag (the scheduler
         # precedent), disabled in `config/test.exs`, never by omission.
         {HarnessSupervisor, harness_worker_opts()},
+        # Phone calls (M94 §04), the harness rail's shape and, like it, always
+        # in the tree: cleanup, status, recovery and report delivery stay
+        # alive while phone calls are off, and the off switch takes effect
+        # with no restart. Admission re-reads readiness on every start, so a
+        # home with phone calls off, or durable memory off, dials nothing.
+        # Primary-only (`Home.Role`). Its boot reconciliation, prune and
+        # delivery ticks run only in the home's daemon (`phone_calls_opts/0`).
+        {PhoneCallsSupervisor, phone_calls_opts()},
         maybe_daemon_socket(),
         maybe_native_host(),
         maybe_realtime_supervisor(),
@@ -839,6 +879,79 @@ defmodule FermixCore.Application do
   defp harness_worker_opts do
     [timer_enabled: Application.get_env(:fermix_core, :harness_workers_enabled, true)]
   end
+
+  # The phone-call subtree's wiring, decided here once (M94 §04): the
+  # per-call worker; what every call's worker is handed beside the Manager's
+  # own args (the transport's wiring, `phone_call_transport_opts/2`, and the
+  # backend a call's turns run on, `config :fermix_core, :phone_calls_delegate`
+  # read through `PhoneCalls.Delegate.configured/0`; with none, `Readiness`
+  # refuses every call); and the Manager's cleanup for a known session no
+  # worker owns, one single-attempt hangup over the same wiring, its key
+  # resolved when it runs.
+  #
+  # Boot reconciliation, the retention prune and the delivery ticks belong to
+  # the home's running engine only (`daemon_boot?/0`): a command that boots
+  # the tree in a process of its own (`fermix memory`, a supervised `fermix
+  # setup`, a mix task) must not settle the daemon's live call as unowned or
+  # hang it up.
+  @doc false
+  @spec phone_calls_opts() :: keyword()
+  def phone_calls_opts, do: phone_calls_opts(daemon_boot?(), @compiled_env)
+
+  @doc false
+  @spec phone_calls_opts(boolean(), atom()) :: keyword()
+  def phone_calls_opts(daemon?, build) when is_boolean(daemon?) and is_atom(build) do
+    transport_opts = phone_call_transport_opts(build)
+
+    delegate =
+      case PhoneCallDelegate.configured() do
+        {:ok, module} -> module
+        {:error, _none} -> nil
+      end
+
+    [
+      call_module: PhoneCallWorker,
+      call_args: %{transport_opts: transport_opts, delegate: delegate},
+      hangup: fn session_id -> PhoneCallTransport.manager_hangup(session_id, transport_opts) end,
+      reconcile: daemon?,
+      timer_enabled: daemon?
+    ]
+  end
+
+  # Where a build's phone calls go, decided here and nowhere else: the
+  # vendor's origins in a release; in a development build, the eval runners'
+  # simulated endpoint when `FERMIX_EVAL_FIXTURE_ORIGIN` is set and honoured
+  # (`Tools.WebFetch.EvalFixture.origin/1`, `opts[:home]` the home whose
+  # manifest is read), a refusal of every call when it is set and not
+  # honoured (never the vendor), the vendor's when it is unset; and in a test
+  # build a refusal of every call, so a test that misses a seam cannot reach
+  # the vendor through the tree's transport.
+  @doc false
+  @spec phone_call_transport_opts(atom(), keyword()) :: keyword()
+  def phone_call_transport_opts(build, opts \\ [])
+
+  def phone_call_transport_opts(:test, _opts), do: [refused: :test_build]
+
+  def phone_call_transport_opts(:dev, opts) do
+    case EvalFixture.origin(Keyword.take(opts, [:home])) do
+      :none ->
+        vendor_phone_origins()
+
+      {:ok, "http://" <> authority = origin} ->
+        [base_url: origin, ws_base_url: "ws://" <> authority]
+
+      {:error, refusal} ->
+        [refused: {:eval_fixture_origin, refusal}]
+    end
+  end
+
+  def phone_call_transport_opts(_release, _opts), do: vendor_phone_origins()
+
+  defp vendor_phone_origins,
+    do: [
+      base_url: PhoneCallOpenAILive.api_base_url(),
+      ws_base_url: PhoneCallSideband.ws_base_url()
+    ]
 
   # The temporal scheduler has no operator TOML surface: reminder timing is
   # internal constants (M30 §6.3). This key exists so `config/test.exs` can keep

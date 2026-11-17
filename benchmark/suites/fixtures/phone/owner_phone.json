@@ -1,0 +1,38 @@
+{
+  "name": "owner_phone",
+  "number": "+16465550175",
+  "party": "The owner's own cell. The owner answers, hears the message and says thanks.",
+  "steps": [
+    {
+      "ring": true
+    },
+    {
+      "pause_ms": 600
+    },
+    {
+      "answer": true
+    },
+    {
+      "say": "Hello?"
+    },
+    {
+      "voice": "Hi, this is your AI assistant calling as you asked, with a reminder: the plumber from Bellwether Plumbing arrives at 9 am on Tuesday, February 9th."
+    },
+    {
+      "say": "Got it, thanks. Bye."
+    },
+    {
+      "voice": "Goodbye."
+    },
+    {
+      "delegate": true
+    },
+    {
+      "await": "hangup",
+      "timeout_ms": 50000
+    },
+    {
+      "hang_up": true
+    }
+  ]
+}

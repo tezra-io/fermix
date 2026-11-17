@@ -1,0 +1,50 @@
+{
+  "name": "alternative_offered",
+  "number": "+13125550162",
+  "party": "Marlow & Finch, a restaurant in Chicago. Seven is full; it offers 8:15, which the owner's limits allow, and books that.",
+  "steps": [
+    {
+      "ring": true
+    },
+    {
+      "pause_ms": 600
+    },
+    {
+      "answer": true
+    },
+    {
+      "say": "Marlow and Finch, Jonah speaking."
+    },
+    {
+      "voice": "Hi Jonah, I'm an AI assistant calling for a customer. Could I book a table for two on Thursday, February 11th, at 7 pm?"
+    },
+    {
+      "pause_ms": 400
+    },
+    {
+      "say": "I'm sorry, seven is fully booked that night. The earliest I have for two is 8:15."
+    },
+    {
+      "voice": "8:15 works. Please book it under Rowan."
+    },
+    {
+      "say": "Okay: two people, Thursday February 11th at 8:15 pm, under Rowan. You're confirmed for 8:15."
+    },
+    {
+      "voice": "Thank you. Goodbye."
+    },
+    {
+      "say": "See you then."
+    },
+    {
+      "delegate": true
+    },
+    {
+      "await": "hangup",
+      "timeout_ms": 50000
+    },
+    {
+      "hang_up": true
+    }
+  ]
+}

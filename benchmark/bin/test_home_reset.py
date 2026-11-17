@@ -54,7 +54,8 @@ seen = open(db).read() if os.path.exists(db) else None
 with open(os.path.join(home, "fake-daemon.log"), "a") as log:
     log.write(json.dumps({"pid": os.getpid(), "memory_db": seen,
                           "path": os.environ.get("PATH", ""),
-                          "fixture_origin": os.environ.get("FERMIX_EVAL_FIXTURE_ORIGIN")}) + "\n")
+                          "fixture_origin": os.environ.get("FERMIX_EVAL_FIXTURE_ORIGIN"),
+                          "openai_key_set": "OPENAI_API_KEY" in os.environ}) + "\n")
 with open(db, "a") as fh:
     fh.write("+written-by-the-daemon")
 path = os.path.join(home, "daemon.sock")
@@ -360,6 +361,68 @@ def test_a_fixture_manifest_it_cannot_read_stops_the_start(scratch, fake_mix, st
         assert reset.returncode != 0
         assert "fixture manifest" in reset.stderr
         assert _starts(home) == []
+    finally:
+        _down(home, stray_daemons)
+
+
+@pytest.mark.parametrize("flag, keeps_key", [("--phone-calls", False), ("", True)])
+def test_a_phone_calls_home_starts_its_daemon_without_the_callers_openai_key(
+        scratch, fake_mix, stray_daemons, flag, keeps_key):
+    # M94: the phone engine reuses the openai provider's key, which the seed made
+    # an invented one; a real key in the caller's environment would overlay it at
+    # boot. Every other home keeps the caller's environment as it was.
+    home = scratch / "cap-eval"
+    up = _script("up", home, FERMIX_CAP_SEED_ARGS=f"--provider ollama --model brindle-7b {flag}",
+                 OPENAI_API_KEY="sk-from-the-callers-shell-invented")
+    try:
+        assert up.returncode == 0, up.stderr
+        [start] = _starts(home)
+        assert start["openai_key_set"] is keeps_key
+        port = json.loads((home / seed.FIXTURE_MANIFEST).read_text())["port"]
+        assert start["fixture_origin"] == f"http://127.0.0.1:{port}"
+    finally:
+        _down(home, stray_daemons)
+
+
+def test_a_phone_calls_home_without_its_fixture_manifest_does_not_start(
+        scratch, fake_mix, stray_daemons):
+    # Its calls would not reach the simulated endpoint; nothing may start.
+    home = _seeded_home(scratch)
+    _write_tree(home, {seed.PHONE_CALLS_MANIFEST: "{}"})
+    assert _script("snapshot", home).returncode == 0
+    try:
+        reset = _script("reset", home)
+        assert reset.returncode != 0
+        assert "phone calls are on" in reset.stderr
+        assert _starts(home) == []
+    finally:
+        _down(home, stray_daemons)
+
+
+def test_every_reset_of_a_phone_calls_home_boots_its_daemon_with_the_simulators_origin(
+        scratch, fake_mix, stray_daemons):
+    # M94: a development build fixes where its calls go once, at boot, from the
+    # variable and the home's manifest, so every start must find both in place. The
+    # restore leaves eval-fixtures/ alone, and each reset's start (what --reset-home
+    # runs before every attempt) gets the origin the seed recorded, never the
+    # caller's, and never the caller's OpenAI key.
+    home = scratch / "cap-eval"
+    callers = {"OPENAI_API_KEY": "sk-from-the-callers-shell-invented",
+               "FERMIX_EVAL_FIXTURE_ORIGIN": "http://127.0.0.1:1"}
+    up = _script("up", home,
+                 FERMIX_CAP_SEED_ARGS="--provider ollama --model brindle-7b --phone-calls",
+                 **callers)
+    try:
+        assert up.returncode == 0, up.stderr
+        for _attempt in range(2):
+            reset = _script("reset", home, **callers)
+            assert reset.returncode == 0, reset.stderr
+        port = json.loads((home / seed.FIXTURE_MANIFEST).read_text())["port"]
+        starts = _starts(home)
+        assert len(starts) == 3
+        assert {start["fixture_origin"] for start in starts} == {f"http://127.0.0.1:{port}"}
+        assert not any(start["openai_key_set"] for start in starts)
+        assert (home / seed.PHONE_CALLS_MANIFEST).is_file()
     finally:
         _down(home, stray_daemons)
 

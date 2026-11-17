@@ -3,6 +3,8 @@ defmodule FermixCore.PhoneCalls.DeliveryTest do
   # registered name this module's tests share.
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias FermixCore.Memory.Repo
   alias FermixCore.PhoneCalls.Continuation
   alias FermixCore.PhoneCalls.Delivery
@@ -32,6 +34,24 @@ defmodule FermixCore.PhoneCalls.DeliveryTest do
     end
   end
 
+  # A store whose pending-report reads fail with `:busy` until healed, with
+  # the Repo's own reply shapes.
+  defmodule BusyStore do
+    use GenServer
+
+    def start_link(busy?), do: GenServer.start_link(__MODULE__, busy?)
+    def heal(pid), do: GenServer.call(pid, :heal)
+
+    @impl true
+    def init(busy?), do: {:ok, busy?}
+
+    @impl true
+    def handle_call(:enabled?, _from, busy?), do: {:reply, true, busy?}
+    def handle_call(:heal, _from, _busy?), do: {:reply, :ok, false}
+    def handle_call({:phone_calls, _request}, _from, true), do: {:reply, {:error, :busy}, true}
+    def handle_call({:phone_calls, _request}, _from, false), do: {:reply, {:ok, []}, false}
+  end
+
   defmodule RefusingDispatcher do
     def dispatch(_notice), do: {:error, {:no_owner_configured, "telegram"}}
   end
@@ -48,6 +68,14 @@ defmodule FermixCore.PhoneCalls.DeliveryTest do
     end)
 
     %{repo: repo}
+  end
+
+  # The recovery and memory-off lines are info: the suite's level is warning,
+  # so the test raises it for itself and puts it back.
+  defp info_logs! do
+    previous = Logger.level()
+    Logger.configure(level: :info)
+    on_exit(fn -> Logger.configure(level: previous) end)
   end
 
   defp terminal_row!(ctx, overrides \\ %{}) do
@@ -128,7 +156,7 @@ defmodule FermixCore.PhoneCalls.DeliveryTest do
   end
 
   describe "the continuation notice" do
-    test "is the composed report and Fermix's closing, marked a depth-1 follow-up" do
+    test "is the report a model reads and Fermix's closing, marked a depth-1 follow-up" do
       row = %{
         id: "pc_0a1b2c3d4e5f",
         status: "ended",
@@ -142,11 +170,13 @@ defmodule FermixCore.PhoneCalls.DeliveryTest do
       }
 
       assert {:ok, notice} = Continuation.notice(row)
-      assert notice.content =~ "[phone call pc_0a1b2c3d4e5f] ended"
+      assert notice.content =~ "[phone call pc_0a1b2c3d4e5f] The call ended."
       assert notice.content =~ ~s(<untrusted_tool_result source="phone_call_recipient">)
       assert notice.content =~ "Do not place another call from this turn"
       assert notice.metadata.harness_continuation == true
       assert notice.metadata.harness_continuation_depth == 1
+      # Its own marker names the call, so the turn reads a phone call, not a coding run.
+      assert notice.metadata.phone_call_result == "pc_0a1b2c3d4e5f"
       refute Map.has_key?(notice.metadata, :harness_run_id)
       assert is_nil(notice.client_origin)
     end
@@ -193,8 +223,13 @@ defmodule FermixCore.PhoneCalls.DeliveryTest do
         )
 
       assert_receive {:sent, "40017", text, opts}
-      assert text =~ "[phone call #{row.id}] ended"
+      # The report a person reads: no frame and no engine code.
+      assert text =~ "Phone call to Calloway Bistro (a business)\nThe call ended.\n"
+      refute text =~ "untrusted_tool_result"
+      refute text =~ "[phone call"
       assert Keyword.get(opts, :message_thread_id) == "88"
+      # Words a called party dictated name no link the engine fetches.
+      assert Keyword.get(opts, :link_previews) == false
       assert {:ok, %{report_status: "written"}} = Ledger.get(row.id, server: ctx.repo)
     end
 
@@ -217,7 +252,8 @@ defmodule FermixCore.PhoneCalls.DeliveryTest do
           )
         )
 
-      assert_receive {:sent, "+14155550111", _text, _opts}
+      assert_receive {:sent, "+14155550111", _text, opts}
+      assert Keyword.get(opts, :link_previews) == false
       refute_received {:dispatched, _notice}
     end
 
@@ -276,8 +312,9 @@ defmodule FermixCore.PhoneCalls.DeliveryTest do
       {worker, _clock} = start_worker(ctx, SinkAdapter, DateTime.add(@t0, 200, :second))
       tick(worker)
 
-      assert_receive {:sent, "40017", text, _opts}
+      assert_receive {:sent, "40017", text, opts}
       assert text =~ "(Sent again: an earlier attempt"
+      assert Keyword.get(opts, :link_previews) == false
       assert {:ok, %{report_status: "written"}} = Ledger.get(row.id, server: ctx.repo)
 
       tick(worker)
@@ -309,6 +346,50 @@ defmodule FermixCore.PhoneCalls.DeliveryTest do
       assert DeliveryWorker.backoff_ms(1) == 30_000
       assert DeliveryWorker.backoff_ms(2) == 60_000
       assert DeliveryWorker.backoff_ms(40) == 1_800_000
+    end
+
+    test "with durable memory off it arms no tick at all, and says so once" do
+      info_logs!()
+      off = :"phone_delivery_off_repo_#{System.unique_integer([:positive])}"
+      start_supervised!({Repo, name: off, enabled: false, database_path: ":memory:"}, id: off)
+
+      log =
+        capture_log(fn ->
+          worker =
+            start_supervised!(
+              {DeliveryWorker,
+               name: :"phone_delivery_off_#{System.unique_integer([:positive])}",
+               repo: off,
+               timer_enabled: true}
+            )
+
+          assert %{store?: false, timer: nil} = :sys.get_state(worker)
+          send(worker, :tick)
+          assert %{timer: nil} = :sys.get_state(worker)
+        end)
+
+      assert log |> String.split("durable memory is off") |> length() == 2
+      refute log =~ "tick failed"
+      refute log =~ "failing"
+    end
+
+    test "a failing tick is logged once when it starts and once when it ends" do
+      info_logs!()
+      {:ok, store} = BusyStore.start_link(true)
+      on_exit(fn -> Process.alive?(store) && GenServer.stop(store) end)
+
+      log =
+        capture_log(fn ->
+          {worker, _clock} = start_worker(%{repo: store}, SinkAdapter, @t0)
+          for _tick <- 1..3, do: tick(worker)
+          :ok = BusyStore.heal(store)
+          tick(worker)
+          tick(worker)
+        end)
+
+      assert log |> String.split("delivery ticks are failing") |> length() == 2
+      assert log |> String.split("delivery ticks work again") |> length() == 2
+      assert log =~ "after 3 failed"
     end
   end
 end

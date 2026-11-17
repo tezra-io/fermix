@@ -24,6 +24,14 @@ defmodule Fermix.CLI.RestartCommand do
   alignment. `--json` prints the shared envelope; `--when-idle` is refused with
   a sentence until protocol 3 publishes `lifecycle.prepare_idle`, because a mode
   that silently interrupted work would be the opposite of what it asked for.
+
+  **A phone call in progress (M94 §12)** holds every path: the owner's restart
+  would hang it up with no outcome read. The app-managed and packaged paths
+  take their drain window with `lifecycle.prepare_restart`, which refuses
+  while a call runs, and the standalone path takes and releases one before it
+  asks the service manager. A daemon one release behind publishes no such
+  method and runs no phone calls, so it is asked for `lifecycle.prepare`. Every
+  refusal prints the daemon's own sentence and changes nothing.
   """
 
   alias Fermix.CLI.Daemon.Client
@@ -142,7 +150,9 @@ defmodule Fermix.CLI.RestartCommand do
   defp run_packaged(json?, deps) do
     service = Keyword.get(deps, :service, Service)
 
-    case service.restart(:user, Keyword.get(deps, :service_opts, [])) do
+    opts = Keyword.put(Keyword.get(deps, :service_opts, []), :owner_restart, true)
+
+    case service.restart(:user, opts) do
       {:ok, result} -> report_packaged(result, json?)
       {:error, reason} -> refuse_reason(reason, json?, deps)
     end
@@ -194,10 +204,10 @@ defmodule Fermix.CLI.RestartCommand do
   # ── app-managed ────────────────────────────────────────────────────────────
 
   defp restart_app_managed(deps) do
-    with {:ok, previous_pid} <- current_pid(deps),
-         {:ok, lease_id} <- prepare(deps),
+    with {:ok, previous} <- current_daemon(deps),
+         {:ok, lease_id} <- prepare(previous.prepare, deps),
          :ok <- commit(lease_id, deps),
-         {:ok, new_pid} <- await_new_pid(previous_pid, deps) do
+         {:ok, new_pid} <- await_new_pid(previous.pid, deps) do
       IO.puts("fermix restart: daemon restarted (pid #{new_pid}).")
       0
     else
@@ -205,25 +215,31 @@ defmodule Fermix.CLI.RestartCommand do
     end
   end
 
-  defp current_pid(deps) do
+  defp current_daemon(deps) do
     case hello(deps) do
-      {:ok, pid} -> {:ok, pid}
+      {:ok, daemon} -> {:ok, daemon}
       {:error, reason} -> {:error, {:no_daemon, reason}}
     end
   end
 
   defp hello(deps) do
     case client(deps).("hello", %{}, []) do
-      {:ok, %{"engine" => %{"pid" => pid}}} when is_binary(pid) -> {:ok, pid}
-      {:ok, _other} -> {:error, :invalid_management_response}
-      {:error, reason} -> {:error, reason}
+      {:ok, %{"engine" => %{"pid" => pid}} = hello} when is_binary(pid) ->
+        {:ok, %{pid: pid, prepare: Client.owner_restart_prepare(hello)}}
+
+      {:ok, _other} ->
+        {:error, :invalid_management_response}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
-  defp prepare(deps) do
-    case client(deps).("lifecycle.prepare", %{}, []) do
+  defp prepare(method, deps) do
+    case client(deps).(method, %{}, []) do
       {:ok, %{"lease_id" => lease_id}} when is_binary(lease_id) -> {:ok, lease_id}
       {:ok, _other} -> {:error, {:prepare_failed, :invalid_management_response}}
+      {:error, {:management_error, _code, _message, %{"sentence" => s}}} -> {:error, {:held, s}}
       {:error, reason} -> {:error, {:prepare_failed, reason}}
     end
   end
@@ -248,7 +264,7 @@ defmodule Fermix.CLI.RestartCommand do
     sleep.(@poll_interval_ms)
 
     case hello(deps) do
-      {:ok, pid} when pid != previous_pid -> {:ok, pid}
+      {:ok, %{pid: pid}} when pid != previous_pid -> {:ok, pid}
       _same_or_down -> poll(previous_pid, deps, sleep, remaining - 1)
     end
   end
@@ -260,6 +276,8 @@ defmodule Fermix.CLI.RestartCommand do
 
   defp describe({:prepare_failed, reason}),
     do: "the daemon would not open a drain window: #{Client.describe_error(reason)}"
+
+  defp describe({:held, sentence}), do: sentence
 
   defp describe({:commit_failed, reason}),
     do: "the daemon would not commit the drain: #{Client.describe_error(reason)}"
@@ -276,9 +294,36 @@ defmodule Fermix.CLI.RestartCommand do
   defp restart_legacy(argv, deps) do
     service = Keyword.get(deps, :service, Service)
 
-    case ServiceCommand.parse_scope(argv, @switches) do
-      {:ok, scope} -> dispatch(scope, service)
+    with {:ok, scope} <- ServiceCommand.parse_scope(argv, @switches),
+         :ok <- standalone_hold(deps) do
+      dispatch(scope, service)
+    else
       {:error, reason} -> abort(reason)
+    end
+  end
+
+  # The service manager's restart takes no lease, so a phone call in progress
+  # is asked about first: the window is taken and released at once. A daemon
+  # that is not answering runs no call this can see, and is restarted as before.
+  defp standalone_hold(deps) do
+    with {:ok, daemon} <- hello(deps),
+         {:ok, lease_id} <- prepare(daemon.prepare, deps) do
+      release_window(lease_id, deps)
+    else
+      {:error, {:held, sentence}} -> {:error, sentence}
+      {:error, {:prepare_failed, reason}} -> {:error, describe({:prepare_failed, reason})}
+      {:error, _not_answering} -> :ok
+    end
+  end
+
+  defp release_window(lease_id, deps) do
+    case client(deps).("lifecycle.cancel", %{"lease_id" => lease_id}, []) do
+      {:ok, _cancelled} ->
+        :ok
+
+      {:error, reason} ->
+        {:error,
+         "the daemon would not release its drain window: " <> Client.describe_error(reason)}
     end
   end
 

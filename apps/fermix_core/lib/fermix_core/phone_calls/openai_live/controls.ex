@@ -25,7 +25,19 @@ defmodule FermixCore.PhoneCalls.OpenAILive.Controls do
   alias FermixCore.PhoneCalls.OpenAILive.Events
   alias FermixCore.Realtime.OpenAILiveClient
 
-  @dtmf_key ~r/\A[0-9A-D*#]\z/
+  # The keypad keys `transport.dtmf.send` carries: the one definition of a key
+  # (`dtmf_key?/1`) and of a sequence of them (`dtmf_keys?/1`).
+  @dtmf_keys "0123456789ABCD*#"
+
+  @doc "Whether `key` is one keypad key: `0`-`9`, `A`-`D`, `*` or `#`."
+  @spec dtmf_key?(term()) :: boolean()
+  def dtmf_key?(key),
+    do: is_binary(key) and byte_size(key) == 1 and String.contains?(@dtmf_keys, key)
+
+  @doc "Whether `keys` is one or more keypad keys, pressed in order."
+  @spec dtmf_keys?(term()) :: boolean()
+  def dtmf_keys?(keys),
+    do: is_binary(keys) and keys != "" and Enum.all?(String.graphemes(keys), &dtmf_key?/1)
 
   @doc "A fresh client event id, unique for the life of this node."
   @spec new_event_id() :: String.t()
@@ -37,7 +49,7 @@ defmodule FermixCore.PhoneCalls.OpenAILive.Controls do
   """
   @spec dtmf_event(String.t(), String.t()) :: {:ok, map()} | {:error, :invalid_dtmf_key}
   def dtmf_event(event_id, key) when is_binary(event_id) and event_id != "" and is_binary(key) do
-    if Regex.match?(@dtmf_key, key),
+    if dtmf_key?(key),
       do: {:ok, %{type: "transport.dtmf.send", event_id: event_id, event: key}},
       else: {:error, :invalid_dtmf_key}
   end
@@ -68,44 +80,4 @@ defmodule FermixCore.PhoneCalls.OpenAILive.Controls do
 
     event
   end
-
-  @doc "Quiet context: progress on a delegation, never spoken when it arrives."
-  @spec thinking_event(String.t(), String.t() | nil, String.t()) :: map()
-  def thinking_event(event_id, delegation_id, content)
-      when is_binary(event_id) and (is_binary(delegation_id) or is_nil(delegation_id)) and
-             is_binary(content) do
-    {^event_id, event} = OpenAILiveClient.thinking_append_event(event_id, delegation_id, content)
-    event
-  end
-
-  @doc "A session-wide instruction (`delegation_id` is `null`)."
-  @spec instructions_event(String.t(), String.t()) :: map()
-  def instructions_event(event_id, content) when is_binary(event_id) and is_binary(content) do
-    {^event_id, event} = OpenAILiveClient.instructions_append_event(event_id, nil, content)
-    event
-  end
-
-  @doc """
-  `session.close`: the graceful close. The server cancels queued work, rejects
-  further commands and ends with `session.closed`, which carries the reason and
-  final usage. Keep the sideband open until it arrives.
-  """
-  @spec close_event(String.t()) :: map()
-  def close_event(event_id) when is_binary(event_id), do: OpenAILiveClient.close_event(event_id)
-
-  @doc """
-  What a normalized event says about an append that carried `event_id`:
-  `:acknowledged`, `{:refused, vendor_error}` or `:unrelated`.
-  """
-  @spec append_outcome(String.t(), Events.t()) ::
-          :acknowledged | {:refused, map()} | :unrelated
-  def append_outcome(event_id, {:append_acked, %{client_event_id: event_id}})
-      when is_binary(event_id),
-      do: :acknowledged
-
-  def append_outcome(event_id, {:vendor_error, %{client_event_id: event_id} = error})
-      when is_binary(event_id),
-      do: {:refused, error}
-
-  def append_outcome(event_id, _event) when is_binary(event_id), do: :unrelated
 end

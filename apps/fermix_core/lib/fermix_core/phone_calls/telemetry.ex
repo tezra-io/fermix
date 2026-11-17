@@ -6,7 +6,8 @@ defmodule FermixCore.PhoneCalls.Telemetry do
   A phone call is a run kind: it outlives the turn that asked for it, and its
   own backend turns and provider calls carry its `session_id`
   (`"phone_call_" <> call_id`), so these bookends reassemble one call into one
-  trace. The requesting turn's session rides as `parent_session`, correlation
+  trace. The requesting turn's session (the row's `parent_session`, kept
+  apart from its request id) rides as `parent_session`, correlation
   only (Opik keeps the call its own root, as it does a meeting: the turn ships
   long before the call ends). `PhoneCalls.Manager` is the single emitter of all
   three: `run_start` once, when a call is admitted and its worker started, and
@@ -16,15 +17,20 @@ defmodule FermixCore.PhoneCalls.Telemetry do
   destination, the mandate, transcripts and credentials never do; the
   vendor's own failure words do, bounded, with anything that reads as a
   phone number replaced, so a provider message that quotes the dialed number
-  does not carry it into a trace. The events also route into
+  does not carry it into a trace. Those words arrive already free of the API
+  key and the trunk password: every vendor word, from the create and hang-up
+  answers to whatever the sideband carries during the call, passes the one
+  scrub in `OpenAILive` (`scrubber/1`) before it leaves the transport. The events also route into
   `FermixCore.Trace` as `agent_event` rows.
   """
+
+  alias FermixCore.PhoneCalls.Limits
+  alias FermixCore.PhoneCalls.PromptText
 
   @run_start_event [:fermix, :phone_call, :run_start]
   @run_complete_event [:fermix, :phone_call, :run_complete]
   @run_error_event [:fermix, :phone_call, :run_error]
 
-  @vendor_message_max 500
   # A run of digits long enough to be a phone number, with its separators.
   @number_pattern ~r/\+?\d[\d\s().-]{6,}\d/
 
@@ -100,7 +106,7 @@ defmodule FermixCore.PhoneCalls.Telemetry do
       agent: "phone_call:" <> call_id,
       call_id: call_id,
       session_id: session_id(call_id),
-      parent_session: Map.get(row, :request_id),
+      parent_session: Map.get(row, :parent_session),
       origin_kind: Map.get(row, :origin_kind),
       model: Map.get(row, :model),
       carrier_profile: Map.get(row, :carrier_profile),
@@ -141,7 +147,7 @@ defmodule FermixCore.PhoneCalls.Telemetry do
   defp scrub(text) when is_binary(text) do
     text
     |> String.replace(@number_pattern, "[number]")
-    |> String.slice(0, @vendor_message_max)
+    |> PromptText.cut(Limits.max_record_text_bytes())
   end
 
   defp fetch_id!(row) do

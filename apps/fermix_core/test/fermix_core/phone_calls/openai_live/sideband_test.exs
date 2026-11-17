@@ -152,6 +152,18 @@ defmodule FermixCore.PhoneCalls.OpenAILive.SidebandTest do
       assert_receive {:EXIT, ^sideband, _reason}, @arrival_ms
     end
 
+    # The upgrade request is written header by header with no check, so a key
+    # carrying a line break would add a header of its own. Refused before any
+    # connection: port 1 would otherwise answer with an attach failure.
+    test "a key no request could carry is refused before dialing" do
+      for key <- [@api_key <> "\n", @api_key <> "\r\nX-Injected: 1", "sk-invented key"] do
+        assert {:error, {:invalid, :api_key}} =
+                 start_sideband("ws://127.0.0.1:1", api_key: key)
+      end
+
+      refute_received {:phone_sideband, _sideband, _payload}
+    end
+
     test "a route through the proxy is refused before dialing" do
       proxied = Egress.new(proxy: "http://proxy.invented.test:3128")
 
@@ -320,10 +332,11 @@ defmodule FermixCore.PhoneCalls.OpenAILive.SidebandTest do
       push(socket, [marker(1)])
       assert :unrelated = Controls.dtmf_outcome(event_id, event!(sideband))
 
-      assert {:ok, next_id} = Sideband.send_instructions(sideband, "Wait quietly.")
+      assert {:ok, next_id} = Sideband.send_commentary(sideband, nil, "One moment.")
       assert_receive {:vendor_got, next}, @arrival_ms
       assert next["event_id"] == next_id
-      assert next["type"] == "session.instructions.append"
+      assert next["type"] == "session.commentary.append"
+      refute_received {:vendor_got, %{"event_id" => ^event_id}}
     end
 
     test "anything but one allowed key is refused before sending, without echoing it" do
@@ -333,16 +346,18 @@ defmodule FermixCore.PhoneCalls.OpenAILive.SidebandTest do
         assert {:error, :invalid_dtmf_key} = Sideband.send_dtmf(sideband, key)
       end
 
-      assert {:ok, marker_id} = Sideband.send_close(sideband)
+      assert {:ok, marker_id} = Sideband.send_dtmf(sideband, "#")
 
-      assert_receive {:vendor_got, %{"type" => "session.close", "event_id" => ^marker_id}},
+      assert_receive {:vendor_got, %{"type" => "transport.dtmf.send", "event_id" => ^marker_id}},
                      @arrival_ms
+
+      refute_received {:vendor_got, %{"type" => "transport.dtmf.send", "event" => "x"}}
     end
   end
 
   describe "the other controls" do
     test "a delegation result goes back as commentary carrying the delegation id" do
-      %{sideband: sideband, socket: socket} = attach!()
+      %{sideband: sideband} = attach!()
       delegation = "item_9tA2bF3h7K9m2P5q8R1s4"
 
       assert {:ok, event_id} = Sideband.send_commentary(sideband, delegation, "Seven is free.")
@@ -355,25 +370,13 @@ defmodule FermixCore.PhoneCalls.OpenAILive.SidebandTest do
                "delegation_id" => delegation,
                "content" => "Seven is free."
              }
-
-      push(socket, [
-        %{
-          "type" => "session.commentary.appended",
-          "event_id" => "event_ack",
-          "client_event_id" => event_id,
-          "start_ms" => 0,
-          "end_ms" => 0
-        }
-      ])
-
-      assert :acknowledged = Controls.append_outcome(event_id, event!(sideband))
     end
 
-    test "quiet progress keeps a null delegation id as JSON null" do
+    test "something for the whole call keeps a null delegation id as JSON null" do
       %{sideband: sideband} = attach!()
 
-      assert {:ok, _event_id} = Sideband.send_thinking(sideband, nil, "Still checking.")
-      assert_receive {:vendor_got, %{"type" => "session.thinking.append"} = sent}, @arrival_ms
+      assert {:ok, _event_id} = Sideband.send_commentary(sideband, nil, "Still checking.")
+      assert_receive {:vendor_got, %{"type" => "session.commentary.append"} = sent}, @arrival_ms
       assert Map.fetch!(sent, "delegation_id") == nil
     end
 
@@ -385,6 +388,57 @@ defmodule FermixCore.PhoneCalls.OpenAILive.SidebandTest do
 
       assert {:error, {:not_sent, {:forbidden_on_sideband, "session.input_audio.append"}}} =
                Sideband.send_event(sideband, %{type: "session.input_audio.append", audio: "AAAA"})
+    end
+  end
+
+  # The one scrub, held for the life of the call: no message the owner gets
+  # holds the key or a secret the sideband was given.
+  describe "what the vendor says" do
+    @password "pw-Invented-0002"
+
+    test "every message to the owner is free of the key and the trunk password" do
+      base = vendor!(:accept)
+      assert {:ok, sideband} = start_sideband(base, secrets: [@password])
+      assert_receive {:phone_sideband, ^sideband, :attached}, @arrival_ms
+      assert_receive {:vendor_socket, socket}, @arrival_ms
+      quoted = ~s(Bearer #{@api_key} for #{@password}; {"key":"#{@api_key}"})
+
+      push(socket, [
+        %{
+          "type" => "error",
+          "event_id" => "e1",
+          "error" => %{"message" => quoted, "code" => quoted}
+        },
+        %{"type" => "transport.failed", "event_id" => "e2", "error" => %{"message" => quoted}},
+        %{"type" => "vendor.#{@api_key}", "event_id" => "e3", "detail" => quoted},
+        %{"type" => "session.input_transcript.delta", "event_id" => "e4", "note" => quoted},
+        %{"type" => "session.closed", "event_id" => "e5", "reason" => quoted}
+      ])
+
+      send(socket, {:push, [Jason.encode!([quoted])]})
+      send(socket, {:close, 4000, "dropped #{@api_key} #{@password}"})
+
+      events = for _n <- 1..5, do: event!(sideband)
+
+      assert [
+               {:vendor_error, _},
+               {:call_failed, _},
+               {:unknown, _, _},
+               {:malformed, _, _},
+               {:session_closed, _}
+             ] = events
+
+      assert_receive {:phone_sideband, ^sideband, {:invalid_frame, frame}}, @arrival_ms
+      assert_receive {:phone_sideband, ^sideband, {:closed, closed}}, @arrival_ms
+
+      for message <- events ++ [frame, closed] do
+        printed = inspect(message, limit: :infinity, printable_limit: :infinity)
+        assert printed =~ "[REDACTED]", printed
+        refute printed =~ @api_key, printed
+        refute printed =~ @password, printed
+      end
+
+      assert_receive {:EXIT, ^sideband, _reason}, @arrival_ms
     end
   end
 

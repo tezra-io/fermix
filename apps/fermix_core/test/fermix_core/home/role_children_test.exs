@@ -17,6 +17,7 @@ defmodule FermixCore.Home.RoleChildrenTest do
     FermixCore.Temporal.Scheduler,
     FermixCore.Temporal.DeliverySupervisor,
     FermixCore.Harness.Supervisor,
+    FermixCore.PhoneCalls.Supervisor,
     FermixCore.Meetings.Supervisor,
     FermixCore.Auth.TokenSupervisor,
     FermixCore.Home.Snapshot.Scheduler,
@@ -163,6 +164,14 @@ defmodule FermixCore.Home.RoleChildrenTest do
   defp history_children(role) do
     {:ok, {_flags, children}} = ComputerHistorySupervisor.init(engine_role: role, recorder?: true)
     Enum.map(children, fn %{start: {module, _function, _args}} -> module end)
+  end
+
+  # M94 §04: only the primary dials, and a call's rows live in memory.db, which a
+  # device does not open; a candidate starts only what it keeps.
+  test "a device and a candidate start no phone-call subtree" do
+    assert FermixCore.PhoneCalls.Supervisor in modules(tree(:primary))
+    refute FermixCore.PhoneCalls.Supervisor in modules(tree(:device))
+    refute FermixCore.PhoneCalls.Supervisor in modules(full_tree(:candidate))
   end
 
   # M75 D5: the token file here is a retired copy and a realtime session calls a

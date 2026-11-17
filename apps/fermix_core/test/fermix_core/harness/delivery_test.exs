@@ -4,6 +4,7 @@ defmodule FermixCore.Harness.DeliveryTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.Acp.Identity
+  alias FermixCore.Delivery.FrozenSend
   alias FermixCore.Harness.Continuation
   alias FermixCore.Harness.Delivery
   alias FermixCore.Jobs.Registry, as: JobsRegistry
@@ -529,13 +530,18 @@ defmodule FermixCore.Harness.DeliveryTest do
       assert Keyword.get(opts, :message_thread_id) == "77"
     end
 
-    # `send_text/3` is `deliver/2`'s send half, which a phone call's report
-    # shares: exactly the given text, once, to the frozen thread and options.
-    test "send_text/3 makes one send of the given text to the frozen destination" do
+    # `deliver/2`'s send half is the frozen-destination send a phone call's
+    # report shares (`Delivery.FrozenSend`): exactly the given text, once, to
+    # the frozen thread and options, under the coding run's own watchdog.
+    test "the shared send makes one send of the given text to the frozen destination" do
       row = completed_row(%{thread: "77", send_opts: %{"reply_to" => "m-9", "other" => "x"}})
+      bound = Delivery.deliver_timeout_ms()
 
       assert {:ok, :sent} =
-               Delivery.send_text(row, "Already composed.", adapter: RecordingAdapter)
+               FrozenSend.send_text(row, "Already composed.",
+                 adapter: RecordingAdapter,
+                 timeout_ms: bound
+               )
 
       assert [{"chat-1", "Already composed.", opts}] = recorded()
       assert Keyword.get(opts, :message_thread_id) == "77"
@@ -543,7 +549,11 @@ defmodule FermixCore.Harness.DeliveryTest do
       refute Keyword.has_key?(opts, :other)
 
       assert {:error, :permanent} =
-               Delivery.send_text(row, "Again.", adapter: FailingAdapter, delivery_backoff_ms: 0)
+               FrozenSend.send_text(row, "Again.",
+                 adapter: FailingAdapter,
+                 delivery_backoff_ms: 0,
+                 timeout_ms: bound
+               )
     end
 
     test "none mode skips without a send" do

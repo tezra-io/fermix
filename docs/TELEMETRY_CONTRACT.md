@@ -882,8 +882,10 @@ inside the meeting session. Ingress voice-note transcription stays sessionless
 
 A phone call (M94) is a **run kind**: `FermixCore.PhoneCalls.Telemetry` mints
 `session_id = "phone_call_<call id>"` (`session_id/1`) with `parent_session` =
-the requesting turn's session (the call's `request_id`), and the call's own
-backend turns and provider calls carry that `session_id` as theirs.
+the requesting turn's session, which the row keeps as its `parent_session`
+beside the owner request's own identity (`request_id`, `Agents.RequestIdentity`,
+which is no session), and the call's own backend turns and provider calls carry
+that `session_id` as theirs.
 `PhoneCalls.Manager` is the single emitter of the bookends
 `[:fermix, :phone_call, :run_start | :run_complete | :run_error]`, never
 hand-rolled: `run_start` once, when a call is admitted and its worker started
@@ -894,17 +896,44 @@ outcome; `run_error` closes a `failed`, `dispatch_unknown` or
 Shared metadata: `agent: "phone_call:<id>"`, `call_id`, `origin_kind`
 (`chat | voice`), `model`, `carrier_profile`, `authorization`
 (`direct | confirmed`); the closers add `status`, `outcome`, `usage_state`,
-`failure_reason` and the vendor's own words (`vendor_message`, bounded to 500
-characters, every digit run that reads as a phone number replaced by
-`[number]`), and measure `duration_ms`, `voice_seconds`, `core_turns`,
-`dtmf_keys`, `cleanup_attempts`. The destination, the mandate, transcripts and
-the trunk credentials never reach these events. `Trace.TelemetryHandler`
+`failure_reason` and the vendor's own words (`vendor_message`, cut to
+`PhoneCalls.Limits.max_record_text_bytes/0`, 500 bytes, every digit run that
+reads as a phone number replaced by `[number]`), and measure `duration_ms`,
+`voice_seconds`, `core_turns`, `dtmf_keys`, `cleanup_attempts`. The
+destination, the mandate and transcripts never reach these events, and no
+vendor word carries either credential: one scrub in `OpenAILive` (the
+function the sideband holds is `scrubber/1`) replaces the API key and the
+trunk password, as stored, trimmed, as printed and as JSON escapes them, in
+the create's and the hang-up's answers and in every message the sideband
+hands the worker during the call (an error event, a carrier failure, a
+`session.closed` reason, a close frame, an event of an unknown type, raw or
+not), before any of it becomes a call's words. `Trace.TelemetryHandler`
 registers all three; `FermixOpik` binds them (`kind: :phone_call`,
 `infer_kind("phone_call_" <> _)`) as a root of its own, the meeting shape:
 `parent_session` is correlation metadata, never a parent, because the
-requesting turn ships long before the call ends. The `phone_call` tool emits
-exactly one `[:fermix, :tool, :exec]` per model call under that name, held and
-refused calls included.
+requesting turn ships long before the call ends.
+
+The call's backend turns (`Agents.PhoneCallTurn`) are children of the call's
+session: each carries the call's `session_id` as its own, with no
+`parent_session`, and `agent: "phone_call"`, so its provider spans and tool
+spans nest under the call's root as its turns, never as a root of their own;
+a turn emits no `[:fermix, :agent, :message]`, which would close the trace as
+a turn's end. The outcome extraction's one provider call
+(`Providers.Telemetry.emit_call/3`, through the adapter) carries the same
+session with `agent: "phone_call_outcome"`. The feature's three tools,
+`phone_call`, `phone_call_press_keys` and `phone_call_end`, each emit exactly
+one `[:fermix, :tool, :exec]` per model call under the tool's own name, held
+and refused calls included (`Tools.Telemetry.exec/5`): `phone_call` on the
+requesting turn's session, the two in-call controls on the call's. Their own
+metadata is a word or a count, beside the access gate's label on a gated call
+(`access_gate`, and `policy_enforcement` on a start the gate held or refused as
+an external effect): `action` (`start | status | cancel |
+invalid`), `key_count` (how many keys were asked for, never the keys),
+`reason` (`done | needs_owner | cannot_proceed | voicemail | invalid`, never
+the note), and on a refusal the refusal's sentence as `error`, which names no
+number. No phone number, keypad key, finish note or transcript reaches any of
+these events' metadata; a captured content preview follows the content policy
+above.
 
 ## Live voice runs
 

@@ -103,6 +103,7 @@ defmodule FermixCore.Memory.Repo do
   @trip_waits_migration_version 65
   @trip_towns_migration_version 66
   @phone_calls_migration_version 67
+  @phone_call_ledger_migration_version 68
   @sqlite_open_intent :readwritecreate
 
   # The home's requests about notes from every machine (M97 §8), all served by
@@ -5152,10 +5153,45 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_trip_near_migration(conn, versions),
          :ok <- apply_trip_waits_migration(conn, versions),
          :ok <- apply_trip_towns_migration(conn, versions),
-         :ok <- apply_phone_calls_migration(conn, versions) do
+         :ok <- apply_phone_calls_migration(conn, versions),
+         :ok <- apply_phone_call_ledger_migration(conn, versions) do
       :ok
     end
   end
+
+  # M94 §09, §12: the call ledger as it stands, after 67, with the version in
+  # one transaction: an outcome's uncertainty note, the provider's confirmed
+  # closure, the requesting turn's session kept apart from the request id (a
+  # call from before keeps its request id, that session, as its parent), a
+  # call reused by its request and its mandate together, and a slot released
+  # on the owner's word as well as on verified termination. A CHECK and a
+  # unique key change only by making the table again, so the table 67 laid
+  # down is rebuilt once into the one definition (`PhoneCallsSql.ledger_rebuild/0`).
+  # Reapplying it changes nothing: a table already at that definition (a
+  # fresh store, which 67 lays it down on) is recognised by its columns and
+  # left as it is, and any other shape is refused, never cut.
+  defp apply_phone_call_ledger_migration(conn, versions) do
+    if Enum.member?(versions, @phone_call_ledger_migration_version) do
+      :ok
+    else
+      with :ok <- Sqlite3.execute(conn, "BEGIN;") do
+        conn
+        |> phone_call_ledger_rebuild()
+        |> record_version(conn, @phone_call_ledger_migration_version)
+        |> commit_migration(conn)
+      end
+    end
+  end
+
+  defp phone_call_ledger_rebuild(conn) do
+    with {:ok, rebuilds} <- pending_rebuilds(conn, [PhoneCallsSql.ledger_rebuild()]),
+         do: execute_each(conn, Enum.map(rebuilds, & &1.sql))
+  end
+
+  defp record_version(:ok, conn, version),
+    do: Sqlite3.execute(conn, "INSERT INTO schema_migrations(version) VALUES (#{version});")
+
+  defp record_version(error, _conn, _version), do: error
 
   # M94 §09: the phone-call ledger, its table and version in one transaction,
   # after 66. Nothing is rewritten: a store from before has no calls.

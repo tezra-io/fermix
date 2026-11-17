@@ -166,7 +166,13 @@ defmodule FermixCore.Management.Protocol do
     {"accessories.check.start", 2},
     {"accessories.check.stop", 2},
     {"accessories.calibrate", 2},
-    {"accessories.set", 2}
+    {"accessories.set", 2},
+    {"phone_calls.status", 2},
+    {"phone_calls.list", 2},
+    {"phone_calls.stop", 2},
+    {"phone_calls.recovery.get", 2},
+    {"phone_calls.recovery.confirm", 2},
+    {"lifecycle.prepare_restart", 2}
   ]
   @methods Enum.map(@method_minimums, fn {method, _minimum} -> method end)
   @method_minimum_versions Map.new(@method_minimums)

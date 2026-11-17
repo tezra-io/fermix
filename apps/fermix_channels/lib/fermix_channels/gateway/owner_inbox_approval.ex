@@ -23,7 +23,10 @@ defmodule FermixChannels.Gateway.OwnerInboxApproval do
   A failed delivery takes the token back, so no confirmable record exists that
   the owner never saw. A request marked `in_call: true` is a call that waits in
   its own process for the answer (`AccessGate.ask_in_call/3`), so its prompt
-  ends with that promise instead of the daemon running a command.
+  ends with that promise instead of the daemon running a command. A request
+  carrying `after_confirm` and `ttl_ms` is an effect outside the machine (a
+  phone call's start): its prompt ends with the promise its own rendering
+  makes, and its token and card live for its own window.
   """
 
   alias FermixChannels.Gateway.ChannelRegistry
@@ -46,7 +49,9 @@ defmodule FermixChannels.Gateway.OwnerInboxApproval do
   @type request :: %{
           required(:access_sensitive) => String.t(),
           required(:prompt) => String.t(),
-          optional(:in_call) => true
+          optional(:in_call) => true,
+          optional(:after_confirm) => String.t(),
+          optional(:ttl_ms) => pos_integer()
         }
 
   @doc """
@@ -60,18 +65,33 @@ defmodule FermixChannels.Gateway.OwnerInboxApproval do
       when is_binary(intent_id) and is_binary(prompt) and is_list(opts) do
     with {:ok, inbox, dm_origin} <- owner_dm(opts),
          {:ok, adapter} <- adapter(inbox.platform, opts) do
-      case Sandbox.store_pending_grant(%{access_sensitive: intent_id}, origin(dm_origin)) do
+      case Sandbox.store_pending_grant(grant(request), origin(dm_origin)) do
         {:ok, token, :existing} -> {:ok, token, :existing}
-        {:ok, token, :new} -> deliver(adapter, inbox, prompt_text(request, token), token)
+        {:ok, token, :new} -> deliver(adapter, inbox, approval(request, token), token)
       end
     end
   end
+
+  defp grant(%{access_sensitive: intent_id, ttl_ms: ttl_ms}),
+    do: %{access_sensitive: intent_id, ttl_ms: ttl_ms}
+
+  defp grant(%{access_sensitive: intent_id}), do: %{access_sensitive: intent_id}
+
+  # The prompt as the turn's own chat would draw it: an effect's as a card
+  # that names its window, every other as the prompt and its token.
+  defp approval(%{ttl_ms: ttl_ms} = request, token) do
+    {:approval_prompt,
+     %{kind: :sandbox, text: prompt_text(request, token), token: token, ttl_s: div(ttl_ms, 1_000)}}
+  end
+
+  defp approval(request, token), do: {:approval_prompt, prompt_text(request, token), token}
 
   defp prompt_text(%{prompt: prompt} = request, token),
     do:
       prompt <> "\n\n" <> AccessGate.approval_line(token, %{chat_type: "private"}, kind(request))
 
   defp kind(%{in_call: true}), do: :in_call
+  defp kind(%{after_confirm: promise}) when is_binary(promise), do: {:effect, promise}
   defp kind(_parked), do: :parked
 
   @doc """
@@ -182,10 +202,10 @@ defmodule FermixChannels.Gateway.OwnerInboxApproval do
     %{channel: platform, chat_id: chat_id, thread_ts: nil, user_id: user_id, resume: nil}
   end
 
-  defp deliver(adapter, inbox, text, token) do
+  defp deliver(adapter, inbox, approval, token) do
     context = ReplyContext.new(adapter, inbox_message(inbox))
 
-    case Delivery.deliver(context, {:approval_prompt, text, token}) do
+    case Delivery.deliver(context, approval) do
       :ok ->
         {:ok, token, :new}
 

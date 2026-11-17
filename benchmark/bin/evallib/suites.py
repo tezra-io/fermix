@@ -28,8 +28,15 @@ _TOP_KEYS = {
 # defaults (`requires:`). A home seeded without it holds those cases out as NOT
 # EVALUATED, never as zeros. `cues`: seeded with `seed_capability_home.py --cues`
 # and seed_cues.exs; `computers`: with --computers; `coding_signed_out`: with
-# --coding-signed-out (a stub `claude` that fails every run as signed out).
-REQUIREMENTS = ("cues", "computers", "coding_signed_out")
+# --coding-signed-out (a stub `claude` that fails every run as signed out);
+# `phone_calls`: with --phone-calls (phone calls on, reaching the runners'
+# simulated GPT-Live endpoint; evallib/phone_sim.py).
+REQUIREMENTS = ("cues", "computers", "coding_signed_out", "phone_calls")
+# A phone case's turn may instead be the call's own report (`await: call_report`:
+# no query, the out-of-turn turn Fermix starts when the call ends), or wait for
+# every call of the attempt to end before its query (`after: call_end`).
+TURN_AWAITS = ("call_report",)
+TURN_AFTERS = ("call_end",)
 _DEFAULT_KEYS = {"timeout_ms", "judge", "expect"}
 _SCENARIO_KEYS = {"id", "title", "severity", "risk", "confirm_cost", "tags", "cases",
                   "sticky_gates", "platforms"}
@@ -43,7 +50,7 @@ _CASE_KEYS = {
     "image", "images", "score", "checker", "requires_tools", "requires_tools_all",
     "cross_session", "companion", "watch", "voice", "cue", "requires",
 }
-_TURN_KEYS = {"query", "expect"}
+_TURN_KEYS = {"query", "expect", "await", "after"}
 
 # expect-key -> accepted python type(s). Drives schema validation + is the single
 # source of truth for the vocabulary documented in suites/SCHEMA.md.
@@ -142,8 +149,10 @@ class SuiteError(Exception):
 
 @dataclass
 class Turn:
-    query: str
+    query: str | None               # None only on an `await` turn, which has no query
     expect: dict = field(default_factory=dict)
+    awaits: str | None = None       # `call_report`: this turn is the call's own report
+    after: str | None = None        # `call_end`: wait for every call to end, then drive
 
 
 @dataclass
@@ -178,6 +187,8 @@ class Case:
     #   the runner posts to the door; evallib/cue_drive.py.
     requires: tuple[str, ...] = ()  # what the eval home must be seeded with for this case
     #   beyond its suite's `requires` (REQUIREMENTS); run_eval.py holds it out without.
+    phone_calls: bool = False       # its suite or itself requires `phone_calls`: its calls
+    #   reach the simulated phone endpoint, which records them for `fixture_state`.
 
     @property
     def needs_operator(self) -> bool:
@@ -572,6 +583,42 @@ def _refuse_misplaced_fixture_state(case, turn_expects: list[dict], cloc: str,
                         f"server — use {FIXTURE_URL_PLACEHOLDER} in `query`")
 
 
+def _turn_waits(tt: dict, tloc: str, problems: list[str]) -> tuple[str | None, str | None]:
+    """A turn's `await` and `after`, each validated. An `await: call_report` turn
+    is the call's own report arriving on its own, so it has no query to drive."""
+    awaits, after = tt.get("await"), tt.get("after")
+    if awaits is not None and awaits not in TURN_AWAITS:
+        problems.append(f"{tloc}: `await` must be one of {list(TURN_AWAITS)}")
+        awaits = None
+    if after is not None and after not in TURN_AFTERS:
+        problems.append(f"{tloc}: `after` must be one of {list(TURN_AFTERS)}")
+        after = None
+    if awaits is not None and ("query" in tt or after is not None):
+        problems.append(f"{tloc}: an `await: {awaits}` turn is the call's own report: it has "
+                        "no `query` and no `after`")
+    return awaits, after
+
+
+def _refuse_misplaced_phone_turns(case, suite_name: str, cloc: str,
+                                  problems: list[str]) -> None:
+    """Where `phone_calls` is read and where a turn may wait on a call. Only
+    run_eval.py's `drive: ask` path starts the simulated phone endpoint and
+    waits on it; anywhere else the case would be driven against a home whose
+    calls reach nothing, or wait for an event no runner watches."""
+    if case.phone_calls and suite_name.startswith(CAPABILITY_SUITE_PREFIX):
+        problems.append(f"{cloc}: `phone_calls` is read by run_eval.py only; a capability "
+                        "case would be driven with no simulated phone endpoint")
+    if not any(turn.awaits or turn.after for turn in case.turns):
+        return
+    if not case.phone_calls:
+        problems.append(f"{cloc}: `await` and `after` wait on the simulated phone endpoint, "
+                        "which only a case requiring `phone_calls` reaches")
+    if case.drive != "ask":
+        problems.append(f"{cloc}: `await` and `after` need `drive: ask`, got {case.drive!r}")
+    if case.turns[0].awaits or case.turns[0].after:
+        problems.append(f"{cloc}: the first turn starts the case; it cannot wait on a call")
+
+
 def _refuse_misplaced_workspace_paths(case, suite_name: str, cloc: str,
                                       problems: list[str]) -> None:
     """Only run_eval.py's `drive: ask` path reads the workspace around a turn; any
@@ -778,6 +825,8 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
         suite_risk = UNCLASSIFIED_RISK
     suite_confirm_cost = _boolean(
         raw.get("confirm_cost", False), f"{fname}: top level confirm_cost", problems, False)
+    # Read before the cases: a case whose suite requires `phone_calls` places calls.
+    suite_requires = _requirements(raw.get("requires", []), fname, problems)
 
     scenarios_raw = raw.get("scenarios")
     if not isinstance(scenarios_raw, list) or not scenarios_raw:
@@ -886,23 +935,27 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
                     problems.append(f"{cloc}: `turns` must be a non-empty list")
                     tr = []
                 declared: list[tuple[str, dict]] = []
+                waits: list[tuple[str | None, str | None]] = []
                 for ti, tt in enumerate(tr):
                     tloc = f"{cloc}.turns[{ti}]"
                     if not isinstance(tt, dict):
                         problems.append(f"{tloc}: must be a map")
                         continue
                     _validate_keys(tt, _TURN_KEYS, tloc, problems)
+                    awaits, after = _turn_waits(tt, tloc, problems)
                     q = tt.get("query")
-                    if not isinstance(q, str) or not q.strip():
+                    if awaits is None and (not isinstance(q, str) or not q.strip()):
                         problems.append(f"{tloc}: `query` must be a non-empty string")
                         q = q or ""
                     texp_raw = tt.get("expect", {})
                     _validate_expect(texp_raw, f"{tloc}.expect", problems)
                     declared.append((q, texp_raw if isinstance(texp_raw, dict) else {}))
+                    waits.append((awaits, after))
                 turn_expects = [texp for _q, texp in declared]
                 for ti, (q, texp) in enumerate(declared):
                     layer = case_expect if ti == len(declared) - 1 else default_expect
-                    turns.append(Turn(query=q, expect=_merge_expect(layer, texp)))
+                    turns.append(Turn(query=q, expect=_merge_expect(layer, texp),
+                                      awaits=waits[ti][0], after=waits[ti][1]))
                 if declared:
                     problems.extend(_final_turn_conflicts(case_declared, declared[-1][1], cloc))
 
@@ -1007,7 +1060,9 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
                         score_spec=score_spec, checker_spec=checker_spec,
                         requires_tools=requires_tools, cross_session=cross_session,
                         requires_tools_all=tuple(requires_all), companion=companion_spec,
-                        watch=watch, voice=voice_spec, cue=cue_spec, requires=case_requires)
+                        watch=watch, voice=voice_spec, cue=cue_spec, requires=case_requires,
+                        phone_calls="phone_calls" in (*suite_requires, *case_requires))
+            _refuse_misplaced_phone_turns(case, str(name), cloc, problems)
             _refuse_misplaced_fixture_state(case, turn_expects, cloc, problems)
             _refuse_misplaced_workspace_paths(case, str(name), cloc, problems)
             cases.append(case)
@@ -1022,7 +1077,7 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
         description = ""
     soft = _boolean(raw.get("soft", False), f"{fname}: top level soft", problems, False)
     aborts = _abort_fragments(raw.get("abort_on_tool_error", []), fname, problems)
-    requires = _requirements(raw.get("requires", []), fname, problems)
+    requires = suite_requires
     if "cues" not in requires and any(case.drive == "cue" for scenario in scenarios
                                       for case in scenario.cases):
         problems.append(f"{fname}: a `drive: cue` suite declares `requires: [cues]`, so a "

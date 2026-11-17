@@ -402,7 +402,7 @@ defmodule Fermix.CLI.Service.Packaged do
   defp previous_generation(home, opts) do
     case hello(home, opts) do
       {:ok, hello} ->
-        prepared_generation(engine_pid(hello), opts)
+        prepared_generation(engine_pid(hello), prepare_method(hello, opts), opts)
 
       {:error, :not_running} ->
         {:ok, %{pid: nil, lease: nil}}
@@ -416,11 +416,28 @@ defmodule Fermix.CLI.Service.Packaged do
     end
   end
 
-  defp prepared_generation(pid, opts) do
-    case request(home_socket(opts), "lifecycle.prepare", %{}, opts) do
-      {:ok, %{"lease_id" => lease}} when is_binary(lease) -> {:ok, %{pid: pid, lease: lease}}
-      {:ok, _other} -> {:error, {:lifecycle_refused, "the daemon returned no lease"}}
-      {:error, reason} -> {:error, {:lifecycle_refused, Client.describe_error(reason)}}
+  # The owner's own restart (`opts[:owner_restart]`, `fermix restart`) takes the
+  # window a phone call in progress holds (M94 §12); an upgrade's restart does
+  # not ask.
+  defp prepare_method(hello, opts) do
+    if Keyword.get(opts, :owner_restart, false),
+      do: Client.owner_restart_prepare(hello),
+      else: "lifecycle.prepare"
+  end
+
+  defp prepared_generation(pid, method, opts) do
+    case request(home_socket(opts), method, %{}, opts) do
+      {:ok, %{"lease_id" => lease}} when is_binary(lease) ->
+        {:ok, %{pid: pid, lease: lease}}
+
+      {:ok, _other} ->
+        {:error, {:lifecycle_refused, "the daemon returned no lease"}}
+
+      {:error, {:management_error, _code, _message, %{"sentence" => sentence}}} ->
+        {:error, {:lifecycle_refused, sentence}}
+
+      {:error, reason} ->
+        {:error, {:lifecycle_refused, Client.describe_error(reason)}}
     end
   end
 
