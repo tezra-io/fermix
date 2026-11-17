@@ -98,14 +98,29 @@ defmodule FermixCore.Meetings do
   def enabled?, do: Config.enabled?()
 
   @doc """
-  Whether meetings can actually be joined, which is what gates tool
-  registration: enabled AND at least one lane usable. A config-only enable
-  advertises nothing until the Meet sidecar is installed or the Zoom RTMS
-  credentials are complete; on an Always On server only Zoom counts
-  (`meet_here/1`). `opts` are `meet_here/1`'s.
+  Whether meetings can actually be joined, which is what Doctor and setup
+  report: enabled AND at least one lane usable. A config-only enable is not
+  ready until the Meet sidecar is installed or the Zoom RTMS credentials are
+  complete; on an Always On server only Zoom counts (`meet_here/1`). `opts`
+  are `meet_here/1`'s.
   """
   @spec ready?(keyword()) :: boolean()
   def ready?(opts \\ []) when is_list(opts), do: config_ready?(Config.load(), opts)
+
+  @doc """
+  Whether the meeting tools are offered, which is what gates their
+  registration (M102 D5): enabled AND either a lane usable here (`ready?/1`)
+  or Google Meet refused here (`meet_here/1`), which is an Always On server.
+  So on a server every link gets a definite answer, Zoom or no Zoom: Zoom
+  joins or says to set Zoom up, and Google Meet says why it is not available
+  there (`meet_unavailable_sentence/1`). Off a server a config-only enable
+  offers nothing until a lane is usable. `opts` are `meet_here/1`'s.
+  """
+  @spec offered?(keyword()) :: boolean()
+  def offered?(opts \\ []) when is_list(opts) do
+    config = Config.load()
+    config_ready?(config, opts) or (config.enabled and meet_here(opts) != :ok)
+  end
 
   @doc """
   Whether Google Meet can be joined from this engine (M97 D24): not on an

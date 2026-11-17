@@ -406,14 +406,16 @@ shown) and then its own. Information only: no button, no notification.
 ## Files and commands on a computer
 
 - **Naming the computer.** On an owner's turn, each tool a computer can run
-  gains a `computer` argument whose values are the names of the computers
-  that offer it, an away one included: `file_read`, `file_write`,
-  `file_edit`, `glob_search`, `content_search`, `view_image` and
-  `send_attachment` under Files; `shell`, `git_read` and `git_write` under
-  Commands. A guest's turn, a worker a skill or a sub-agent runs (a plugin
-  skill's above all) and a home with no computer offering it never show it,
-  and such a turn naming one is refused as no such computer. The owner's
-  scheduled jobs and cues do see it.
+  gains a `computer` argument whose values are the names of every computer
+  `## Computers` lists, an away one and one that does not offer it
+  included: `file_read`, `file_write`, `file_edit`, `glob_search`,
+  `content_search`, `view_image` and `send_attachment` under Files;
+  `shell`, `git_read` and `git_write` under Commands. Naming a connected
+  one that does not offer it is refused with why ("… has commands switched
+  off. Only someone at … can switch it on."). A guest's turn, a worker a
+  skill or a sub-agent runs (a plugin skill's above all) and a home with no
+  computer never show it, and such a turn naming one is refused as no such
+  computer. The owner's scheduled jobs and cues do see it.
 - **Where a call runs, never silently:** with no `computer`, on the server
   (it has files and commands of its own); with a name, on that computer.
   A computer that is away is refused at once with when it was last seen
@@ -461,9 +463,10 @@ shown) and then its own. Information only: no button, no notification.
 
 ## `## Computers` on the owner's turn
 
-- On the server, an owner's turn carries a `## Computers` section right
-  after `## This Fermix`, where the home has at least one computer; a guest's
-  turn never does:
+- On the server, an owner's turn carries a `## Computers` section after the
+  runtime contract, where the home has at least one computer; a guest's turn
+  never does. It is read for each turn, and for a voice call as it starts, so
+  a computer that joins is in the next turn's list:
 
   ```
   ## Computers

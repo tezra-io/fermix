@@ -1,11 +1,12 @@
 defmodule FermixCore.Computers.ArgumentTest do
   # M97 §6.5: the `computer` argument appears on an owner's turn, where the home
-  # has a computer, on each tool whose capability some computer offers, and
-  # lists the names of the computers that offer it.
+  # has a computer, on each tool a computer can run, and names every computer
+  # `## Computers` names, whether or not it offers that tool (M102 N10).
   use ExUnit.Case, async: true
 
   alias FermixCore.Capabilities.Advertisement
   alias FermixCore.Capabilities.Builtin
+  alias FermixCore.Capabilities.BuiltinSeeder
   alias FermixCore.Computers.Argument
   alias FermixCore.Computers.Capabilities.Files
   alias FermixCore.Computers.Capabilities.Shell, as: ShellCapability
@@ -69,28 +70,60 @@ defmodule FermixCore.Computers.ArgumentTest do
     refute Map.has_key?(Builtin.from_tool_module(WebFetch).metadata, :computer)
   end
 
-  test "the argument lists the computers that offer the tool's capability, an away one too" do
+  test "the argument names every computer: an away one, one with it off, one past the window" do
     computers = [studio(), loft(), attic()]
     read = Argument.add(Builtin.from_tool_module(FileRead), computers)
     shell = Argument.add(Builtin.from_tool_module(Shell), computers)
 
-    assert %{type: "string", enum: ["studio Mac", "loft Linux"], description: words} =
+    assert %{type: "string", enum: ["studio Mac", "loft Linux", "attic Mac"], description: words} =
              computer_property(read)
 
     assert words =~ "## Computers"
-    assert computer_property(shell).enum == ["studio Mac"]
+    assert computer_property(shell).enum == ["studio Mac", "loft Linux", "attic Mac"]
     # The tool's own arguments are untouched, and the argument is never required.
     assert Map.has_key?(read.parameters.properties, :path)
     refute "computer" in read.parameters.required
   end
 
-  test "no argument when no computer offers the capability, or the tool has none" do
-    only_off = [%{loft() | offers: [offer("shell", :off)]}]
-
-    assert computer_property(Argument.add(Builtin.from_tool_module(Shell), only_off)) == nil
+  test "no argument with no computer, or on a tool no computer can run" do
     assert computer_property(Argument.add(Builtin.from_tool_module(FileRead), [])) == nil
     assert computer_property(Argument.add(Builtin.from_tool_module(WebFetch), [studio()])) == nil
   end
+
+  # M102 N10: the argument names every computer `## Computers` names, so a call
+  # naming one that offers nothing reaches `Choice`'s own refusal ("… has
+  # commands switched off") instead of running here.
+  test "a computer that offers nothing appears in every computer tool's list" do
+    cellar = %Computer{
+      device_id: "d4",
+      name: "cellar Linux",
+      platform: :linux,
+      connected: true,
+      offers: [offer("files", :off), offer("shell", :off), offer("browser", :off)]
+    }
+
+    computers = [studio(), cellar]
+
+    tools = Enum.filter(BuiltinSeeder.builtin_tool_modules(), &computer_tool?/1)
+    assert Shell in tools and FileRead in tools
+
+    for tool <- tools do
+      capability = Argument.add(Builtin.from_tool_module(tool), computers)
+
+      assert named(capability) == ["studio Mac", "cellar Linux"],
+             "#{tool.name()} does not name every computer"
+    end
+
+    assert named(Argument.add(Builtin.from_tool_module(Shell), [cellar])) == ["cellar Linux"]
+  end
+
+  defp computer_tool?(tool),
+    do: Map.has_key?(Builtin.from_tool_module(tool).metadata, :computer)
+
+  # The names, in the key style the tool's own schema uses.
+  defp named(%{parameters: %{properties: %{computer: %{enum: names}}}}), do: names
+  defp named(%{parameters: %{"properties" => %{"computer" => %{"enum" => names}}}}), do: names
+  defp named(_capability), do: nil
 
   test "only an owner's turn sees the home's computers" do
     assert Argument.computers(owner([studio()])) == [studio()]

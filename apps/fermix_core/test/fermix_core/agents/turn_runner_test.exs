@@ -3752,6 +3752,72 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   @private_key {"voice", "6f1c2a4e-9b3d-4c5e-8a7f-0123456789ab", :root}
   @chat_key {"companion", "main", :root}
 
+  # M102 N10: `## Computers` is the turn's own, rendered in the turn's process
+  # at its trust (`Computers.prompt_section/1`) and carried in the turn-only
+  # system slot, never in the runtime context MainAgent caches, which nothing
+  # invalidates when a computer joins. So a computer that joins after the
+  # context was built is in the very next turn's section.
+  describe "the home's computers" do
+    @computers_host %{
+      install: :general,
+      os: :linux,
+      os_version: "Debian 13",
+      architecture: "x86_64",
+      linux_app: false
+    }
+
+    defp computers_opts(rows) do
+      [
+        role: :primary,
+        rows: fn -> {:ok, Agent.get(rows, & &1)} end,
+        live: %{},
+        records: %{},
+        version: "0.19.2",
+        host_facts: @computers_host
+      ]
+    end
+
+    defp computer_row(name) do
+      %{
+        device_id: "0d3f8a7e-5c21-4b9e-8f60-2a4c6e8b1d37",
+        name: name,
+        platform: "linux",
+        last_seen: nil,
+        backups: nil,
+        connected: false,
+        since: nil
+      }
+    end
+
+    defp computers_messages(messages),
+      do: Enum.filter(messages, &String.starts_with?(&1.content, "## Computers"))
+
+    test "a computer that joins after the context was built is in the next turn's section" do
+      rows = start_supervised!({Agent, fn -> [] end})
+      ctx = runtime_context()
+      msg = %{channel: "telegram", chat_id: "computers_join"}
+      state = [runtime_context: ctx, computers_opts: computers_opts(rows)]
+
+      assert computers_messages(capture_prompt(msg, state)) == []
+
+      :ok = Agent.update(rows, fn _none -> [computer_row("cellar Linux")] end)
+      messages = capture_prompt(msg, state)
+
+      assert [%{role: "system", content: section}] = computers_messages(messages)
+      assert section =~ "- cellar Linux (Linux, not connected yet): offers nothing."
+      # It follows the cached runtime contract, which is unchanged.
+      assert [%{content: "base prompt"}, %{content: "runtime contract"}, %{content: ^section} | _] =
+               messages
+    end
+
+    test "a guest's turn carries no section" do
+      rows = start_supervised!({Agent, fn -> [computer_row("cellar Linux")] end})
+      msg = %{channel: "telegram", chat_id: "computers_guest", source_trust: :guest}
+
+      assert computers_messages(capture_prompt(msg, computers_opts: computers_opts(rows))) == []
+    end
+  end
+
   # The records a reply draws are its own turn's (EVENTS_DRAWN_AS_CARDS §04,
   # M85 §07, M89 §06). What an earlier turn in the conversation put and no
   # reply took is dropped as the next turn begins: a Live call's hand-off in

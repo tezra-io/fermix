@@ -75,13 +75,14 @@ engine's provider api_key slot, filled at daemon boot from `XAI_API_KEY` or
 socket starts only in a daemon run with realtime on (`mix fermix.dev`, not
 `--no-realtime`) and that key present.
 
-`--computers` (M97) makes the home an Always On server with two linked
-computers, both away, for the computers suite (suites/computers.yaml): a
+`--computers` (M97) makes the home an Always On server with three linked
+computers, all away, for the computers suite (suites/computers.yaml): a
 desktop row each in `mobile/devices.toml` (what `DeviceStore` reads) and a
 record each in `device/computers/<device_id>.json` (its last offers, engine
 version and when it was last seen). It is off by default: the section joins every owner turn, which
 would move the measured prompt of every unrelated suite. No session ever
-exists in an eval, so both computers are listed as away. The studio Mac offers
+exists in an eval, so every computer is listed as away. The third, cellar
+Linux, offers nothing: every switch there is off (M102 N10). The studio Mac offers
 `places` (D13) and the home's place search is set to `backend = "computer"`,
 so the home looks places up on that Mac, as a server does, and finds it away:
 a dev build on a Mac would otherwise search Apple Maps itself. The seed records what
@@ -299,19 +300,24 @@ printf '%s\\n' '{_json_line(CLAUDE_STUB_INIT)}'
 printf '%s\\n' '{_json_line(CLAUDE_NOT_LOGGED_IN)}'
 exit 1
 """
-# Computers (M97), with --computers: two computers linked to this home, neither
+# Computers (M97), with --computers: three computers linked to this home, none
 # with a session. Each is a desktop row in the paired-device store (`DeviceStore`:
 # lowercase uuid, name and model 1..255 bytes, a unique 32-byte Noise key, ISO
 # 8601 UTC times, no phone field) and a record of what it last said about itself.
 # `model` is the string the move writes for each system. Each files offer names
 # the folders files and commands reach on that computer (`roots`, M97 F5) and
 # the home `~` stands for there (`home`): the studio Mac its workspace and
-# Projects (standard), loft Linux its workspace (strict), never Downloads. Every value is invented, and fixed, so every seed
-# writes the same bytes.
+# Projects (standard), loft Linux its workspace (strict), never Downloads.
+# cellar Linux has every switch off (M102 N10), each with the sentence a
+# Linux computer says for it, so it offers nothing. Every value is invented,
+# and fixed, so every seed writes the same bytes.
 COMPUTERS_MANIFEST = os.path.join("eval-fixtures", "computers.json")
 HISTORY_MANIFEST = os.path.join("eval-fixtures", "computer_history.json")
 DEVICES_FILE = os.path.join("mobile", "devices.toml")
 COMPUTER_RECORDS_DIR = os.path.join("device", "computers")
+# What a Linux computer says of an offer whose own switch is off
+# (`Computers.Offers.switched_off_sentence/1`).
+CELLAR_OFF = "Switched off on this computer. Only someone at this computer can switch it on."
 COMPUTERS = (
     {"device_id": "6f1c2a9e-3b7d-4c21-9a8e-1d2f3a4b5c6d", "name": "studio Mac",
      "model": "macOS desktop", "platform": "macos", "backups": True,
@@ -337,6 +343,16 @@ COMPUTERS = (
                 {"id": "imessage", "state": "unavailable",
                  "sentence": "Messages runs only on a Mac."},
                 {"id": "history", "state": "on"},
+                {"id": "places", "state": "unavailable",
+                 "sentence": "Looking places up in Apple Maps needs the Fermix app on a Mac."}]},
+    {"device_id": "e2a95c47-8d13-4b6f-a0c8-5f3e7d21b9a4", "name": "cellar Linux",
+     "model": "Linux desktop", "platform": "linux", "backups": False,
+     "created_at": "2026-10-27T18:20:00Z", "last_seen": "2026-11-07T23:50:00Z",
+     "engine_version": "0.19.0", "offers_rev": "5d0b8e3f71a26c94",
+     "offers": [*({"id": offer, "state": "off", "sentence": CELLAR_OFF}
+                  for offer in ("files", "shell", "browser", "computer_use", "history")),
+                {"id": "imessage", "state": "unavailable",
+                 "sentence": "Messages runs only on a Mac."},
                 {"id": "places", "state": "unavailable",
                  "sentence": "Looking places up in Apple Maps needs the Fermix app on a Mac."}]},
 )
@@ -746,7 +762,7 @@ def computer_noise_pk(device_id: str) -> str:
 def render_devices() -> str:
     """`mobile/devices.toml` with one desktop row per computer in `COMPUTERS`."""
     lines = ["# Managed by benchmark/bin/seed_capability_home.py --computers: the",
-             "# computers linked to this home, both away (no session).", ""]
+             "# computers linked to this home, all away (no session).", ""]
     for computer in COMPUTERS:
         lines += ["[[devices]]"]
         lines += [f"{key} = {json.dumps(computer[key])}"
@@ -780,7 +796,7 @@ def make_private_dir(path: str) -> None:
 
 
 def write_computer_fixtures(home: str) -> dict:
-    """The two computers (`COMPUTERS`): the devices file (directory 0700, file
+    """The three computers (`COMPUTERS`): the devices file (directory 0700, file
     0600, the modes `DeviceStore` refuses anything but), one record each under
     `device/computers/` (0700 / 0600), and the manifest that says this seed
     wrote them. Rewritten whole on every seed. A devices file the manifest does
@@ -1111,8 +1127,8 @@ def parse_args() -> argparse.Namespace:
                         help="with --cues: add the stub http plugin and the two mandates the "
                              "cue suite's mandate cases need (they are held out without it)")
     parser.add_argument("--computers", action="store_true",
-                        help="link two computers to the home (studio Mac, loft Linux), both "
-                             "away, for the computers suite; off by default")
+                        help="link three computers to the home (studio Mac, loft Linux, "
+                             "cellar Linux), all away, for the computers suite; off by default")
     parser.add_argument("--coding-signed-out", dest="coding_signed_out", action="store_true",
                         help="put a stub claude first on the daemon's PATH that fails every "
                              "run as signed out, for coding_harness's signed-out case; off "
@@ -1232,8 +1248,8 @@ def main() -> None:
         if voice_conversation == "private":
             print("voice calls: private (each call apart from the chat, its answers only said)")
     if args.computers:
-        names = " and ".join(c["name"] for c in COMPUTERS)
-        print(f"computers: {names} linked, both away")
+        names = [c["name"] for c in COMPUTERS]
+        print(f"computers: {', '.join(names[:-1])} and {names[-1]} linked, all away")
     if args.coding_signed_out:
         print(f"coding signed out: {CLAUDE_STUB} fails every Claude Code run as signed out; "
               "capability-daemon.sh puts it first on the daemon's PATH")

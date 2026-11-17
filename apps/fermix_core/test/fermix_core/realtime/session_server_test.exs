@@ -712,6 +712,71 @@ defmodule FermixCore.Realtime.SessionServerTest do
     assert event.session.instructions =~ section <> "\n\n## Runtime Contract\n"
   end
 
+  # M102 N10: the call is told the home's computers as they are when it starts
+  # (`Computers.prompt_section/1` at the call's trust), never from the runtime
+  # context, which nothing rebuilds when a computer joins.
+  test "the production voice prompt names the home's computers as the call starts" do
+    fixture = runtime_session_fixture([])
+
+    host = %{
+      install: :general,
+      os: :linux,
+      os_version: "Debian 13",
+      architecture: "x86_64",
+      linux_app: false
+    }
+
+    cellar = %{
+      device_id: "0d3f8a7e-5c21-4b9e-8f60-2a4c6e8b1d37",
+      name: "cellar Linux",
+      platform: "linux",
+      last_seen: nil,
+      backups: nil,
+      connected: false,
+      since: nil
+    }
+
+    context = %{
+      agent_name: "realtime",
+      conversation_key: ConversationRecorder.conversation_key("unknown"),
+      realtime?: true,
+      source_trust: :operator,
+      computers_opts: [
+        role: :primary,
+        rows: fn -> {:ok, [cellar]} end,
+        live: %{},
+        records: %{},
+        version: "0.19.2",
+        host_facts: host
+      ]
+    }
+
+    {:ok, server} =
+      SessionServer.start_link(
+        companion: self(),
+        endpoint: :desktop,
+        call_lease: CallLeases.own!(),
+        config: Config.normalize(enabled: true),
+        openai_client: FakeOpenAIClient,
+        api_key: "sk-test",
+        safety_identifier: "safe-id",
+        capability_registry: fixture.capability_registry,
+        skill_registry: fixture.skill_registry,
+        context: context
+      )
+
+    assert :ok = SessionServer.call_start(server)
+
+    [event] = server |> SessionServer.openai_pid() |> FakeOpenAIClient.events()
+
+    section =
+      "## Computers\n" <>
+        "- This server: Debian 13. Files, shell and a headless browser run here by default.\n" <>
+        "- cellar Linux (Linux, not connected yet): offers nothing."
+
+    assert [_before, _after] = String.split(event.session.instructions, section)
+  end
+
   test "skill reload does not mutate an active realtime session snapshot" do
     fixture = runtime_session_fixture(["voice_skill"])
 

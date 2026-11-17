@@ -204,6 +204,8 @@ defmodule FermixCore.Agents.RuntimeContext do
   A Live voice delegation puts its backend addendum here
   (MILESTONE_41_OPENAI_LIVE_VOICE.md §6.3) — it must never mutate the shared
   prompt a text conversation replays, so it is never cached into a profile.
+  An owner's turn puts its `## Computers` section here too (M102 N10): a
+  computer joins or goes away with nothing to rebuild a cached profile.
   Empty (the default) leaves every existing caller byte-identical.
 
   The volatile tier is the owner's memory (USER.md and MEMORY.md). A turn on

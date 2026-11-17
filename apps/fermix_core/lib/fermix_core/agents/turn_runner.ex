@@ -41,6 +41,7 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.ComputerHistory.Gate, as: ComputerHistoryGate
   alias FermixCore.ComputerHistory.RecentActivity
   alias FermixCore.ComputerHistory.Taint
+  alias FermixCore.Computers
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Memory.Compactor
   alias FermixCore.Memory.ConversationStore
@@ -543,7 +544,7 @@ defmodule FermixCore.Agents.TurnRunner do
         profile,
         masked_history,
         user_message,
-        extra_system_messages(voice_call)
+        extra_system_messages(voice_call) ++ computers_messages(state, profile.trust)
       )
 
     accounting = RuntimeContext.accounting_for(ctx, profile)
@@ -816,6 +817,21 @@ defmodule FermixCore.Agents.TurnRunner do
     do: [%{role: "system", content: addendum}]
 
   defp extra_system_messages(:none), do: []
+
+  # The home's computers (M97 §6.5), read for this turn, in its own process
+  # and at its trust, as the turn's `computer` argument is
+  # (`Computers.Argument`), never from the cached runtime context, which
+  # nothing rebuilds when a computer joins or goes away (M102 N10). It follows
+  # the voice addendum, since it changes whenever a computer connects or goes
+  # away. `turn_state.computers_opts` is a test's seams for `Computers`.
+  defp computers_messages(state, trust) do
+    opts = Keyword.put(Map.get(state, :computers_opts, []), :trust, trust)
+
+    case Computers.prompt_section(opts) do
+      nil -> []
+      section -> [%{role: "system", content: section}]
+    end
+  end
 
   defp session_id({:ok, %{turn_session_id: turn_session_id}}), do: turn_session_id
   defp session_id(:none), do: "main-#{System.unique_integer([:positive, :monotonic])}"

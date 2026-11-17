@@ -188,7 +188,8 @@ defmodule FermixWebWeb.SetupLive do
   @open_loops_restart_keys [:open_loops_enabled]
   # `[fermix_core.meetings]` is written as a section rather than through wizard
   # answers, so these never reach `runtime_restart_answers?/1`; they are the keys
-  # `Meetings.ready?/0` reads, and tool registration reads it only at boot.
+  # `Meetings.ready?/0` and `Meetings.offered?/1` read, and tool registration
+  # reads the second only at boot.
   @meetings_restart_keys [
     :enabled,
     :zoom_account_id,
@@ -2415,13 +2416,13 @@ defmodule FermixWebWeb.SetupLive do
   defp meetings_saved_message(true), do: "Meetings saved. Restart to apply."
   defp meetings_saved_message(false), do: "Meetings saved."
 
-  # The meetings tools are registered once, at boot, from `Meetings.ready?/0`
-  # (enabled plus either the notetaker binary or the full Zoom credential set),
-  # so a change to any of those keys only reaches the model after a restart —
-  # the same boot-seeded gate the computer-use save asks a restart for. The
-  # remaining keys (bot name, announcement, backend) are read per meeting. The
-  # comparison runs against the loaded config so an unset key reads as its
-  # default rather than as a change.
+  # The meetings tools are registered once, at boot, from `Meetings.offered?/1`
+  # (enabled plus either the notetaker binary or the full Zoom credential set,
+  # or an Always On server), so a change to any of those keys only reaches the
+  # model after a restart — the same boot-seeded gate the computer-use save asks
+  # a restart for. The remaining keys (bot name, announcement, backend) are read
+  # per meeting. The comparison runs against the loaded config so an unset key
+  # reads as its default rather than as a change.
   defp meetings_restart_required?(%MeetingsConfig{} = previous, changes) do
     Enum.any?(@meetings_restart_keys, fn key ->
       Keyword.has_key?(changes, key) and Keyword.get(changes, key) != Map.fetch!(previous, key)

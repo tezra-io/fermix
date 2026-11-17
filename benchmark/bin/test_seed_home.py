@@ -727,7 +727,7 @@ def _computer_tree(home):
     return tree
 
 
-def test_the_computers_fixture_writes_two_away_computers_the_store_reads(tmp_path):
+def test_the_computers_fixture_writes_three_away_computers_the_store_reads(tmp_path):
     home = tmp_path / "x-eval"
     home.mkdir()
     seed.write_computer_fixtures(str(home))
@@ -738,11 +738,11 @@ def test_the_computers_fixture_writes_two_away_computers_the_store_reads(tmp_pat
     devices = home / "mobile" / "devices.toml"
     assert devices.stat().st_mode & 0o777 == 0o600
     rows = tomllib.loads(devices.read_text())["devices"]
-    assert [row["name"] for row in rows] == ["studio Mac", "loft Linux"]
+    assert [row["name"] for row in rows] == ["studio Mac", "loft Linux", "cellar Linux"]
     for row in rows:
         _assert_desktop_row(row)
-    assert len({row["device_id"] for row in rows}) == 2
-    assert len({row["noise_pk"] for row in rows}) == 2
+    assert len({row["device_id"] for row in rows}) == 3
+    assert len({row["noise_pk"] for row in rows}) == 3
 
     records = {}
     for row in rows:
@@ -772,10 +772,19 @@ def test_the_computers_fixture_writes_two_away_computers_the_store_reads(tmp_pat
                                  "sentence": "Messages runs only on a Mac."}
     assert linux["places"] == {"id": "places", "state": "unavailable",
                                "sentence": "Looking places up in Apple Maps needs the Fermix app on a Mac."}
+    # cellar Linux: every switch off (M102 N10), so it offers nothing, each off
+    # offer with the sentence a Linux computer says for it.
+    cellar = _offers(records["cellar Linux"])
+    assert not [oid for oid, offer in cellar.items() if offer["state"] == "on"]
+    assert {oid for oid, offer in cellar.items() if offer["state"] == "off"} == {
+        "files", "shell", "browser", "computer_use", "history"}
+    assert {offer["sentence"] for offer in cellar.values() if offer["state"] == "off"} == {
+        "Switched off on this computer. Only someone at this computer can switch it on."}
     assert {row["platform"] for row in rows} == {"macos", "linux"}
 
     manifest = json.loads((home / seed.COMPUTERS_MANIFEST).read_text())
-    assert [c["name"] for c in manifest["computers"]] == ["studio Mac", "loft Linux"]
+    assert [c["name"] for c in manifest["computers"]] == [
+        "studio Mac", "loft Linux", "cellar Linux"]
 
 
 def test_a_second_computers_seed_writes_the_same_bytes(tmp_path, monkeypatch):
@@ -796,7 +805,8 @@ def test_computers_come_only_with_the_flag_and_a_seed_without_them_takes_them_aw
     # A Mac dev daemon carries the Apple helper and would search Apple Maps
     # itself; the computers world looks places up on the studio Mac (D13).
     assert on["fermix_core"]["tools"]["place_search"] == {"backend": "computer"}
-    assert "computers: studio Mac and loft Linux linked, both away" in capsys.readouterr().out
+    assert ("computers: studio Mac, loft Linux and cellar Linux linked, all away"
+            in capsys.readouterr().out)
     written = seed.computer_paths(str(home))
     assert all(os.path.isfile(path) for path in written)
 

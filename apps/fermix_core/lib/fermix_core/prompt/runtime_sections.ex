@@ -9,7 +9,6 @@ defmodule FermixCore.Prompt.RuntimeSections do
   alias FermixCore.Agents.AgentDefinition
   alias FermixCore.Capabilities.Deferral
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
-  alias FermixCore.Computers
   alias FermixCore.ComputerUse.Reach
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.HostFacts
@@ -79,7 +78,6 @@ defmodule FermixCore.Prompt.RuntimeSections do
 
     [
       this_fermix(trust),
-      computers(trust),
       runtime_contract(trust),
       sub_agent_orchestration(opts),
       capability_summary_from_opts(opts),
@@ -97,11 +95,6 @@ defmodule FermixCore.Prompt.RuntimeSections do
   # profile carries none, as a guest turn carries none of the owner's memory.
   defp this_fermix(:operator), do: HostFacts.prompt_section()
   defp this_fermix(:guest), do: nil
-
-  # The home's computers (M97 §6.5), right after the machine this Fermix runs
-  # on, on an owner's turn only, as `## This Fermix` is: names, state and
-  # offers, never an address or an id.
-  defp computers(trust), do: Computers.prompt_section(trust: trust)
 
   defp capability_summary_from_opts(opts) do
     case Keyword.fetch(opts, :capabilities) do

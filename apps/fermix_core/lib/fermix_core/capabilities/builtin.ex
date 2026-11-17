@@ -221,8 +221,8 @@ defmodule FermixCore.Capabilities.Builtin do
     # the owner's own meetings out of a guest's surface; the attended-operator
     # advertise?/execute gate these three share with the temporal family — and
     # `Meetings.join/2` repeats — is the hard barrier. Only seeded when
-    # `Meetings.ready?()` (BuiltinSeeder), so a disabled or lane-less daemon
-    # never advertises them.
+    # `Meetings.offered?/1` (BuiltinSeeder), so a disabled daemon, or a
+    # lane-less one off an Always On server, never advertises them.
     "join_meeting" => %{
       policy_class: :external_api,
       hidden_from_agent?: false,
