@@ -1,10 +1,12 @@
 #!/bin/sh
-# Test stand-in for curl. https://fermix.ai/install answers the fake
-# installer, unless /etc/fermix-test/install-unreachable exists;
-# https://fermix.ai/install/releases answers /etc/fermix-test/releases and a
-# release file on GitHub answers /etc/fermix-test/release/v<version>/<file>,
-# each a 404 while the file is not there (what the regular installer's
-# --always-on fetches); https://pkgs.tailscale.com/ is fetched for real, with
+# Test stand-in for curl. https://fermix.ai/install/releases answers
+# /etc/fermix-test/releases and a release file on GitHub answers
+# /etc/fermix-test/release/v<version>/<file>, each a 404 while the file is
+# not there (what the first boot, the update and the regular installer's
+# --always-on fetch); every address is refused while
+# /etc/fermix-test/offline exists, as with no network, and so is
+# https://fermix.ai/install itself, whose installer no server runs; a call
+# to it is still logged. https://pkgs.tailscale.com/ is fetched for real, with
 # the curl the tailnet scenario installs; the instance metadata service and
 # AWS STS answer what the s3-backups scenario put in /etc/fermix-test/imds/
 # and /etc/fermix-test/sts/ (E1's credentials helper); any other address is
@@ -80,11 +82,10 @@ sts() {
   if [ -f "$fixtures/sts/status" ]; then cat "$fixtures/sts/status"; else printf 200; fi
 }
 
-[ ! -f /etc/fermix-test/install-unreachable ] || exit 6
+[ ! -f /etc/fermix-test/offline ] || exit 6
 case "$url" in
   http://169.254.169.254/*) imds "${url#http://169.254.169.254}"; exit 0 ;;
   https://sts.*.amazonaws.com/) sts; exit 0 ;;
-  https://fermix.ai/install) body=/cloud/test/fake-install.sh ;;
   https://fermix.ai/install/releases) body=/etc/fermix-test/releases ;;
   https://github.com/tezra-io/fermix/releases/download/*)
     body=/etc/fermix-test/release/${url#https://github.com/tezra-io/fermix/releases/download/}

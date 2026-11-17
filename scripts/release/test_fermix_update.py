@@ -15,27 +15,39 @@ minutes as a follow run (`--follow`), which installs and restarts but never
 reboots, and every night at 04:00 UTC, which reboots too. The owner's own
 update (`--release X [--ahead-of-apps]`) passes the same gate: no downgrade,
 only a release the table lists, and only an eligible one unless it says to go
-ahead of the apps. After each install the update script becomes the
-installed release's own (its `fermix_always_on.sh`, checked against the
-table, run with `--update-script-only`). A restart waits for a move and for
-work on a computer (`restart_hold.wait_s`). The runs never overlap: each
-takes one lock, which a follow run leaves to the run that holds it and the
-night waits for, within a bound.
+ahead of the apps. A restart waits for a move and for work on a computer
+(`restart_hold.wait_s`). The runs never overlap: each takes one lock, which a
+follow run leaves to the run that holds it and the night waits for, within a
+bound.
 
-The update is the script first boot writes, taken from first-boot.sh as it
-writes it, with its fixed paths moved under this test's own directory (each
-replaced line asserted present exactly once, as test_install_sh.py does for
-the installer). Nothing reaches the network, a package manager, systemd,
-another account or /run: every command it runs is a stand-in on a PATH of this
-test's own, beside a handful of real POSIX tools. The container scenarios in
-packaging/cloud/test/ run the same script on a real Debian, with the real
-flock.
+M101 Part B: root runs no code of the site's. Both the first boot and the
+update install through one function of the release's own server script
+(`install_checked`): the package from the release's GitHub release, installed
+by apt only when its sha256 is the one fermix.ai's table lists and, for every
+update, when the package's own cosign (`/usr/lib/fermix/cosign`, its Sigstore
+cache in root's own folder) verifies its signature as the release workflow's
+for that tag. The first boot, the first install, has no cosign yet and checks
+the digest alone. After each install the update script becomes the installed
+release's own (its `fermix_always_on.sh`, under the same two checks, run with
+`--update-script-only`).
+
+The update is the script first boot writes, written by first-boot.sh's own
+write_update_script with the paths it names moved under this test's own
+directory (each fixed line of its body asserted present exactly once, as
+test_install_sh.py does for the installer). Nothing reaches the network, a
+package manager, systemd, another account or /run: every command it runs is a
+stand-in on a PATH of this test's own, beside a handful of real POSIX tools.
+cosign is a stand-in too, which accepts a signature only when it covers the
+file's own bytes and names the identity and issuer it is asked for. The
+container scenarios in packaging/cloud/test/ run the same script on a real
+Debian, with the real flock.
 """
 
 import contextlib
 import fcntl
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -48,17 +60,26 @@ FIRST_BOOT = ROOT / "packaging/cloud/first-boot.sh"
 INSTALL_URL = "https://fermix.ai/install"
 RELEASES_URL = "https://fermix.ai/install/releases"
 ARTIFACT_ORIGIN = "https://github.com/tezra-io/fermix/releases/download/"
+WORKFLOW = "https://github.com/tezra-io/fermix/.github/workflows/release.yml@refs/tags/v"
+ISSUER = "https://token.actions.githubusercontent.com"
+ALWAYS_ON = "fermix_always_on.sh"
+VERSIONS = ("0.9.0", "0.10.0", "0.17.0", "0.17.2", "0.18.0")
 
 REAL_TOOLS = (
     "sh", "cat", "tr", "sed", "rm", "mv", "mktemp", "install", "dirname", "env",
-    "mkdir", "chmod", "cut", "grep", "awk", "sha256sum",
+    "mkdir", "chmod", "cut", "grep", "awk", "sha256sum", "find",
 )
 
 # `dpkg --compare-versions A OP B` for the plain MAJOR.MINOR.PATCH releases
-# Fermix ships, as dpkg orders them (numerically, field by field).
+# Fermix ships, as dpkg orders them (numerically, field by field), and
+# `dpkg --print-architecture` for an x86_64 server.
 FAKE_DPKG = f"""#!{sys.executable}
 import sys
-_, flag, a, op, b = sys.argv
+args = sys.argv[1:]
+if args == ["--print-architecture"]:
+    print("amd64")
+    sys.exit(0)
+flag, a, op, b = args
 assert flag == "--compare-versions", sys.argv
 key = lambda v: tuple(int(part) for part in v.split("."))
 ops = {{"lt": key(a) < key(b), "le": key(a) <= key(b), "eq": key(a) == key(b),
@@ -78,6 +99,39 @@ NIGHT_STOPS_WAITING = (
 )
 
 
+def package(version):
+    return f"fermix_{version}_amd64.deb"
+
+
+def checked_calls(version, name):
+    """The calls that fetch file `name` of a release and check its signature."""
+    return [
+        f"curl {ARTIFACT_ORIGIN}v{version}/{name}",
+        f"curl {ARTIFACT_ORIGIN}v{version}/{name}.sig",
+        f"curl {ARTIFACT_ORIGIN}v{version}/{name}.pem",
+        f"cosign verify-blob {name} as {WORKFLOW}{version} by {ISSUER}",
+    ]
+
+
+def install_calls(version):
+    """An update's install of `version`: the table, the package and both checks, then apt."""
+    return [
+        f"curl {RELEASES_URL}",
+        *checked_calls(version, package(version)),
+        f"apt-get -qq install -y --no-remove {package(version)}",
+    ]
+
+
+def refresh_calls(version):
+    """The calls that make the update script release `version`'s own."""
+    return [f"curl {RELEASES_URL}", *checked_calls(version, ALWAYS_ON), "always-on --update-script-only"]
+
+
+def refused(when, reason, still):
+    """The one line an update that installed nothing ends with."""
+    return f"fermix update: Fermix is not updated {when}: {reason}. Nothing was installed, so {still}."
+
+
 class NightlyUpdateTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="fermix-update-")
@@ -92,7 +146,11 @@ class NightlyUpdateTest(unittest.TestCase):
         self.lock = self.base / "run" / "fermix-update.lock"
         self.reboot_flag = self.base / "run" / "reboot-required"
         self.deferrals = self.base / "deferrals" / "reboot-deferrals"
-        for directory in (self.bin, self.state, self.fermix_home, self.base / "run"):
+        # The package's cosign, and its Sigstore cache in root's own folder.
+        self.cosign = self.base / "usr-lib-fermix" / "cosign"
+        self.sigstore = self.base / "var-lib" / "fermix-update" / "sigstore"
+        self.update = self.base / "fermix-update"
+        for directory in (self.bin, self.state, self.fermix_home, self.base / "run", self.cosign.parent):
             directory.mkdir(parents=True)
         self.log.touch()
         for tool in REAL_TOOLS:
@@ -110,6 +168,7 @@ class NightlyUpdateTest(unittest.TestCase):
     def test_a_server_behind_the_eligible_release_installs_it_and_takes_its_script(self):
         self._installed("0.17.0")
         self._eligible("0.17.2")
+        (self.state / "always-on-replaces").touch()
 
         result = self._night()
 
@@ -117,16 +176,17 @@ class NightlyUpdateTest(unittest.TestCase):
         self.assertIn("==> Fermix went from 0.17.0 to 0.17.2", result.stdout)
         self.assertIn("==> This update script is now Fermix 0.17.2's own", result.stdout)
         calls = self._calls()
-        self.assertEqual(calls[:6], [
-            "fermix home status --json",
-            f"curl {INSTALL_URL}",
-            "installer --no-setup --version 0.17.2",
-            f"curl {RELEASES_URL}",
-            f"curl {ARTIFACT_ORIGIN}v0.17.2/fermix_always_on.sh",
-            "always-on --update-script-only",
-        ])
+        expected = ["fermix home status --json", *install_calls("0.17.2"), *refresh_calls("0.17.2")]
+        self.assertEqual(calls[: len(expected)], expected)
         # The engine runs the older release, so it is restarted.
         self.assertIn("fermix restart", calls)
+        self.assertEqual(self._installed_version(), "0.17.2")
+        self.assertEqual(self.update.read_text(encoding="utf-8"), "#!/bin/sh\n# replaced by the release\n")
+        # apt, which reads a local package as its own account, can reach it.
+        self.assertFalse((self.state / "apt-unsandboxed").exists())
+        # cosign's Sigstore cache is a folder root made for itself alone.
+        self.assertTrue(self.sigstore.is_dir())
+        self.assertEqual(self.sigstore.stat().st_mode & 0o777, 0o700)
 
     def test_releases_are_ordered_as_dpkg_orders_them_not_as_text(self):
         self._installed("0.9.0")
@@ -135,7 +195,7 @@ class NightlyUpdateTest(unittest.TestCase):
         result = self._night()
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("installer --no-setup --version 0.10.0", self._calls())
+        self.assertIn(f"apt-get -qq install -y --no-remove {package('0.10.0')}", self._calls())
 
     def test_a_server_on_the_eligible_release_downloads_nothing(self):
         self._installed("0.17.0")
@@ -145,7 +205,7 @@ class NightlyUpdateTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("==> Fermix 0.17.0 is the newest release eligible for this server", result.stdout)
-        self.assertNotIn(f"curl {INSTALL_URL}", self._calls())
+        self.assertEqual(self._installs(), [])
 
     def test_a_server_newer_than_the_eligible_release_is_never_installed_back_down(self):
         self._installed("0.18.0")
@@ -159,7 +219,7 @@ class NightlyUpdateTest(unittest.TestCase):
             "and is never installed back down",
             result.stdout,
         )
-        self.assertNotIn(f"curl {INSTALL_URL}", self._calls())
+        self.assertEqual(self._installs(), [])
 
     def test_with_no_release_eligible_fermix_stays_as_it_is(self):
         self._installed("0.17.0")
@@ -173,7 +233,7 @@ class NightlyUpdateTest(unittest.TestCase):
             "Fermix stays at 0.17.0",
             result.stdout,
         )
-        self.assertNotIn(f"curl {INSTALL_URL}", self._calls())
+        self.assertEqual(self._installs(), [])
 
     def test_a_server_with_no_home_yet_installs_nothing_and_asks_no_engine(self):
         self._installed("0.17.0")
@@ -199,46 +259,235 @@ class NightlyUpdateTest(unittest.TestCase):
             "message above says why.",
             result.stderr,
         )
-        self.assertNotIn(f"curl {INSTALL_URL}", self._calls())
+        self.assertEqual(self._installs(), [])
 
-    def test_an_installer_that_fails_stops_the_night_before_the_restart(self):
+    def test_an_apt_get_that_fails_stops_the_night_before_the_restart_and_the_reboot(self):
         self._installed("0.17.0")
         self._eligible("0.17.2")
-        (self.state / "installer-fails").touch()
+        (self.state / "apt-fails").touch()
+        self.reboot_flag.touch()
 
         result = self._night()
 
         self.assertEqual(result.returncode, 1)
-        self.assertIn("The Fermix installer stopped", result.stderr)
+        self.assertEqual(
+            result.stderr,
+            "Verified OK\nE: (test) dpkg was interrupted\n"
+            "fermix update: apt-get could not install the package for Fermix 0.17.2; its message "
+            "above says why.\n",
+        )
         self.assertNotIn("fermix restart", self._calls())
+        self.assertNotIn("systemctl reboot", self._calls())
         self.assertNotIn("always-on --update-script-only", self._calls())
 
-    # -- the update script follows the release it installed ---------------------
+    # -- M101 B: two roots, and no site code as root ----------------------------
 
-    def test_an_update_script_the_table_does_not_vouch_for_is_never_run(self):
-        for case, setup, said in (
-            ("mismatch", lambda: self._always_on("#!/bin/sh\necho tampered\n", keep_digest=True),
-             "the update script of Fermix 0.17.2 is not the one"),
-            ("unlisted", lambda: self._table(always_on=False),
-             "lists no single update script for Fermix 0.17.2"),
-            ("table", lambda: (self.state / "table-unreachable").touch(),
-             "the release table could not be read"),
-            ("stops", lambda: (self.state / "always-on-fails").touch(),
-             "the update script of Fermix 0.17.2 stopped"),
+    def test_the_installer_fermix_ai_serves_never_runs(self):
+        for name, argv, eligible in (
+            ("night", (), "0.17.2"),
+            ("follow", ("--follow",), "0.17.2"),
+            ("hand", ("--release", "0.17.2"), "0.18.0"),
+        ):
+            with self.subTest(run=name):
+                self._reset()
+                self._installed("0.17.0")
+                self._eligible(eligible)
+
+                result = self._run(*argv)
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn(f"curl {INSTALL_URL}", self._calls())
+                self.assertEqual([call for call in self._calls() if call.startswith("installer")], [])
+                self.assertFalse((self.state / "site-installer-ran").exists())
+                self.assertIn(f"apt-get -qq install -y --no-remove {package('0.17.2')}", self._calls())
+                self.assertEqual(self._installed_version(), "0.17.2")
+
+    def test_a_package_the_release_workflow_did_not_sign_is_refused_before_apt_runs(self):
+        for case, signer, signed in (
+            ("a fork's workflow", "https://github.com/invented-fork/fermix/.github/workflows/"
+             "release.yml@refs/tags/v0.17.2", None),
+            ("another tag", f"{WORKFLOW}0.17.1", None),
+            ("another workflow", "https://github.com/tezra-io/fermix/.github/workflows/"
+             "build.yml@refs/tags/v0.17.2", None),
+            ("other bytes", None, b"fermix package 0.17.2, as the workflow built it\n"),
         ):
             with self.subTest(case=case):
                 self._reset()
                 self._installed("0.17.0")
                 self._eligible("0.17.2")
+                # The table lists the served file's own digest: the site agrees.
+                self._package("0.17.2", signer=signer, signed=signed)
+                self._table()
+                self.reboot_flag.touch()
+
+                result = self._night()
+
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertEqual(result.stderr.splitlines()[-1], refused(
+                    "tonight",
+                    "the package for Fermix 0.17.2 is not signed by the Fermix release workflow "
+                    "(cosign's message above says why)",
+                    "the restart and the reboot are still decided",
+                ))
+                self.assertIn("Error: (test)", result.stderr)
+                self.assertIn(f"cosign verify-blob {package('0.17.2')} as {WORKFLOW}0.17.2 by {ISSUER}",
+                              self._calls())
+                self.assertEqual([call for call in self._calls() if call.startswith("apt-get")], [])
+                self.assertEqual(self._installed_version(), "0.17.0")
+                self.assertNotIn("always-on --update-script-only", self._calls())
+                # Nothing on disk changed, so the reboot an update asks for is still decided.
+                self.assertEqual(self._calls()[-1], "systemctl reboot")
+
+    def test_a_signed_package_the_table_does_not_vouch_for_is_refused(self):
+        listed = hashlib.sha256((self.state / "release/v0.17.2" / package("0.17.2")).read_bytes()).hexdigest()
+        for case, debs, reason in (
+            ("not listed", {"0.17.2": []},
+             f"{RELEASES_URL} lists no single package for Fermix 0.17.2"),
+            ("listed twice", {"0.17.2": [listed, listed]},
+             f"{RELEASES_URL} lists no single package for Fermix 0.17.2"),
+            ("another digest", {"0.17.2": ["0" * 64]},
+             f"the package for Fermix 0.17.2 is not the one {RELEASES_URL} lists"),
+        ):
+            with self.subTest(case=case):
+                self._reset()
+                self._installed("0.17.0")
+                self._eligible("0.17.2")
+                self._table(debs=debs)
+
+                result = self._follow()
+
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertEqual(result.stderr, refused("now", reason, "the restart is still decided") + "\n")
+                # The digest is checked first: no signature is fetched for a
+                # file the table refused, and apt never runs.
+                self.assertEqual(
+                    [call for call in self._calls() if call.startswith(("apt-get", "cosign"))], []
+                )
+                self.assertEqual(self._installed_version(), "0.17.0")
+
+    def test_a_release_table_that_cannot_be_read_installs_nothing_and_the_night_goes_on(self):
+        self._installed("0.17.0")
+        self._eligible("0.17.2")
+        self._table_fails_from(1)
+        self.reboot_flag.touch()
+
+        result = self._night()
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertEqual(result.stderr, refused(
+            "tonight", f"the release table could not be read from {RELEASES_URL}",
+            "the restart and the reboot are still decided",
+        ) + "\n")
+        self.assertEqual(self._installs(), [f"curl {RELEASES_URL}"])
+        self.assertEqual(self._calls()[-1], "systemctl reboot")
+
+    # An update never runs without the signature check: no cosign is not a
+    # reason to install on the digest alone.
+    def test_an_update_without_the_package_s_cosign_installs_nothing(self):
+        self._installed("0.17.0")
+        self._eligible("0.17.2")
+        self.cosign.unlink()
+
+        result = self._night()
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertEqual(result.stderr, refused(
+            "tonight",
+            f"{self.cosign}, the cosign the Fermix package ships, is not on this server, so the "
+            "signature of the package for Fermix 0.17.2 could not be checked",
+            "the restart and the reboot are still decided",
+        ) + "\n")
+        self.assertEqual([call for call in self._calls() if call.startswith("apt-get")], [])
+        self.assertEqual(self._installed_version(), "0.17.0")
+
+    def test_an_unreadable_sigstore_cache_fails_closed_with_its_sentence(self):
+        cases = [("a file in its place", lambda: self.sigstore.write_text("not a folder\n", encoding="utf-8"))]
+        # Root reads a folder whatever its mode; an account that is not root
+        # cannot, which shows the same check.
+        if os.geteuid() != 0:
+            cases.append(("a folder it cannot read", lambda: self.sigstore.mkdir(mode=0o000)))
+        for case, shape in cases:
+            with self.subTest(case=case):
+                self._reset()
+                self._installed("0.17.0")
+                self._eligible("0.17.2")
+                self.sigstore.parent.mkdir(parents=True, exist_ok=True)
+                shape()
+                self.addCleanup(self._remove_sigstore)
+
+                result = self._night()
+
+                self._remove_sigstore()
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertEqual(result.stderr, refused(
+                    "tonight",
+                    f"cosign's Sigstore cache, {self.sigstore}, is not a folder root can read and "
+                    "write, so the signature of the package for Fermix 0.17.2 could not be checked",
+                    "the restart and the reboot are still decided",
+                ) + "\n")
+                self.assertEqual(
+                    [call for call in self._calls() if call.startswith(("apt-get", "cosign"))], []
+                )
+                self.assertEqual(self._installed_version(), "0.17.0")
+
+    def test_the_update_script_pins_the_release_workflow_and_names_no_installer(self):
+        written = self._written_update_script(moved=False)
+
+        for line in (
+            f"RELEASES_URL={RELEASES_URL}",
+            "RELEASE_REPO=tezra-io/fermix",
+            "RELEASE_WORKFLOW=.github/workflows/release.yml",
+            f"RELEASE_ISSUER={ISSUER}",
+            "COSIGN=/usr/lib/fermix/cosign",
+            "SIGSTORE_DIR=/var/lib/fermix-update/sigstore",
+        ):
+            self.assertEqual(written.splitlines().count(line), 1, line)
+        self.assertNotIn("INSTALL_URL", written)
+        self.assertIsNone(re.search(r"https://fermix\.ai/install(?!/releases)", written))
+        # Every install and every check the update's own body makes names the
+        # signature; digest-only is the first boot's alone.
+        body = written[written.index("\nREBOOT_FLAG=") :]
+        self.assertNotIn("digest-only", body)
+        calls = re.findall(r"(?:install|fetch)_checked \"[^\n]*", body)
+        self.assertEqual(len(calls), 2, calls)
+        for call in calls:
+            self.assertRegex(call, r" cosign(;| \|\||$)")
+
+    # -- the update script follows the release it installed ---------------------
+
+    def test_a_server_script_that_fails_either_check_leaves_this_update_script(self):
+        for case, setup, said in (
+            ("another digest", lambda: self._always_on("#!/bin/sh\necho tampered\n", keep_digest=True),
+             f"the update script for Fermix 0.17.2 is not the one {RELEASES_URL} lists"),
+            ("unlisted", lambda: self._table(always_on=False),
+             f"{RELEASES_URL} lists no single update script for Fermix 0.17.2"),
+            ("unsigned", lambda: self._always_on(
+                signer="https://github.com/invented-fork/fermix/.github/workflows/release.yml@refs/tags/v0.17.2"),
+             "the update script for Fermix 0.17.2 is not signed by the Fermix release workflow "
+             "(cosign's message above says why)"),
+            ("table", lambda: self._table_fails_from(2),
+             f"the release table could not be read from {RELEASES_URL}"),
+            ("stops", lambda: (self.state / "always-on-fails").touch(),
+             "the update script for Fermix 0.17.2 stopped; its message above says why"),
+        ):
+            with self.subTest(case=case):
+                self._reset()
+                self._installed("0.17.0")
+                self._eligible("0.17.2")
+                (self.state / "always-on-replaces").touch()
+                before = self.update.read_bytes()
                 setup()
 
                 result = self._follow()
 
                 self.assertEqual(result.returncode, 1, result.stdout)
-                self.assertIn(said, result.stderr)
-                self.assertIn("so this update script stays as it was.", result.stderr)
+                self.assertIn(
+                    f"fermix update: Fermix is updated, but {said}, so this update script stays as it was.",
+                    result.stderr,
+                )
+                self.assertEqual(self.update.read_bytes(), before)
                 # The release is installed and the engine restarted all the same.
-                self.assertIn("installer --no-setup --version 0.17.2", self._calls())
+                self.assertIn(f"apt-get -qq install -y --no-remove {package('0.17.2')}", self._calls())
                 self.assertEqual(self._calls()[-1], "fermix restart")
                 if case != "stops":
                     self.assertNotIn("always-on --update-script-only", self._calls())
@@ -253,15 +502,15 @@ class NightlyUpdateTest(unittest.TestCase):
         result = self._run("--release", "0.17.2")
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("==> Updating Fermix 0.17.0 to 0.17.2, as asked, through", result.stdout)
+        self.assertIn("==> Updating Fermix 0.17.0 to 0.17.2, as asked\n", result.stdout)
         calls = self._calls()
-        self.assertEqual(calls[:5], [
+        expected = [
             f"curl {RELEASES_URL}",
             "fermix home status --json",
-            f"curl {INSTALL_URL}",
-            "installer --no-setup --version 0.17.2",
-            f"curl {RELEASES_URL}",
-        ])
+            *install_calls("0.17.2"),
+            *refresh_calls("0.17.2"),
+        ]
+        self.assertEqual(calls[: len(expected)], expected)
         self.assertEqual(calls[-1], "fermix restart")
         self.assertNotIn("systemctl reboot", calls)
         self.assertTrue(self.reboot_flag.exists())
@@ -307,7 +556,7 @@ class NightlyUpdateTest(unittest.TestCase):
             "restore your home from them. Nothing was installed. To install it all the same, "
             "run: fermix-update --release 0.18.0 --ahead-of-apps\n",
         )
-        self.assertNotIn(f"curl {INSTALL_URL}", self._calls())
+        self.assertEqual([call for call in self._calls() if call.startswith(("apt-get", "cosign"))], [])
 
         self._reset()
         self._installed("0.17.0")
@@ -321,7 +570,7 @@ class NightlyUpdateTest(unittest.TestCase):
             "your backups says so until its app carries it",
             result.stdout,
         )
-        self.assertIn("installer --no-setup --version 0.18.0", self._calls())
+        self.assertIn(f"apt-get -qq install -y --no-remove {package('0.18.0')}", self._calls())
 
     def test_a_hand_update_to_the_installed_release_does_nothing_more(self):
         self._installed("0.17.2")
@@ -331,7 +580,7 @@ class NightlyUpdateTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("==> Fermix 0.17.2 is installed already", result.stdout)
-        self.assertNotIn(f"curl {INSTALL_URL}", self._calls())
+        self.assertEqual(self._installs(), [])
 
     # -- the follow run, every five minutes -----------------------------------
 
@@ -344,11 +593,8 @@ class NightlyUpdateTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self._calls(), [
             "fermix home status --json",
-            f"curl {INSTALL_URL}",
-            "installer --no-setup --version 0.17.2",
-            f"curl {RELEASES_URL}",
-            f"curl {ARTIFACT_ORIGIN}v0.17.2/fermix_always_on.sh",
-            "always-on --update-script-only",
+            *install_calls("0.17.2"),
+            *refresh_calls("0.17.2"),
             "fermix service status --json",
             "fermix home status --json",
             "fermix restart",
@@ -399,7 +645,7 @@ class NightlyUpdateTest(unittest.TestCase):
         result = self._follow()
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("installer --no-setup --version 0.17.2", self._calls())
+        self.assertIn(f"apt-get -qq install -y --no-remove {package('0.17.2')}", self._calls())
         self.assertNotIn("fermix restart", self._calls())
         self.assertIn(
             "==> A move is under way on this server (receiving), so the engine restarts at the "
@@ -487,7 +733,7 @@ class NightlyUpdateTest(unittest.TestCase):
             "fermix update: fermix home status stopped, so Fermix is not updated now; its "
             "message above says why.\n",
         )
-        self.assertNotIn(f"curl {INSTALL_URL}", self._calls())
+        self.assertEqual(self._installs(), [])
 
     def test_an_argument_the_update_does_not_take_is_refused_before_anything_runs(self):
         refusal = (
@@ -579,6 +825,7 @@ class NightlyUpdateTest(unittest.TestCase):
     def test_nothing_the_update_starts_holds_its_lock(self):
         for run in (self._night, self._follow):
             with self.subTest(run=run.__name__):
+                self._reset()
                 self._installed("0.17.0")
                 self._eligible("0.17.2")
 
@@ -586,6 +833,7 @@ class NightlyUpdateTest(unittest.TestCase):
 
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("fermix restart", self._calls())
+                self.assertIn(f"apt-get -qq install -y --no-remove {package('0.17.2')}", self._calls())
                 self.assertFalse(
                     (self.state / "held-lock").exists(),
                     (self.state / "held-lock").read_text(encoding="utf-8")
@@ -628,15 +876,44 @@ class NightlyUpdateTest(unittest.TestCase):
                     f"fermix always-on: Run this as root: curl -fsSL https://fermix.ai/install{expected}\n",
                 )
 
-    def test_first_boot_installs_the_release_it_is_given(self):
-        for release, expected in (("0.17.2", "installer --no-setup --version 0.17.2"),
-                                  ("", "installer --no-setup")):
+    # The first install: no cosign exists before the package does, and the
+    # owner's curl | sudo sh trusted the site already, so the site's digest
+    # alone vouches for the package. Nothing the site serves runs.
+    def test_first_boot_installs_the_release_it_is_given_through_the_same_checked_install(self):
+        for release, installed, said in (
+            ("0.17.2", "0.17.2", "Installing Fermix 0.17.2, the release your computer runs"),
+            ("", "0.18.0", "Installing Fermix 0.18.0, the latest release"),
+        ):
             with self.subTest(release=release):
-                self.log.write_text("", encoding="utf-8")
+                self._reset()
                 result = self._install_step(release)
 
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(self._calls(), [f"curl {INSTALL_URL}", expected])
+                self.assertEqual(self._calls(), [
+                    f"curl {RELEASES_URL}",
+                    f"curl {ARTIFACT_ORIGIN}v{installed}/{package(installed)}",
+                    f"apt-get -qq install -y --no-remove {package(installed)}",
+                ])
+                self.assertIn(f"==> {said}, checked against {RELEASES_URL}\n", result.stdout)
+                self.assertEqual(self._installed_version(), installed)
+                self.assertFalse((self.state / "site-installer-ran").exists())
+
+    def test_first_boot_refuses_a_package_the_table_does_not_vouch_for(self):
+        for case, debs, reason in (
+            ("another digest", {"0.17.2": ["0" * 64]},
+             f"the package for Fermix 0.17.2 is not the one {RELEASES_URL} lists"),
+            ("not listed", {"0.17.2": []}, f"{RELEASES_URL} lists no single package for Fermix 0.17.2"),
+        ):
+            with self.subTest(case=case):
+                self._reset()
+                self._table(debs=debs)
+
+                result = self._install_step("0.17.2")
+
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertEqual(result.stderr, f"fermix always-on: Fermix is not installed: {reason}.\n")
+                self.assertEqual([call for call in self._calls() if call.startswith("apt-get")], [])
+                self.assertFalse((self.state / "site-installer-ran").exists())
 
     # The first boot's host check alone, as first-boot.sh holds it with its own
     # `fail`, on an account that is not root (`id` stood in for).
@@ -663,24 +940,25 @@ class NightlyUpdateTest(unittest.TestCase):
         body = source[source.index(f"\n{name}() {{\n") + 1 :]
         return body[: body.index("\n}\n") + 3]
 
-    # The first boot's install step alone: its function as first-boot.sh holds
-    # it, with what it calls before the installer stood in for.
-    def _install_step(self, release):
+    # first-boot.sh without its last line (`main "$@"`): its constants and
+    # functions, which a test then runs one of.
+    def _first_boot_copy(self):
         source = FIRST_BOOT.read_text(encoding="utf-8")
-        step = source[source.index("install_fermix() {") :]
-        step = step[: step.index("\n}\n") + 3]
+        self.assertTrue(source.endswith('\nmain "$@"\n'), "first-boot.sh no longer ends with main")
+        return source[: -len('main "$@"\n')]
+
+    # The first boot's install step alone: install_fermix as first-boot.sh
+    # holds it, with its paths moved here and apt's own packages stood in for.
+    def _install_step(self, release):
         work = self.base / "work"
         work.mkdir(exist_ok=True)
-        (self.state / "installed-version").write_text("0.17.0", encoding="utf-8")
         script = self.base / "install-step.sh"
         script.write_text(
-            "set -eu\n"
-            f"INSTALL_URL={INSTALL_URL}\nWORK={work}\nFERMIX_BIN={self.fermix}\n"
-            f"RELEASE='{release}'\n"
-            'say() { printf "==> %s\\n" "$1"; }\n'
-            'fail() { printf "%s\\n" "$1" >&2; exit 1; }\n'
+            self._first_boot_copy()
+            + f"WORK={work}\nFERMIX_BIN={self.fermix}\nRELEASE='{release}'\n"
+            f"COSIGN={self.cosign}\nSIGSTORE_DIR={self.sigstore}\n"
             "apt_install() { :; }\n"
-            f"{step}install_fermix\n",
+            "install_fermix\n",
             encoding="utf-8",
         )
         return subprocess.run(
@@ -714,6 +992,9 @@ class NightlyUpdateTest(unittest.TestCase):
         (self.state / "installed-version").write_text(version, encoding="utf-8")
         (self.state / "running-version").write_text(version, encoding="utf-8")
 
+    def _installed_version(self):
+        return (self.state / "installed-version").read_text(encoding="utf-8")
+
     def _eligible(self, version, phase=None, hold_s=None):
         """The engine's `home status --json`: the eligible release
         (`update_ceiling`), a move's phase, and how long a computer's work
@@ -740,35 +1021,81 @@ class NightlyUpdateTest(unittest.TestCase):
             encoding="utf-8",
         )
 
-    # The release table: every release a test names, each with the update
-    # script the stand-in publishes, or none when `always_on` is false.
-    def _table(self, always_on=True):
-        digest = hashlib.sha256((self.state / "always-on.sh").read_bytes()).hexdigest()
+    def _sign(self, version, name, body, signer=None, signed=None):
+        """File `name` of release `version`, served from its GitHub release,
+        with the .sig and .pem cosign checks: the certificate names `signer`
+        (the release workflow on that tag unless given) and the signature
+        covers `signed` (the file's own bytes unless given)."""
+        directory = self.state / "release" / f"v{version}"
+        directory.mkdir(parents=True, exist_ok=True)
+        data = body if isinstance(body, bytes) else body.encode("utf-8")
+        identity = signer or f"{WORKFLOW}{version}"
+        (directory / name).write_bytes(data)
+        (directory / f"{name}.pem").write_text(f"identity {identity}\nissuer {ISSUER}\n", encoding="utf-8")
+        covered = hashlib.sha256(signed if signed is not None else data).hexdigest()
+        (directory / f"{name}.sig").write_text(f"{covered} {identity}\n", encoding="utf-8")
+
+    def _package(self, version, signer=None, signed=None):
+        """The Linux package of `version`, as the apt-get stand-in installs it."""
+        self._sign(version, package(version), f"fermix package {version}\n", signer, signed)
+
+    def _digest(self, version, name):
+        path = self.state / "release" / f"v{version}" / name
+        return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
+
+    def _table(self, debs=None, always_on=True):
+        """The release table: every release's package and update script, at
+        the digests of the files served, unless `debs` gives the package
+        rows of a release (none, one, two) or `always_on` is false."""
+        debs = debs or {}
         rows = ["format 1", "latest 0.18.0"]
-        for version in ("0.9.0", "0.10.0", "0.17.0", "0.17.2", "0.18.0"):
-            rows.append(f"{version} {'e' * 64} fermix_{version}_amd64.deb")
+        for version in VERSIONS:
+            for digest in debs.get(version, [self._digest(version, package(version))]):
+                rows.append(f"{version} {digest} {package(version)}")
             if always_on:
-                rows.append(f"{version} {digest} fermix_always_on.sh")
+                rows.append(f"{version} {self._digest(version, ALWAYS_ON)} {ALWAYS_ON}")
         (self.state / "releases").write_text("\n".join(rows) + "\n", encoding="utf-8")
 
-    # The release's update script: records how it was run, and fails when told.
-    # `keep_digest` leaves the table naming the script it had.
-    def _always_on(self, body=None, keep_digest=False):
+    def _table_fails_from(self, fetch):
+        """The table cannot be read from its `fetch`-th fetch of a run on."""
+        (self.state / "table-fails-from").write_text(f"{fetch}\n", encoding="utf-8")
+
+    def _always_on(self, body=None, keep_digest=False, signer=None):
+        """Every release's update script: records how it was run, fails when
+        told, and replaces this update script by a rename, as the real one
+        does, when told. `keep_digest` leaves the table naming the script it
+        had."""
         state, log = self.state, self.log
         body = body or (
             "#!/bin/sh\n"
             f"printf 'always-on %s\\n' \"$*\" >>'{log}'\n"
             f"[ ! -f '{state}/always-on-fails' ] || exit 1\n"
+            f"if [ -f '{state}/always-on-replaces' ]; then\n"
+            f"  printf '#!/bin/sh\\n# replaced by the release\\n' >'{self.update}.new'\n"
+            f"  mv '{self.update}.new' '{self.update}'\n"
+            "fi\n"
         )
-        (self.state / "always-on.sh").write_text(body, encoding="utf-8")
+        for version in VERSIONS:
+            self._sign(version, ALWAYS_ON, body, signer)
         if not keep_digest:
             self._table()
 
     def _reset(self):
         self.log.write_text("", encoding="utf-8")
-        for name in ("always-on-fails", "table-unreachable"):
+        for name in ("always-on-fails", "always-on-replaces", "table-fails-from", "apt-fails",
+                     "site-installer-ran", "held-lock"):
             (self.state / name).unlink(missing_ok=True)
+        for version in VERSIONS:
+            self._package(version)
         self._always_on()
+        self.update.write_bytes(self.script.read_bytes())
+
+    def _remove_sigstore(self):
+        if self.sigstore.is_dir():
+            self.sigstore.chmod(0o700)
+            self.sigstore.rmdir()
+        elif self.sigstore.exists():
+            self.sigstore.unlink()
 
     @contextlib.contextmanager
     def _lock_held(self):
@@ -780,6 +1107,12 @@ class NightlyUpdateTest(unittest.TestCase):
     def _calls(self):
         return self.log.read_text(encoding="utf-8").splitlines()
 
+    def _installs(self):
+        """The calls that download, check or install a release."""
+        return [
+            call for call in self._calls() if call.startswith(("curl", "cosign", "apt-get", "installer"))
+        ]
+
     def _flock_calls(self):
         if not self.flock_log.exists():
             return []
@@ -788,13 +1121,13 @@ class NightlyUpdateTest(unittest.TestCase):
     def _stand_ins(self):
         state, log = self.state, self.log
         installer = self.base / "fake-install.sh"
-        # The installer and fermix each record it when they were started with
-        # the update's lock still open: anything they left running would hold it.
+        # What fermix.ai serves at its installer's address. Nothing may run
+        # it: it records that it ran, and installs as the installer would.
         self._write(installer, f"""#!/bin/sh
 set -eu
 printf 'installer %s\\n' "$*" >>'{log}'
+: >'{state}/site-installer-ran'
 [ ! -e /dev/fd/9 ] || printf 'installer\\n' >>'{state}/held-lock'
-[ ! -f '{state}/installer-fails' ] || exit 1
 if [ "${{2-}}" = "--version" ]; then printf '%s' "$3" >'{state}/installed-version'; fi
 """)
         self._fake("curl", f"""#!/bin/sh
@@ -811,12 +1144,75 @@ printf 'curl %s\\n' "$url" >>'{log}'
 case "$url" in
   '{INSTALL_URL}') cat '{installer}' >"$out" ;;
   '{RELEASES_URL}')
-    [ ! -f '{state}/table-unreachable' ] || exit 22
+    if [ -f '{state}/table-fails-from' ] &&
+      [ "$(grep -cxF 'curl {RELEASES_URL}' '{log}')" -ge "$(cat '{state}/table-fails-from')" ]; then
+      exit 22
+    fi
     cat '{state}/releases' >"$out"
     ;;
-  '{ARTIFACT_ORIGIN}'v*/fermix_always_on.sh) cat '{state}/always-on.sh' >"$out" ;;
+  '{ARTIFACT_ORIGIN}'v*/*)
+    file='{state}/release/'${{url#'{ARTIFACT_ORIGIN}'}}
+    [ -f "$file" ] || exit 22
+    cat "$file" >"$out"
+    ;;
   *) exit 6 ;;
 esac
+""")
+        # apt-get -qq install -y --no-remove FILE: the package FILE names
+        # ("fermix package X") installed, as dpkg-query then reads it. It
+        # notes when apt's own account could not have read the file (it
+        # reads a local package as _apt), and fails as dpkg does when told.
+        self._fake("apt-get", f"""#!/bin/sh
+set -eu
+logged=""
+for arg do
+  case "$arg" in *.deb) logged="$logged ${{arg##*/}}" ;; *) logged="$logged $arg" ;; esac
+done
+printf 'apt-get%s\\n' "$logged" >>'{log}'
+[ ! -e /dev/fd/9 ] || printf 'apt-get\\n' >>'{state}/held-lock'
+[ "$#" -eq 5 ] && [ "$1 $2 $3 $4" = "-qq install -y --no-remove" ] ||
+  {{ echo "apt-get stand-in: unexpected arguments" >&2; exit 2; }}
+if [ -f '{state}/apt-fails' ]; then echo "E: (test) dpkg was interrupted" >&2; exit 100; fi
+if [ -z "$(find "$5" -perm -0044)" ] || [ -z "$(find "$(dirname "$5")" -maxdepth 0 -perm -0001)" ]; then
+  : >'{state}/apt-unsandboxed'
+fi
+read -r name kind version <"$5"
+[ "$name $kind" = "fermix package" ] || {{ echo "apt-get stand-in: not a Fermix package" >&2; exit 2; }}
+printf '%s' "$version" >'{state}/installed-version'
+""")
+        # cosign verify-blob --certificate C --signature S
+        # --certificate-identity I --certificate-oidc-issuer O FILE, with
+        # its TUF cache in TUF_ROOT: accepts FILE only when S covers its
+        # bytes and C names I and O, as the real one does.
+        self._write(self.cosign, f"""#!/bin/sh
+set -eu
+[ "$#" -eq 10 ] && [ "$1 $2 $4 $6 $8" = \\
+  "verify-blob --certificate --signature --certificate-identity --certificate-oidc-issuer" ] ||
+  {{ echo "cosign stand-in: unexpected arguments: $*" >&2; exit 2; }}
+cert=$3 sig=$5 identity=$7 issuer=$9
+shift 9
+blob=$1
+printf 'cosign verify-blob %s as %s by %s\\n' "${{blob##*/}}" "$identity" "$issuer" >>'{log}'
+[ ! -e /dev/fd/9 ] || printf 'cosign\\n' >>'{state}/held-lock'
+if [ "${{TUF_ROOT-}}" != '{self.sigstore}' ]; then
+  echo "Error: (test) TUF_ROOT is not the update's own Sigstore cache" >&2
+  exit 1
+fi
+if [ ! -d "$TUF_ROOT" ] || [ ! -r "$TUF_ROOT" ] || [ ! -w "$TUF_ROOT" ]; then
+  echo "Error: (test) the TUF cache cannot be read" >&2
+  exit 1
+fi
+signer=$(sed -n 's/^identity //p' "$cert")
+signed_by=$(sed -n 's/^issuer //p' "$cert")
+if [ "$(cat "$sig")" != "$(sha256sum "$blob" | cut -d ' ' -f 1) $signer" ]; then
+  echo "Error: (test) invalid signature when validating ASN.1 encoded signature" >&2
+  exit 1
+fi
+if [ "$signer" != "$identity" ] || [ "$signed_by" != "$issuer" ]; then
+  echo "Error: (test) none of the expected identities matched what was in the certificate, got subjects [$signer] with issuer $signed_by" >&2
+  exit 1
+fi
+echo "Verified OK" >&2
 """)
         self._fake("dpkg-query", f"""#!/bin/sh
 cat '{state}/installed-version'
@@ -853,6 +1249,8 @@ esac
         for tool in ("cmp", "cp"):
             (self.bin / tool).symlink_to(shutil.which(tool))
         self._fake("flock", self._fake_flock())
+        for version in VERSIONS:
+            self._package(version)
         self._always_on()
 
     def _fake_flock(self):
@@ -884,23 +1282,38 @@ while True:
         time.sleep(0.05)
 """
 
+    def _written_update_script(self, moved=True):
+        """The update script as first-boot.sh's own write_update_script
+        writes it, into self.update: with the account's home, the binary,
+        the package's cosign and its Sigstore cache moved under self.base
+        unless `moved` is false."""
+        paths = (
+            f"ACCOUNT_HOME={self.home}\nFERMIX_HOME_DIR={self.fermix_home}\nFERMIX_BIN={self.fermix}\n"
+            f"COSIGN={self.cosign}\nSIGSTORE_DIR={self.sigstore}\n"
+        ) if moved else ""
+        writer = self.base / "write-update-script.sh"
+        writer.write_text(
+            self._first_boot_copy()
+            + paths
+            + f"UPDATE_SCRIPT={self.update}\n"
+            'write_file() { cat >"$1"; chmod "$2" "$1"; }\n'
+            "write_update_script\n",
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            ["/bin/sh", str(writer)],
+            env={"PATH": str(self.bin)},
+            stdin=subprocess.DEVNULL,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return self.update.read_text(encoding="utf-8")
+
     def _update_script(self):
         """The script first boot writes, its fixed paths moved under self.base."""
-        source = FIRST_BOOT.read_text(encoding="utf-8")
-        writer = source[source.index("write_update_script() {") :]
-        writer = writer[: writer.index('} | write_file "$UPDATE_SCRIPT" 0755')]
-        header = self._between(writer, "    cat <<EOF\n", "\nEOF\n")
-        body = self._between(writer, "    cat <<'FERMIX_UPDATE'\n", "\nFERMIX_UPDATE\n")
-
-        for name, value in (
-            ("ENGINE_USER", "fermix"),
-            ("ACCOUNT_HOME", str(self.home)),
-            ("FERMIX_HOME_DIR", str(self.fermix_home)),
-            ("FERMIX_BIN", str(self.fermix)),
-            ("INSTALL_URL", INSTALL_URL),
-        ):
-            header = self._once(header, f"{name}=${name}", f"{name}={value}")
-
+        text = self._written_update_script()
         for fixed, moved in (
             ("REBOOT_FLAG=/run/reboot-required", f"REBOOT_FLAG={self.base}/run/reboot-required"),
             (
@@ -919,16 +1332,12 @@ while True:
                 f"WORK=$(mktemp -d {self.base}/run/fermix-update.XXXXXX)",
             ),
         ):
-            body = self._once(body, fixed, moved)
+            text = self._once(text, fixed, moved)
 
-        script = self.base / "fermix-update"
-        script.write_text(header + "\n" + body + "\n", encoding="utf-8")
+        script = self.base / "fermix-update.moved"
+        script.write_text(text, encoding="utf-8")
+        self.update.write_text(text, encoding="utf-8")
         return script
-
-    def _between(self, text, start, end):
-        self.assertEqual(text.count(start), 1, f"{start!r} is not in write_update_script once")
-        after = text[text.index(start) + len(start) :]
-        return after[: after.index(end)]
 
     def _once(self, text, old, new):
         self.assertEqual(text.count(old), 1, f"{old!r} is not in the update script exactly once")

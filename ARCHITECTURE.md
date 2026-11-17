@@ -1384,9 +1384,10 @@ clouds serve them from the same address (the `output` hook: the
 host's own processes, which is why the server runs no containers), with a root
 unit that loads it before the network at every boot and a `user@<uid>` drop-in
 that will not start the engine account's service manager without it; gives a
-host with no swap a 2 GB `/swapfile`; installs the Linux package through
-`https://fermix.ai/install --no-setup --version X`, the release the computer
-that sets it up runs; turns on Debian's daily
+host with no swap a 2 GB `/swapfile`; installs the Linux package of the
+release the computer that sets it up runs through `install_checked`, the
+one install path the update shares, on fermix.ai's digest alone (the first
+install: no cosign exists before the package); turns on Debian's daily
 unattended-upgrades and installs two root timers over one script,
 `fermix-update`: `fermix-follow.timer` every five minutes (`--follow`) and
 `fermix-update.timer` at 04:00 UTC. Each installs `fermix home status
@@ -1394,7 +1395,13 @@ unattended-upgrades and installs two root timers over one script,
 server served in the last 30 days, `FermixCore.Home.EngineCeiling`, which
 the server records from each desktop's `hello`) when it is newer than the
 installed release in `dpkg --compare-versions`' order, never back down
-and nothing when there is none, then `fermix restart` as the engine
+and nothing when there is none, never through the site's installer:
+`install_checked` installs the release's `.deb` only when fermix.ai's
+digest and the release workflow's cosign signature (checked with
+`/usr/lib/fermix/cosign`, its TUF cache in `/var/lib/fermix-update/sigstore`,
+the identity pinned in the update script) agree, and the release's
+`fermix_always_on.sh` takes over the update script under the same two
+checks; then `fermix restart` as the engine
 account when `fermix service status` says the running engine is behind
 the installed one (not while `fermix home status` shows a pending move
 phase, nor when either read fails), so the server takes its computers'
@@ -1402,7 +1409,7 @@ release within minutes. Only the night runs `systemctl reboot` when
 `/run/reboot-required` exists, which a move may defer at most two nights
 in a row (a root-owned count under `/var/lib/fermix-update`); a follow
 run never reboots. Each run stops before the restart and the reboot when
-the installer ran and failed (one that could not be downloaded changed
+`apt-get` ran and failed (a release the table or a check refused changed
 nothing, so both are still decided), and both take an exclusive `flock`
 on `/run/fermix-update.lock` first: a follow run that finds it held
 leaves the update to that run, and the night waits for it at most 15

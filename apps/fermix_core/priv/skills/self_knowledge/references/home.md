@@ -262,7 +262,11 @@ it, never a second writer.
   read from fermix.ai's release table; `held` names a newer one waiting for
   an app), never back down, nothing while no table was read, then takes
   that release's own update script; then `fermix restart` as `fermix` when
-  the engine is behind. Computers up to two minor versions behind are
+  the engine is behind. Root never runs fermix.ai's installer for this: a
+  package or update script is installed only when fermix.ai's digest and
+  the release workflow's cosign signature (checked with the package's own
+  `/usr/lib/fermix/cosign`) agree, and one that fails either check installs
+  nothing and says which check refused it. Computers up to two minor versions behind are
   served; older ones keep settings only ("Update Fermix on this computer").
   `fermix-update --release X` updates by hand behind the same gate
   (`--ahead-of-apps` to go past it). The reboot stays at night.
@@ -273,10 +277,10 @@ it, never a second writer.
   five-minute run leaves the update to one already running, the night waits
   for it). Each run says what it did in `journalctl -u fermix-follow` or
   `journalctl -u fermix-update` (a five-minute run with nothing due says
-  nothing); an installer that ran and failed stops the run and leaves the
-  running engine as it was, while one that could not be downloaded changed
-  nothing, so the restart (and at night the reboot) is still decided; the
-  next run tries again. A server set up before the five-minute timer
+  nothing); an install apt began and failed stops the run and leaves the
+  running engine as it was, while a release that could not be fetched or
+  that a check refused installed nothing, so the restart (and at night the
+  reboot) is still decided; the next run tries again. A server set up before the five-minute timer
   existed gets it when its command runs again.
   So a server always runs the Fermix of the computer it serves, from its
   first install (Always On's command for the server names that release): a

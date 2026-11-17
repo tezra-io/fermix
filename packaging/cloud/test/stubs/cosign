@@ -1,0 +1,31 @@
+#!/bin/sh
+# Test stand-in for the cosign the Fermix package ships at
+# /usr/lib/fermix/cosign, which the stand-in package installs there:
+# `verify-blob --certificate C --signature S --certificate-identity I
+# --certificate-oidc-issuer O FILE` accepts FILE only when S covers its
+# bytes and C names I and O, as in_container.sh signs a release's files, and
+# only with its TUF cache in TUF_ROOT, root's own folder of the update. Logs
+# the call as the file, the identity and the issuer it was asked for.
+set -eu
+[ "$#" -eq 10 ] &&
+  [ "$1 $2 $4 $6 $8" = "verify-blob --certificate --signature --certificate-identity --certificate-oidc-issuer" ] ||
+  { echo "cosign stand-in: unexpected arguments: $*" >&2; exit 2; }
+cert=$3 sig=$5 identity=$7 issuer=$9
+shift 9
+blob=$1
+printf 'cosign verify-blob %s as %s by %s\n' "${blob##*/}" "$identity" "$issuer" >>/var/log/fermix-test/calls.log
+if [ "${TUF_ROOT-}" != /var/lib/fermix-update/sigstore ] || [ ! -d "$TUF_ROOT" ]; then
+  echo "Error: (test) TUF_ROOT is not the update's own Sigstore cache" >&2
+  exit 1
+fi
+signer=$(sed -n 's/^identity //p' "$cert")
+signed_by=$(sed -n 's/^issuer //p' "$cert")
+if [ "$(cat "$sig")" != "$(sha256sum "$blob" | cut -d ' ' -f 1) $signer" ]; then
+  echo "Error: (test) invalid signature when validating ASN.1 encoded signature" >&2
+  exit 1
+fi
+if [ "$signer" != "$identity" ] || [ "$signed_by" != "$issuer" ]; then
+  echo "Error: (test) none of the expected identities matched what was in the certificate, got subjects [$signer] with issuer $signed_by" >&2
+  exit 1
+fi
+echo "Verified OK" >&2

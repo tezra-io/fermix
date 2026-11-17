@@ -198,9 +198,12 @@ take the engine within five minutes; the Linux app follows whenever it is
 ready. Nothing waits for an owner to install an app. An engine release with no
 `app` row reaches no server, which is the safe side: check
 `curl -fsSL https://fermix.ai/install/releases | awk '$1 == "app"'` after the
-app's site change deploys. After each install the server fetches that
-release's `fermix_always_on.sh`, checks it against the table and lets it
-rewrite the update script, so a change to `fermix-update` reaches existing
+app's site change deploys. The server installs a release's package only
+when the table's digest and the release workflow's cosign signature agree
+(its `.sig` and `.pem` on the GitHub release, checked with the package's own
+cosign), never through the site's installer. After each install it fetches
+that release's `fermix_always_on.sh`, checks it the same two ways and lets
+it rewrite the update script, so a change to `fermix-update` reaches existing
 servers with the release that carries it; keep `--update-script-only` and the
 `update_ceiling` field working for as long as any server may still run an
 older script. On the server, `sudo fermix-update --release X.Y.Z` is the same

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Test stand-in for the packaged fermix, installed by the fake installer.
+# Test stand-in for the packaged fermix, which the stand-in package installs.
 # Records its arguments, its account and the names (never the values) of its
 # environment, the process that started it (runuser, when a PAM session holds
 # the call) and the uid, gid and groups it runs with; `home enroll` records
@@ -13,8 +13,8 @@
 # without it, null when it says none), and its restart_hold's wait_s from
 # /etc/fermix-test/hold (no hold without it).
 # The release the service runs is kept in $state/running-version: `service
-# install` and `restart` start the installed one (the fake installer records
-# it in $state/installed-version), and `service status --json` answers
+# install` and `restart` start the installed one (the package's postinst
+# records it in $state/installed-version), and `service status --json` answers
 # `aligned`, `pending_restart` when they differ, or `not_running` while the
 # home is missing. `restart` fails, as a new engine that does not answer does,
 # while /etc/fermix-test/restart-fails exists, and `service status` and `home
