@@ -18,6 +18,7 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.EnrollmentCode
   alias FermixCore.Home.Epoch
+  alias FermixCore.Home.Join
   alias FermixCore.Home.Move
   alias FermixCore.Home.Moved
   alias FermixCore.Home.Return
@@ -787,6 +788,34 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
       assert_received {:forwarded, "home.enroll.deny", %{}}
     end
 
+    # M102 J1, D3: a computer its server removed offers Join again, which
+    # asks for the new code without showing it and joins through the
+    # engine's own join, letting go of the old link first.
+    test "removed: Join again asks for the code, and the join starts", %{
+      conn: conn,
+      seams: seams
+    } do
+      removed!(seams)
+      {view, html} = open_view!(conn, "/setup")
+
+      assert text(html, "#always-on-sentence") ==
+               "Your server no longer knows this computer. To join your Fermix again, enter a " <>
+                 "new code from Add a computer."
+
+      html = press(view, "join")
+      assert html =~ ~s(name="always_on_step[code]")
+      assert html =~ ~s(id="always-on-step-code")
+
+      code = computer_code()
+      html = submit!(view, %{"code" => code})
+      refute html =~ code
+
+      assert_received {:released, :revoked}
+      assert_received :restarted
+      refute File.exists?(DesktopLink.path(seams.home))
+      assert {:ok, %{"phase" => "dialing"}} = Join.read(seams.home)
+    end
+
     # Always On's move back is drawn as any step is: pressed from Details'
     # actions, sent to the server over the link, and this page does not
     # restart (the restart comes at the activation, and the page reconnects).
@@ -1120,6 +1149,38 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
     end
 
     put_seams(seams, [], fn -> [primary_forward: forward] end)
+  end
+
+  # A computer that joined, which its server removed: its link keeps the
+  # server's word (`revoked`), and it holds no moved marker.
+  defp removed!(seams) do
+    profile = "setup-join-#{System.unique_integer([:positive])}"
+    File.write!(Path.join(seams.home, "config.toml"), ~s([fermix_core]\nprofile = "#{profile}"\n))
+    :ok = DesktopLink.write(seams.home, desktop_link())
+    {:ok, link} = DesktopLink.read(seams.home)
+    {:ok, _revoked} = DesktopLink.record_revoked(seams.home, link, true)
+    revoked = %{primary(nil) | connected: false, status: :revoked}
+    Agent.update(seams.link, &%{&1 | primary: revoked})
+    test = seams.test
+    release = fn which -> send(test, {:released, which}) && :ok end
+    put_seams(seams, release: release)
+  end
+
+  # A code Add a computer opened on the server, open past `@at`.
+  defp computer_code do
+    {:ok, code} =
+      EnrollmentCode.encode(%{
+        purpose: :computer,
+        secret: :binary.copy(<<0x5A>>, 32),
+        gateway_pk: :binary.copy(<<3>>, 32),
+        node_id: String.duplicate("c4", 32),
+        relays: [%{"url" => "https://eu1.relay.invalid/", "quic_port" => 7842}],
+        relays_rev: String.duplicate("a1", 8),
+        name: "invented-vm",
+        expires_at: ~U[2031-05-04 12:30:00Z]
+      })
+
+    code
   end
 
   defp return_code do

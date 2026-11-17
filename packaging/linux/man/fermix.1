@@ -171,7 +171,9 @@ it asks for printed once), \fBcancel\fR, \fBback\-up\-now\fR,
 another computer joins your Fermix with (see \fBfermix computer\fR), once;
 when that computer asks to join, \fBapprove\-computer\fR adds it with the
 six digits it shows (\fB\-\-sas\fR, or asked on a terminal) and
-\fBdeny\-computer\fR does not. With no terminal, or with \fB\-\-json\fR,
+\fBdeny\-computer\fR does not. On a computer your server removed,
+\fBjoin\fR joins it again with a new code, asked for on a terminal without
+showing it. With no terminal, or with \fB\-\-json\fR,
 nothing is asked: \fB\-\-recovery\-passphrase\-file\fR reads the
 passphrase, \fB\-\-yes\fR accepts what the step asks first, and
 \fB\-\-wait\fR waits for the step to settle, exiting 1 when it ends on a
@@ -184,11 +186,13 @@ Join this computer to a Fermix that already runs, with the code Add a
 computer opened there (\fBfermix always\-on add\-computer\fR on the
 server). It asks for the code without showing it, or reads the first line
 piped in; the code is never an argument, where other programs could read
-it. Nothing moves to this computer. Run it with Fermix stopped here,
-then start Fermix: it shows six digits, and you add this computer on a
+it. Nothing moves to this computer. It needs Fermix running here, as the
+apps do, and hands the code to it: Fermix restarts and shows six digits in
+\fBfermix home status\fR, and you add this computer in Always On on a
 computer already in your Fermix only if the same digits show there. A
 computer that already has a Fermix of its own is refused, and nothing is
-deleted.
+deleted. A computer your server removed joins again the same way, with a
+new code.
 .TP
 .B fermix logs
 Show the daemon's own log file.

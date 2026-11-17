@@ -6331,9 +6331,9 @@
       "required": ["id", "label", "needs", "confirm", "key"],
       "additionalProperties": false,
       "properties": {
-        "id": { "enum": ["cancel", "move_now", "try_again", "update", "back_up_now", "check_again", "own_server", "move_back", "restore_here", "review_offers", "add_computer", "approve_computer", "deny_computer", "change_passphrase", "restart_server"] },
+        "id": { "enum": ["cancel", "move_now", "try_again", "update", "back_up_now", "check_again", "own_server", "move_back", "restore_here", "review_offers", "add_computer", "approve_computer", "deny_computer", "join", "change_passphrase", "restart_server"] },
         "label": { "type": "string", "minLength": 1 },
-        "needs": { "type": "array", "maxItems": 1, "uniqueItems": true, "items": { "enum": ["recovery_passphrase", "new_recovery_passphrase", "sas"] } },
+        "needs": { "type": "array", "maxItems": 1, "uniqueItems": true, "items": { "enum": ["recovery_passphrase", "new_recovery_passphrase", "sas", "code"] } },
         "confirm": { "type": ["string", "null"], "minLength": 1 },
         "key": { "type": "string", "minLength": 1, "maxLength": 64 }
       }
@@ -6824,6 +6824,7 @@
             "add_computer",
             "approve_computer",
             "deny_computer",
+            "join",
             "change_passphrase",
             "restart_server"
           ]
@@ -6834,7 +6835,7 @@
     },
     "homeActInput": {
       "type": "object",
-      "description": "What the action's needs collected: recovery_passphrase (needs recovery_passphrase, typed once, or new_recovery_passphrase, typed twice and compared by the surface; restore_here's opens the copy it restores, change_passphrase's is the new one), never logged and never answered; keep_offers, the offers of the keeps_on block left ticked; and sas (needs sas), the six digits the computer that asks to join shows.",
+      "description": "What the action's needs collected: recovery_passphrase (needs recovery_passphrase, typed once, or new_recovery_passphrase, typed twice and compared by the surface; restore_here's opens the copy it restores, change_passphrase's is the new one), never logged and never answered; keep_offers, the offers of the keeps_on block left ticked; sas (needs sas), the six digits the computer that asks to join shows; and code (needs code), the code Add a computer opened, for join, never logged and never answered.",
       "additionalProperties": false,
       "properties": {
         "recovery_passphrase": { "type": "string", "minLength": 12, "maxLength": 1024 },
@@ -6844,6 +6845,12 @@
           "minLength": 6,
           "maxLength": 32,
           "pattern": "^[0-9 ]+$"
+        },
+        "code": {
+          "description": "For join (Join again, on a computer its server removed), the code Add a computer opened on a computer already in the home; it carries a one-time secret. It joins as computer.join.start does: a code that is not a computer's, that expired or that Fermix did not open is refused (invalid_params on code), and so is none, and the old link stays.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
         },
         "keep_offers": {
           "description": "For move_now and try_again on the computer that sets Always On up, the offers of the ready screen's detail.keeps_on left ticked: what this computer keeps on for its server after the move; absent, the block as it was shown. For review_offers, absent: this computer's switches as they are (set under This computer); an app from before the review's switches moved there sends the lines it left ticked, which stay on. A list that is not of text is refused (invalid_params on keep_offers), and so is an id other than files_and_shell, browser, computer_use, imessage, places and history, or files and shell: the two lines an app from before M97 D27 sends for files and commands, which keep files_and_shell on only when both are sent (one alone keeps it off).",

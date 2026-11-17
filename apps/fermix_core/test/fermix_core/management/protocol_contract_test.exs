@@ -2366,6 +2366,10 @@ defmodule FermixCore.Management.ProtocolContractTest do
        %{"code" => join_code(:candidate)}, joiner(join_home())},
       {"unavailable_computer_join_home_of_its_own", :unavailable, "computer.join.start",
        %{"code" => join_code(:computer)}, joiner(linked_home())},
+      # M102 J2: a link that does not say revoked, whose relay has no session
+      # up with its server yet.
+      {"unavailable_computer_join_not_reached", :unavailable, "computer.join.start",
+       %{"code" => join_code(:computer)}, joiner(linked_home(), nil)},
       {"unavailable_computer_disconnect_not_told", :unavailable, "computer.disconnect", %{},
        leaver(out_of_reach)},
       {"invalid_params_home_enroll_approve_sas", :invalid_params, "home.enroll.approve",
@@ -2394,9 +2398,17 @@ defmodule FermixCore.Management.ProtocolContractTest do
     [actor: {:desktop, @desktop_id}, operation_opts: [home: seams]]
   end
 
-  defp joiner(home) do
-    # No relay runs here: letting go of a link stops none.
-    seams = [home: home, now: @join_now, restart: fn -> :ok end, release: fn _which -> :ok end]
+  # No relay runs here: letting go of a link stops none. `primary` is what
+  # the relay says of the link, a session up with its server unless said.
+  defp joiner(home, primary \\ %{name: @golden_server, connected: true, status: :connected}) do
+    seams = [
+      home: home,
+      now: @join_now,
+      restart: fn -> :ok end,
+      release: fn _which -> :ok end,
+      link_status: fn -> %{primary: primary, desktops: [], enrollment: nil} end
+    ]
+
     [operation_opts: [computer_link: seams]]
   end
 

@@ -5,10 +5,13 @@ defmodule FermixCore.Management.ComputerLink do
 
     * `computer.join.start {code}`: this computer joins the home the code
       names (`Home.Join.start/3`) and the engine restarts as its computer,
-      which then dials the server and waits for the owner to add it. A code
-      that is not a computer's, that expired or that Fermix did not open is
-      `invalid_params` on `code`; a computer with a home of its own, or one
-      already joining, is `unavailable` with its sentence.
+      which then dials the server and waits for the owner to add it. The
+      apps send it, and so does `fermix computer join` (M102 J2, D4), and
+      Always On's Join again joins through it too (`home.act`'s `join`). A
+      code that is not a computer's, that expired or that Fermix did not open
+      is `invalid_params` on `code`; a computer with a home of its own, one
+      already joining, and one whose link its relay has not yet taken to its
+      server are `unavailable` with their sentences.
     * `computer.join.cancel`: the join ends wherever it stands
       (`Home.Join.cancel/2`) and this computer is its own home again.
     * `computer.disconnect {confirmed?}`: this computer leaves the home it is
@@ -20,8 +23,8 @@ defmodule FermixCore.Management.ComputerLink do
       `server_told: false`.
 
   Seams in `opts`: `:home`, `:now`, `:restart`, `:key_opts`, `:release`
-  (`Home.Unlink.let_go/4`'s) and `:primary_forward` (the link, on a linked
-  computer).
+  (`Home.Unlink.let_go/4`'s), `:link_status` (`Home.Join.start/3`'s) and
+  `:primary_forward` (the link, on a linked computer).
   """
 
   alias FermixCore.Home.Join
@@ -112,6 +115,8 @@ defmodule FermixCore.Management.ComputerLink do
 
   defp refused(reason), do: {:error, {:unavailable, @capability, Join.error_sentence(reason)}}
 
-  defp join_opts(opts), do: Keyword.take(opts, [:now, :restart, :key_opts, :release])
+  defp join_opts(opts),
+    do: Keyword.take(opts, [:now, :restart, :key_opts, :release, :link_status])
+
   defp home(opts), do: Keyword.get_lazy(opts, :home, &ConfigStore.fermix_home/0)
 end

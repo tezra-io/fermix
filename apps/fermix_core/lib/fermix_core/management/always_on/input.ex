@@ -3,8 +3,8 @@ defmodule FermixCore.Management.AlwaysOn.Input do
   What an Always On step was given (Always On setup §3.4): `home.act`'s
   `input`, decoded where it arrived (the router, the setup page's event, the
   CLI) and passed on as this struct alone, never as the map it came in. Its
-  `Inspect` withholds the recovery passphrase, so a crash report, a log line
-  or a page's last event never names it.
+  `Inspect` withholds the recovery passphrase and a code, so a crash report,
+  a log line or a page's last event never names either.
 
     * `recovery_passphrase`: for `move_now` and `try_again`, checked against
       the recovery key set, or set when none is; for `restore_here`, the one
@@ -17,29 +17,35 @@ defmodule FermixCore.Management.AlwaysOn.Input do
       block as the engine proposed it).
     * `sas` (M97 §7.5): for `approve_computer`, the six digits the computer
       that asks to join shows, as the owner typed them. Text, or nil.
+    * `code` (M102 J1): for `join`, the code Add a computer opened, which
+      carries a one-time secret. Text, or nil.
   """
 
   @fields %{
     "recovery_passphrase" => :recovery_passphrase,
     "keep_offers" => :keep_offers,
-    "sas" => :sas
+    "sas" => :sas,
+    "code" => :code
   }
   @shape_sentence "Always On takes a recovery passphrase, as text, the offers to keep on, " <>
-                    "as a list, and a new computer's digits, as text, and nothing else."
+                    "as a list, a new computer's digits, as text, and a code from Add a " <>
+                    "computer, as text, and nothing else."
   @field_sentences %{
     "recovery_passphrase" => "Type the recovery passphrase as text.",
     "keep_offers" => "Send the offers to keep on as a list of their ids.",
-    "sas" => "Type the six digits the new computer shows."
+    "sas" => "Type the six digits the new computer shows.",
+    "code" => "Paste the code from Add a computer as text."
   }
   @max_offers 32
-  @text_fields ~w(recovery_passphrase sas)
+  @text_fields ~w(recovery_passphrase sas code)
 
-  defstruct recovery_passphrase: nil, keep_offers: nil, sas: nil
+  defstruct recovery_passphrase: nil, keep_offers: nil, sas: nil, code: nil
 
   @type t :: %__MODULE__{
           recovery_passphrase: String.t() | nil,
           keep_offers: [String.t()] | nil,
-          sas: String.t() | nil
+          sas: String.t() | nil,
+          code: String.t() | nil
         }
 
   @doc "The fields `input` may hold, as the wire names them."
@@ -82,12 +88,13 @@ defmodule FermixCore.Management.AlwaysOn.Input do
   defimpl Inspect do
     import Inspect.Algebra
 
-    # The secret shows only whether it was given.
+    # The secrets show only whether they were given.
     def inspect(input, opts) do
       shown = [
         recovery_passphrase: withheld(input.recovery_passphrase),
         keep_offers: input.keep_offers,
-        sas: input.sas
+        sas: input.sas,
+        code: withheld(input.code)
       ]
 
       concat(["#FermixCore.Management.AlwaysOn.Input<", to_doc(shown, opts), ">"])

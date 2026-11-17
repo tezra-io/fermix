@@ -684,6 +684,7 @@ def test_the_shipped_numbered_rubrics_parse():
                       "open_up_the_server_sandbox_from_my_mac": 5,
                       "stricter_mac_open_server": 5,
                       "second_mac_without_moving_anything": 5,
+                      "laptop_removed_by_mistake": 5, "mac_removed_while_it_was_off": 5,
                       "can_you_still_text_me_on_imessage": 4,
                       "a_text_while_the_mac_sleeps": 3,
                       "a_ramen_place_in_vell": 2, "a_cafe_by_the_castle": 2,

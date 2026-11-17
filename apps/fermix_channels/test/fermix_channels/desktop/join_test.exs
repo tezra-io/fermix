@@ -82,10 +82,35 @@ defmodule FermixChannels.Desktop.JoinTest do
 
     assert_receive {:DOWN, _ref, :process, ^worker, :normal}, @wait
     assert {:ok, %{"phase" => "denied", "sentence" => said}} = Join.read(ctx.joiner)
-    assert said == "studio-mac did not add this computer. Open a new code there to try again."
+    # A new code is opened in Always On on a computer already in the home,
+    # never on the server, which has no screen (M102 N9, D7).
+    assert said ==
+             "This computer was not added. Open a new code in Always On on a computer " <>
+               "already in your Fermix."
+
     refute File.exists?(DesktopLink.path(ctx.joiner))
     refute_received :restarted
     assert {:ok, []} = DeviceStore.list(ctx.primary.store)
+  end
+
+  # The code withdrawn while this computer waits ends the wait as cancelled.
+  test "a code closed while it waits says where to open a new one", ctx do
+    worker = start_worker(ctx)
+    _sas = await_digits(ctx)
+    _waiting = await_window(ctx)
+
+    :ok = Enrollment.withdraw(ctx.primary.enrollment)
+
+    assert_receive {:DOWN, _ref, :process, ^worker, :normal}, @wait
+    assert {:ok, %{"phase" => "denied", "sentence" => said}} = Join.read(ctx.joiner)
+
+    assert said ==
+             "The code was cancelled. Open a new one in Always On on a computer already in " <>
+               "your Fermix."
+
+    refute said =~ "studio-mac"
+    refute File.exists?(DesktopLink.path(ctx.joiner))
+    refute_received :restarted
   end
 
   defp start_worker(ctx) do

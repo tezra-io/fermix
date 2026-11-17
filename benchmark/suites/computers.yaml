@@ -730,6 +730,86 @@ scenarios:
           Mac starts with everything switched off until the owner turns
           things on there, that it keeps no backups, or how to remove it.
 
+  # Joining again (M102 J1, J2): a computer the owner removed from the home
+  # comes back with a new code, through the running Fermix, and its screen
+  # offers Join again. The failures this guards are the road that no longer
+  # exists and the wrong ones: stopping Fermix on the laptop to run `fermix
+  # computer join` (the join now runs through the running Fermix), or
+  # starting the laptop over as a home of its own. What is graded is the
+  # road, which the model has from its own reference: a new code from Add a
+  # computer, entered on the laptop, then the six digits it shows typed where
+  # the home asks. No wording floor and no route assertion: every phrasing of
+  # those steps is right, and nothing here opens a code (the question asks
+  # how).
+  - id: joining_again_after_removal
+    title: "Bringing back a computer its server no longer knows"
+    severity: normal
+    risk: host_readonly
+    tags: [computers, always-on, home, join]
+    cases:
+      - id: laptop_removed_by_mistake
+        query: >
+          I removed my Linux laptop from Fermix by mistake last week, and now
+          its Always On says my server no longer knows it. How do I get it
+          back in?
+        expect:
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: |
+          1. Says the laptop joins again with a new code, which the owner
+             opens with Add a computer on a computer that is already part of
+             this Fermix, or on the server itself (`fermix always-on
+             add-computer` names the same step).
+          2. Says the new code is entered on the laptop: with Join again in
+             its Always On, or from a terminal there (`fermix always-on
+             join`, or `fermix computer join` with the code). Any one is
+             enough. Telling the owner to stop Fermix on the laptop before
+             entering the code does not meet this.
+          3. Says the laptop then shows six digits, and that the owner adds
+             it by typing those digits where this Fermix asks for them (on a
+             computer already part of it, or the server). Telling the owner
+             to compare digits shown on both sides instead does not meet
+             this.
+          4. Gives no other road as the way to bring the laptop back: not
+             reinstalling Fermix, not deleting the laptop's Fermix home, not
+             pairing it like a phone, and not setting it up as a server.
+          5. Does not claim to have opened a code, added the laptop or
+             changed anything itself.
+          Not required: that the code works once and for 30 minutes, that
+          the laptop lets go of its old link first, or why the server no
+          longer knows it.
+      - id: mac_removed_while_it_was_off
+        query: >
+          The kitchen Mac was switched off when I removed it from my Fermix.
+          Now I want it back. What do I do on it once it's on again?
+        expect:
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: |
+          1. Says the Mac joins again with a new code, which the owner opens
+             with Add a computer on a computer that is already part of this
+             Fermix, or on the server itself (`fermix always-on
+             add-computer` names the same step).
+          2. Says the new code is entered on the Mac with Fermix running
+             there: with Join again in its Always On, or from a terminal
+             there (`fermix always-on join`, or `fermix computer join` with
+             the code). Any one is enough. Telling the owner to stop or quit
+             Fermix on the Mac before entering the code does not meet this.
+          3. Says the Mac then shows six digits, and that the owner adds it
+             by typing those digits where this Fermix asks for them (on a
+             computer already part of it, or the server). Telling the owner
+             to compare digits shown on both sides instead does not meet
+             this.
+          4. Gives no other road as the way to bring the Mac back: not
+             reinstalling Fermix, not deleting the Mac's Fermix home, not
+             pairing it like a phone, not setting it up as a server, and not
+             moving the home onto it.
+          5. Does not claim to have opened a code, added the Mac or changed
+             anything itself.
+          Not required: that the Mac first needs a moment once Fermix starts
+          to learn that it was removed, that the code works once and for 30
+          minutes, or that the Mac lets go of its old link first.
+
   # A computer's browser (M97 §6.4): a task that needs the owner's sign-in on a
   # named computer goes to that computer's browser, never this server's own,
   # which is signed in nowhere. The studio Mac is away in an eval, so the right

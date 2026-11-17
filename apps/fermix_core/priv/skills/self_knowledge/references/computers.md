@@ -8,8 +8,9 @@ it. The server reads, writes and searches files and runs commands and git on
 a computer that offers them (*Files and commands on a computer*) and uses
 its browser (*A computer's browser* in the `browser` reference) and its
 screen (*A computer's screen*), and a Mac's Messages carry the home's
-iMessage (*iMessage through a Mac*). The move, the link and the summary: skill_view(name:
-"self-knowledge", file: "home").
+iMessage (*iMessage through a Mac*). The move and the link: skill_view(name:
+"self-knowledge", file: "home"); the Always On screen and its steps:
+skill_view(name: "self-knowledge", file: "always_on_screen").
 
 ## The record
 
@@ -55,11 +56,17 @@ no memory of its own.
    a new computer code replaces an older one.
 2. **Enter it on the new computer.** In the app's first-run screen, the
    choice to connect to a Fermix that already runs (management
-   `computer.join.start`). With no app: stop Fermix there, run `fermix
-   computer join` and paste the code when it asks (or pipe it in; it is never
-   an argument), then start Fermix.
-3. **Type six digits.** Only the new computer shows them: "Type 482 913 on
-   <server>, where it asks you to add this Mac." The Always On screen of the
+   `computer.join.start`). With no app: with Fermix running there, run
+   `fermix computer join` and paste the code when it asks (or pipe it in; it
+   is never an argument). It hands the code to the running Fermix, as the
+   apps do, and refuses with Fermix stopped ("Fermix is not running here.
+   Start it, then run this again."); Fermix then restarts, and `fermix home
+   status` shows the digits.
+3. **Type six digits.** Only the new computer shows them: "Type 482 913 in
+   Always On on a computer already in your Fermix, where it asks to add this
+   Mac." The server has no screen, so the owner types them on a computer of
+   the home, and the server's name says only where Fermix runs ("Connecting
+   this computer to your Fermix on <server>."). The Always On screen of the
    server and of every linked computer says "A computer named loft-linux
    (Linux) asks to join your Fermix. To add it, type the six digits it
    shows.", with **Add it** (type the digits read on the new computer; on
@@ -73,7 +80,10 @@ no memory of its own.
   Not adding it, typing digits that are not its own ("Those digits are not
   the ones the new computer showed, so it was not added. Open a new code to
   try again.") and the 30 minutes running out add nothing, and the code is
-  spent each time: open a new one. A connection that drops while it waits
+  spent each time: open a new one. The new computer says why, and where:
+  "This computer was not added. Open a new code in Always On on a computer
+  already in your Fermix." (or the code was cancelled, nobody added it in
+  time, the code was used or expired). A connection that drops while it waits
   spends nothing: it reconnects with new digits, and those are the ones to
   type. **Cancel** on the new computer makes it its own Fermix again.
 - Once added it is listed at once, under the name it gave (with " 2" when
@@ -114,20 +124,25 @@ no memory of its own.
   in its link; its Always On then says "Your server no longer knows this
   Mac. To join your Fermix again, enter a new code from Add a computer.",
   with Fermix running or stopped (`fermix home status`), since the link is
-  where that word lives. A computer that cannot write it there says why in
-  its link's status and tries again, as for an outage. A
-  new code joins it as the first one did (`fermix computer join` with
-  Fermix stopped, or `computer.join.start`): it first lets go of the old
-  link here, as Disconnect does (its key, what the server may use there,
-  the link), and a code it cannot join with leaves that link as it is; so
-  does a running Fermix whose server knows the computer again by then
-  ("it holds a link to a server"). It
-  takes that word from the server: a computer removed while its Fermix was
-  stopped is refused ("it holds a link to a server") until Fermix has
-  started there once. The same holds for a server restored from a snapshot
-  taken before the computer joined. The computer the home moved from is
-  still refused: it keeps its link, its moved marker and its own copies of
-  the backups.
+  where that word lives, and offers **Join again** (management `home.act`'s
+  `join`, which asks for the code masked: the setup page's Always On tab and
+  `fermix always-on join` on a terminal take it, and an app once it draws
+  it). A computer that cannot write the word there says why in its
+  link's status and tries again, as for an outage. A new code joins it as
+  the first one did, always through the running Fermix (Join again,
+  `computer.join.start`, or `fermix computer join`): it first lets go of the
+  old link here, as Disconnect does (its key, what the server may use
+  there, the link), and a code it cannot join with leaves that link as it
+  is; so does a running Fermix whose server knows the computer again by
+  then ("it holds a link to a server"). It takes that word from the server,
+  as the answer to its relay's dial: a computer removed while its Fermix
+  was stopped learns it once Fermix runs there and reaches the server, and
+  until then a join is refused ("Fermix has not reached your server from
+  this computer yet, so it cannot tell whether your server still knows this
+  computer. Try again in a minute."). The same holds for a server restored
+  from a snapshot taken before the computer joined. The computer the home
+  moved from is still refused: it keeps its link, its moved marker and its
+  own copies of the backups.
 - **From the computer.** **Disconnect this computer** (management
   `computer.disconnect`) tells the server, then deletes that computer's key,
   its link and what the server may use on it. A computer that joined is its

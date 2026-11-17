@@ -1656,7 +1656,7 @@ defmodule FermixCore.Management.CopyTest do
     test "the sweep reads every producer" do
       files = summary_sources() |> Enum.map(&Path.basename(elem(&1, 0))) |> Enum.uniq()
 
-      assert Enum.sort(files) == ~w(enrollment.ex link.ex move_readiness.ex)
+      assert Enum.sort(files) == ~w(enrollment.ex join.ex link.ex move_readiness.ex)
       assert Enum.count(summary_sources()) > 40
     end
   end
@@ -2490,7 +2490,13 @@ defmodule FermixCore.Management.CopyTest do
       Enum.map(
         ["home/move_readiness.ex"],
         &Path.join(@lib, &1)
-      ) ++ Enum.map(["home/enrollment.ex", "home/link.ex"], &Path.join(@channels_lib, &1))
+      ) ++
+        Enum.map(
+          # A computer's join that was not added: its sentence is the screen's
+          # (M102 N9).
+          ["home/enrollment.ex", "home/link.ex", "desktop/join.ex"],
+          &Path.join(@channels_lib, &1)
+        )
 
     collect(files, &literal/1) ++ collect(files, &template/1) ++ collect(files, &joined/1)
   end

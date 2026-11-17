@@ -647,8 +647,14 @@ defmodule FermixCore.Management.Copy do
   def summary_sentence(:join_dialing, %{machine: machine, to: to}),
     do: "Connecting this #{machine} to your Fermix on #{to}."
 
-  def summary_sentence(:join_waiting, %{machine: machine, to: to, sas: sas}),
-    do: "Type #{digits(sas)} on #{to}, where it asks you to add this #{machine}."
+  # The owner types the digits in Always On on a computer already in the
+  # home, never on the server, which has no screen (M102 N9, D7). The words
+  # stay within the word bound, so "asks to add" in place of D7's "asks you
+  # to add".
+  def summary_sentence(:join_waiting, %{machine: machine, sas: sas}),
+    do:
+      "Type #{digits(sas)} in Always On on a computer already in your Fermix, where it asks " <>
+        "to add this #{machine}."
 
   def summary_sentence(:notice_computer_joined, %{name: name}),
     do: "A computer named #{name} joined your Fermix."
@@ -1129,6 +1135,7 @@ defmodule FermixCore.Management.Copy do
   def summary_label(:add_computer, _values), do: "Add a computer"
   def summary_label(:approve_computer, _values), do: "Add it"
   def summary_label(:deny_computer, _values), do: "Do not add it"
+  def summary_label(:join, _values), do: "Join again"
   def summary_label(:change_passphrase, _values), do: "Change"
 
   def summary_label(:restart_server, %{name: name}) when is_binary(name) and name != "",
