@@ -44,7 +44,7 @@ the checks that show a property needs it):
   fires `{:failed, _}` (`queue.ex:920-928`).
 - `TurnsShareQueueFate`: turn tasks run under a `Task.Supervisor` that
   `QueueSupervisor` (`:one_for_all`) terminates before it restarts the Queue
-  (`queue_supervisor.ex:46-51`, `application.ex:212`).
+  (`queue_supervisor.ex:46-51`, `application.ex:223`).
 - `CrashClosesUserMessage`: a crashed turn's `:DOWN` writes the stopped marker
   before the next message starts (`queue.ex:879`, `:893-899`).
 - `StopSparesClaimedTurn`: a stop leaves a turn that has claimed its outcome
@@ -164,8 +164,8 @@ watch was added to the model).
 
 - The LLM and tools (one "loop" step), streaming drafts, and typing.
 - The access gate's parked confirmation. `run_message_loop` hands AgentLoop
-  the owner-inbox closure and the Live call id (`turn_runner.ex:670`,
-  `:674`). A parked call is a held tool result inside the one loop step, and
+  the owner-inbox closure and the Live call id (`turn_runner.ex:672`,
+  `:676`). A parked call is a held tool result inside the one loop step, and
   the owner's confirm later runs it on a task outside the Queue, not as a
   new turn.
 - The `terminal_error_owner?` branch, which only changes who sends the error
@@ -261,7 +261,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
     while the new Queue's turn ran, and nobody could stop it.
 - **Fix:** `FermixChannels.Gateway.QueueSupervisor` (`queue_supervisor.ex`)
   runs `{Task.Supervisor, name: FermixChannels.Gateway.TurnTasks}` and the
-  Queue, in that order, `:one_for_all`; `application.ex:212` starts it in the
+  Queue, in that order, `:one_for_all`; `application.ex:223` starts it in the
   Queue's slot. `:task_supervisor` is a required Queue option
   (`queue.ex:199`), so no Queue runs turns under a supervisor that outlives
   it. When the Queue dies, the supervisor terminates the task supervisor, and
@@ -590,3 +590,19 @@ start, stop, result or answer the spec models changed. `run` and
 at all and `commit_turn/4` holds the commit the spec describes. The line
 references into `turn_runner.ex`, several of which had drifted before this
 change, point at the committed code.
+
+## Re-read for a resumed request's identity and the stop's drain (M94, 2026-11-17)
+
+`f2a874b8` staled the `turn_runner.ex` and channels `application.ex` pins.
+`run_message_loop` now takes the turn's `request_id` from `request_id/1`: the
+one a grant resume hands back in its metadata when it is valid, else a fresh
+one. It is a context key with no Queue state. The channels application gains
+`prep_stop/1`, which on an orderly stop asks a phone call in progress to end
+(`PhoneCalls.Manager.drain_for_stop/0`, bounded, and at once when another
+application drained it already) before this application's tree stops, so the
+Queue still runs while the call's last turns finish. Its children, their order
+and the strategy are as before, so `QueueSupervisor`, its `TurnTasks` and the
+Queue run as the spec says, and a daemon stop stays outside the model. No
+claim, start, stop, result or answer the spec models changed. The line
+references into `turn_runner.ex` after the context map and into the channels
+`application.ex` moved with the code.

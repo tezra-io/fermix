@@ -37,7 +37,7 @@ them, or during the write-back, leaves a terminal pending row and no sender.
 **The hand-off lease** (`leased`): the terminal UPDATE also writes
 `next_delivery_at = now + @handoff_lease_ms` (120 s; `terminalize_and_notify/4`,
 `manager.ex:1117-1129`, `:96-108`), and the worker selects only due rows
-(`repo.ex:6709`). So the row is terminal and leased in one statement, and the
+(`repo.ex:8944`). So the row is terminal and leased in one statement, and the
 worker cannot select it until the lease ends. The lease clock starts before
 the terminal write is served (`manager.ex:1118`), so the lease must outlast that write
 and the Manager's own hand-off: the terminal write, at most two write-back Repo
@@ -72,7 +72,7 @@ may still land (the code before the link).
   the worker finds is one whose hand-off recorded no outcome (the Manager died
   inside it, or the lease lapsed), and the worker dead-letters it on that tick
   as `:handoff_unrecorded`, with no send (`process_row/3`,
-  `delivery_worker.ex:134-149`; `Delivery.client_owned?/1`, `delivery.ex:113`).
+  `delivery_worker.ex:134-149`; `Delivery.client_owned?/1`, `delivery.ex:62`).
 
 A row the owner cancelled is an owner halt whatever its origin
 (`not_continuable_reason/1`, `manager.ex:1219`): a framework origin gets the
@@ -94,7 +94,7 @@ send (`manager.ex:1271-1277`).
   The cancel of an untracked row is modelled (`OwnerCancelUntracked`);
 - the continuation depth cap itself, a pure per-row rule that ExUnit covers;
 - `delivery_mode` `none` and `local`, which succeed with no channel send
-  (`delivery.ex:122-124`);
+  (`delivery.ex:71-73`);
 - advisory notices and telemetry;
 - this machine's coding store (`Harness.MachineStore`, `device/coding.db`), the
   first child of `Harness.Supervisor`'s `:rest_for_one` list, and the sign-in
@@ -119,7 +119,7 @@ send (`manager.ex:1271-1277`).
 - the DeliveryWorker's Repo timeouts, because each is a step already modelled.
   The worker passes `on_timeout: :error` on its tick read and its delivery
   marks (`Repo.periodic_opts/2`, `delivery_worker.ex:85-86`), so a call past
-  its 5 s budget returns `{:error, :repo_timeout}` (`repo.ex:3946-3954`) and
+  its 5 s budget returns `{:error, :repo_timeout}` (`repo.ex:5028-5036`) and
   the worker logs it instead of exiting. (It used to exit: a DeliveryWorker
   crash on its own.)
   - A timed-out tick read (`delivery_worker.ex:116-118`) ends the tick with no
@@ -174,7 +174,7 @@ least one check):
   `run_monitors` entry. It is `TRUE` at start and `FALSE` after a crash, because
   the restarted Manager begins with empty maps (`manager.ex:1629-1630`).
 - `GuardedTerminalUpdate`: the terminal UPDATE only matches an active row
-  (`repo.ex:6577-6582`), and `:already_terminal` is dropped (`manager.ex:1122`,
+  (`repo.ex:8812-8818`), and `:already_terminal` is dropped (`manager.ex:1122`,
   `:1164-1169`).
 - `RestForOne`: a Manager crash also restarts the `RunSupervisor` and the
   `DeliveryWorker`, killing every live Run first (`supervisor.ex:45-52`).
@@ -187,7 +187,7 @@ least one check):
 - `ClientDeadLetters`: a failed client-owned dispatch dead-letters the row with
   its named cause (`manager.ex:1247-1253`, `:1281-1296`).
 - `WorkerDrainsOutbox`: the worker selects terminal rows that are still pending
-  (`delivery_worker.ex:113-156`, `repo.ex:6700-6712`).
+  (`delivery_worker.ex:113-156`, `repo.ex:8935-8951`).
 - `DeadLetterCap`: the worker dead-letters a row at `MaxAttempts`
   (`delivery_worker.ex:162-174`).
 - `LeasesFirstAttempt`: the terminal write leases the row to the Manager's
@@ -496,13 +496,13 @@ showed them are now `reachable` witnesses.
   - Triggers: an orderly shutdown (a daemon restart or upgrade: the supervisor
     stops the DeliveryWorker, then the RunSupervisor, then the Manager, which
     does not trap exits), or a restart of any earlier child of the core
-    `:rest_for_one` tree (`application.ex:338-452`), such as `Memory.Repo`,
+    `:rest_for_one` tree (`application.ex:336-450`), such as `Memory.Repo`,
     `MainAgent`, `JobScheduler` or the Temporal supervisors. Every trigger
     needs a report queued behind a busy Manager at that moment.
 - **Impact:**
   - The owner's text reads "`[run <id>] interrupted`", with the completed result
     shown as if it were the vendor's error text, and a resume hint. The text is
-    re-read from `result.txt` (`delivery.ex:334-335`, `:420`).
+    re-read from `result.txt` (`delivery.ex:146-147`, `:232`).
   - A chat continuation carries no result body. It closes with "This run ended
     without reporting a result ... check the working tree before redoing
     anything" (`continuation.ex:89`, `:223`), so the agent finds the finished
@@ -581,3 +581,18 @@ line numbers in the spec and in this README's current-code sections point at
 the committed files. Most `manager.ex` citations past its line 1040 still
 named the lines from before the M98 change added its sign-in code, about nine
 short; each now names the lines of the function it cites.
+
+## Re-read for the frozen origin's move (M94, 2026-11-17)
+
+`f2a874b8` staled the `delivery.ex` pin. `resolve_snapshot/2`, where a run's
+destination and origin kind are frozen at tool-execute time, moved with its
+helpers to `Delivery.FrozenOrigin.resolve/2`, which the coding-run tools call,
+shared with a phone call; the only change in its body is the excerpt's UTF-8
+cut, now `Text.truncate_utf8/2`, which keeps the same prefix. That happens
+before admission, which the spec leaves out: it takes the row's origin as
+frozen and reads only `client_owned?/1`, `deliver/2` and the send, all still
+in `delivery.ex` and unchanged. So no modelled step changed, and
+`delivery/frozen_origin.ex` is not pinned. The line numbers into `delivery.ex`
+moved up with the removal. The ones into `repo.ex`, two thousand lines short
+after the file's growth, now name the harness functions they cite, and the
+core tree's range in HARNESS-3 follows `application.ex`.

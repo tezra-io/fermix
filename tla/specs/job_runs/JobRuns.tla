@@ -72,8 +72,8 @@
 (* refused by the tool before any registry write or Scheduler call         *)
 (* (job_registry_support.ex:36-41): a request the owner never made. Its    *)
 (* job-row read feeds no modelled column. The store of parked              *)
-(* confirmations (AccessGate.Pending, application.ex:410) and the holder   *)
-(* of a conversation's place records (ReplyBlocks, :414), which no job     *)
+(* confirmations (AccessGate.Pending, application.ex:408) and the holder   *)
+(* of a conversation's place records (ReplyBlocks, :412), which no job     *)
 (* process reads, are two more core children started before the            *)
 (* RunnerSupervisor, so a crash of either is the daemon crash below.       *)
 (*                                                                         *)
@@ -111,7 +111,7 @@
 (* Run ids are reused once a run is fully finished, so two ids model an    *)
 (* unbounded run history. A daemon crash also stands for a crash of any    *)
 (* core child started before the RunnerSupervisor (Memory.Repo, Trace,     *)
-(* Finch, MainAgent and the rest, application.ex:338-422) or of the        *)
+(* Finch, MainAgent and the rest, application.ex:336-420) or of the        *)
 (* RunnerSupervisor itself: under :rest_for_one each restarts the          *)
 (* RunnerSupervisor with its runners and the Scheduler                     *)
 (* (application.ex:209). A runner's send helper (REMIND-2,                 *)
@@ -195,7 +195,7 @@ CONSTANTS
     SchedulerCrashes,   \* how many times the Scheduler alone may die of a cause other than a
                         \* Repo timeout, e.g. :rest_for_one restarting it when the
                         \* MeetingsSupervisor between the RunnerSupervisor and it dies
-                        \* (application.ex:423-430)
+                        \* (application.ex:421-428)
     SchedulerTimeouts,  \* how many of the Scheduler's Repo calls may time out (5 s); it takes
                         \* that call site's error branch and keeps running (repo.ex:1252-1254)
     RunnerCanCrash,     \* a runner dies at one of its Repo calls (a timeout, a failed match)
@@ -1555,7 +1555,7 @@ ReportWrite(r) ==
 \* A pending :cue_admit dies with the old process, and init asks for none:
 \* maybe_request_admission (scheduler.ex:231, :300-302) asks only while the cue
 \* tree runs (Cues.running?/0), and that tree starts after the Scheduler under
-\* :rest_for_one (application.ex:518, :209), so it is never up while the
+\* :rest_for_one (application.ex:516, :209), so it is never up while the
 \* Scheduler inits. The first admission after a restart is a tick's, a wake's,
 \* a run's end's or a job change's. The run set starts unknown (runs_known?
 \* false, scheduler.ex:211) until init's reconcile scan succeeds; without
@@ -1583,9 +1583,9 @@ SchedRestart ==
 \* waited on never lands. A Repo call that times out no longer kills it
 \* (the timeout steps above); another cause still does, such as
 \* :rest_for_one restarting it when the MeetingsSupervisor started between
-\* the RunnerSupervisor and it dies (application.ex:423-430), or a raise in
+\* the RunnerSupervisor and it dies (application.ex:421-428), or a raise in
 \* its own code. FermixCore.Supervisor is :rest_for_one and starts
-\* JobRunnerSupervisor before JobScheduler (application.ex:423, :430, :209),
+\* JobRunnerSupervisor before JobScheduler (application.ex:421, :428, :209),
 \* so the restart leaves every runner running.
 SchedulerCrash ==
     /\ schedCrashes < SchedulerCrashes

@@ -756,7 +756,7 @@ GDone ==
 \* (DeviceSupervisor.children/1), whose process carries on (carry_on/1,
 \* candidate.ex:206-216): activating finishes the activation; a local
 \* candidate in any other phase is removed (drop_local/1, :735-745). A
-\* primary boot runs prepare_home (application.ex:249-289) first:
+\* primary boot runs prepare_home (application.ex:247-287) first:
 \* finish_activation/1 removes a candidate whose settings are in place
 \* (activation.ex:288-300), and Return.done/2 records moved_at
 \* (return.ex:117-132); then the memory repo opens memory.db, making a fresh

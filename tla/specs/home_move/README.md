@@ -540,3 +540,8 @@ role, marker, move phase or candidate file, and `prepare_home`,
 `finish_activation`, `finish_move` and `left_to_status` are as they were. No
 modelled step changed. `Restart`'s citation into `application.ex`, which had
 drifted, now points at `prepare_home` and `finish_activation`.
+
+`f2a874b8` (M94, 2026-11-17) changed `prep_stop/1` to drain through
+`PhoneCalls.Manager.drain_for_stop/0`, from whichever application an orderly
+stop stops first, and shortened its comment; no pinned function changed. The
+`application.ex` citation moved up by two with the code.

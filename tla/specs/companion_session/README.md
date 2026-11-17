@@ -259,6 +259,12 @@ on an approval now carries its call (`phone_call_result`) into the turn its
 confirmation re-ingests, a part of the grant resume the spec leaves out. The
 line references into `sandbox.ex` moved with the code.
 
+`f2a874b8` (M94, 2026-11-17) made the grant resume carry the owner request's
+identity (`request_id`) into the re-ingested turn, in `synthesize_resume_message`,
+a part of the resume the spec leaves out; no pinned function changed. The
+citations of `take_pending` and `validate_pending` moved down by six with the
+code.
+
 **The Queue is one abstract process.** The runner takes one `.tla` per spec,
 and `turn_queue` proves the Queue's rules against `queue.ex`, so this spec takes
 them as given:

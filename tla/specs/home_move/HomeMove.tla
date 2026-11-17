@@ -711,7 +711,7 @@ Activate ==
 
 \* handle_info(:restart) (candidate.ex:286-290) -> Lifecycle.restart_self/0. The
 \* boot reads role = "primary" and finishes the activation
-\* (FermixCore.Application, application.ex:249-269).
+\* (FermixCore.Application, application.ex:247-267).
 Restart ==
     /\ CandIdle /\ cand = "active"
     /\ candUp' = "primary"

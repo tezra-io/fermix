@@ -282,7 +282,7 @@ CONSTANTS
                          \* sent through Fanout.announce; FALSE announces no user row
     SingleAnswer,        \* an approval token is consumed once: Confirmations.take is
                          \* an :ets.take (confirmations.ex:21-26, take_pending
-                         \* sandbox.ex:747-756)
+                         \* sandbox.ex:753-762)
     ResendsPendingApprovals, \* the Connection writes every card still waiting right
                          \* after server_hello, in the step that joined the registry
                          \* (join, send_pending_approvals, connection.ex:638-727, from
@@ -630,7 +630,7 @@ OnCancel(m) ==
 \* /confirm TOKEN or /deny TOKEN: a command request through the same path,
 \* answered by the Gateway's command (confirm, deny, sandbox.ex:309-329).
 \* take_pending peeks, checks the expiry and origin, then takes the token
-\* (sandbox.ex:747-764, Confirmations.take, confirmations.ex:21-26). Only a
+\* (sandbox.ex:753-770, Confirmations.take, confirmations.ex:21-26). Only a
 \* take that finds the token applies the answer and announces
 \* approval_resolved (notify_approval, sandbox.ex:400-408 ->
 \* approval_resolution_fn, requests.ex:619-624 -> Approvals.resolve,
@@ -942,7 +942,7 @@ Ask(m) ==
                    applied, reqs, queue, store, env, obs>>
 
 \* The card's ttl_s runs out: the token is refused from then on
-\* (validate_pending, sandbox.ex:758-764), and Approvals drops the card and
+\* (validate_pending, sandbox.ex:764-770), and Approvals drops the card and
 \* announces approval_resolved{expired} to its transport (handle_info
 \* {:approval_expired, ...}, expire, approvals.ex:150-155, :208-217). The two
 \* clocks run the same window, 60 s or the one an access-sensitive request

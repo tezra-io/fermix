@@ -12,7 +12,7 @@
 (*  - the LLM and tools (one "loop" step), streaming drafts, typing;       *)
 (*  - the access gate's parked confirmation: run_message_loop hands        *)
 (*    AgentLoop the owner-inbox closure and the Live call id               *)
-(*    (turn_runner.ex:670, :674); a parked call is a held tool result      *)
+(*    (turn_runner.ex:672, :676); a parked call is a held tool result      *)
 (*    inside the one loop step, and the owner's confirm later runs it on   *)
 (*    a task outside the Queue, not as a new turn;                         *)
 (*  - what a turn tells its channel's stream (a hand-off's word, before   *)
@@ -56,11 +56,11 @@
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/stopper.ex @ 3f42aedf7399
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/typing.ex#with_indicator,stop_typing_loop @ 4e91ea3d2f7d
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/draft_stream.ex#start_link @ c185d3d497b1
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/application.ex @ c16f49cc504b
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/application.ex @ 727ac1851850
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/acp/peer.ex#@moduledoc,handle_info,start_prompt,hand_off,watch_queue,ingest,handle_ingest,apply_turn_result,cancel_turn,cancel_prompt_request,stop_turn,settle_queue_down,close_turn,demonitor_queue,apply_if_open @ 37fc57942bd1
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/acp/session.ex#start_turn,clear_turn,turn_open?,put_queue_ref,queue_ref,queue @ ad21422f117f
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway.ex#ingest,do_deliver_to_agent @ a988106fa5ca
-\* SOURCE: apps/fermix_core/lib/fermix_core/agents/turn_runner.ex#run,run_message_loop,persist_user_message,commit,commit_turn @ 67e5fa7a942d
+\* SOURCE: apps/fermix_core/lib/fermix_core/agents/turn_runner.ex#run,run_message_loop,persist_user_message,commit,commit_turn @ 5539b9a97546
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/conversation_store.ex @ a81b127db387
 EXTENDS Naturals, Sequences, FiniteSets
 
@@ -89,7 +89,7 @@ CONSTANTS
     CrashFiresOutcome,  \* a crashed turn's held closure fires {:failed, _} (queue.ex:920-928)
     TurnsShareQueueFate,    \* turn tasks run under a Task.Supervisor that QueueSupervisor
                             \* (:one_for_all) terminates before it restarts the Queue
-                            \* (queue_supervisor.ex:46-51, application.ex:212)
+                            \* (queue_supervisor.ex:46-51, application.ex:223)
     CrashClosesUserMessage, \* a crashed turn's DOWN writes the stopped marker before the
                             \* next message starts (queue.ex:879, :893-899)
     StopSparesClaimedTurn,  \* a stop leaves a turn that claimed its outcome running
@@ -385,7 +385,7 @@ CheckoutFail(m) ==
     /\ Show(m, "error")
     /\ QueueUnchanged /\ UNCHANGED <<holding, outcomes, history>>
 
-\* TurnRunner persist_user_message (turn_runner.ex:1493), before AgentLoop.
+\* TurnRunner persist_user_message (turn_runner.ex:1504), before AgentLoop.
 PersistUser(m) ==
     /\ pc[m] = "start"
     /\ MoveTo(m, "loop")
