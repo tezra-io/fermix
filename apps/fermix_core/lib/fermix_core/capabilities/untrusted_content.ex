@@ -40,6 +40,7 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   alias FermixCore.Tools.OpenLoopList
   alias FermixCore.Tools.OpenLoopNote
   alias FermixCore.Tools.OpenLoopUpdate
+  alias FermixCore.Tools.PhoneCall
   alias FermixCore.Tools.RecallActivity
   alias FermixCore.Tools.SkillRun
 
@@ -87,8 +88,10 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   # Fermix's own fields), a scheduled run's final response, and what the cue
   # sources sent and the watchers' tasks wrote (`list_cues`, M60 C16; its views
   # of what is set up relay none, `outside_source/2`). `manage_watcher` is not
-  # one: it returns no outside text (M60 S13).
-  @relaying_modules [SkillRun, GetCodingRun, GetJobRun, ListJobRuns, ListCues]
+  # one: it returns no outside text (M60 S13). `phone_call`'s status relays what
+  # the person called said (M94 §11); starting or stopping a call returns
+  # Fermix's own fields (`outside_source/2`).
+  @relaying_modules [SkillRun, GetCodingRun, GetJobRun, ListJobRuns, ListCues, PhoneCall]
 
   # Tools whose result is text captured from the owner's screen: Computer
   # History's summaries of the pages and documents the owner had open, which
@@ -177,6 +180,11 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   def outside_source(%Capability{metadata: %{tool_module: ListCues}} = capability, arguments)
       when is_map(arguments) do
     if ListCues.relays_outside_text?(arguments), do: outside_source(capability), else: nil
+  end
+
+  def outside_source(%Capability{metadata: %{tool_module: PhoneCall}} = capability, arguments)
+      when is_map(arguments) do
+    if PhoneCall.relays_outside_text?(arguments), do: outside_source(capability), else: nil
   end
 
   def outside_source(%Capability{} = capability, arguments) when is_map(arguments),

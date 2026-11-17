@@ -529,6 +529,23 @@ defmodule FermixCore.Harness.DeliveryTest do
       assert Keyword.get(opts, :message_thread_id) == "77"
     end
 
+    # `send_text/3` is `deliver/2`'s send half, which a phone call's report
+    # shares: exactly the given text, once, to the frozen thread and options.
+    test "send_text/3 makes one send of the given text to the frozen destination" do
+      row = completed_row(%{thread: "77", send_opts: %{"reply_to" => "m-9", "other" => "x"}})
+
+      assert {:ok, :sent} =
+               Delivery.send_text(row, "Already composed.", adapter: RecordingAdapter)
+
+      assert [{"chat-1", "Already composed.", opts}] = recorded()
+      assert Keyword.get(opts, :message_thread_id) == "77"
+      assert Keyword.get(opts, :reply_to) == "m-9"
+      refute Keyword.has_key?(opts, :other)
+
+      assert {:error, :permanent} =
+               Delivery.send_text(row, "Again.", adapter: FailingAdapter, delivery_backoff_ms: 0)
+    end
+
     test "none mode skips without a send" do
       row = completed_row(%{delivery_mode: "none"})
 

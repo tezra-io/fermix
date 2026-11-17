@@ -293,8 +293,20 @@ defmodule FermixCore.Harness.Delivery do
 
   # --- One bounded send ---------------------------------------------------
 
-  defp deliver_to_channel(row, opts) do
-    text = compose(row, result_text_for(row), opts)
+  defp deliver_to_channel(row, opts),
+    do: send_text(row, compose(row, result_text_for(row), opts), opts)
+
+  @doc """
+  Makes ONE bounded send of `text` to `row`'s frozen destination
+  (`platform`, `destination`, `thread`, `send_opts`) through the shared
+  `Delivery.ChannelSend` seam, under the delivery watchdog (`opts[:timeout_ms]`,
+  default `deliver_timeout_ms/0`). It is `deliver/2`'s send half, shared with
+  the other run kind that freezes its destination this way (a phone call's
+  report, `PhoneCalls.Delivery`), so the watchdog, the single attempt and the
+  thread and send-option mapping stay one rule.
+  """
+  @spec send_text(map(), String.t(), keyword()) :: {:ok, :sent} | {:error, term()}
+  def send_text(row, text, opts \\ []) when is_map(row) and is_binary(text) and is_list(opts) do
     timeout_ms = Keyword.get(opts, :timeout_ms, deliver_timeout_ms())
 
     result =

@@ -98,7 +98,10 @@ defmodule FermixCore.Home.ReadableTest do
     # trip by cascade. An engine at this format that changes a near leaves
     # the old words' row behind, which no near then matches and the next
     # newer engine's edit clears: the format stays.
-    @migrations Enum.to_list(1..39) ++ [41, 42, 43] ++ Enum.to_list(45..66)
+    # 67 (M94 §09, the phone-call ledger) adds one table an engine at this
+    # format never reads or writes, and changes nothing it does: the format
+    # stays.
+    @migrations Enum.to_list(1..39) ++ [41, 42, 43] ++ Enum.to_list(45..67)
     @manifest_keys ~w(created_at engine_version files format home_format home_root host links
                       primary_epoch)
     @entry_keys ~w(bytes mode path sha256)

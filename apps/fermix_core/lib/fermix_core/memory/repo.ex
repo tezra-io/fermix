@@ -29,6 +29,7 @@ defmodule FermixCore.Memory.Repo do
   alias FermixCore.Memory.Repo.MobileSql
   alias FermixCore.Memory.Repo.OpenLoopReactionsSql
   alias FermixCore.Memory.Repo.OpenLoopsSql
+  alias FermixCore.Memory.Repo.PhoneCallsSql
   alias FermixCore.Memory.Repo.TemporalSql
   alias FermixCore.Memory.Repo.TripsSql
   alias FermixCore.Memory.Repo.VoiceCallsSql
@@ -101,6 +102,7 @@ defmodule FermixCore.Memory.Repo do
   @trip_near_migration_version 64
   @trip_waits_migration_version 65
   @trip_towns_migration_version 66
+  @phone_calls_migration_version 67
   @sqlite_open_intent :readwritecreate
 
   # The home's requests about notes from every machine (M97 §8), all served by
@@ -3764,6 +3766,15 @@ defmodule FermixCore.Memory.Repo do
     do: call({:trips, request}, opts)
 
   @doc """
+  Serves one request about the phone-call ledger (M94 §09) with
+  `Memory.Repo.PhoneCallsSql`, a `handle(conn, request)` with one head per
+  request tuple. Only `FermixCore.PhoneCalls.Ledger` calls it.
+  """
+  @spec phone_calls_call(tuple(), keyword()) :: term()
+  def phone_calls_call(request, opts \\ []) when is_tuple(request) and is_list(opts),
+    do: call({:phone_calls, request}, opts)
+
+  @doc """
   The base schema as SQL, for a test that seeds a store an older release wrote.
 
   Every statement is `IF NOT EXISTS`, so a fixture can lay the base tables down
@@ -4955,6 +4966,10 @@ defmodule FermixCore.Memory.Repo do
     {:reply, with_connection(state, &TripsSql.handle(&1, request)), state}
   end
 
+  def handle_call({:phone_calls, request}, _from, state) do
+    {:reply, with_connection(state, &PhoneCallsSql.handle(&1, request)), state}
+  end
+
   # Every request is served in order by this one process, so a call waits
   # behind every request ahead of it. A timed-out call exits its caller unless
   # the caller passed `on_timeout: :error` (`periodic_opts/2`).
@@ -5136,8 +5151,27 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_trips_migration(conn, versions),
          :ok <- apply_trip_near_migration(conn, versions),
          :ok <- apply_trip_waits_migration(conn, versions),
-         :ok <- apply_trip_towns_migration(conn, versions) do
+         :ok <- apply_trip_towns_migration(conn, versions),
+         :ok <- apply_phone_calls_migration(conn, versions) do
       :ok
+    end
+  end
+
+  # M94 §09: the phone-call ledger, its table and version in one transaction,
+  # after 66. Nothing is rewritten: a store from before has no calls.
+  defp apply_phone_calls_migration(conn, versions) do
+    if Enum.member?(versions, @phone_calls_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{PhoneCallsSql.schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@phone_calls_migration_version});
+        COMMIT;
+        """
+      )
     end
   end
 

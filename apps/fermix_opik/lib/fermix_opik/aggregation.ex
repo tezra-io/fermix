@@ -1238,6 +1238,52 @@ defmodule FermixOpik.Aggregation do
     add_child_span(state, meta, at, &Mapper.meeting_phase_span(meta, meas, &1))
   end
 
+  # A phone call (M94 §11) is the meeting's shape: a detached run that outlives
+  # the turn which asked for it, so it is its OWN root and the requesting
+  # turn's session rides as `parent_session` correlation metadata only.
+  # run_start opens the root, bounded by the call's own `max_duration_ms`; the
+  # call's backend turns and provider spans nest via the shared
+  # `phone_call_<id>` session; run_complete/run_error close it. No number,
+  # mandate or transcript reaches these events, so the root carries none.
+  def apply_event(state, [:fermix, :phone_call, :run_start], _meas, meta, at) do
+    case Map.get(meta, :session_id) do
+      nil ->
+        {state, []}
+
+      session_id ->
+        ctx = %{
+          parent_session: nil,
+          kind: :phone_call,
+          name: Map.get(meta, :agent),
+          input: nil,
+          max_duration_ms: Map.get(meta, :max_duration_ms),
+          trace_metadata: phone_call_metadata(meta),
+          at: at.at,
+          mono: at.mono
+        }
+
+        {state, _ref} = ensure_session(state, session_id, ctx)
+        {state, []}
+    end
+  end
+
+  # `run_error` carries the terminal status word (`failed`, `dispatch_unknown`,
+  # `closure_unconfirmed`) and the vendor's own words, which are the diagnosis.
+  def apply_event(state, [:fermix, :phone_call, run], meas, meta, at)
+      when run in [:run_complete, :run_error] do
+    status =
+      if run == :run_error,
+        do: Map.get(meta, :status, "error"),
+        else: Map.get(meta, :status, "ok")
+
+    close_root(state, meta, at, %{
+      output: Map.get(meta, :vendor_message) || Map.get(meta, :error),
+      status: status,
+      error_info: phone_call_error_info(run, meta),
+      metadata: compact(Map.merge(phone_call_metadata(meta), phone_call_end(meta, meas)))
+    })
+  end
+
   # A management Doctor run (M34 §5) is a bounded background run minted with its
   # own `doctor:<rand>` session before any check executes. It is always a root:
   # the app asks the daemon directly, so there is no originating turn to nest
@@ -1875,6 +1921,10 @@ defmodule FermixOpik.Aggregation do
   # An open-loop check-in, minted in `OpenLoops.Telemetry.correlation/2`.
   defp infer_kind("open_loop_" <> _), do: :open_loop_checkin
   defp infer_kind("meeting_" <> _), do: :meeting
+  # A phone call, minted in `PhoneCalls.Telemetry.session_id/1`; keep the two
+  # in lockstep, or a closer whose opener was missed reads as a `:subagent`
+  # phantom root.
+  defp infer_kind("phone_call_" <> _), do: :phone_call
   # A Live voice call and the backend turns it delegates to. Both prefixes are
   # minted outside this app (LocalVoiceSocket / LiveSessionServer); keep them in
   # lockstep with those, or a call_stop arriving without its opener reads as a
@@ -1924,6 +1974,8 @@ defmodule FermixOpik.Aggregation do
   # id ("meeting_<id>_<ts>") is its own fallback — the generic "<kind>:<name>"
   # would only say "meeting" twice.
   defp wrapper_name(:meeting, name, session), do: name || session
+  # "phone_call:<id>" already says what it is and which call.
+  defp wrapper_name(:phone_call, name, session), do: name || session
   # Both voice ids already carry their kind ("voice_live:1",
   # "voice_delegation_7"), and a delegation's `agent` is the turn's own name
   # ("main"), which says nothing about which delegation it was — so the session
@@ -2210,6 +2262,37 @@ defmodule FermixOpik.Aggregation do
     do: error_info("MeetingError", stringify(Map.get(metadata, :error)))
 
   defp meeting_error_info(_run, _metadata), do: nil
+
+  # The phone-call bookends' correlation allowlist, shared by the opener and the
+  # closer so a call whose opener never arrived still carries its ids.
+  defp phone_call_metadata(metadata) do
+    compact(%{
+      call_id: Map.get(metadata, :call_id),
+      origin_kind: stringify(Map.get(metadata, :origin_kind)),
+      model: stringify(Map.get(metadata, :model)),
+      carrier_profile: stringify(Map.get(metadata, :carrier_profile)),
+      authorization: stringify(Map.get(metadata, :authorization)),
+      parent_session: Map.get(metadata, :parent_session)
+    })
+  end
+
+  # What the closer adds: the call's terminal words and its counters, usage
+  # labelled by its own state.
+  defp phone_call_end(metadata, measurements) do
+    %{
+      outcome: stringify(Map.get(metadata, :outcome)),
+      usage_state: stringify(Map.get(metadata, :usage_state)),
+      failure_reason: Map.get(metadata, :failure_reason),
+      duration_ms: Map.get(measurements, :duration_ms),
+      voice_seconds: Map.get(measurements, :voice_seconds),
+      core_turns: Map.get(measurements, :core_turns)
+    }
+  end
+
+  defp phone_call_error_info(:run_error, metadata),
+    do: error_info("PhoneCallError", stringify(Map.get(metadata, :error)))
+
+  defp phone_call_error_info(_run, _metadata), do: nil
 
   defp voice_gist_metadata(metadata) do
     compact(%{

@@ -12,7 +12,10 @@ defmodule FermixCore.Capabilities.AccessGate do
   (`metadata.host_command?`: `shell`, `git_write`, a command the owner
   declared, and the local coding runs `codex_run` and `claude_code_run`) is
   decided only when the turn read outside content and Fermix cannot sandbox the
-  call. The taint is rule 5's `:outside_sources` half alone: a shared Buzz
+  call. `phone_call` opts in the same way, unconfined, and only its `start` is
+  decided (`metadata.phone_call?`): a dial is a side effect no sandbox holds,
+  and checking or stopping a call never waits. The taint is rule 5's
+  `:outside_sources` half alone: a shared Buzz
   channel does not hold one by itself, since a Buzz session answers through
   `shell`. Fermix cannot sandbox the call anywhere but macOS
   (`Sandbox.OsSandbox.seatbelt?/1` false, read through the context's
@@ -640,7 +643,7 @@ defmodule FermixCore.Capabilities.AccessGate do
     case gate_kind(capability, args) do
       :access_sensitive -> true
       :sign_in -> true
-      :host_command -> host_command_gated?(capability, context)
+      :host_command -> host_command_gated?(capability, args, context)
       nil -> false
     end
   end
@@ -688,10 +691,17 @@ defmodule FermixCore.Capabilities.AccessGate do
   # even there (the `codex`/`claude_code` presets, the coding runs). Its taint is
   # only what the turn read, never the shared Buzz channel on its own (owner
   # decision): a Buzz session answers by running the `buzz` CLI through `shell`.
-  defp host_command_gated?(capability, context) do
-    read_outside?(capability, context) and
+  defp host_command_gated?(capability, args, context) do
+    decided_call?(capability, args) and read_outside?(capability, context) and
       (not confined_call?(capability) or not OsSandbox.seatbelt?(os_opts(context)))
   end
+
+  # A phone call is decided when it would dial: any action but a status read or
+  # a stop, so a call with no arguments (a job's tools) counts as one.
+  defp decided_call?(%Capability{metadata: %{phone_call?: true}}, args),
+    do: Map.get(args, "action") not in ["status", "cancel"]
+
+  defp decided_call?(%Capability{}, _args), do: true
 
   # What a chained run may carry: its task and folder, and settings that widen
   # nothing it can reach or how. Every other argument (extra directories, a
@@ -1292,6 +1302,9 @@ defmodule FermixCore.Capabilities.AccessGate do
     """
   end
 
+  defp prompt_head(%Capability{metadata: %{phone_call?: true}}, _context),
+    do: "It places a phone call from your number, made by Fermix as your AI assistant."
+
   defp prompt_head(%Capability{}, %{computer: %Computer{name: name}}),
     do: "It runs a command on #{name}, which Fermix cannot sandbox there."
 
@@ -1302,6 +1315,7 @@ defmodule FermixCore.Capabilities.AccessGate do
     do: "It runs a command on this computer, which Fermix cannot sandbox here."
 
   defp command_label(%Capability{metadata: %{coding_run?: true}}), do: "Task"
+  defp command_label(%Capability{metadata: %{phone_call?: true}}), do: "Brief"
   defp command_label(%Capability{}), do: "Command"
 
   defp chat_prompt(call, token),
@@ -1355,6 +1369,10 @@ defmodule FermixCore.Capabilities.AccessGate do
 
   defp command_text(%Capability{metadata: %{coding_run?: true}}, args),
     do: argument_value(Map.get(args, "prompt"))
+
+  # The whole brief a call would carry, so the owner confirms its every term.
+  defp command_text(%Capability{metadata: %{phone_call?: true}}, args),
+    do: argument_value(Map.get(args, "brief"))
 
   defp command_text(%Capability{}, args), do: Jason.encode!(args)
 

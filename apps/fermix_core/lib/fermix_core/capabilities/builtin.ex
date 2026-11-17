@@ -14,7 +14,9 @@ defmodule FermixCore.Capabilities.Builtin do
   wraps it where the kernel enforces: true for `shell` and `git_write`, false
   for the coding agents, which run outside it. `coding_run?: true` marks those
   two, whose confirmation shows every argument handed to the vendor CLI and
-  whose chain a run's follow-up turn may continue in the same folder. All three
+  whose chain a run's follow-up turn may continue in the same folder.
+  `phone_call?: true` marks `phone_call`, an unconfined host command whose
+  `start` alone is decided and whose confirmation shows its brief. All four
   reach the capability's metadata, where `Capabilities.AccessGate` reads them: a
   host command in a turn that read outside content waits for the owner where
   the call is not confined or the host has no kernel enforcement.
@@ -162,6 +164,21 @@ defmodule FermixCore.Capabilities.Builtin do
       coding_run?: true
     },
     "codex_cloud_run" => %{policy_class: :exec, hidden_from_agent?: false, owner_only?: false},
+    # Phone calls (M94 §06). A call is a side effect the model steers, placed
+    # outside anything Fermix can sandbox, so it opts into the access gate as an
+    # unconfined host command: a `start` in a turn that read outside content
+    # waits for the owner's confirmation of its exact brief on every platform.
+    # `phone_call?` narrows that to `start` and words the owner's prompt as a
+    # call. Owner-only: every row is the owner's call. The execute-time attended
+    # gate (`Tools.PhoneCall`) is the barrier.
+    "phone_call" => %{
+      policy_class: :external_api,
+      hidden_from_agent?: false,
+      owner_only?: true,
+      host_command?: true,
+      host_command_confined?: false,
+      phone_call?: true
+    },
     "list_coding_runs" => %{
       policy_class: :read_only,
       hidden_from_agent?: false,
@@ -295,7 +312,7 @@ defmodule FermixCore.Capabilities.Builtin do
       metadata:
         Map.merge(
           metadata(tool_module),
-          Map.take(defaults, [:host_command?, :host_command_confined?, :coding_run?])
+          Map.take(defaults, [:host_command?, :host_command_confined?, :coding_run?, :phone_call?])
         )
     })
   end

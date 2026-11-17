@@ -878,6 +878,34 @@ stream session is *not* a run kind. Summarizer calls are ordinary llm spans
 inside the meeting session. Ingress voice-note transcription stays sessionless
 (pre-turn), unchanged.
 
+## Phone call runs
+
+A phone call (M94) is a **run kind**: `FermixCore.PhoneCalls.Telemetry` mints
+`session_id = "phone_call_<call id>"` (`session_id/1`) with `parent_session` =
+the requesting turn's session (the call's `request_id`), and the call's own
+backend turns and provider calls carry that `session_id` as theirs.
+`PhoneCalls.Manager` is the single emitter of the bookends
+`[:fermix, :phone_call, :run_start | :run_complete | :run_error]`, never
+hand-rolled: `run_start` once, when a call is admitted and its worker started
+(carrying `max_duration_ms`, the Opik sweep floor); one closer when its
+terminal row is written. `run_complete` closes an `ended` call, whatever its
+outcome; `run_error` closes a `failed`, `dispatch_unknown` or
+`closure_unconfirmed` one, with `error` = the failure word (else the status).
+Shared metadata: `agent: "phone_call:<id>"`, `call_id`, `origin_kind`
+(`chat | voice`), `model`, `carrier_profile`, `authorization`
+(`direct | confirmed`); the closers add `status`, `outcome`, `usage_state`,
+`failure_reason` and the vendor's own words (`vendor_message`, bounded to 500
+characters, every digit run that reads as a phone number replaced by
+`[number]`), and measure `duration_ms`, `voice_seconds`, `core_turns`,
+`dtmf_keys`, `cleanup_attempts`. The destination, the mandate, transcripts and
+the trunk credentials never reach these events. `Trace.TelemetryHandler`
+registers all three; `FermixOpik` binds them (`kind: :phone_call`,
+`infer_kind("phone_call_" <> _)`) as a root of its own, the meeting shape:
+`parent_session` is correlation metadata, never a parent, because the
+requesting turn ships long before the call ends. The `phone_call` tool emits
+exactly one `[:fermix, :tool, :exec]` per model call under that name, held and
+refused calls included.
+
 ## Live voice runs
 
 A call on a **task engine**, one that hands every task to Fermix through the

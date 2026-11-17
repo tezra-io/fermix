@@ -2739,6 +2739,106 @@ defmodule FermixOpik.AggregationTest do
     end
   end
 
+  # Phone calls ([:fermix, :phone_call, :run_start | :run_complete | :run_error],
+  # M94 §11): the meeting shape, a root of its own that outlives the turn that
+  # asked for it.
+  @phone_start [:fermix, :phone_call, :run_start]
+  @phone_complete [:fermix, :phone_call, :run_complete]
+  @phone_error [:fermix, :phone_call, :run_error]
+  @phone_session "phone_call_pc_0a1b2c3d4e5f"
+
+  # The emitter's own metadata shape (FermixCore.PhoneCalls.Telemetry), mirrored
+  # by hand as `meeting_meta/1` is. Every id is invented.
+  defp phone_meta(extra \\ %{}) do
+    Map.merge(
+      %{
+        agent: "phone_call:pc_0a1b2c3d4e5f",
+        call_id: "pc_0a1b2c3d4e5f",
+        session_id: @phone_session,
+        parent_session: "main-4",
+        origin_kind: "chat",
+        model: "gpt-live-1",
+        carrier_profile: "telnyx_credential_v1",
+        authorization: "direct"
+      },
+      extra
+    )
+  end
+
+  describe "phone call runs" do
+    test "the reporter subscribes to all three events" do
+      for event <- [@phone_start, @phone_complete, @phone_error] do
+        assert event in FermixOpik.Reporter.events(),
+               "#{inspect(event)} is not subscribed, so the call is invisible to Opik"
+      end
+    end
+
+    test "a call is its own root nesting its backend turns' provider spans" do
+      {_state, closed} =
+        run([
+          {[:fermix, :provider, :call], %{duration_ms: 100},
+           %{provider: :openai, model: "gpt-5", status: :ok, session_id: "main-4"}},
+          {@phone_start, %{}, phone_meta(%{status: "admitted", max_duration_ms: 660_000})},
+          {[:fermix, :agent, :message], %{iterations: 1},
+           %{channel: :telegram, chat_id: "c1", session_id: "main-4", agent: "main"}},
+          {[:fermix, :provider, :call], %{duration_ms: 700},
+           %{provider: :openai, model: "gpt-5", status: :ok, session_id: @phone_session}},
+          {@phone_complete, %{duration_ms: 180_000, voice_seconds: 150, core_turns: 1},
+           phone_meta(%{
+             status: "ended",
+             outcome: "confirmed",
+             usage_state: "voice_duration_confirmed"
+           })}
+        ])
+
+      call = Enum.find(closed, &(&1.trace.name == "phone_call:pc_0a1b2c3d4e5f"))
+      assert call, "the call shipped no root of its own"
+      assert call.trace.tags == ["phone_call"]
+      assert call.trace.metadata.parent_session == "main-4"
+      assert call.trace.metadata.call_id == "pc_0a1b2c3d4e5f"
+      assert call.trace.metadata.outcome == "confirmed"
+      assert call.trace.metadata.voice_seconds == 150
+
+      wrapper = span_named(call.spans, "phone_call:pc_0a1b2c3d4e5f")
+      refute Map.has_key?(wrapper, :parent_span_id)
+      assert [llm] = spans_of_type(call.spans, "llm")
+      assert llm.parent_span_id == wrapper.id
+
+      turn = Enum.find(closed, &(&1.trace.name == "agent:main"))
+      refute span_named(turn.spans, "phone_call:pc_0a1b2c3d4e5f")
+    end
+
+    test "an uncertain end exports as errored with its status word and the vendor's words" do
+      {_state, closed} =
+        run([
+          {@phone_start, %{}, phone_meta()},
+          {@phone_error, %{count: 1, duration_ms: 9_000},
+           phone_meta(%{
+             status: "closure_unconfirmed",
+             error: "worker_lost",
+             vendor_message: "Session not found."
+           })}
+        ])
+
+      assert [%{trace: trace}] = closed
+      assert trace.metadata.status == "closure_unconfirmed"
+      assert trace.output == %{text: "Session not found."}
+      assert trace.error_info == %{exception_type: "PhoneCallError", message: "worker_lost"}
+    end
+
+    test "a closer whose opener was missed still classifies as a phone call" do
+      {_state, closed} =
+        run([
+          {[:fermix, :provider, :call], %{duration_ms: 50},
+           %{provider: :openai, model: "gpt-5", status: :ok, session_id: @phone_session}},
+          {@phone_complete, %{duration_ms: 1_000}, phone_meta(%{status: "ended"})}
+        ])
+
+      assert [%{trace: trace}] = closed
+      assert trace.tags == ["phone_call"], "the call fell through to the :subagent fallback"
+    end
+  end
+
   @voice_live_start [:fermix, :voice_live, :call_start]
   @voice_live_session_started [:fermix, :voice_live, :session_started]
   @voice_live_delegation_start [:fermix, :voice_live, :delegation_start]
