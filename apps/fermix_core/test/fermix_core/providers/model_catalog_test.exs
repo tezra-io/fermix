@@ -406,6 +406,29 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       assert ModelCatalog.model_effort_ceiling(:openai, "unknown-model") == nil
     end
 
+    # Every OpenAI model the catalog offers is in OpenAI's Fast pricing table;
+    # on Anthropic only Claude Opus 5.5 and Claude Fable 5.2 have a fast tier.
+    test "fast?/2 is true exactly for the catalog models with a fast tier" do
+      for %{id: id} <- ModelCatalog.models_for(:openai) do
+        assert ModelCatalog.fast?(:openai, id), id
+      end
+
+      for {id, expected} <- [
+            {"claude-opus-5-5", true},
+            {"claude-fable-5-2", true},
+            {"claude-sonnet-4-6", false},
+            {"claude-opus-5", false},
+            {"claude-opus-4-8", false},
+            {"claude-haiku-5-5", false}
+          ] do
+        assert ModelCatalog.fast?(:anthropic, id) == expected, id
+      end
+
+      refute ModelCatalog.fast?(:openai, "gpt-plan-unlisted")
+      refute ModelCatalog.fast?(:openrouter, "openai/gpt-6.2-sol")
+      refute ModelCatalog.fast?(:mock, "anything")
+    end
+
     test "effort_levels_for/2 drops levels above the model's ceiling" do
       assert ModelCatalog.effort_levels_for(:openai, "gpt-5.5") ==
                [:none, :low, :medium, :high, :xhigh]

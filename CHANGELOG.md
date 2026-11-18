@@ -14,6 +14,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   account does, and Fermix knows their context window there, so a
   conversation on either compacts where the rest of the GPT-6 generation does.
 
+- **Fast mode is back, for an OpenAI API key and Anthropic.** A Fast mode
+  switch under each of those providers asks for the vendor's faster tier, at
+  about twice the price per token: every model in OpenAI's list, and Claude
+  Opus 5.5 and Claude Fable 5.2 with an Anthropic API key. Other models, and
+  the Claude sign-in, run at standard speed while it is on, and each call's
+  trace says which speed it ran at. OpenAI Codex stays without one: signed in
+  with ChatGPT, OpenAI refuses the fast tier or runs the turn at standard speed.
+
 ### Fixed
 
 - **The first phone you pair can be on any network.** Turning phone access on

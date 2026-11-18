@@ -585,6 +585,82 @@ defmodule FermixCore.Providers.OpenAI.ResponsesTest do
     end
   end
 
+  # Fast mode (`service_tier: "fast"`) rides only when the route asks for it;
+  # the call's trace names the speed OpenAI reports it ran at.
+  describe "fast mode" do
+    test "speed :fast sends service_tier fast" do
+      assert capture_body(speed: :fast)["service_tier"] == "fast"
+    end
+
+    test "speed :standard and no speed send no service_tier" do
+      refute Map.has_key?(capture_body(speed: :standard), "service_tier")
+      refute Map.has_key?(capture_body([]), "service_tier")
+    end
+
+    test "a tool-loop step keeps asking for the fast tier" do
+      test_id = :"responses_fast_continue_#{System.unique_integer([:positive])}"
+      parent = self()
+
+      Req.Test.stub(test_id, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(parent, {:captured_body, Jason.decode!(body)})
+        Req.Test.json(conn, function_call_response_body())
+      end)
+
+      opts = [
+        api_key: "sk-test",
+        model: "gpt-6.2-sol",
+        base_url: "https://api.openai.com/v1",
+        speed: :fast,
+        req_options: [plug: {Req.Test, test_id}]
+      ]
+
+      {:ok, turn} = Responses.chat([%{role: "user", content: "Hi"}], [capability()], opts)
+      assert_receive {:captured_body, %{"service_tier" => "fast"}}
+
+      results = [%{call_id: "call_xyz", output: "yo"}]
+      {:ok, _turn} = Responses.continue(turn.provider_state, results, opts)
+      assert_receive {:captured_body, %{"service_tier" => "fast"}}
+    end
+
+    for {reported, speed} <- [{"fast", "fast"}, {"priority", "fast"}, {"default", "standard"}] do
+      test "the trace records #{speed} when OpenAI reports #{reported}" do
+        assert fast_call_metadata(:fast, unquote(reported)).speed == unquote(speed)
+      end
+    end
+
+    test "a route at standard speed records standard; a call without fast mode records none" do
+      assert fast_call_metadata(:standard, "default").speed == "standard"
+      refute Map.has_key?(fast_call_metadata(nil, "default"), :speed)
+    end
+  end
+
+  defp fast_call_metadata(speed, reported_tier) do
+    test_id = :"responses_fast_trace_#{System.unique_integer([:positive])}"
+    session_id = "fast-#{System.unique_integer([:positive])}"
+
+    FermixTestSupport.TelemetryCapture.attach([[:fermix, :provider, :call]],
+      session_id: session_id
+    )
+
+    Req.Test.stub(test_id, fn conn ->
+      Req.Test.json(conn, Map.put(text_response_body(), "service_tier", reported_tier))
+    end)
+
+    opts =
+      [
+        api_key: "sk-test",
+        model: "gpt-6.2-sol",
+        base_url: "https://api.openai.com/v1",
+        session_id: session_id,
+        req_options: [plug: {Req.Test, test_id}]
+      ] ++ if(speed, do: [speed: speed], else: [])
+
+    {:ok, _turn} = Responses.chat([%{role: "user", content: "Hi"}], [], opts)
+    assert_receive {:telemetry, [:fermix, :provider, :call], _measurements, metadata}
+    metadata
+  end
+
   defp capture_body(opts) do
     test_id = :"responses_capture_#{System.unique_integer([:positive])}"
     parent = self()

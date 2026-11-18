@@ -1248,6 +1248,44 @@ defmodule FermixCore.Setup.WizardTest do
     refute Keyword.has_key?(providers[:openai], :default_model)
   end
 
+  # Fast mode lands on the provider being edited, and only a provider whose
+  # requests can carry it takes it: OpenAI Codex's plan route ignores the tier.
+  test "fast mode lands on the edited provider and is refused where no route carries it" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-fast-mode")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(provider: "openai", openai_api_key: "sk-x")
+
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(
+               edit_provider: "anthropic",
+               anthropic_api_key: "sk-ant",
+               fast: true
+             )
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    providers = Keyword.get(persisted.fermix_core, :providers, [])
+    assert Keyword.get(providers[:anthropic], :fast) == true
+    refute Keyword.has_key?(providers[:openai], :fast)
+
+    for provider <- ["openai_codex", "xai"] do
+      error =
+        assert_raise ArgumentError, fn ->
+          Wizard.save_answers(Wizard.report().wizard, edit_provider: provider, fast: true)
+        end
+
+      assert error.message =~ "fast mode"
+    end
+  end
+
   test "an auto-promoted provider receives the same save's model/effort fields" do
     tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-promote-fields")
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)

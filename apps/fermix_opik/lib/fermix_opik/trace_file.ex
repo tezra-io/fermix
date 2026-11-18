@@ -71,6 +71,7 @@ defmodule FermixOpik.TraceFile do
        :input,
        :output,
        :reasoning_effort,
+       :speed,
        :adapter
      ])
      |> put_tokens(row)}

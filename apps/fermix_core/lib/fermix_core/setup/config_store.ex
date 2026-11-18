@@ -2680,6 +2680,7 @@ defmodule FermixCore.Setup.ConfigStore do
   defp normalize_provider_value(:default_model, value), do: normalize_string(value)
   defp normalize_provider_value(:auth_mode, value), do: normalize_auth_mode(value)
   defp normalize_provider_value(:primary, value), do: normalize_bool(value)
+  defp normalize_provider_value(:fast, value), do: normalize_bool(value)
 
   defp normalize_provider_value(:reasoning_effort, value),
     do: normalize_reasoning_effort(value)

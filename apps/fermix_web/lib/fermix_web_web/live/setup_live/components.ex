@@ -1233,6 +1233,7 @@ defmodule FermixWebWeb.SetupLive.Components do
           :if={effort_provider?(@provider_form.provider)}
           provider_form={@provider_form}
         />
+        <.fast_field :if={fast_provider?(@provider_form.provider)} provider_form={@provider_form} />
       </div>
     </section>
     """
@@ -1267,6 +1268,33 @@ defmodule FermixWebWeb.SetupLive.Components do
   end
 
   defp effort_provider?(provider), do: Descriptor.fetch!(provider).effort?
+
+  attr :provider_form, :map, required: true
+
+  # The provider's Fast mode, published where its requests can carry it; the
+  # Settings row's note says which models it speeds up.
+  defp fast_field(assigns) do
+    ~H"""
+    <div class="form-control">
+      <input type="hidden" name="provider_form[fast]" value="false" />
+      <label class="label cursor-pointer justify-start gap-3">
+        <input
+          type="checkbox"
+          name="provider_form[fast]"
+          value="true"
+          checked={@provider_form.fast == true}
+          class="toggle toggle-sm toggle-primary"
+        />
+        <span class="text-sm font-medium">Fast mode</span>
+      </label>
+      <p class="text-xs text-base-content/60">
+        Answers sooner on the models that offer it, at about twice the price per token.
+      </p>
+    </div>
+    """
+  end
+
+  defp fast_provider?(provider), do: :fast in Descriptor.fetch!(provider).config_keys
 
   defp effort_levels(provider, model) do
     provider |> ModelCatalog.effort_levels_for(model) |> Enum.map(&Atom.to_string/1)

@@ -79,7 +79,8 @@ defmodule FermixCore.Management.Settings.Providers do
 
     auth_mode_row(descriptor, block, restart) ++
       Enum.map(descriptor.setup_fields, &field_row(descriptor, &1, block, snapshot, restart)) ++
-      [model_row(descriptor, block, restart)] ++ effort_row(descriptor, block, restart)
+      [model_row(descriptor, block, restart)] ++
+      effort_row(descriptor, block, restart) ++ fast_row(descriptor, block, restart)
   end
 
   defp auth_mode_row(descriptor, block, restart) do
@@ -141,6 +142,39 @@ defmodule FermixCore.Management.Settings.Providers do
         restart: restart
       )
     ]
+  end
+
+  # Fast mode is published by the providers whose requests can carry it. Copy
+  # carries no version numbers, so its note says where it applies rather than
+  # naming models; which models that is stays the catalog's (`Entry.fast?`).
+  defp fast_row(descriptor, block, restart) do
+    if :fast in descriptor.config_keys do
+      [
+        Row.new("fast", :toggle, "Fast mode",
+          footer: fast_footer(descriptor.id),
+          value: Source.boolean(block, :fast, false),
+          restart: restart
+        )
+      ]
+    else
+      []
+    end
+  end
+
+  defp fast_footer(:openai) do
+    "Answers sooner on #{fast_scope(:openai)}, at about twice the price per token. " <>
+      "OpenAI may run a busy request at standard speed and price."
+  end
+
+  defp fast_footer(:anthropic) do
+    "Answers sooner on #{fast_scope(:anthropic)}, with an API key, at twice the price " <>
+      "per token. Other models, and the Claude sign-in, run at standard speed."
+  end
+
+  defp fast_scope(provider) do
+    if Enum.all?(ModelCatalog.models_for(provider), & &1.fast?),
+      do: "every model in the list",
+      else: "the models in the list that offer it"
   end
 
   # An empty option list is the truthful answer for a provider whose models are

@@ -279,6 +279,21 @@ is the only record in the trace from which a cache-aware price can be computed
 at all. The allowlist in `Mapper.usage/1` is the whole contract: a token key not
 named there never reaches a span.
 
+### `:speed` (Fast mode)
+
+A call on a route with Fast mode on carries `speed: "fast" | "standard"`: the
+speed it **ran** at, never the one asked for. The route asks for the vendor's
+fast tier only where the model has one and the route takes it
+(`RouteResolver`, `ModelCatalog.fast?/2`); anywhere else it runs at `standard`
+and the call says so. On a fast request the adapter reads what the vendor
+reports: OpenAI Responses `service_tier` (`fast`, or `priority` from GPT-5.6
+and older, is `fast`; `default` means OpenAI ran it at standard speed and
+price), Anthropic Messages `usage.speed` (absent is `standard`). A route with
+Fast mode off, and a call that did not complete, carry no `:speed` key at all.
+`FermixOpik.Mapper.llm_span/3` exports it in the span metadata. The rate card
+prices a call by model, not tier, so a `fast` call is under-stated there by
+the fast premium (about 2x).
+
 ## Adding a new "run kind" (something that drives the agent loop)
 
 A subagent or scheduled job is a *run*. New run kinds (anything that calls

@@ -387,6 +387,40 @@ defmodule FermixCore.Management.SettingsTest do
       assert "grok-4-7" in published.("providers.venice")
     end
 
+    # Fast mode is a per-provider toggle, off until turned on, published only by
+    # the providers whose requests can carry it. Copy carries no version
+    # numbers, so its note says where it applies, from the catalog's flags.
+    test "OpenAI and Anthropic publish a fast mode toggle, off by default, and no other provider does" do
+      Application.put_env(:fermix_core, :providers, [])
+
+      for id <- [:openai, :anthropic] do
+        keys = Enum.map(rows("providers.#{id}"), & &1["key"])
+        assert List.last(keys) == "fast", "providers.#{id}: #{inspect(keys)}"
+
+        fast = row("providers.#{id}", "fast")
+        assert fast["kind"] == "toggle"
+        assert fast["label"] == "Fast mode"
+        assert fast["value"] == false
+        assert fast["restart"] == true
+      end
+
+      for descriptor <- Descriptor.all(), descriptor.id not in [:openai, :anthropic] do
+        keys = Enum.map(rows("providers.#{descriptor.id}"), & &1["key"])
+        refute "fast" in keys, "providers.#{descriptor.id}: #{inspect(keys)}"
+      end
+    end
+
+    test "the fast mode note says where it applies" do
+      Application.put_env(:fermix_core, :providers, [])
+
+      anthropic = row("providers.anthropic", "fast")["footer"]
+      assert anthropic =~ "the models in the list that offer it"
+      assert anthropic =~ "API key"
+      assert anthropic =~ "sign-in, run at standard speed"
+
+      assert row("providers.openai", "fast")["footer"] =~ "every model in the list"
+    end
+
     # OpenAI Codex lists the signed-in account's models live: its model row
     # offers nothing shipped, holds the empty value until a model is chosen,
     # and fast mode is retired, so no toggle is published.
@@ -1157,6 +1191,29 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert {:ok, _result} = Settings.reload()
       assert %{"value" => "claude-sonnet-5"} = row("providers.anthropic", "default_model")
+    end
+
+    test "fast mode persists to the edited provider and reads back" do
+      Application.put_env(:fermix_core, :providers,
+        openai: [primary: true, default_model: "gpt-6.2-sol"],
+        anthropic: []
+      )
+
+      assert {:ok, _result} = Settings.apply("providers.anthropic", %{"fast" => true})
+
+      providers = Application.get_env(:fermix_core, :providers)
+      assert providers[:anthropic][:fast] == true
+      refute Keyword.has_key?(providers[:openai], :fast)
+      assert %{"value" => true} = row("providers.anthropic", "fast")
+
+      assert {:ok, persisted} = ConfigStore.load_runtime_config()
+      assert persisted[:fermix_core][:providers][:anthropic][:fast] == true
+
+      assert {:ok, _result} = Settings.reload()
+      assert %{"value" => true} = row("providers.anthropic", "fast")
+
+      assert {:ok, _result} = Settings.apply("providers.anthropic", %{"fast" => false})
+      assert %{"value" => false} = row("providers.anthropic", "fast")
     end
 
     test "auth-mode changes persist and read back while preserving an existing API key" do
@@ -2331,6 +2388,7 @@ defmodule FermixCore.Management.SettingsTest do
       assert core[:computer_history][:summarizer] == :default_provider
       assert core[:providers][:anthropic][:auth_mode] == :oauth
       assert core[:providers][:anthropic][:reasoning_effort] == :high
+      assert core[:providers][:anthropic][:fast] == true
       assert core[:transcription][:backend] == "deepgram"
       assert Map.get(reloaded, :sandbox).mode == :strict
       assert core[:realtime][:voice] == "cedar"
@@ -2450,7 +2508,12 @@ defmodule FermixCore.Management.SettingsTest do
     )
 
     Application.put_env(:fermix_core, :providers,
-      anthropic: [auth_mode: :oauth, reasoning_effort: :high, default_model: "claude-opus-5"]
+      anthropic: [
+        auth_mode: :oauth,
+        reasoning_effort: :high,
+        default_model: "claude-opus-5",
+        fast: true
+      ]
     )
 
     Application.put_env(:fermix_core, :transcription, backend: "deepgram", model: "nova-3")

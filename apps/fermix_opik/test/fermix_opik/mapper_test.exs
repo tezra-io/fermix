@@ -32,6 +32,24 @@ defmodule FermixOpik.MapperTest do
     assert span.end_time == "2026-06-02T12:00:03.200Z"
   end
 
+  test "llm_span names the speed a fast-mode call ran at, and nothing without fast mode" do
+    span = fn metadata ->
+      Mapper.llm_span(
+        Map.merge(%{provider: :anthropic, model: "claude-opus-5-5", status: :ok}, metadata),
+        %{
+          duration_ms: 700
+        },
+        trace_id: "trace-1",
+        project_name: "fermix",
+        ended: @ended
+      )
+    end
+
+    assert span.(%{speed: "fast"}).metadata.speed == "fast"
+    assert span.(%{speed: "standard"}).metadata.speed == "standard"
+    refute Map.has_key?(span.(%{}).metadata, :speed)
+  end
+
   test "llm_span renders a media provider failure as an adapter-qualified, errored span" do
     # Shape emitted by Media.Support.with_provider_call on a failed image gen:
     # adapter set (so the name is qualified), zero tokens (no phantom cost),

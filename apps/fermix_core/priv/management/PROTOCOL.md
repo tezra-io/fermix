@@ -1533,6 +1533,13 @@ Notes that the shapes alone do not carry:
   until one is. A sign-in that has just completed therefore names its model at
   once, and Doctor probes the same one. Engines before this published `null`,
   or an empty value, until a model was chosen, so a client keeps accepting both.
+- **`fast` is a provider's Fast mode, off until it is turned on.** The OpenAI
+  and Anthropic settings sections publish it as a `toggle` row after Reasoning
+  effort, applied at restart, whose footer says which models it speeds up; no
+  other provider publishes one (OpenAI Codex's plan route has no fast tier).
+  A provider row in `setup.state.get` carries the stored value, or `null` while
+  unset. A model without a fast tier, and the Claude sign-in, run at standard
+  speed while it is on.
 - **`computer_use.permissions.get` never prompts**, and `installed` comes from
   the installer rather than from the probe: the feature being switched off says
   nothing about whether the helper is on disk, and that is exactly what decides

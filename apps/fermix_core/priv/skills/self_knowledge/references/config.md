@@ -6,7 +6,7 @@
 
 | Pane | Holds |
 |---|---|
-| Providers | each provider's sign-in or key, **Model**, **Reasoning effort**, **Details…** > **Use as primary**; Model behavior > **Sub-agent model** |
+| Providers | each provider's sign-in or key, **Model**, **Reasoning effort**, **Fast mode** (OpenAI, Anthropic), **Details…** > **Use as primary**; Model behavior > **Sub-agent model** |
 | Personality | About you: **Your name**, **Time zone**, **Style**, **Call the assistant**; **Suggest new skills from tasks you repeat** |
 | Memory | **Compact a conversation at**, **Review memory every** |
 | Channels | each chat channel; Editors > **Accept editor connections** (ACP) |

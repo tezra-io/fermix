@@ -1280,6 +1280,73 @@ defmodule FermixCore.Providers.Anthropic.MessagesTest do
     end
   end
 
+  # Fast mode (`speed: "fast"`) rides only when the route asks for it; the
+  # call's trace names the speed Anthropic reports in `usage.speed`.
+  describe "chat/3 — fast mode" do
+    test "speed :fast sends speed fast" do
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        assert Jason.decode!(body)["speed"] == "fast"
+        Req.Test.json(conn, text_response_body())
+      end)
+
+      assert {:ok, _turn} =
+               Messages.chat(
+                 [%{role: "user", content: "."}],
+                 [],
+                 chat_opts(model: "claude-opus-5-5", speed: :fast)
+               )
+    end
+
+    test "speed :standard and no speed send no speed field" do
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        refute Map.has_key?(Jason.decode!(body), "speed")
+        Req.Test.json(conn, text_response_body())
+      end)
+
+      for extra <- [[speed: :standard], []] do
+        assert {:ok, _turn} = Messages.chat([%{role: "user", content: "."}], [], chat_opts(extra))
+      end
+    end
+
+    for {reported, speed} <- [{"fast", "fast"}, {"standard", "standard"}, {nil, "standard"}] do
+      test "the trace records #{speed} when Anthropic reports #{inspect(reported)}" do
+        assert fast_call_metadata(:fast, unquote(reported)).speed == unquote(speed)
+      end
+    end
+
+    test "a route at standard speed records standard; a call without fast mode records none" do
+      assert fast_call_metadata(:standard, nil).speed == "standard"
+      refute Map.has_key?(fast_call_metadata(nil, nil), :speed)
+    end
+  end
+
+  defp fast_call_metadata(speed, reported) do
+    session_id = "fast-#{System.unique_integer([:positive])}"
+
+    FermixTestSupport.TelemetryCapture.attach([[:fermix, :provider, :call]],
+      session_id: session_id
+    )
+
+    usage =
+      if reported,
+        do: %{"input_tokens" => 10, "output_tokens" => 5, "speed" => reported},
+        else: %{"input_tokens" => 10, "output_tokens" => 5}
+
+    Req.Test.stub(__MODULE__, fn conn ->
+      Req.Test.json(conn, Map.put(text_response_body(), "usage", usage))
+    end)
+
+    extra =
+      [model: "claude-opus-5-5", session_id: session_id] ++
+        if(speed, do: [speed: speed], else: [])
+
+    assert {:ok, _turn} = Messages.chat([%{role: "user", content: "."}], [], chat_opts(extra))
+    assert_receive {:telemetry, [:fermix, :provider, :call], _measurements, metadata}
+    metadata
+  end
+
   describe "chat/3 — telemetry" do
     test "emits a provider call event with anthropic identity and correlation ids" do
       test_pid = self()

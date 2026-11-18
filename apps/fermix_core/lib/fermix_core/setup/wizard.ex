@@ -54,6 +54,7 @@ defmodule FermixCore.Setup.Wizard do
           | {:provider, provider() | String.t()}
           | {:default_model, String.t()}
           | {:reasoning_effort, reasoning_effort() | String.t()}
+          | {:fast, boolean() | String.t()}
           | {:compaction_threshold, float() | String.t()}
           | {:proxy, String.t()}
           | {:proxy_bypass, [String.t()] | String.t()}
@@ -851,6 +852,7 @@ defmodule FermixCore.Setup.Wizard do
       |> put_harness_default_vendor(Keyword.get(answers, :harness_default_vendor))
       |> put_harness_approved(Keyword.get(answers, :harness_approved))
       |> put_reasoning_effort(Keyword.get(answers, :reasoning_effort), target)
+      |> put_fast(Keyword.get(answers, :fast), target)
       |> put_compaction_config(answers)
       |> put_memory_config(answers)
       |> put_realtime_config(answers)
@@ -1728,6 +1730,36 @@ defmodule FermixCore.Setup.Wizard do
 
   defp effort_providers do
     for descriptor <- Descriptor.all(), descriptor.effort?, do: descriptor.id
+  end
+
+  # Fast mode lands on the provider being edited, and only on one whose
+  # descriptor carries the key: OpenAI Codex's plan route ignores the tier.
+  defp put_fast(snapshot, nil, _target), do: snapshot
+  defp put_fast(snapshot, "", _target), do: snapshot
+
+  defp put_fast(snapshot, value, target) do
+    fast = parse_fast!(value)
+    provider = target || active_provider(snapshot)
+
+    if :fast in Descriptor.fetch!(provider).config_keys do
+      update_provider_block(snapshot, provider, :fast, fast)
+    else
+      raise ArgumentError,
+            "provider #{inspect(provider)} has no fast mode " <>
+              "(fast mode providers: #{Enum.map_join(fast_providers(), ", ", &Atom.to_string/1)})"
+    end
+  end
+
+  defp fast_providers do
+    for descriptor <- Descriptor.all(), :fast in descriptor.config_keys, do: descriptor.id
+  end
+
+  defp parse_fast!(value) when is_boolean(value), do: value
+  defp parse_fast!("true"), do: true
+  defp parse_fast!("false"), do: false
+
+  defp parse_fast!(value) do
+    raise ArgumentError, "invalid fast mode #{inspect(value)}; expected true or false"
   end
 
   defp edit_provider_target(answers) do

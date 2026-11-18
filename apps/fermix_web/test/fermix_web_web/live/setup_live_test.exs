@@ -4979,6 +4979,54 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert contents =~ ~s(reasoning_effort = "high")
     end
 
+    test "the Fast mode switch is offered where a provider has one, and not on OpenAI Codex", %{
+      conn: conn
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      for {provider, offered?} <- [{"openai", true}, {"anthropic", true}, {"openai_codex", false}] do
+        html =
+          view
+          |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: provider})
+          |> render_change()
+
+        assert html =~ ~s(name="provider_form[fast]") == offered?, provider
+      end
+    end
+
+    test "submitting persists fast mode on the provider being configured", %{
+      conn: conn,
+      tmp_home: tmp_home
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view
+      |> form("form[phx-submit=\"save_provider\"]",
+        provider_form: %{
+          provider: "openai",
+          default_model: "gpt-6.2-sol",
+          fast: "true",
+          openai_api_key: "sk-from-live-test"
+        }
+      )
+      |> render_submit()
+
+      assert render(view) =~ "Provider saved."
+
+      openai = :fermix_core |> Application.get_env(:providers, []) |> Keyword.get(:openai, [])
+      assert Keyword.get(openai, :fast) == true
+      assert File.read!(Path.join(tmp_home, "config.toml")) =~ "fast = true"
+
+      view
+      |> form("form[phx-submit=\"save_provider\"]",
+        provider_form: %{provider: "openai", fast: "false"}
+      )
+      |> render_submit()
+
+      openai = :fermix_core |> Application.get_env(:providers, []) |> Keyword.get(:openai, [])
+      assert Keyword.get(openai, :fast) == false
+    end
+
     test "submitting persists Anthropic model and api key", %{
       conn: conn,
       tmp_home: tmp_home

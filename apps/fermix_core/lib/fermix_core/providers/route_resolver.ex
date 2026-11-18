@@ -26,6 +26,7 @@ defmodule FermixCore.Providers.RouteResolver do
   alias FermixCore.Providers.Adapter
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Providers.OpenAI.Responses
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Providers.ReasoningEffort
 
@@ -182,10 +183,13 @@ defmodule FermixCore.Providers.RouteResolver do
       base_url: base_url
     }
 
+    fast_route? = Adapter.for_route(route_key) == Responses
+
     adapter_opts =
       [model: model, base_url: base_url, api_key: api_key, provider: :openai]
       |> maybe_put(:temperature, Keyword.get(opts, :temperature))
       |> maybe_put(:reasoning_effort, resolve_reasoning_effort(:openai, opts))
+      |> maybe_put(:speed, resolve_speed(:openai, model, config, fast_route?))
       |> maybe_put(:req_options, Keyword.get(opts, :req_options))
 
     {route_key, adapter_opts}
@@ -226,12 +230,14 @@ defmodule FermixCore.Providers.RouteResolver do
     |> maybe_put(:api_key, Keyword.get(opts, :api_key) || Keyword.get(config, :api_key))
     |> maybe_put(:temperature, Keyword.get(opts, :temperature))
     |> maybe_put(:reasoning_effort, resolve_reasoning_effort(:anthropic, opts))
+    |> maybe_put(:speed, resolve_speed(:anthropic, model, config, true))
     |> maybe_put(:req_options, Keyword.get(opts, :req_options))
   end
 
   # The configured api_key never leaks into the oauth route — the selected
-  # auth mode is the billing expectation (design doc §5.2, no fallbacks).
-  defp anthropic_adapter_opts(:oauth, model, base_url, opts, _config) do
+  # auth mode is the billing expectation (design doc §5.2, no fallbacks). Fast
+  # mode is unverified on the sign-in, so this route runs at standard speed.
+  defp anthropic_adapter_opts(:oauth, model, base_url, opts, config) do
     [
       model: model,
       base_url: base_url,
@@ -241,6 +247,7 @@ defmodule FermixCore.Providers.RouteResolver do
     |> maybe_put(:access_token, Keyword.get(opts, :access_token))
     |> maybe_put(:temperature, Keyword.get(opts, :temperature))
     |> maybe_put(:reasoning_effort, resolve_reasoning_effort(:anthropic, opts))
+    |> maybe_put(:speed, resolve_speed(:anthropic, model, config, false))
     |> maybe_put(:req_options, Keyword.get(opts, :req_options))
   end
 
@@ -350,6 +357,27 @@ defmodule FermixCore.Providers.RouteResolver do
 
   defp maybe_put(opts, _key, nil), do: opts
   defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
+
+  # Fast mode is a provider setting (`fast`, off by default). A route asks for
+  # the vendor's fast tier only where it is known to work: the model has one
+  # (`ModelCatalog.fast?/2`) and the route takes it (`route_takes_fast?`).
+  # Anywhere else it runs at `:standard` and says so, so the call's trace names
+  # the speed it ran at; with fast mode off the route carries no speed at all.
+  defp resolve_speed(provider, model, config, route_takes_fast?) do
+    case validate_fast!(Keyword.get(config, :fast)) do
+      true ->
+        if route_takes_fast? and ModelCatalog.fast?(provider, model), do: :fast, else: :standard
+
+      _off ->
+        nil
+    end
+  end
+
+  defp validate_fast!(value) when is_boolean(value) or is_nil(value), do: value
+
+  defp validate_fast!(value) do
+    raise ArgumentError, "invalid fast mode: #{inspect(value)}; expected true or false"
+  end
 
   # Effort precedence: explicit opt > per-provider config block > nil (omitted).
   # The adapter omits the request body field when the result is nil or :none,

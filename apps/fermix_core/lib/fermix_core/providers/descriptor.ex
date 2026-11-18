@@ -149,7 +149,7 @@ defmodule FermixCore.Providers.Descriptor do
       secrets: [:openai_api_key],
       # `base_url` is written only when set (`fermix setup --openai-base-url`);
       # config.exs seeds none, or every save would write the default.
-      config_keys: [:api_key, :base_url, :default_model, :reasoning_effort, :primary],
+      config_keys: [:api_key, :base_url, :default_model, :reasoning_effort, :fast, :primary],
       setup_fields: [
         %{
           key: :openai_api_key,
@@ -171,7 +171,15 @@ defmodule FermixCore.Providers.Descriptor do
       locality: :remote,
       auth_modes: [:api_key, :oauth],
       secrets: [:anthropic_api_key],
-      config_keys: [:auth_mode, :api_key, :base_url, :default_model, :reasoning_effort, :primary],
+      config_keys: [
+        :auth_mode,
+        :api_key,
+        :base_url,
+        :default_model,
+        :reasoning_effort,
+        :fast,
+        :primary
+      ],
       setup_fields: [
         %{
           key: :anthropic_api_key,

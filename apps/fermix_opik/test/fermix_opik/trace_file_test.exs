@@ -14,6 +14,7 @@ defmodule FermixOpik.TraceFileTest do
       "model" => "gpt-5",
       "status" => "ok",
       "session_id" => "main-1",
+      "speed" => "fast",
       "tokens" => %{"prompt" => 40, "completion" => 8}
     }
 
@@ -22,6 +23,7 @@ defmodule FermixOpik.TraceFileTest do
 
     assert meta.session_id == "main-1"
     assert meta.model == "gpt-5"
+    assert meta.speed == "fast"
     assert meta.tokens == %{prompt: 40, completion: 8}
   end
 

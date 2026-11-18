@@ -148,7 +148,7 @@ Deeper detail loads on demand with `skill_view(name: "self-knowledge", file: "<n
 - `service_unit` — standalone and Linux-package installs: who owns the service, updating each kind, the `PATH` baseline, the environment file, the system unit, and the package's verbs, port and logs.
 - `config` — where each setting lives (the Mac pane map, browser setup, `config.toml`), what needs a restart, every config section, outside edits, and the secret stores.
 - `persona` — personalization and the assistant's name, the prompt files and template adoption, and every `/soul` subcommand.
-- `providers` — connecting each provider (Mac, browser setup, CLI), primary and sign-out rules, config keys, reasoning effort, sub-agent routing, failover and retries, OpenAI Codex responses.
+- `providers` — connecting each provider (Mac, browser setup, CLI), primary and sign-out rules, config keys, reasoning effort, Fast mode, sub-agent routing, failover and retries, OpenAI Codex responses.
 - `agent_loop` — the context budget inside a turn, iteration and fan-out caps, `/ultra`, and deferred tool schemas.
 - `images` — `view_image`, how inbound attachments (pictures, GIFs, videos, PDFs, text files) and images reach each model, `generate_image` backends and `delivery`, and `send_attachment`, including from a scheduled job.
 - `web` — choosing between `web_search`, `web_fetch`, `browser` and `place_search`, search backends and the degrade, and the place-search rules.

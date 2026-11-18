@@ -20,9 +20,9 @@ Each provider is `[fermix_core.providers.<name>]` with `primary`, `default_model
 
 | Provider | Wire | Auth and extra keys |
 |---|---|---|
-| `openai_codex` | OpenAI Responses (public `api.openai.com/v1`) | Sign in with ChatGPT (Plus/Pro plan usage); `reasoning_effort`; models listed live. A `fast` key from an older config is dropped at load with a warning |
-| `openai` | OpenAI Responses | `api_key`, `base_url`; `reasoning_effort` |
-| `anthropic` | Messages | `auth_mode = "api_key"` (`api_key`) or `"oauth"` (Claude subscription), `base_url`; `reasoning_effort` |
+| `openai_codex` | OpenAI Responses (public `api.openai.com/v1`) | Sign in with ChatGPT (Plus/Pro plan usage); `reasoning_effort`; models listed live. No Fast mode (the plan route has no fast tier); a `fast` key from an older config is dropped at load with a warning |
+| `openai` | OpenAI Responses | `api_key`, `base_url`; `reasoning_effort`; `fast` |
+| `anthropic` | Messages | `auth_mode = "api_key"` (`api_key`) or `"oauth"` (Claude subscription), `base_url`; `reasoning_effort`; `fast` |
 | `xai` (SpaceXAI Grok) | OpenAI Responses shape | `auth_mode = "api_key"` (`api_key`, `XAI_API_KEY`) or `"oauth"` (Grok Build), `base_url`; `reasoning_effort` |
 | `openrouter` | Chat Completions | `api_key` (`OPENROUTER_API_KEY`), `base_url` |
 | `mistral` | Chat Completions | `api_key` (`MISTRAL_API_KEY`), `base_url` |
@@ -44,6 +44,10 @@ An unknown key in any provider block, or an unknown legacy provider, fails loud 
 ## Reasoning effort
 
 Only OpenAI, OpenAI Codex, Anthropic and SpaceXAI take `reasoning_effort`; the other four reject the key at config load and routing overlays skip them. Vocabulary: `none|low|medium|high|xhigh|max`, per-provider subsets (Anthropic has no `none`; its API default is `high`). Models carry their own ceiling: the current OpenAI/Codex generations reach `max`, `gpt-5.5`, `gpt-5.4` and `gpt-5.4-mini` stop at `xhigh`, Grok before 4.6 stops at `high`. A level above the ceiling is clamped down at route resolution. The CLI wizard and web page list only the levels the chosen model accepts; the Mac app lists the provider's whole set and relies on the clamp.
+
+## Fast mode
+
+`fast = true` on `[fermix_core.providers.openai]` or `[fermix_core.providers.anthropic]` (**Fast mode** under the provider in Settings > Providers, or the Model behavior panel in browser setup; off by default, applies at restart) asks the vendor's faster, pricier tier. OpenAI: every model in its list, about twice the price per token; OpenAI may run a busy request at standard speed and price. Anthropic: Claude Opus 5.5 and Claude Fable 5.2 with an API key, twice the price per token; other Claude models and the Claude sign-in run at standard speed. OpenAI Codex has no Fast mode. A model without a fast tier, or an OpenAI `base_url` other than OpenAI's own, runs at standard speed while it is on; each call's trace (`llm_call` row, Opik span) records `speed`, the speed it actually ran at. Fermix cannot change it from a chat: when the owner wants faster replies, point them to **Fast mode** for their provider and say what it costs.
 
 ## Routing sub-agents, jobs and the notetaker
 

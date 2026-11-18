@@ -604,6 +604,39 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   defp restore_providers({:ok, value}), do: Application.put_env(:fermix_core, :providers, value)
   defp restore_providers(:error), do: Application.delete_env(:fermix_core, :providers)
 
+  # Fast mode is a boolean in each block that offers it; the round trip is
+  # seeded with the normalized app-env shapes (the config round-trip pitfall).
+  test "save/load round-trips fast mode on the OpenAI and Anthropic blocks" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    openai = [default_model: "gpt-6.2-sol", fast: true, primary: true]
+    anthropic = [default_model: "claude-opus-5-5", auth_mode: :api_key, fast: false]
+
+    snapshot = %{
+      fermix_core: [providers: [openai: openai, anthropic: anthropic]],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ ~r/\[fermix_core\.providers\.openai\][^\[]*fast = true/
+    assert contents =~ ~r/\[fermix_core\.providers\.anthropic\][^\[]*fast = false/
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    assert Enum.sort(loaded.fermix_core[:providers][:openai]) == Enum.sort(openai)
+    assert Enum.sort(loaded.fermix_core[:providers][:anthropic]) == Enum.sort(anthropic)
+
+    assert :ok = ConfigStore.save_snapshot(loaded)
+    assert {:ok, reloaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    assert reloaded.fermix_core[:providers] == loaded.fermix_core[:providers]
+  end
+
   # M57 §5: `[fermix_core.providers.openai_codex]` carries `primary`,
   # `default_model` and `reasoning_effort` and nothing else (the config
   # round-trip pitfall: seeded with the normalized app-env shapes).

@@ -49,6 +49,7 @@ defmodule FermixOpik.Mapper do
         drop_nil(%{
           status: stringify(Map.get(metadata, :status)),
           reasoning_effort: Map.get(metadata, :reasoning_effort),
+          speed: Map.get(metadata, :speed),
           adapter: Map.get(metadata, :adapter)
         })
     }

@@ -133,7 +133,7 @@ defmodule FermixWebWeb.SetupLive do
   @oauth_client_providers ~w(google github notion x slack tesla)
   # Derived from the descriptor registry: every provider setup field plus
   # each multi-auth-mode provider's auth_mode answer (M12 §6.2).
-  @provider_restart_keys [:provider, :default_model, :reasoning_effort] ++
+  @provider_restart_keys [:provider, :default_model, :reasoning_effort, :fast] ++
                            Enum.flat_map(
                              FermixCore.Providers.Descriptor.all(),
                              fn descriptor -> Enum.map(descriptor.setup_fields, & &1.key) end
@@ -337,6 +337,7 @@ defmodule FermixWebWeb.SetupLive do
           |> maybe_put_string(:edit_provider, params["provider"])
           |> maybe_put_string(:default_model, params["default_model"])
           |> maybe_put_string(:reasoning_effort, params["reasoning_effort"])
+          |> put_fast_answer(params["provider"], params["fast"])
           |> put_provider_field_answers(params)
           |> put_auth_mode_answer(params["provider"], params["auth_mode"])
           |> put_subagent_model_answer(params)
@@ -1931,6 +1932,7 @@ defmodule FermixWebWeb.SetupLive do
       subagent_model: Map.get(params, "subagent_model", current.subagent_model),
       reasoning_effort:
         parse_effort_field(Map.get(params, "reasoning_effort"), current.reasoning_effort),
+      fast: parse_fast_field(Map.get(params, "fast"), current.fast),
       auth_mode: parse_auth_mode_field(Map.get(params, "auth_mode"), current.auth_mode),
       # Carry the plain setup fields (e.g. Ollama's base_url) across an in-place
       # edit; without this the re-render drops them and the input blanks out,
@@ -1938,6 +1940,25 @@ defmodule FermixWebWeb.SetupLive do
       field_values: edited_field_values(current, params)
     }
   end
+
+  # The Fast mode switch posts "true" or "false" (a hidden "false" sits before
+  # the checkbox), and only for a provider that has one; any other provider
+  # never sends the answer, so the wizard never sees fast for it.
+  defp put_fast_answer(answers, provider, value) when value in ["true", "false"] do
+    if fast_provider?(provider), do: Keyword.put(answers, :fast, value), else: answers
+  end
+
+  defp put_fast_answer(answers, _provider, _value), do: answers
+
+  defp fast_provider?(provider) when is_binary(provider) do
+    Enum.any?(Descriptor.all(), &(Atom.to_string(&1.id) == provider and :fast in &1.config_keys))
+  end
+
+  defp fast_provider?(_provider), do: false
+
+  defp parse_fast_field("true", _current), do: true
+  defp parse_fast_field("false", _current), do: false
+  defp parse_fast_field(_value, current), do: current
 
   defp edited_field_values(current, params) do
     Map.new(current.field_values || %{}, fn {key, prior} ->
@@ -1963,6 +1984,7 @@ defmodule FermixWebWeb.SetupLive do
       default_model: ModelCatalog.effective_model(provider, provider_block),
       subagent_model: routing_subagent_model(snapshot),
       reasoning_effort: Keyword.get(provider_block, :reasoning_effort, default_effort(provider)),
+      fast: Keyword.get(provider_block, :fast, false),
       auth_mode: Keyword.get(provider_block, :auth_mode, :api_key),
       field_values: plain_field_values(provider, provider_block)
     }

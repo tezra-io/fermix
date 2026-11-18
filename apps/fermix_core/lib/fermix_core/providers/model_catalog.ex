@@ -98,63 +98,96 @@ defmodule FermixCore.Providers.ModelCatalog do
   # `openai_codex_window` is the GPT-6 generation's published window, which
   # OpenAI Codex runs it within (`find_entry/2`); a GPT-6-or-later entry
   # carries it, an older one runs on Codex as it does on the API.
+  #
+  # `fast?`: every model here is in the Fast table of
+  # developers.openai.com/api/docs/pricing (read 2026-11-18; Fast is what
+  # OpenAI renamed Priority processing on 2026-07-30), billed at about twice
+  # the standard rate, gpt-5.5 and gpt-5.4 below 272K context only. OpenAI may
+  # run a fast request at standard speed and price and says so in the
+  # response's `service_tier`. The OpenAI Codex plan route does not offer it
+  # (a 2026-11-18 probe: `"fast"` is refused with a 400, `"priority"` runs at
+  # `default`), so `fast?` is read for `:openai` only.
   @openai [
     %Entry{
       id: "gpt-6-astra",
       label: "GPT-6 Astra (default, recommended)",
       context_window: 320_000,
-      openai_codex_window: 1_050_000
+      openai_codex_window: 1_050_000,
+      fast?: true
     },
     %Entry{
       id: "gpt-6.2-astra",
       label: "GPT-6.2 Astra",
       context_window: 320_000,
-      openai_codex_window: 1_050_000
+      openai_codex_window: 1_050_000,
+      fast?: true
     },
     %Entry{
       id: "gpt-6.2-sol",
       label: "GPT-6.2 Sol",
       context_window: 320_000,
-      openai_codex_window: 1_050_000
+      openai_codex_window: 1_050_000,
+      fast?: true
     },
     %Entry{
       id: "gpt-6.1-sol",
       label: "GPT-6.1 Sol",
       context_window: 320_000,
-      openai_codex_window: 1_050_000
+      openai_codex_window: 1_050_000,
+      fast?: true
     },
     %Entry{
       id: "gpt-6.1-terra",
       label: "GPT-6.1 Terra (balanced)",
       context_window: 320_000,
-      openai_codex_window: 1_050_000
+      openai_codex_window: 1_050_000,
+      fast?: true
     },
     %Entry{
       id: "gpt-6-luna",
       label: "GPT-6 Luna (fast, cheaper)",
       context_window: 320_000,
-      openai_codex_window: 1_050_000
+      openai_codex_window: 1_050_000,
+      fast?: true
     },
-    %Entry{id: "gpt-5.6-sol", label: "GPT-5.6 Sol", context_window: 272_000},
-    %Entry{id: "gpt-5.6-terra", label: "GPT-5.6 Terra (balanced)", context_window: 272_000},
-    %Entry{id: "gpt-5.6-luna", label: "GPT-5.6 Luna (fast, cheaper)", context_window: 272_000},
+    %Entry{
+      id: "gpt-5.6-sol",
+      label: "GPT-5.6 Sol",
+      context_window: 272_000,
+      fast?: true
+    },
+    %Entry{
+      id: "gpt-5.6-terra",
+      label: "GPT-5.6 Terra (balanced)",
+      context_window: 272_000,
+      fast?: true
+    },
+    %Entry{
+      id: "gpt-5.6-luna",
+      label: "GPT-5.6 Luna (fast, cheaper)",
+      context_window: 272_000,
+      fast?: true
+    },
     %Entry{
       id: "gpt-5.5",
       label: "GPT-5.5",
       context_window: 1_050_000,
-      max_reasoning_effort: :xhigh
+      max_reasoning_effort: :xhigh,
+      fast?: true
     },
     %Entry{
       id: "gpt-5.4",
       label: "GPT-5.4",
       context_window: 1_050_000,
-      max_reasoning_effort: :xhigh
+      max_reasoning_effort: :xhigh,
+      fast?: true
     },
     %Entry{
       id: "gpt-5.4-mini",
       label: "GPT-5.4 mini",
       context_window: 400_000,
-      max_reasoning_effort: :xhigh
+      max_reasoning_effort: :xhigh,
+      fast?: true
     }
   ]
 
@@ -188,6 +221,14 @@ defmodule FermixCore.Providers.ModelCatalog do
   # disabled thinking, forced tool_choice and sampling params; its "sonnet-5"
   # substring sends adaptive thinking and no sampling params, and the adapter
   # never sends tool_choice.
+  #
+  # `fast?`: fast mode (`speed: "fast"`, no beta flag) is generally available
+  # on Claude Opus 5.5 ($8/$40 per MTok, twice standard) and Claude Fable 5.2
+  # ($16/$80), Messages API only. Opus 5 and Opus 4.8 offer it as a research
+  # preview behind a beta flag and an access list (4.8's ends 2026-11-30), so
+  # they run at standard speed. Unverified on the Claude sign-in (both probe
+  # tokens were dead on 2026-11-18), so the route asks for it only with an API
+  # key (`RouteResolver`).
   @anthropic [
     %Entry{
       id: "claude-sonnet-4-6",
@@ -208,7 +249,8 @@ defmodule FermixCore.Providers.ModelCatalog do
       label: "Claude Fable 5.2",
       context_window: 1_000_000,
       compaction_ceiling: 200_000,
-      max_output_tokens: 128_000
+      max_output_tokens: 128_000,
+      fast?: true
     },
     %Entry{
       id: "claude-fable-5-1",
@@ -229,7 +271,8 @@ defmodule FermixCore.Providers.ModelCatalog do
       label: "Claude Opus 5.5 (best quality)",
       context_window: 1_000_000,
       compaction_ceiling: 200_000,
-      max_output_tokens: 128_000
+      max_output_tokens: 128_000,
+      fast?: true
     },
     %Entry{
       id: "claude-opus-5",
@@ -709,6 +752,19 @@ defmodule FermixCore.Providers.ModelCatalog do
     level
     |> ReasoningEffort.clamp(provider)
     |> ReasoningEffort.cap(model_effort_ceiling(provider, model_id))
+  end
+
+  @doc """
+  Whether the vendor runs `model_id` at a faster tier when its provider's Fast
+  mode is on (`Entry.fast?`). `false` for a model the catalog does not know and
+  for a provider outside it, so an unknown model runs at standard speed.
+  """
+  @spec fast?(atom(), String.t()) :: boolean()
+  def fast?(provider, model_id) when is_atom(provider) and is_binary(model_id) do
+    case find_entry(provider, model_id) do
+      %Entry{fast?: value} -> value
+      nil -> false
+    end
   end
 
   @doc """

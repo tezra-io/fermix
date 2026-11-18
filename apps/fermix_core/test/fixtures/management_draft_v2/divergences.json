@@ -883,6 +883,18 @@
       "why": "The OpenAI API-key provider carries a reasoning effort like the other reasoning providers; the draft drew the row only for the subscription providers. Adding it is a row the app renders through the descriptor form with no Swift work."
     },
     {
+      "method": "settings.get:providers.anthropic",
+      "field": "rows:fast",
+      "kind": "engine_only",
+      "why": "Fast mode returns as a toggle on the OpenAI API-key and Anthropic providers, after Reasoning effort, off until turned on: the route asks for the vendor's fast tier (OpenAI service_tier fast, Anthropic speed fast) only on a model that has one, and runs every other model, and the Claude sign-in, at standard speed. The draft drew a fast row only for the old Codex sign-in; this is an ordinary toggle row the providers pane renders through the descriptor form with no Swift work."
+    },
+    {
+      "method": "settings.get:providers.openai",
+      "field": "rows:fast",
+      "kind": "engine_only",
+      "why": "Fast mode returns as a toggle on the OpenAI API-key and Anthropic providers, after Reasoning effort, off until turned on: the route asks for the vendor's fast tier (OpenAI service_tier fast, Anthropic speed fast) only on a model that has one, and runs every other model, and the Claude sign-in, at standard speed. The draft drew a fast row only for the old Codex sign-in; this is an ordinary toggle row the providers pane renders through the descriptor form with no Swift work."
+    },
+    {
       "method": "settings.get:providers.openai_codex",
       "field": "rows:fast",
       "kind": "draft_only",
