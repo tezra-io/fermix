@@ -40,6 +40,29 @@ goes in this order:
 The Mac app picks the helper up at its next engine pin bump, after its own signing
 change for the helper has landed.
 
+## Released contracts
+
+An app that has not updated keeps working against every later engine that still
+serves it. `test/released_contracts/<tag>/` holds each such release's wire
+contracts (the management, Realtime and mobile schemas and golden fixtures, byte for
+byte as the tag published them under `apps/fermix_core/priv/`), and
+`FermixCore.ReleasedContractsTest` and `FermixChannels.Mobile.ReleasedContractsTest`
+hold the engine to them on every run: a released app's version is inside the
+engine's window, every method it calls is still served at that version, every frame
+it sends still decodes, and every field it reads is still sent, with no type it
+never saw.
+
+- **After the owner tags a release**, snapshot it on `dev` and commit the new
+  directory: `uv run scripts/release/snapshot_released_contracts.py --tag vX.Y.Z`.
+  The script reads only the tag, and refuses a snapshot that already exists.
+- **A release leaves the set** when the engine stops serving its apps in full: one
+  of its protocol versions falls outside the engine's window, or it is more than two
+  minor versions behind (the mobile protocol's *Where it stands*). Delete its
+  directory in the change that stops serving it, and name the apps that stop
+  working in that commit. That is the only way a change that breaks a released app
+  ships: otherwise a failing released-contract test is a break to fix, never a
+  snapshot to retake.
+
 ## Install paths to walk before announcing
 
 The release rail proves the *artifact*: it is signed, its checksum matches, it runs,
