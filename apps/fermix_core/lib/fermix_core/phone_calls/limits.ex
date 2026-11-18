@@ -58,7 +58,7 @@ defmodule FermixCore.PhoneCalls.Limits do
 
   # Reached: a new start is refused before dispatch until the window frees an attempt.
   @spec max_attempts_per_day() :: pos_integer()
-  def max_attempts_per_day, do: 5
+  def max_attempts_per_day, do: 20
 
   # The window `max_attempts_per_day/0` counts in: the 24 hours before a start.
   @spec attempt_window_ms() :: pos_integer()

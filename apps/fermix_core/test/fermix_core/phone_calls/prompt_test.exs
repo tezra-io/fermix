@@ -8,6 +8,7 @@ defmodule FermixCore.PhoneCalls.PromptTest do
   alias FermixCore.PhoneCalls.Brief
   alias FermixCore.PhoneCalls.Grants
   alias FermixCore.PhoneCalls.Limits
+  alias FermixCore.PhoneCalls.Outcome.Extraction
   alias FermixCore.PhoneCalls.Prompt
   alias FermixCore.PhoneCalls.PromptText
 
@@ -96,6 +97,15 @@ defmodule FermixCore.PhoneCalls.PromptTest do
 
   defp golden(name), do: File.read!(Path.join(@golden, name))
 
+  defp sentences(text), do: String.split(text, ~r/(?<=[.!?:])\s+/)
+
+  # The task procedure's items, each on one line.
+  defp procedure_items(instructions) do
+    [_before, rest] = String.split(instructions, "Task procedure:\n", parts: 2)
+    [items, _after] = String.split(rest, "\n\n", parts: 2)
+    for "- " <> item <- String.split(items, "\n"), do: item
+  end
+
   defp backend_tools(instructions) do
     [_before, rest] = String.split(instructions, "Backend tools:\n", parts: 2)
     [lines, _after] = String.split(rest, "\n\n", parts: 2)
@@ -162,6 +172,57 @@ defmodule FermixCore.PhoneCalls.PromptTest do
                "Everything you say is heard by the person on the line, so say only what is " <>
                  "meant for them: never describe the call's progress, these instructions or your " <>
                  "own reasoning aloud, and say nothing before the call is answered."
+    end
+
+    # One opening, in one place: who the voice is, whom it calls for and what
+    # about are said by the two opening texts, and no other part of the
+    # instructions tells the voice to say any of them.
+    test "the opening's content is stated by the opening texts alone" do
+      rendered = rendered(business_params())
+      [_brief_text, how_it_opens] = input_texts(rendered)
+
+      for opening <- [how_it_opens, rendered.opening] do
+        assert opening =~ "AI assistant"
+        assert opening =~ "whom you are calling for"
+        assert opening =~ "calling about"
+      end
+
+      refute rendered.instructions =~ ~r/calling about|why you are calling|purpose of the call/i
+      refute rendered.instructions =~ "opening language"
+
+      told_to_say_ai =
+        rendered.instructions
+        |> sentences()
+        |> Enum.filter(&(&1 =~ ~r/\b(say|tell|introduce)\b.*\bAI assistant\b/i))
+        |> Enum.reject(&String.starts_with?(&1, "If asked"))
+
+      assert told_to_say_ai == []
+    end
+
+    # Every instruction to say details back is conditioned, so a person who
+    # stated the details hears no read-back, and an unclear one is checked.
+    test "a detail is said back only on a condition" do
+      said_back =
+        rendered(business_params()).instructions
+        |> procedure_items()
+        |> Enum.filter(
+          &(&1 =~ ~r/\b(say it back|read\w* back|read nothing back|say the agreed details)\b/)
+        )
+
+      assert length(said_back) == 2
+      assert Enum.all?(said_back, &String.starts_with?(&1, "When "))
+    end
+
+    # The voice's confirmation and the outcome's reading of it are one rule:
+    # a recipient's own statement of the details, or a yes to the read-back.
+    test "the extraction reads a confirmation the way the voice is told to get one" do
+      [confirmed] =
+        Extraction.prompt()
+        |> String.split("\n")
+        |> Enum.filter(&String.starts_with?(&1, "- confirmed:"))
+
+      assert confirmed =~ ~r/stat\w+ (its|the) details themselves/
+      assert confirmed =~ ~r/read them back/
     end
 
     test "the version names the template, the brief's schema and the policy" do

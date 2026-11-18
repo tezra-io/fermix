@@ -457,9 +457,9 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     assert body =~ ~s{skill_view(name: "self-knowledge", file: "phone_calls")}
 
     assert {PhoneCallLimits.max_outstanding_calls(), PhoneCallLimits.max_attempts_per_day()} ==
-             {1, 5}
+             {1, 20}
 
-    assert reference =~ "One call at a time, and at most five attempts in any 24 hours."
+    assert reference =~ "One call at a time, and at most twenty attempts in any 24 hours."
 
     # The two waits it states, as the bounds the worker reads.
     assert PhoneCallLimits.opening_wait_ms() == 2_000

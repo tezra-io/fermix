@@ -126,8 +126,9 @@ defmodule FermixCore.Tools.PhoneCall do
       type: "object",
       additionalProperties: false,
       description:
-        "For start: the whole mandate, which the call may not go beyond. Times are absolute " <>
-          "and local to the brief's timezone.",
+        "For start: the whole mandate, which the call may not go beyond: every fact the call " <>
+          "needs, each in the field that owns it, and no script. Times are absolute and local " <>
+          "to the brief's timezone.",
       required: ~w(destination destination_kind number_source contact_name timezone goal
                    completion_criteria),
       properties: %{
@@ -141,15 +142,26 @@ defmodule FermixCore.Tools.PhoneCall do
         contact_name: text("Who is being called.", b.contact_name_bytes),
         on_behalf_of:
           text(
-            "The name the assistant may say it is calling for, as the person called should " <>
-              "hear it. Leave it out to name no one.",
+            "The name the call gives when it says whom it is calling for, as the person called " <>
+              "should hear it. Without it the call names no one, so the name goes here, never " <>
+              "in the goal.",
             b.on_behalf_of_bytes
           ),
         timezone: text("The destination's IANA time zone.", b.timezone_bytes),
-        goal: text("The concrete task, with absolute dates and times.", b.goal_bytes),
+        goal:
+          text(
+            "The result the owner wants from the call, with everything it must find out or " <>
+              "arrange and absolute dates and times: what to achieve, never what to say or in " <>
+              "what order. The call's own instructions greet, say it is an AI assistant and " <>
+              "whom it calls for, check it reached the right party, and say goodbye; none of " <>
+              "that belongs here.",
+            b.goal_bytes
+          ),
         completion_criteria:
           list(
-            "What the person called must confirm for the task to be done.",
+            "Facts the person called must state or confirm for the result to count, one fact " <>
+              "per item: never a step, an instruction to the call or its report, or how to " <>
+              "record an answer.",
             1,
             b.completion_criteria,
             b.item_bytes

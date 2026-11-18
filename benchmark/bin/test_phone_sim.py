@@ -944,7 +944,7 @@ def test_a_home_seeded_without_phone_calls_holds_the_suite_out_as_not_evaluated(
 
 
 def test_a_phone_case_runs_only_when_its_attempt_starts_from_the_reset_home(tmp_path):
-    """A seeded home without --reset-home spends its five attempts and its call
+    """A seeded home without --reset-home spends its daily attempts and its call
     slot across cases: every phone case is NOT EVALUATED, never failed or passed."""
     chosen, cases = _phone_selection()
     seeded = SimpleNamespace(daemon=SimpleNamespace(fermix_home=_home(tmp_path, True)))

@@ -64,8 +64,8 @@ defmodule FermixCore.PhoneCalls.Outcome.Extraction do
   not confirm them.
 
   Outcome, one of:
-  - confirmed: the recipient confirmed the result the brief asks for, after the details were \
-  read back.
+  - confirmed: the recipient confirmed the result the brief asks for, stating its details \
+  themselves or saying a clear yes right after the assistant read them back.
   - unavailable: the recipient said what was asked for is not available, and nothing else was \
   agreed.
   - options: the recipient offered alternatives, and none was agreed.

@@ -200,18 +200,21 @@ defmodule FermixCore.PhoneCalls.LedgerTest do
 
     test "a dispatch whose answer is unknown, or one with a session that then failed, counts",
          ctx do
-      for n <- 1..2, do: dialed_and_ended!(ctx, at(n * 60))
+      cap = Limits.max_attempts_per_day()
+      for n <- 1..(cap - 3), do: dialed_and_ended!(ctx, at(n * 60))
 
-      unknown = admit!(ctx, %{}, at(200))
-      {:ok, _row} = Ledger.claim_dispatch(unknown.id, at(200), ctx.opts)
+      unknown_at = at(cap * 60)
+      unknown = admit!(ctx, %{}, unknown_at)
+      {:ok, _row} = Ledger.claim_dispatch(unknown.id, unknown_at, ctx.opts)
+      ended_at = DateTime.add(unknown_at, 1, :second)
 
       {:ok, _row} =
-        Ledger.terminalize(unknown.id, "dispatch_unknown", %{ended_at: at(201)}, ctx.opts)
+        Ledger.terminalize(unknown.id, "dispatch_unknown", %{ended_at: ended_at}, ctx.opts)
 
       # Past the unknown dispatch's own slot, so only the day's count can refuse.
       late =
         DateTime.add(
-          at(201),
+          ended_at,
           Limits.provider_lifetime_bound_ms() + Limits.max_create_wait_ms(),
           :millisecond
         )
@@ -232,35 +235,45 @@ defmodule FermixCore.PhoneCalls.LedgerTest do
           )
       end
 
-      assert {:error, {:daily_attempts_exhausted, 5}} =
+      assert {:error, {:daily_attempts_exhausted, ^cap}} =
                Ledger.admit(attrs(), DateTime.add(late, 10, :second), ctx.opts)
     end
 
-    test "the sixth attempt in a rolling window is refused and writes nothing", ctx do
-      for n <- 1..Limits.max_attempts_per_day(), do: dialed_and_ended!(ctx, at(n * 60))
+    test "the attempt past the limit in a rolling window is refused and writes nothing", ctx do
+      cap = Limits.max_attempts_per_day()
+      for n <- 1..cap, do: dialed_and_ended!(ctx, at(n * 60))
 
-      assert {:error, {:daily_attempts_exhausted, 5}} = Ledger.admit(attrs(), at(3_600), ctx.opts)
+      assert {:error, {:daily_attempts_exhausted, ^cap}} =
+               Ledger.admit(attrs(), at(3_600), ctx.opts)
+
       assert {:ok, rows} = Ledger.list_recent("default", ctx.opts)
-      assert length(rows) == 5
+      assert length(rows) == min(cap, Limits.max_recent_calls())
     end
 
     test "a call proven never to have dialed gives its attempt back", ctx do
-      for n <- 1..4, do: dialed_and_ended!(ctx, at(n * 60))
+      cap = Limits.max_attempts_per_day()
+      for n <- 1..(cap - 1), do: dialed_and_ended!(ctx, at(n * 60))
 
-      undialed = admit!(ctx, %{}, at(300))
+      undialed = admit!(ctx, %{}, at(cap * 60))
 
       {:ok, _row} =
-        Ledger.fail_undispatched(undialed.id, "cancelled_before_dispatch", at(301), ctx.opts)
+        Ledger.fail_undispatched(
+          undialed.id,
+          "cancelled_before_dispatch",
+          at(cap * 60 + 1),
+          ctx.opts
+        )
 
-      assert {:ok, {:admitted, _fifth}} = Ledger.admit(attrs(), at(400), ctx.opts)
+      assert {:ok, {:admitted, _last}} = Ledger.admit(attrs(), at(cap * 60 + 100), ctx.opts)
     end
 
     test "the window is the attempt window ending now, its start included", ctx do
       window_s = div(Limits.attempt_window_ms(), 1_000)
-      for _n <- 1..5, do: dialed_and_ended!(ctx, @t0)
+      cap = Limits.max_attempts_per_day()
+      for _n <- 1..cap, do: dialed_and_ended!(ctx, @t0)
 
-      # Exactly one window later the five still count (`created_at >= start`).
-      assert {:error, {:daily_attempts_exhausted, 5}} =
+      # Exactly one window later they all still count (`created_at >= start`).
+      assert {:error, {:daily_attempts_exhausted, ^cap}} =
                Ledger.admit(attrs(), at(window_s), ctx.opts)
 
       # A microsecond past it, none does.

@@ -27,6 +27,8 @@ defmodule FermixCore.Tools.PhoneCallTest do
   # Every name, number and id here is invented.
   @t0 ~U[2031-03-04 15:00:00.000000Z]
   @caller "+14155550142"
+  # The tool's schema as the model is offered it, measured (the budget test).
+  @schema_budget_bytes 3_709
   @token "TOKEN-PC"
 
   # A stand-in for `PhoneCalls.Manager`: it answers the two calls the tool
@@ -348,6 +350,49 @@ defmodule FermixCore.Tools.PhoneCallTest do
       assert p.tool_grants.maxItems == b.tool_grants
       assert p.times.maxItems == b.times
       assert p.times.items.properties.label.maxLength == b.label_bytes
+    end
+
+    # The brief states the result, never a script: the call's own instructions
+    # (`PhoneCalls.Prompt`) own how it opens and closes, so a brief that also
+    # scripts them is heard twice on the line.
+    test "the goal's description says what a goal is not, and who owns the rest" do
+      %{properties: %{brief: %{properties: p}}} = PhoneCall.parameters()
+
+      assert p.goal.description =~ "never what to say or in what order"
+
+      for owned <- ["greet", "AI assistant", "whom it calls for", "right party", "goodbye"],
+          do: assert(p.goal.description =~ owned, owned)
+
+      assert p.goal.description =~ "none of that belongs here"
+    end
+
+    test "a criterion is one fact the person states, never a step or a note to the report" do
+      %{properties: %{brief: %{properties: p}}} = PhoneCall.parameters()
+      assert p.completion_criteria.description =~ "one fact per item"
+      assert p.completion_criteria.description =~ "never a step"
+      assert p.completion_criteria.description =~ "how to record"
+    end
+
+    test "whom the call is for has its own field, and the brief keeps every fact" do
+      %{properties: %{brief: brief}} = PhoneCall.parameters()
+      assert brief.properties.on_behalf_of.description =~ "Without it the call names no one"
+      assert brief.properties.on_behalf_of.description =~ "never in the goal"
+      assert brief.description =~ "every fact the call needs, each in the field that owns it"
+    end
+
+    test "the tool's schema stays inside its measured budget" do
+      encoded =
+        Jason.encode!(%{
+          name: PhoneCall.name(),
+          description: PhoneCall.description(),
+          parameters: PhoneCall.parameters()
+        })
+
+      # Measured at 3,183 bytes before the brief's fields said what each is
+      # not; that guidance (the goal is the result, never a script, a criterion
+      # one fact, the calling-for name its own field, every fact in the field
+      # that owns it) measured 526 bytes more: 3,709.
+      assert byte_size(encoded) <= @schema_budget_bytes
     end
 
     test "a brief naming whom the call is for reaches the Manager", ctx do

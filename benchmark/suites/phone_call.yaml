@@ -66,7 +66,7 @@ description: >
   labelled sanity case (`book_table_readback_confirmed`'s last turn). Elsewhere
   the floor is what the simulator recorded and the wording is the rubric's.
 
-  RUN IT ONE ATTEMPT PER FRESH HOME. Every dial spends one of the home's five
+  RUN IT ONE ATTEMPT PER FRESH HOME. Every dial spends one of the home's twenty
   daily attempts and a lost create holds the home's one call slot for hours, so
   a phone case runs only with `--reset-home` (each attempt starts from the
   seeded world); without it, or on a home seeded without `--phone-calls`, every

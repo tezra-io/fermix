@@ -1122,7 +1122,7 @@ drops a caller's `OPENAI_API_KEY` so the seed's invented key is the one in use; 
 seed refuses a home whose daemon answers, so no manifest appears under a running
 daemon. The suite grades the agent path and what the owner
 is told, not how the voice converses (its header says what else it cannot prove).
-Each dial spends one of the home's five daily attempts and a lost create holds its
+Each dial spends one of the home's twenty daily attempts and a lost create holds its
 one call slot for hours, so a phone case runs only with `--reset-home` (every
 attempt starts from the seeded world, one daemon restart each); without it every
 case is NOT EVALUATED. `phone_call` is registered in every home and offered to

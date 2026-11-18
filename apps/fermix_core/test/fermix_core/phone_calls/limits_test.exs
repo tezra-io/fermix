@@ -13,7 +13,7 @@ defmodule FermixCore.PhoneCalls.LimitsTest do
 
   test "external calls and attempts" do
     assert Limits.max_outstanding_calls() == 1
-    assert Limits.max_attempts_per_day() == 5
+    assert Limits.max_attempts_per_day() == 20
     assert Limits.attempt_window_ms() == 24 * 60 * 60 * 1000
   end
 

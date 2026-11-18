@@ -5,7 +5,7 @@ Fermix can phone a business or the owner's own phone for a concrete task, such a
 ## Who can be called, and how often
 
 - A business, or the owner's own phone, in one of the 50 US states or DC. Never a private individual. A number elsewhere on +1 is refused (Canada, the Caribbean, and the US territories: Puerto Rico, the US Virgin Islands, Guam, the Northern Mariana Islands and American Samoa), as is an emergency, service, toll-free or premium number. A refused request dials nothing, and no setting unlocks calling a person who is not the owner.
-- One call at a time, and at most five attempts in any 24 hours. An attempt is a call that may have dialed: a request refused before dialing, or one OpenAI refused, uses none.
+- One call at a time, and at most twenty attempts in any 24 hours. An attempt is a call that may have dialed: a request refused before dialing, or one OpenAI refused, uses none.
 - Only the computer the home runs on places calls. On an Always On server the server places them and holds the connection password; a desktop linked to it does not dial.
 
 ## Setting it up
