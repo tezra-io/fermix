@@ -16,6 +16,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The first phone you pair can be on any network.** Turning phone access on
+  and pairing straight away made the pairing code before the relay connection
+  had started, so a phone on another Wi-Fi or on mobile data could not reach
+  this computer, and only a second code worked. The code now waits for the
+  relay, up to 5 seconds, so the first scan pairs from anywhere.
+
 - **A request to a computer's browser just after the last one ended no longer
   fails.** When Fermix on your server used a computer's browser, a request
   that reached the computer just as the turn holding that browser there had

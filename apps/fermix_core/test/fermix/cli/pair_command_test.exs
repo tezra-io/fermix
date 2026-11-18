@@ -36,7 +36,9 @@ defmodule Fermix.CLI.PairCommandTest do
     assert stdout =~ "paired Sam's phone (#{@device_id})"
     assert stderr == ""
 
-    assert_received {:call, "mobile.pair.start", %{}, [timeout: 5_000]}
+    # A window opened while the remote rail still starts waits up to 5 s for
+    # it, so the start is given the 10 s the app gives it.
+    assert_received {:call, "mobile.pair.start", %{}, [timeout: 10_000]}
 
     for _poll <- 1..3 do
       assert_received {:call, "mobile.pair.get", %{"session_id" => @session_id}, _opts}

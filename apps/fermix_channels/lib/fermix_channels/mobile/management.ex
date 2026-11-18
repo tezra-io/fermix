@@ -46,6 +46,10 @@ defmodule FermixChannels.Mobile.Management do
   alias FermixCore.Setup.ConfigStore
 
   @max_wait_ms 120_000
+  # How long a pairing link waits for a remote rail still starting: well under
+  # the 10 s a client gives `mobile.pair.start`, which also opens the window and
+  # reads discovery.
+  @rail_wait_ms 5_000
   @max_listed_devices 64
   @v0_device_fields [:device_id, :name, :created_at, :last_seen]
   @open_states [:awaiting_scan, :awaiting_decision]
@@ -909,10 +913,14 @@ defmodule FermixChannels.Mobile.Management do
 
   # Reach from anywhere, when the rail is ready (M62 §2): the endpoint id, the
   # relays in a compact `host:port` list (the relay source fixes https and the
-  # path), and that list's revision. A rail still starting adds nothing; the
-  # phone learns the route from `pair_approved` once it is ready.
+  # path), and that list's revision. The first window of a boot is what starts
+  # the rail, and a link without the route pairs only a phone on this
+  # computer's network or tailnet, so the link waits for a rail still starting.
+  # One that is not ready after the wait adds nothing; the phone learns the
+  # route from `pair_approved` once it is ready.
   defp remote_params(opts) do
     helper = Keyword.get(opts, :iroh_helper, Helper)
+    :ok = await_rail(helper, opts)
 
     case invoke(opts, :iroh_candidate, &Helper.candidate/1, [helper]) do
       {:ok, %{"node_id" => node_id, "relays" => relays, "relays_rev" => rev}} ->
@@ -920,6 +928,21 @@ defmodule FermixChannels.Mobile.Management do
 
       :none ->
         []
+    end
+  end
+
+  # A rail switched off, failed or missing answers its status at once and
+  # reports itself; only a wait that ran out is this link's to name.
+  defp await_rail(helper, opts) do
+    case invoke(opts, :iroh_await_ready, &Helper.await_ready/2, [helper, @rail_wait_ms]) do
+      %{state: _state} ->
+        :ok
+
+      :timeout ->
+        Logger.warning(
+          "remote reach was still starting #{@rail_wait_ms} ms into the pairing window; " <>
+            "its link reaches this computer over the home network or Tailscale only"
+        )
     end
   end
 

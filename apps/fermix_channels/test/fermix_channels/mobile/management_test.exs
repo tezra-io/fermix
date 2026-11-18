@@ -427,6 +427,52 @@ defmodule FermixChannels.Mobile.ManagementTest do
       assert {:error, :pairing_active} = Management.pair_start(ctx.opts)
     end
 
+    # The app turns the phone on and opens its first window in one step, and
+    # that window is what starts the remote rail: a link made before the rail
+    # was ready carried no route, and a phone on another network had nothing
+    # to dial. The link waits for a rail still starting, within a bound under
+    # the 10 s a client gives the call, and reads the route after it.
+    test "start waits for a rail still starting, so the link carries its route", ctx do
+      opts =
+        [
+          iroh_helper: :rail,
+          iroh_await_ready: fn :rail, wait_ms ->
+            send(self(), {:rail_awaited, wait_ms})
+            Process.put(:rail_ready, true)
+            %{state: :ready}
+          end,
+          iroh_candidate: fn :rail ->
+            if Process.get(:rail_ready), do: {:ok, iroh_candidate()}, else: :none
+          end
+        ] ++ ctx.opts
+
+      assert {:ok, %{uri: uri}} = Management.pair_start(opts)
+      query = uri |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+
+      assert query["iroh"] == @endpoint_id
+      assert query["relays"] == "us1.relay.fermix.ai:7842"
+      assert_received {:rail_awaited, wait_ms}
+      assert wait_ms in 1..5_000
+    end
+
+    test "a rail still starting past the wait leaves the link to this network, and says so",
+         ctx do
+      opts =
+        [
+          iroh_helper: :rail,
+          iroh_await_ready: fn :rail, _wait_ms -> :timeout end,
+          iroh_candidate: fn :rail -> :none end
+        ] ++ ctx.opts
+
+      {result, log} = with_log(fn -> Management.pair_start(opts) end)
+      assert {:ok, %{uri: uri}} = result
+      query = uri |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+
+      assert Jason.decode!(query["candidates"]) == ["192.168.1.8"]
+      refute Enum.any?(~w(iroh relays relays_rev), &Map.has_key?(query, &1))
+      assert log =~ "remote reach was still starting"
+    end
+
     test "get counts the window down and shows the phone that asked", ctx do
       assert {:ok, _started} = Management.pair_start(ctx.opts)
       Agent.update(ctx.clock, &(&1 + 2_000))
@@ -1579,6 +1625,15 @@ defmodule FermixChannels.Mobile.ManagementTest do
                },
                socket_pid: socket
              })
+  end
+
+  defp iroh_candidate do
+    %{
+      "kind" => "iroh",
+      "node_id" => @endpoint_id,
+      "relays" => [%{"url" => "https://us1.relay.fermix.ai/", "quic_port" => 7842}],
+      "relays_rev" => "0123456789abcdef"
+    }
   end
 
   defp start_opts(overrides) do

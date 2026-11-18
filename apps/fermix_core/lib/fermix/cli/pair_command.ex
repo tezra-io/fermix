@@ -23,6 +23,9 @@ defmodule Fermix.CLI.PairCommand do
   alias FermixCore.Management.Mobile
 
   @call_timeout_ms 5_000
+  # A window opened while the remote rail still starts waits up to 5 s for it
+  # before it answers, so the start is given the 10 s the app gives it.
+  @start_timeout_ms 10_000
   # A settings write with its readiness recompute, as `fermix settings` allows.
   @settings_timeout_ms 30_000
   @poll_interval_ms 1_000
@@ -56,7 +59,7 @@ defmodule Fermix.CLI.PairCommand do
   defp pair(io, deps), do: start(io, deps, :may_turn_on)
 
   defp start(io, deps, offer) do
-    case call(deps, "mobile.pair.start", %{}) do
+    case deps.client.("mobile.pair.start", %{}, timeout: @start_timeout_ms) do
       {:ok, %{"state" => "failed"} = view} -> refused_start(view, io, deps, offer)
       {:ok, view} -> opened(view, io, deps)
       {:error, reason} -> start_error(reason, io)

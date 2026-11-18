@@ -1301,7 +1301,9 @@ Notes that the shapes alone do not carry:
   retained.
 - A **pairing session** is the third, and it is polled rather than a job: its
   view grows while it runs, and the operator decides mid-run. `mobile.pair.start`
-  opens the one pairing window and answers at once, the pane reads
+  opens the one pairing window and answers at once (a window opened while
+  remote reach still starts, as the first one of a boot does, waits up to
+  5000 ms for it, so its link carries the relay route), the pane reads
   `mobile.pair.get` (every 1000 ms is the recommended cadence) until the session
   is terminal, and `mobile.pair.decide` or `mobile.pair.cancel` ends it. One
   session is open at a time (`busy` {`operation`: `mobile.pair`} for a second
