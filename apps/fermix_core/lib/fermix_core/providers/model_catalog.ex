@@ -49,22 +49,25 @@ defmodule FermixCore.Providers.ModelCatalog do
   # The OpenAI API models. `context_window` is the compaction denominator
   # (`context_tokens / context_window >= compaction.threshold`, default 0.85 —
   # see `TurnRunner`), NOT a declared capability, so it is not a straight copy
-  # of a published number. astra = frontier (default); GPT-6.1 sol, GPT-6.1
-  # terra and GPT-6 luna = the generation's cheaper frontier/balanced/fast
-  # tiers; the gpt-5.6 sol/terra/luna = frontier/balanced/fast of the prior
-  # generation.
+  # of a published number. astra = frontier (default); GPT-6.2 astra and
+  # GPT-6.2 sol = the newest frontier and cheaper frontier, released
+  # 2026-11-17, beside the default rather than replacing it; GPT-6.1 sol,
+  # GPT-6.1 terra and GPT-6 luna = the generation's cheaper
+  # frontier/balanced/fast tiers; the gpt-5.6 sol/terra/luna =
+  # frontier/balanced/fast of the prior generation.
   #
   # Windows: the published window from
   # developers.openai.com/api/docs/models/<id> for gpt-5.5, gpt-5.4 and
-  # gpt-5.4-mini only. The other seven are deliberate deviations, because every
+  # gpt-5.4-mini only. The other nine are deliberate deviations, because every
   # current model reprices a request above 272k INPUT tokens at 2x input/cache
   # and 1.5x output "for the full request" — a cliff rather than a ramp, so one
   # token over doubles the bill for everything before it:
   #
-  #   * astra, GPT-6.1 sol, GPT-6.1 terra and GPT-6 luna, 320_000 is NOT their
-  #     real 1,050,000 window (6.1 sol takes the calibration of the GPT-6 sol
-  #     it replaced, and 6.1 terra, released 2026-10-26 under the same cliff,
-  #     takes it too).
+  #   * astra, GPT-6.2 astra, GPT-6.2 sol, GPT-6.1 sol, GPT-6.1 terra and
+  #     GPT-6 luna, 320_000 is NOT their real 1,050,000 window (6.1 sol takes
+  #     the calibration of the GPT-6 sol it replaced, and 6.1 terra, released
+  #     2026-10-26, and the two 6.2 models, released 2026-11-17, all under the
+  #     same cliff, take it too).
   #     0.85 * 320_000 = 272_000 puts compaction exactly on that
   #     boundary, so the standard-priced tier is used in full. Do not
   #     "correct" it upward.
@@ -99,6 +102,18 @@ defmodule FermixCore.Providers.ModelCatalog do
     %Entry{
       id: "gpt-6-astra",
       label: "GPT-6 Astra (default, recommended)",
+      context_window: 320_000,
+      openai_codex_window: 1_050_000
+    },
+    %Entry{
+      id: "gpt-6.2-astra",
+      label: "GPT-6.2 Astra",
+      context_window: 320_000,
+      openai_codex_window: 1_050_000
+    },
+    %Entry{
+      id: "gpt-6.2-sol",
+      label: "GPT-6.2 Sol",
       context_window: 320_000,
       openai_codex_window: 1_050_000
     },
@@ -364,6 +379,16 @@ defmodule FermixCore.Providers.ModelCatalog do
     %Entry{
       id: "openai/gpt-6-astra",
       label: "GPT-6 Astra via OpenRouter",
+      context_window: 320_000
+    },
+    %Entry{
+      id: "openai/gpt-6.2-astra",
+      label: "GPT-6.2 Astra via OpenRouter",
+      context_window: 320_000
+    },
+    %Entry{
+      id: "openai/gpt-6.2-sol",
+      label: "GPT-6.2 Sol via OpenRouter",
       context_window: 320_000
     },
     %Entry{

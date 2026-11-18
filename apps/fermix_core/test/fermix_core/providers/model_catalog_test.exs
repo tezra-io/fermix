@@ -66,7 +66,7 @@ defmodule FermixCore.Providers.ModelCatalogTest do
     # The plan route serves the public API's models, so a listed slug takes the
     # openai catalog's facts; a slug neither knows takes the unknown-model window.
     test "an openai_codex slug takes the openai catalog's facts" do
-      for model <- ~w(gpt-6-astra gpt-6.1-sol gpt-6.1-terra gpt-6-luna) do
+      for model <- ~w(gpt-6-astra gpt-6.2-astra gpt-6.2-sol gpt-6.1-sol gpt-6.1-terra gpt-6-luna) do
         assert ModelCatalog.context_window_for(:openai_codex, model) == 1_050_000
       end
 
@@ -87,7 +87,7 @@ defmodule FermixCore.Providers.ModelCatalogTest do
     # A ChatGPT plan has usage limits, not the API's 272k repricing, so a GPT-6
     # conversation on Codex compacts at 500k; the direct API keeps its calibration.
     test "a GPT-6 conversation on openai_codex compacts at 500k" do
-      for model <- ~w(gpt-6-astra gpt-6.1-sol gpt-6.1-terra gpt-6-luna),
+      for model <- ~w(gpt-6-astra gpt-6.2-astra gpt-6.2-sol gpt-6.1-sol gpt-6.1-terra gpt-6-luna),
           threshold <- [0.85, 0.95, 1.0] do
         assert ModelCatalog.compact_at_tokens_for(:openai_codex, model, threshold) == 500_000
         assert ModelCatalog.context_budget_for(:openai_codex, model) == 500_000
@@ -109,9 +109,15 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       assert ModelCatalog.default_model_for(:xai) == "grok-4.7"
     end
 
-    test "GPT-6.1 Sol, GPT-6.1 Terra and GPT-6 Luna follow Astra on OpenAI, and GPT-6 Sol is gone" do
-      assert ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna" | _rest] =
-               Enum.map(ModelCatalog.models_for(:openai), & &1.id)
+    test "GPT-6.2 Astra, GPT-6.2 Sol, GPT-6.1 Sol, GPT-6.1 Terra and GPT-6 Luna follow Astra on OpenAI, and GPT-6 Sol is gone" do
+      assert [
+               "gpt-6-astra",
+               "gpt-6.2-astra",
+               "gpt-6.2-sol",
+               "gpt-6.1-sol",
+               "gpt-6.1-terra",
+               "gpt-6-luna" | _rest
+             ] = Enum.map(ModelCatalog.models_for(:openai), & &1.id)
 
       refute ModelCatalog.known_model?(:openai, "gpt-6-sol")
     end
@@ -187,6 +193,8 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       # 1,050,000 window: 0.85 * 320_000 = 272_000, exactly the input-token
       # boundary above which OpenAI reprices the full request at 2x/1.5x.
       assert ModelCatalog.context_window_for(:openai, "gpt-6-astra") == 320_000
+      assert ModelCatalog.context_window_for(:openai, "gpt-6.2-astra") == 320_000
+      assert ModelCatalog.context_window_for(:openai, "gpt-6.2-sol") == 320_000
       assert ModelCatalog.context_window_for(:openai, "gpt-6.1-sol") == 320_000
       assert ModelCatalog.context_window_for(:openai, "gpt-6.1-terra") == 320_000
       assert ModelCatalog.context_window_for(:openai, "gpt-6-luna") == 320_000
@@ -377,11 +385,15 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       assert ModelCatalog.model_effort_ceiling(:openai, "gpt-5.4") == :xhigh
       assert ModelCatalog.model_effort_ceiling(:openai, "gpt-5.4-mini") == :xhigh
       assert ModelCatalog.model_effort_ceiling(:openai, "gpt-6-astra") == nil
+      assert ModelCatalog.model_effort_ceiling(:openai, "gpt-6.2-astra") == nil
+      assert ModelCatalog.model_effort_ceiling(:openai, "gpt-6.2-sol") == nil
       assert ModelCatalog.model_effort_ceiling(:openai, "gpt-6.1-sol") == nil
       assert ModelCatalog.model_effort_ceiling(:openai, "gpt-6.1-terra") == nil
       assert ModelCatalog.model_effort_ceiling(:openai, "gpt-5.6-sol") == nil
       # OpenAI Codex serves the public API's models: their caps are openai's.
       assert ModelCatalog.model_effort_ceiling(:openai_codex, "gpt-5.5") == :xhigh
+      assert ModelCatalog.model_effort_ceiling(:openai_codex, "gpt-6.2-astra") == nil
+      assert ModelCatalog.model_effort_ceiling(:openai_codex, "gpt-6.2-sol") == nil
       assert ModelCatalog.model_effort_ceiling(:openai_codex, "gpt-6.1-sol") == nil
       assert ModelCatalog.model_effort_ceiling(:openai_codex, "gpt-6.1-terra") == nil
       # xhigh arrived with Grok 4.6: 4.6+ is uncapped, every older Grok tops
@@ -527,6 +539,8 @@ defmodule FermixCore.Providers.ModelCatalogTest do
                "anthropic/claude-opus-5.5",
                "anthropic/claude-opus-4.8",
                "openai/gpt-6-astra",
+               "openai/gpt-6.2-astra",
+               "openai/gpt-6.2-sol",
                "openai/gpt-6.1-sol",
                "openai/gpt-6.1-terra",
                "openai/gpt-6-luna",

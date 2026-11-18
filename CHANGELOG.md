@@ -6,6 +6,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **GPT-6.2 Astra and GPT-6.2 Sol are in the model lists.** OpenAI's two new
+  models follow GPT-6 Astra for an OpenAI API key and on OpenRouter; no
+  provider's default changes. A ChatGPT sign-in offers them whenever the
+  account does, and Fermix knows their context window there, so a
+  conversation on either compacts where the rest of the GPT-6 generation does.
+
 ### Fixed
 
 - **A request to a computer's browser just after the last one ended no longer

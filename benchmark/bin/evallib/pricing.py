@@ -67,16 +67,18 @@ All figures are published list prices in US dollars per MILLION tokens, standard
 Venice's was read 2026-09-19 and carries its own line below. The four models
 released 2026-09-22 (gpt-6-sol, gpt-6-luna, claude-opus-5-5, grok-4.7) were
 read from the same first-party pages that day, gpt-6.1-sol on its release
-day, 2026-09-29, and gpt-6.1-terra (with its OpenRouter twin) on its release
-day, 2026-10-26. The OpenRouter and Venice entries added with the catalog's
+day, 2026-09-29, gpt-6.1-terra (with its OpenRouter twin) on its release
+day, 2026-10-26, and gpt-6.2-astra and gpt-6.2-sol (with their OpenRouter
+twins) from their first-party model pages on their release day, 2026-11-17.
+The OpenRouter and Venice entries added with the catalog's
 2026-10-03 refresh were read from each one's public listing that day, and
 claude-haiku-5-5 from the first-party model page on 2026-10-10:
 
   OpenAI      https://developers.openai.com/api/docs/pricing (first-party;
               input / cached input / output for every slug). Cache WRITES are
               billed at 1.25x uncached input from GPT-5.6 onward — gpt-6-astra,
-              gpt-6.1-sol, gpt-6.1-terra, gpt-6-sol, gpt-6-luna, gpt-5.6-sol,
-              gpt-5.6-terra, gpt-5.6-luna.
+              gpt-6.2-astra, gpt-6.2-sol, gpt-6.1-sol, gpt-6.1-terra,
+              gpt-6-sol, gpt-6-luna, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna.
               Every older slug carded here predates that line and bills a
               written token as ordinary input; that is a read fact
               (`BILLS_AT_INPUT_RATE`), not a gap.
@@ -154,7 +156,7 @@ from typing import Protocol
 # onto a stored row. It is not an ordered sequence and the values in between
 # need not exist: `.1` never did, and renaming `.2` now would make a token that
 # is already on disk mean two different tables.
-CARD_VERSION = "2026-10-26.1"
+CARD_VERSION = "2026-11-17.1"
 
 
 class LlmSpanUsage(Protocol):
@@ -260,6 +262,11 @@ NOT_TOKEN_BILLED: frozenset[str] = frozenset({"ollama", "local"})
 # `BILLS_AT_INPUT_RATE` — a read fact, not an unresearched leg.
 _OPENAI_RATES: dict[str, Rate] = {
     "gpt-6-astra": Rate(10.00, 50.00, 1.00, 12.50),
+    # CHEAPER than GPT-6 Astra on every leg, cached read 0.05x input; do not
+    # price it by analogy to its predecessor.
+    "gpt-6.2-astra": Rate(8.00, 40.00, 0.40, 10.00),
+    # GPT-6.1 Sol's rate exactly, 0.10 cached read included.
+    "gpt-6.2-sol": Rate(2.00, 10.00, 0.10, 2.50),
     # Standard rates, and CHEAPER than their GPT-5.6 namesakes below on every
     # leg; do not price a GPT-6 tier by analogy to its predecessor.
     "gpt-6-sol": Rate(2.00, 10.00, 0.20, 2.50),
@@ -412,6 +419,8 @@ _OPENROUTER_RATES: dict[str, Rate] = {
     "anthropic/claude-opus-5.5": Rate(4.00, 20.00, 0.20, 5.00),
     "anthropic/claude-opus-4.8": Rate(5.00, 25.00, 0.50, 6.25),
     "openai/gpt-6-astra": Rate(10.00, 50.00, 1.00, 12.50),
+    "openai/gpt-6.2-astra": Rate(8.00, 40.00, 0.40, 10.00),
+    "openai/gpt-6.2-sol": Rate(2.00, 10.00, 0.10, 2.50),
     "openai/gpt-6.1-sol": Rate(2.00, 10.00, 0.10, 2.50),
     "openai/gpt-6.1-terra": Rate(1.00, 5.00, 0.05, 1.25),
     "openai/gpt-6-luna": Rate(0.10, 0.50, 0.01, 0.125),

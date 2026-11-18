@@ -413,8 +413,9 @@ def test_malformed_spans_raise_rather_than_being_skipped():
 # checked against first-party vendor pricing; the card carries the reason beside
 # the entry, and the assertion here is what makes the reason enforceable.
 
-_OPENAI_CACHE_WRITE_MODELS = ("gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol",
-                              "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
+_OPENAI_CACHE_WRITE_MODELS = ("gpt-6-astra", "gpt-6.2-astra", "gpt-6.2-sol", "gpt-6.1-sol",
+                              "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol",
+                              "gpt-5.6-terra", "gpt-5.6-luna")
 
 
 @pytest.mark.parametrize("model", _OPENAI_CACHE_WRITE_MODELS)
@@ -614,6 +615,22 @@ def test_gpt_6_1_terra_costs_half_gpt_6_1_sol_on_every_leg():
     for leg in ("input_per_mtok", "output_per_mtok", "cached_input_per_mtok",
                 "cache_write_per_mtok"):
         assert getattr(terra, leg) * 2 == pytest.approx(getattr(sol, leg)), leg
+
+
+def test_gpt_6_2_astra_undercuts_gpt_6_astra_and_gpt_6_2_sol_keeps_gpt_6_1_sol_rate():
+    # Read first-party 2026-11-17, their release day, standard tier: Astra
+    # 8.00/40.00 with a 0.40 cached read and a 10.00 write, below GPT-6 Astra on
+    # every leg; Sol 2.00/10.00/0.10/2.50, GPT-6.1 Sol's rate exactly.
+    # OpenRouter lists the same prices that day.
+    for route, prefix in (("openai", ""), ("openai_codex", ""), ("openrouter", "openai/")):
+        assert pricing.CARD[(route, f"{prefix}gpt-6.2-astra")] == \
+            pricing.Rate(8.00, 40.00, 0.40, 10.00), route
+        assert pricing.CARD[(route, f"{prefix}gpt-6.2-sol")] == \
+            pricing.Rate(2.00, 10.00, 0.10, 2.50), route
+    new, old = pricing.CARD[("openai", "gpt-6.2-astra")], pricing.CARD[("openai", "gpt-6-astra")]
+    for leg in ("input_per_mtok", "output_per_mtok", "cached_input_per_mtok",
+                "cache_write_per_mtok"):
+        assert getattr(new, leg) < getattr(old, leg), leg
 
 
 def test_fable_5_1_caches_at_a_tenth_of_its_siblings_read_rate():
