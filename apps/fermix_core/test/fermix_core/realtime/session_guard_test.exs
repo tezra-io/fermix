@@ -9,7 +9,9 @@ defmodule FermixCore.Realtime.SessionGuardTest do
   # Answers the one `SessionControl` verb a teardown sends, telling the test,
   # blocks in it while the test holds it closed, and then ends itself, as every
   # engine session does on `call_stop`. Given a lease, it takes the home's call
-  # in `init/1` as an engine session does.
+  # in `init/1` as an engine session does. `after_answer` opens the gap an
+  # engine closes at once, between answering its stop and exiting:
+  # `{:linger, ms}` exits that long after the answer, `:stay` runs on.
   defmodule StoppableSession do
     use GenServer
 
@@ -24,8 +26,12 @@ defmodule FermixCore.Realtime.SessionGuardTest do
       Process.monitor(observer)
 
       case take_lease(opts[:lease]) do
-        :ok -> {:ok, %{observer: observer, block?: opts[:block?] == true}}
-        {:error, reason} -> {:stop, reason}
+        :ok ->
+          {:ok,
+           %{observer: observer, block?: opts[:block?] == true, after_answer: opts[:after_answer]}}
+
+        {:error, reason} ->
+          {:stop, reason}
       end
     end
 
@@ -37,10 +43,24 @@ defmodule FermixCore.Realtime.SessionGuardTest do
     defp take_lease(lease), do: CallLease.acquire(lease, :desktop, "openai_realtime")
 
     @impl true
-    def handle_call(:call_stop, _from, state) do
+    def handle_call(:call_stop, from, state) do
       send(state.observer, {:call_stop, self()})
       if state.block?, do: wait_for_release(state.observer)
-      {:stop, :normal, :ok, state}
+      answer_stop(from, state)
+    end
+
+    defp answer_stop(_from, %{after_answer: nil} = state), do: {:stop, :normal, :ok, state}
+
+    defp answer_stop(from, %{after_answer: {:linger, ms}} = state) do
+      GenServer.reply(from, :ok)
+      # sleep: the gap between the answer and the exit, held open
+      Process.sleep(ms)
+      {:stop, :normal, state}
+    end
+
+    defp answer_stop(from, %{after_answer: :stay} = state) do
+      GenServer.reply(from, :ok)
+      {:noreply, state}
     end
 
     defp wait_for_release(observer) do
@@ -106,6 +126,28 @@ defmodule FermixCore.Realtime.SessionGuardTest do
 
   # A slow settle must never hold up the guard: it answers the next adapter
   # while a teardown is still waiting on its session.
+  test "a teardown returns once its session has exited, not when it answers" do
+    {:ok, session} = StoppableSession.start(self(), after_answer: {:linger, 50})
+
+    assert SessionGuard.teardown(session, SessionControl) == :ok
+    refute Process.alive?(session)
+  end
+
+  test "a session running on past the bound after its answer is logged and left to end" do
+    {:ok, session} = StoppableSession.start(self(), after_answer: :stay)
+
+    {result, log} =
+      ExUnit.CaptureLog.with_log(fn ->
+        SessionGuard.teardown(session, SessionControl, exit_within_ms: 0)
+      end)
+
+    assert result == :ok
+    assert log =~ "answered its stop and still ran 0 ms later"
+    assert Process.alive?(session)
+    {:monitors, monitors} = Process.info(self(), :monitors)
+    refute {:process, session} in monitors
+  end
+
   test "a teardown runs off the guard's own loop", %{guard: guard} do
     {:ok, slow} = StoppableSession.start(self(), block?: true)
     owner = own_session(guard, slow)

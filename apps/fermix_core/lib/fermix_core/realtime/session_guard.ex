@@ -13,8 +13,8 @@ defmodule FermixCore.Realtime.SessionGuard do
   it arrives. A session that outlived its adapter would keep a billed provider
   socket open with no one listening, and hold the home's one call
   (`CallLease`), refusing every later call. An adapter that ends its call
-  itself (`call_stop`) tears the session down and then releases it, so the
-  guard forgets it.
+  itself (`call_stop`) tears the session down, which returns once the session
+  has exited (`teardown/3`), and then releases it, so the guard forgets it.
 
   Nothing a session does runs on the guard's own loop, so a slow or failing
   engine can never hold up another adapter's teardown: a start runs in a task
@@ -45,6 +45,10 @@ defmodule FermixCore.Realtime.SessionGuard do
   # `init/1` (config, the call lease, its prompt) and opens no provider socket,
   # so a start that takes this long is stuck, not slow.
   @start_timeout_ms 15_000
+  # How long a teardown waits for a session that answered its stop to exit.
+  # An engine answers `call_stop` after its `terminate/2` has run, so its exit
+  # follows the answer at once; one that runs on past this is stuck.
+  @exit_within_ms 5_000
 
   @typedoc """
   Starts the adapter's session: the engine start, or a test's double. It must
@@ -108,18 +112,41 @@ defmodule FermixCore.Realtime.SessionGuard do
 
   @doc """
   Ends a session's call, which ends the session: the one teardown, shared by
-  the guard and by an adapter tearing down its own session. It may race a
-  session already dying on its own, so an exit from the call is logged, not
-  raised.
+  the guard and by an adapter tearing down its own session. It returns once
+  the session has exited, not when it answers its stop, so what the session
+  held (the home's call above all) is free when an adapter says the call
+  ended. A session answers its stop and then exits, so the wait is bounded
+  (`:exit_within_ms`, #{@exit_within_ms} ms by default): one still running
+  past it is logged and left to end on its own, holding the home's call until
+  it does. It may race a session already dying on its own, so an exit from
+  the call is logged, not raised.
   """
-  @spec teardown(pid(), module()) :: :ok
-  def teardown(session, session_module) when is_pid(session) and is_atom(session_module) do
-    if Process.alive?(session), do: session_module.call_stop(session)
-    :ok
+  @spec teardown(pid(), module(), keyword()) :: :ok
+  def teardown(session, session_module, opts \\ [])
+      when is_pid(session) and is_atom(session_module) and is_list(opts) do
+    ref = Process.monitor(session)
+    if Process.alive?(session), do: stop(session, session_module)
+    await_exit(session, ref, Keyword.get(opts, :exit_within_ms, @exit_within_ms))
+  end
+
+  defp stop(session, session_module) do
+    session_module.call_stop(session)
   catch
-    :exit, reason ->
-      Logger.debug("Realtime session teardown exited: #{inspect(reason)}")
-      :ok
+    :exit, reason -> Logger.debug("Realtime session teardown exited: #{inspect(reason)}")
+  end
+
+  defp await_exit(session, ref, within_ms) do
+    receive do
+      {:DOWN, ^ref, :process, ^session, _reason} -> :ok
+    after
+      within_ms ->
+        Process.demonitor(ref, [:flush])
+
+        Logger.warning(
+          "Realtime session #{inspect(session)} answered its stop and still ran " <>
+            "#{within_ms} ms later; it holds the home's call until it ends"
+        )
+    end
   end
 
   @impl true

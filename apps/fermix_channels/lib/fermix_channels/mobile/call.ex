@@ -54,7 +54,11 @@ defmodule FermixChannels.Mobile.Call do
   finish into the chat), and an unknown device or a primary that moved on
   (`{:call_end, reason}`). A primary that restarted holds no call, so a resume
   is answered `unknown_call` (`open/5`). Nothing about a call closes the
-  phone's session or its chat.
+  phone's session or its chat. A call's `call_close` goes out only once the
+  call holds nothing: its voice session has exited, so the home's call is
+  free (unless its stop ran past the client's deadline, the one case it is
+  left to end on its own), and the call has given up the device's name, so the
+  device's next `call_open`, however soon, starts a new call.
 
   ## The media path
 
@@ -328,6 +332,7 @@ defmodule FermixChannels.Mobile.Call do
 
     {:ok,
      %{
+       calls: Keyword.fetch!(opts, :calls),
        device_id: device_id,
        call_id: Keyword.fetch!(opts, :call_id),
        endpoint: endpoint,
@@ -452,6 +457,7 @@ defmodule FermixChannels.Mobile.Call do
   end
 
   defp refuse_open(session, call_id, reason, state) do
+    :ok = give_up_name(state)
     send_control(session, line_event(call_id, CallClient.error_frame(reason)))
     send_control(session, close_event(call_id, "ended"))
     {:stop, :normal, state}
@@ -1033,9 +1039,16 @@ defmodule FermixChannels.Mobile.Call do
   defp stop_session(state), do: state
 
   defp close(state, ending) do
+    :ok = give_up_name(state)
     _state = control(state, close_event(state.call_id, ending))
     {:stop, :normal, state}
   end
+
+  # A call gives up its device's name before it tells the device it closed,
+  # so a `call_open` sent on the close starts a new call instead of reaching
+  # this one on its way out. Its session has been stopped by then
+  # (`stop_session/1`).
+  defp give_up_name(state), do: Registry.unregister(state.calls, state.device_id)
 
   defp line_event(call_id, json) when is_binary(json),
     do: %{"t" => "call_line", "call_id" => call_id, "bytes" => json}

@@ -75,7 +75,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     def playback_progress(pid, playback_id, played_ms, drained?),
       do: tell_observer(pid, {:playback_progress, playback_id, played_ms, drained?})
 
-    def call_stop(pid), do: Agent.update(pid, &Map.put(&1, :stopped?, true))
+    def call_stop(pid), do: Agent.stop(pid)
 
     # A test that waits on what this double was told puts itself in the
     # session's state as `observer`.
@@ -97,7 +97,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     def interrupt(_pid, _audio_end_ms), do: :ok
     def mute(_pid, _enabled?), do: :ok
     def cancel_task(_pid, _delegation_id), do: :ok
-    def call_stop(pid), do: Agent.update(pid, &Map.put(&1, :stopped?, true))
+    def call_stop(pid), do: Agent.stop(pid)
   end
 
   # A session whose provider refused the handshake: `call_start` answers with
@@ -112,7 +112,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     def interrupt(_pid, _audio_end_ms), do: :ok
     def mute(_pid, _enabled?), do: :ok
     def cancel_task(_pid, _delegation_id), do: :ok
-    def call_stop(pid), do: Agent.update(pid, &Map.put(&1, :stopped?, true))
+    def call_stop(pid), do: Agent.stop(pid)
   end
 
   # The live ordering of a refused handshake: the session pushes its own rich
@@ -135,7 +135,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     def interrupt(_pid, _audio_end_ms), do: :ok
     def mute(_pid, _enabled?), do: :ok
     def cancel_task(_pid, _delegation_id), do: :ok
-    def call_stop(pid), do: Agent.update(pid, &Map.put(&1, :stopped?, true))
+    def call_stop(pid), do: Agent.stop(pid)
   end
 
   # The same race with a non-terminal frame queued: it still has to reach the
@@ -154,7 +154,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     def interrupt(_pid, _audio_end_ms), do: :ok
     def mute(_pid, _enabled?), do: :ok
     def cancel_task(_pid, _delegation_id), do: :ok
-    def call_stop(pid), do: Agent.update(pid, &Map.put(&1, :stopped?, true))
+    def call_stop(pid), do: Agent.stop(pid)
   end
 
   # The handler snapshots `Config.current()` per connection, so the engine is
@@ -623,9 +623,10 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
 
     assert_receive {:session_started, session, _opts}
     assert {:ok, _line} = recv_line(conn)
+    session_ref = Process.monitor(session)
 
     :ok = :gen_tcp.send(conn, ~s({"type":"call_stop"}\n))
-    wait_until(fn -> Agent.get(session, &Map.get(&1, :stopped?)) == true end)
+    assert_receive {:DOWN, ^session_ref, :process, ^session, :normal}
     assert {:ok, line} = recv_line(conn)
     assert %{"type" => "state", "state" => "idle"} = Jason.decode!(String.trim(line))
 
@@ -639,9 +640,10 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
 
     assert_receive {:session_started, session, _opts}
     assert {:ok, _line} = recv_line(conn)
+    session_ref = Process.monitor(session)
 
     :gen_tcp.close(conn)
-    wait_until(fn -> Agent.get(session, &Map.get(&1, :stopped?)) == true end)
+    assert_receive {:DOWN, ^session_ref, :process, ^session, :normal}
   end
 
   test "refuses to start when a live socket already owns the path", %{
@@ -889,6 +891,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     # Listening frame → the handler is past bind and looping.
     assert {:ok, _line} = recv_line(conn)
     wait_until(fn -> LocalVoiceSocket.active_clients(socket) == {:ok, 1} end)
+    session_ref = Process.monitor(session)
 
     # The root-cause scenario: the reader handler dies mid-call.
     Process.exit(handler, :kill)
@@ -901,7 +904,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     # The listener's monitor decrements the count AND tears down the session that
     # was still bound to the dead handler.
     wait_until(fn -> LocalVoiceSocket.active_clients(socket) == {:ok, 0} end)
-    wait_until(fn -> Agent.get(session, &Map.get(&1, :stopped?)) == true end)
+    assert_receive {:DOWN, ^session_ref, :process, ^session, :normal}
   end
 
   test "a v1 companion on a Live-configured daemon is refused before any session starts", %{
@@ -985,6 +988,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
 
     assert_receive {:session_started, session, _opts}
     assert {:ok, _line} = recv_line(conn)
+    :ok = observe(session)
 
     :ok = :gen_tcp.send(conn, ~s({"type":"task_cancel","delegation_id":"dg_1"}\n))
 
@@ -995,7 +999,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
 
     assert {:error, :closed} = :gen_tcp.recv(conn, 0, 1_000)
     # The Realtime session never sees a cancel it has no vocabulary for.
-    assert Agent.get(session, &Map.get(&1, :cancelled_task)) == nil
+    refute_received {:cancelled_task, "dg_1"}
   end
 
   test "task_cancel reaches the session under the live engine", %{socket_path: socket_path} do

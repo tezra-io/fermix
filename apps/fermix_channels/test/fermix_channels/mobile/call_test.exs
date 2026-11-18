@@ -30,7 +30,8 @@ defmodule FermixChannels.Mobile.CallTest do
 
   # A voice session in place of an engine's: it takes the home's call in
   # `init/1` as every engine does, tells the test each verb, and pushes to its
-  # companion whatever the test hands it (`{:push, frame}`).
+  # companion whatever the test hands it (`{:push, frame}`). `linger_ms` opens
+  # the gap an engine closes at once, between answering its stop and exiting.
   defmodule Voice do
     use GenServer
 
@@ -48,12 +49,16 @@ defmodule FermixChannels.Mobile.CallTest do
     def call_stop(pid), do: GenServer.call(pid, :call_stop)
 
     @impl true
-    def init(%{observer: observer, opts: opts, lease: lease, engine: engine}) do
+    def init(%{observer: observer, opts: opts, lease: lease, engine: engine} = spec) do
       Process.monitor(observer)
 
       case CallLease.acquire(lease, Keyword.fetch!(opts, :endpoint), engine) do
-        :ok -> {:ok, %{observer: observer, companion: Keyword.fetch!(opts, :companion)}}
-        {:error, reason} -> {:stop, reason}
+        :ok ->
+          companion = Keyword.fetch!(opts, :companion)
+          {:ok, %{observer: observer, companion: companion, linger_ms: spec[:linger_ms]}}
+
+        {:error, reason} ->
+          {:stop, reason}
       end
     end
 
@@ -61,6 +66,14 @@ defmodule FermixChannels.Mobile.CallTest do
     def handle_call(:call_start, _from, state) do
       send(state.companion, {:realtime, %{type: "state", state: "listening"}})
       {:reply, :ok, state}
+    end
+
+    def handle_call(:call_stop, from, %{linger_ms: ms} = state) when is_integer(ms) do
+      send(state.observer, {:voice, self(), :call_stop})
+      GenServer.reply(from, :ok)
+      # sleep: the gap between the answer and the exit, held open
+      Process.sleep(ms)
+      {:stop, {:shutdown, :call_stop}, state}
     end
 
     def handle_call(:call_stop, _from, state) do
@@ -448,6 +461,37 @@ defmodule FermixChannels.Mobile.CallTest do
       call_opts = [calls: ctx.calls, call_supervisor: ctx.call_supervisor, call_options: opts]
       assert Call.open({:phone, @phone_id}, relay, @call, false, call_opts) == :ok
       assert_receive {:from_call, :control, %{"t" => "call_attached", "resumed" => false}}
+      :ok = :sys.resume(partition)
+    end
+
+    # The registry forgets an exited call a moment later, and an engine exits a
+    # moment after it answers its stop. Both moments are held open here (the
+    # registry's partition kept from reading the exit, the session lingering),
+    # so a close sent before the call gave up its name, or at the session's
+    # answer, is seen.
+    test "a hang-up's close comes once the call holds nothing: the next call_open opens",
+         ctx do
+      %{voice: voice, relay: relay} = call_alone!(ctx, "openai_live", voice_linger_ms: 50)
+      partition = Module.concat(ctx.calls, "PIDPartition0")
+      :ok = :sys.suspend(partition)
+
+      assert Call.deliver(@phone_id, relay, "call_close", %{"call_id" => @call}, <<>>,
+               calls: ctx.calls
+             ) == :ok
+
+      assert_receive {:voice, ^voice, :call_stop}
+      assert %{"t" => "call_close", "reason" => "ended"} = List.last(controls_until_close())
+      refute Process.alive?(voice)
+      assert CallLease.holder(ctx.lease) == :none
+      assert Registry.lookup(ctx.calls, @phone_id) == []
+
+      opts = call_options(ctx, [])
+      call_opts = [calls: ctx.calls, call_supervisor: ctx.call_supervisor, call_options: opts]
+      assert Call.open({:phone, @phone_id}, relay, "c-2", false, call_opts) == :ok
+
+      assert_receive {:from_call, :control,
+                      %{"t" => "call_attached", "call_id" => "c-2", "resumed" => false}}
+
       :ok = :sys.resume(partition)
     end
 
@@ -1383,9 +1427,16 @@ defmodule FermixChannels.Mobile.CallTest do
     test = self()
     lease = ctx.lease
     engine = ctx.engine
+    {linger_ms, overrides} = Keyword.pop(overrides, :voice_linger_ms)
 
     starter = fn session_opts ->
-      spec = %{observer: test, opts: session_opts, lease: lease, engine: engine}
+      spec = %{
+        observer: test,
+        opts: session_opts,
+        lease: lease,
+        engine: engine,
+        linger_ms: linger_ms
+      }
 
       with {:ok, voice} <- GenServer.start(Voice, spec) do
         send(test, {:voice_started, voice, session_opts})
