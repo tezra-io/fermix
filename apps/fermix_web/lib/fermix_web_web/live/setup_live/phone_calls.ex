@@ -39,6 +39,9 @@ defmodule FermixWebWeb.SetupLive.PhoneCalls do
 
   @section "phone_calls"
   @switch "phone_calls_enabled"
+  # The recent calls drawn: a short list, newest first (`phone_calls.list`
+  # answers more; a client draws what it needs).
+  @recent_max 5
   # While a call holds the slot the section reads its state again this often,
   # as the Phone card reads a pairing (`SetupLive.Phone`); otherwise it waits.
   @poll_ms 2_000
@@ -258,8 +261,8 @@ defmodule FermixWebWeb.SetupLive.PhoneCalls do
         switch: switch,
         on?: switch["value"] == true,
         status: state.status,
-        engine: row(state.rows, "phone_calls_engine"),
-        summary: row(state.rows, "phone_calls_status")
+        summary: row(state.rows, "phone_calls_status"),
+        recent: Enum.take(state.calls, @recent_max)
       )
 
     ~H"""
@@ -294,15 +297,10 @@ defmodule FermixWebWeb.SetupLive.PhoneCalls do
       >
         {@phone_calls.unreadable}
       </p>
-      <p class="text-sm">
-        <span class="text-base-content/70">{@engine["label"]}</span>
-        <span id="phone-calls-engine" class="ml-2 font-medium">{@engine["value"]}</span>
-      </p>
-
       <.settings_form rows={@phone_calls.rows} />
       <.current_call :if={@status && @status["call"]} call={@status["call"]} />
       <.recovery :for={call <- @phone_calls.recovery} call={call} />
-      <.recent :if={@phone_calls.calls != []} calls={@phone_calls.calls} />
+      <.recent :if={@recent != []} calls={@recent} />
     </section>
     """
   end
@@ -336,7 +334,9 @@ defmodule FermixWebWeb.SetupLive.PhoneCalls do
             {option["label"]}
           </option>
         </select>
-        <span class="label pt-1 text-xs text-base-content/60">{@voice["footer"]}</span>
+        <span :if={@voice["footer"]} class="label pt-1 text-xs text-base-content/60">
+          {@voice["footer"]}
+        </span>
       </label>
       <.text_field row={@number} name="phone_calls[caller_number]" />
       <.text_field row={@username} name="phone_calls[sip_username]" />
@@ -363,7 +363,9 @@ defmodule FermixWebWeb.SetupLive.PhoneCalls do
         placeholder={@row["example"]}
         class="input input-bordered w-full bg-base-100"
       />
-      <span class="label pt-1 text-xs text-base-content/60">{@row["footer"]}</span>
+      <span :if={@row["footer"]} class="label pt-1 text-xs text-base-content/60">
+        {@row["footer"]}
+      </span>
     </label>
     """
   end
@@ -382,7 +384,9 @@ defmodule FermixWebWeb.SetupLive.PhoneCalls do
         placeholder={if @row["present"], do: "stored - leave blank to keep", else: "paste secret"}
         class="input input-bordered w-full bg-base-100 font-mono"
       />
-      <span class="label pt-1 text-xs text-base-content/60">{@row["footer"]}</span>
+      <span :if={@row["footer"]} class="label pt-1 text-xs text-base-content/60">
+        {@row["footer"]}
+      </span>
     </label>
     """
   end
@@ -394,7 +398,6 @@ defmodule FermixWebWeb.SetupLive.PhoneCalls do
     <div id="phone-calls-call" class="rounded-box bg-base-200 p-4 text-sm space-y-2">
       <p class="font-medium">{@call["contact_name"]}</p>
       <p id="phone-calls-call-sentence">{@call["sentence"]}</p>
-      <p class="text-base-content/70">{@call["usage"]["voice"]}</p>
       <form
         :if={not @call["uncertain"] and @call["state"] != "stopping"}
         id="phone-calls-stop"
@@ -418,15 +421,12 @@ defmodule FermixWebWeb.SetupLive.PhoneCalls do
       <p class="font-medium">{@call["sentence"]}</p>
       <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
         <dt class="text-base-content/70">Attempted</dt>
-        <dd>{@call["attempted_at"]}</dd>
+        <dd>{at(@call["attempted_at"])}</dd>
         <dt class="text-base-content/70">Called</dt>
         <dd>{@call["contact_name"]} {@call["destination"]}</dd>
-        <dt :if={@call["provider_session_id"]} class="text-base-content/70">OpenAI session</dt>
-        <dd :if={@call["provider_session_id"]} class="font-mono">{@call["provider_session_id"]}</dd>
-        <dt :if={@call["carrier_call_id"]} class="text-base-content/70">Telnyx call</dt>
-        <dd :if={@call["carrier_call_id"]} class="font-mono">{@call["carrier_call_id"]}</dd>
+        <dt :if={@call["slot_release_at"]} class="text-base-content/70">Slot frees by</dt>
+        <dd :if={@call["slot_release_at"]}>{at(@call["slot_release_at"])}</dd>
       </dl>
-      <p>{@call["release"]}</p>
       <ul class="list-disc pl-5 space-y-1">
         <li :for={step <- @call["containment"]}>{step}</li>
       </ul>
@@ -442,24 +442,26 @@ defmodule FermixWebWeb.SetupLive.PhoneCalls do
 
   defp recent(assigns) do
     ~H"""
-    <div id="phone-calls-recent" class="space-y-3 text-sm">
+    <div id="phone-calls-recent" class="space-y-1 text-sm">
       <h4 class="font-medium">Recent calls</h4>
-      <div :for={call <- @calls} id={"phone-calls-recent-#{call["call_id"]}"} class="space-y-1">
-        <p>
-          <span class="font-medium">{call["contact_name"]}</span>
-          <span class="text-base-content/70">{call["created_at"]}</span>
-        </p>
-        <p>{call["sentence"]} {call["outcome_sentence"]}</p>
-        <p :if={call["why_stopped"]} id={"phone-calls-recent-why-#{call["call_id"]}"}>
-          {call["why_stopped"]}
-        </p>
-        <p class="text-base-content/70">
-          {call["usage"]["voice"]} {call["usage"]["carrier"]} {call["usage"]["backend"]}
-        </p>
-      </div>
+      <p :for={call <- @calls} id={"phone-calls-recent-#{call["call_id"]}"}>
+        <span class="font-medium">{call["contact_name"]}</span>
+        <span class="text-base-content/70">{at(call["created_at"])}</span>
+        <span>{call["label"]}</span>
+      </p>
     </div>
     """
   end
 
   defp row(rows, key), do: Enum.find(rows, &(&1["key"] == key))
+
+  # A time the daemon publishes, to the minute: how it reads, not what it says.
+  defp at(iso) when is_binary(iso) do
+    case DateTime.from_iso8601(iso) do
+      {:ok, at, _offset} -> Calendar.strftime(at, "%Y-%m-%d %H:%M UTC")
+      {:error, _reason} -> iso
+    end
+  end
+
+  defp at(nil), do: nil
 end

@@ -2652,7 +2652,8 @@ references, and there is no master Voice switch. Its rows, in order:
 `phone_calls_enabled` (the switch), `phone_calls_status` (read-only: the
 summary's `label` as its value and `sentence` as its footer),
 `phone_calls_engine` (read-only: the engine that calls, a fact of this build
-and not a picker), `phone_calls_voice` (the engine's voices),
+and not a picker; a surface may leave it undrawn while it has one possible
+value), `phone_calls_voice` (the engine's voices),
 `phone_calls_caller_number` (the owner's Telnyx number, E.164),
 `phone_calls_sip_username` (the Telnyx connection's username),
 `phone_calls_sip_password` (a secret: `secret.set` id
@@ -2661,8 +2662,11 @@ provider's own key, never a second credential, shown whichever engine Talk to
 Fermix uses). The trunk address, the model, the limits and the retention are
 constants of the engine and no rows. No phone row asks for a restart; the
 OpenAI key's row carries the provider section's rule, because its write is the
-provider's. A value the section refuses is `invalid_params` on the row's key
-with the owner's sentence, and nothing is written.
+provider's. A row's footer is there only where the owner would make a
+mistake without it, and null otherwise (the voice, the connection password,
+whose one line the username's footer gives the pair). A value the section
+refuses is `invalid_params` on the row's key with the owner's sentence, and
+nothing is written.
 
 **The off switch.** `settings.apply` of `phone_calls_enabled` is one operation:
 the section is written first, and only once that write has landed does the
@@ -2683,10 +2687,7 @@ and `secret.clear` of `openai_api_key` or `phone_calls_sip_password` answer
 `unavailable` {`capability`: `phone_calls`, `sentence`} and change nothing:
 the call reads both, and its hang-up reads the key. So does
 `lifecycle.prepare_restart`, the owner's restart, which would hang the call
-up with no outcome read. The switch's footer says what the owner accepts by
-turning phone calls on: a call Fermix loses hold of can run to OpenAI's own
-limit, bounded by a daily spend limit on the connection if the owner set one
-as the setup asks, and what is kept of a call and for how long. A trunk password longer
+up with no outcome read. A trunk password longer
 than 4096 bytes, or with a line break or NUL in it, is `invalid_params` on
 `value`.
 
@@ -2724,7 +2725,8 @@ refused, or `unknown`: OpenAI never said), `contact_name`,
 `destination_kind` (`owner` or `business`), `outcome` and its sentence
 (null for a call never placed, which the state's sentence already says),
 `uncertain` (the remote call is not proven gone: `dispatch_unknown`,
-`closure_unconfirmed`), `holds_slot`, the state's `sentence`, `slot` (for a
+`closure_unconfirmed`), `holds_slot`, the state's `sentence`, `label` (how it
+went in a few words, for a list that draws one line a call; optional), `slot` (for a
 call whose termination is unconfirmed, how it holds the slot and how that
 ends, else null), `usage` (the voice time and how sure it is, the carrier's
 charges, which only Telnyx knows, and the backend turns and the tokens they reported (`backend_tokens`, null

@@ -628,6 +628,39 @@ defmodule FermixCore.PhoneCalls.ReportTest do
     end
   end
 
+  # How a call went in a few words, for a list that shows one line a call.
+  describe "a call's label" do
+    test "is the outcome's own word where it has one, else what happened" do
+      for {overrides, label} <- [
+            {%{status: "active", outcome: "pending", ended_at: nil}, "In progress"},
+            {%{status: "active", outcome: "pending", cancel_requested_at: @t0}, "Stopping"},
+            {%{outcome: "confirmed"}, "Confirmed"},
+            {%{outcome: "unavailable"}, "Not available"},
+            {%{outcome: "options"}, "Options offered"},
+            {%{outcome: "needs_owner"}, "Needs a decision"},
+            {%{status: "closure_unconfirmed", outcome: "confirmed"}, "Confirmed"},
+            {%{status: "closure_unconfirmed"}, "Termination unconfirmed"},
+            {%{status: "dispatch_unknown"}, "Placement unknown"},
+            {%{status: "failed", dispatch_claimed_at: nil}, "Not dialed"},
+            {%{failure_reason: "no_answer"}, "Nobody answered"},
+            {%{outcome_facts: %{"reason" => "voicemail"}}, "Voicemail"},
+            {%{outcome_facts: %{"reason" => "extraction_refused"}}, "Result not read"},
+            {%{status: "failed", failure_reason: "call_failed"}, "Failed"},
+            {%{}, "Outcome unknown"}
+          ] do
+        assert Report.view(row(overrides)).label == label, inspect(overrides)
+      end
+    end
+
+    test "the reason's codes, its detail never" do
+      assert Report.reason_codes("sideband_lost; hangup timeout after 5000 ms") ==
+               ["sideband_lost", "hangup"]
+
+      assert Report.reason_codes("create_rejected: HTTP 400") == ["create_rejected"]
+      assert Report.reason_codes(nil) == []
+    end
+  end
+
   describe "the backend's work" do
     test "is its turns and the tokens they reported, never a cost" do
       said = fn usage, turns ->

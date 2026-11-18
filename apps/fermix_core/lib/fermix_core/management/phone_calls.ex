@@ -310,6 +310,7 @@ defmodule FermixCore.Management.PhoneCalls do
       "uncertain" => view.uncertain?,
       "holds_slot" => view.holds_slot?,
       "sentence" => view.headline,
+      "label" => view.label,
       "slot" => view.slot,
       "usage" => usage_view(view.usage),
       "why_stopped" => view.why_stopped,

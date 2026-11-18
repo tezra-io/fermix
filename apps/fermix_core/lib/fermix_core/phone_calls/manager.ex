@@ -853,6 +853,7 @@ defmodule FermixCore.PhoneCalls.Manager do
   # the slot.
   defp post_terminal(row, state) do
     Telemetry.run_end(row)
+    log_call_end(row)
 
     opts = [
       repo: state.repo,
@@ -867,6 +868,25 @@ defmodule FermixCore.PhoneCalls.Manager do
       {:ok, _pid} -> refresh_slot_fact(state)
       {:error, reason} -> row |> log_handoff_unstarted(reason, state) |> refresh_slot_fact()
     end
+  end
+
+  # The one line the general log keeps of a call's end, from the row this
+  # Manager just wrote: its id, status, outcome and, in the daemon's own code
+  # words, why it stopped (`Report.reason_codes/1`, never the detail beside a
+  # code), its voice seconds and backend turns. Never a name, a number, the
+  # brief, anything said on the call, OpenAI's own words or a credential.
+  defp log_call_end(row) do
+    reason =
+      case Report.reason_codes(Map.get(row, :failure_reason)) do
+        [] -> "none"
+        codes -> Enum.join(codes, ",")
+      end
+
+    Logger.info(
+      "phone call #{row.id} ended: status=#{row.status} outcome=#{row.outcome} " <>
+        "reason=#{reason} voice_seconds=#{Map.get(row, :voice_seconds) || "unknown"} " <>
+        "backend_turns=#{Map.get(row, :core_turns) || 0}"
+    )
   end
 
   defp log_handoff_unstarted(row, reason, state) do

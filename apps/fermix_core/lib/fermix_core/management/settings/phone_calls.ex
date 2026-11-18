@@ -35,7 +35,6 @@ defmodule FermixCore.Management.Settings.PhoneCalls do
   alias FermixCore.Management.Settings.Row
   alias FermixCore.Management.Settings.Source
   alias FermixCore.PhoneCalls.Config
-  alias FermixCore.PhoneCalls.Limits
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Wizard
 
@@ -70,19 +69,19 @@ defmodule FermixCore.Management.Settings.PhoneCalls do
   @voice_sentence "Choose one of the voices listed."
   @switch_sentence "This switch is on or off."
 
-  # What the owner accepts by turning phone calls on (M94 §12): how long a call
-  # can run if Fermix loses hold of it, and what is kept of it and for how long.
-  defp enabled_footer do
-    hours = div(Limits.provider_connected_limit_ms(), 3_600_000)
-
-    "Lets Fermix call a business or your own phone when you ask, from your Telnyx number. " <>
-      "If Fermix loses hold of a call, it can run until OpenAI's own limit of #{hours} " <>
-      "hours; a daily spend limit on your Telnyx connection, if you set one as the setup " <>
-      "asks, bounds what it costs. Fermix " <>
-      "keeps a call's outcome and brief for #{Limits.outcome_retention_days()} days and short " <>
-      "excerpts of what was said for #{Limits.excerpt_retention_days()} days, records no " <>
-      "audio, and a report sent to a chat stays in that chat."
-  end
+  # Each row says only what the owner would get wrong or miss without it
+  # (M94 §12): a constant says at most one line, and nothing is said twice.
+  # What a call can run to and what is kept of it are Fermix's to tell when
+  # asked (the self-knowledge reference), not lines under the switch.
+  @enabled_footer "Lets Fermix place calls from your Telnyx number when you ask."
+  @engine_footer "Talk to Fermix keeps its own model."
+  # The number you dial from, not your own phone's.
+  @caller_number_footer "The number you bought from Telnyx."
+  # One line for the pair, under the first: both are the connection's, never
+  # the Telnyx login.
+  @connection_footer "Both come from your Telnyx credential connection, not your Telnyx login."
+  # A second row for the provider's own secret: a change here is a change there.
+  @openai_key_footer "The OpenAI provider's own key: changing it here changes it there."
 
   @doc "The one section this module owns."
   @spec sections() :: [%{id: String.t(), pane: String.t(), title: String.t()}]
@@ -106,15 +105,13 @@ defmodule FermixCore.Management.Settings.PhoneCalls do
 
     [
       Row.new("phone_calls_enabled", :toggle, "Phone calls",
-        footer: enabled_footer(),
+        footer: @enabled_footer,
         value: config.enabled,
         restart: restart
       ),
       status_row(config, Keyword.get(opts, :phone_calls, []), restart),
       Row.new("phone_calls_engine", :text, "Calls with",
-        footer:
-          "GPT-Live speaks on every call, through your Telnyx connection. Talk to " <>
-            "Fermix keeps its own model.",
+        footer: @engine_footer,
         value: PhoneCallFacts.engine_label(),
         read_only: true,
         restart: restart
@@ -125,33 +122,27 @@ defmodule FermixCore.Management.Settings.PhoneCalls do
   defp setup_rows(config, snapshot, restart) do
     [
       Row.new("phone_calls_voice", :choice, "Voice",
-        footer: "The voice the people Fermix calls hear.",
         value: config.voice,
         options: Enum.map(Config.voices(), &Row.option(&1, String.capitalize(&1))),
         restart: restart
       ),
       Row.new("phone_calls_caller_number", :text, "Caller number",
-        footer: "The number you bought from Telnyx. Calls come from it.",
+        footer: @caller_number_footer,
         example: @example_number,
         value: config.caller_number || "",
         restart: restart
       ),
       Row.new("phone_calls_sip_username", :text, "Connection username",
-        footer: "Telnyx makes it for your credential connection. It is not your Telnyx login.",
+        footer: @connection_footer,
         value: config.sip_username || "",
         restart: restart
       ),
       Row.new("phone_calls_sip_password", :secret, "Connection password",
-        footer:
-          "Telnyx makes it with the username. Fermix hands it to OpenAI only to place " <>
-            "your calls through Telnyx.",
         present: Source.secret_present?(snapshot, :phone_calls_sip_password),
         restart: restart
       ),
       Row.new("openai_api_key", :secret, "OpenAI key",
-        footer:
-          "The same key the OpenAI provider uses. Phone calls need it even when Talk to " <>
-            "Fermix uses Grok.",
+        footer: @openai_key_footer,
         present: Source.secret_present?(snapshot, :openai_api_key),
         restart: Row.restart?(:providers)
       )

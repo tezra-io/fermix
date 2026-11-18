@@ -167,21 +167,32 @@ defmodule FermixCore.Management.PhoneCallsTest do
       assert row(rows, "phone_calls_sip_password")["present"] == false
     end
 
-    # The two things the owner accepts by turning phone calls on (M94 §12),
-    # said where they turn them on.
-    test "the switch says how long a lost call can run and what is kept of a call", ctx do
+    # Read at a glance: a text stays only where the owner would make a
+    # mistake or miss something to act on without it; a constant says at
+    # most one line; nothing is said twice.
+    test "each row says only what prevents a mistake", ctx do
       seed!(ctx, [])
-      footer = row(rows(ctx), "phone_calls_enabled")["footer"]
+      footers = Map.new(rows(ctx), &{&1["key"], &1["footer"]})
 
-      assert footer =~
-               "If Fermix loses hold of a call, it can run until OpenAI's own limit of 2 " <>
-                 "hours; a daily spend limit on your Telnyx connection, if you set one as the " <>
-                 "setup asks, bounds what it costs."
+      assert footers["phone_calls_enabled"] ==
+               "Lets Fermix place calls from your Telnyx number when you ask."
 
-      assert footer =~
-               "Fermix keeps a call's outcome and brief for 90 days and short excerpts of what " <>
-                 "was said for 7 days, records no audio, and a report sent to a chat stays in " <>
-                 "that chat."
+      assert footers["phone_calls_engine"] == "Talk to Fermix keeps its own model."
+      assert footers["phone_calls_voice"] == nil
+      assert footers["phone_calls_caller_number"] == "The number you bought from Telnyx."
+
+      assert footers["phone_calls_sip_username"] ==
+               "Both come from your Telnyx credential connection, not your Telnyx login."
+
+      assert footers["phone_calls_sip_password"] == nil
+
+      assert footers["openai_api_key"] ==
+               "The OpenAI provider's own key: changing it here changes it there."
+
+      for {key, footer} <- footers, is_binary(footer) do
+        refute footer =~ "\n", key
+        assert length(String.split(footer, ". ")) == 1, key
+      end
     end
 
     test "a home that never set phone calls up reads Disabled, and its fields are empty", ctx do
@@ -528,6 +539,37 @@ defmodule FermixCore.Management.PhoneCallsTest do
   end
 
   describe "the stop" do
+    # What left the setup page goes to the general log: one info line when a
+    # call ends, in the daemon's own code words, never a name, a number, the
+    # brief, anything said on the call or a credential.
+    test "a call's end is one log line of codes, with no name or number", ctx do
+      seed_ready!(ctx)
+      manager = start_manager(ctx)
+      call = start_call!(manager)
+      previous = Logger.level()
+      Logger.configure(level: :info)
+      on_exit(fn -> Logger.configure(level: previous) end)
+
+      log =
+        ExUnit.CaptureLog.capture_log([level: :info], fn ->
+          assert {:ok, %{"stop" => "cancelled"}} =
+                   route(ctx, "phone_calls.stop", %{"call_id" => call.id}, manager)
+
+          _settled = :sys.get_state(manager.pid)
+        end)
+
+      lines = log |> String.split("\n") |> Enum.filter(&(&1 =~ "phone call #{call.id} ended:"))
+
+      assert [line] = lines
+
+      assert line =~
+               "phone call #{call.id} ended: status=failed outcome=unknown " <>
+                 "reason=cancelled_by_owner voice_seconds=0 backend_turns=0"
+
+      for private <- [@destination, "Calloway Bistro", "table for two", @caller, @openai_key],
+          do: refute(log =~ private, private)
+    end
+
     test "is the owner's, through the call manager's cancel", ctx do
       seed_ready!(ctx)
       manager = start_manager(ctx)

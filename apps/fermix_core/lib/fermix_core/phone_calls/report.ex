@@ -175,6 +175,13 @@ defmodule FermixCore.PhoneCalls.Report do
     "unknown" => "Fermix could not tell what was agreed, if anything."
   }
   @unreached "Nobody was reached, so nothing was agreed."
+  # The outcome's own word, short, for a one-line list (`label`).
+  @outcome_labels %{
+    "confirmed" => "Confirmed",
+    "unavailable" => "Not available",
+    "options" => "Options offered",
+    "needs_owner" => "Needs a decision"
+  }
 
   @progress %{
     "admitted" => "The call is about to be placed.",
@@ -315,6 +322,7 @@ defmodule FermixCore.PhoneCalls.Report do
       destination: mandate(row, "destination"),
       destination_kind: mandate(row, "destination_kind"),
       headline: headline(row, placed),
+      label: label(row, outcome, placed, code, outcome_facts),
       outcome: outcome,
       outcome_sentence: outcome_sentence(outcome, placed, unreached?(code, outcome_facts)),
       outcome_reason: outcome_reason(outcome_facts, why_stopped),
@@ -353,6 +361,21 @@ defmodule FermixCore.PhoneCalls.Report do
       not_checked: @not_checked,
       basis: %{"verified" => @basis.verified, "read" => @basis.read}
     }
+
+  @doc """
+  The codes a failure reason holds, each part's leading word and never its
+  detail: `"sideband_lost; hangup timeout after 5000 ms"` is
+  `["sideband_lost", "hangup"]`. What a log may carry of why a call stopped.
+  """
+  @spec reason_codes(String.t() | nil) :: [String.t()]
+  def reason_codes(reason) when is_binary(reason) do
+    reason
+    |> String.split(";")
+    |> Enum.flat_map(&Regex.run(~r/^\s*([a-z][a-z_]*)/, &1, capture: :all_but_first))
+    |> List.flatten()
+  end
+
+  def reason_codes(_none), do: []
 
   @doc "Every failure word `reason_sentence/1` has its own sentence for."
   @spec reasons() :: [String.t(), ...]
@@ -418,7 +441,20 @@ defmodule FermixCore.PhoneCalls.Report do
       Map.values(@notes) ++
       Map.values(@outcome_reasons) ++
       Map.values(@matched) ++
-      [@outcome_reason_other, @note_other, "It matches alternative 1 in the brief."]
+      [@outcome_reason_other, @note_other, "It matches alternative 1 in the brief."] ++
+      Map.values(@outcome_labels) ++
+      ~w(Stopping) ++
+      [
+        "In progress",
+        "Placement unknown",
+        "Not dialed",
+        "Nobody answered",
+        "Voicemail",
+        "Result not read",
+        "Termination unconfirmed",
+        "Failed",
+        "Outcome unknown"
+      ]
   end
 
   # A call is placed once OpenAI took the create; never placed when nothing
@@ -439,6 +475,35 @@ defmodule FermixCore.PhoneCalls.Report do
       do: "stopping",
       else: status
   end
+
+  # How a call went, in a few words for a one-line list: the outcome's own
+  # word where it has one, else what happened to the call.
+  defp label(row, outcome, placed, code, facts) do
+    cond do
+      not Ledger.terminal?(row.status) -> progress_label(row)
+      Map.has_key?(@outcome_labels, outcome) -> Map.fetch!(@outcome_labels, outcome)
+      true -> unknown_label(row.status, placed, code, Map.get(facts, "reason"))
+    end
+  end
+
+  defp progress_label(row),
+    do: if(Map.get(row, :cancel_requested_at), do: "Stopping", else: "In progress")
+
+  defp unknown_label("dispatch_unknown", _placed, _code, _reason), do: "Placement unknown"
+  defp unknown_label(_status, :no, _code, _reason), do: "Not dialed"
+  defp unknown_label(_status, _placed, "no_answer", _reason), do: "Nobody answered"
+  defp unknown_label(_status, _placed, _code, "not_answered"), do: "Nobody answered"
+  defp unknown_label(_status, _placed, _code, "voicemail"), do: "Voicemail"
+
+  defp unknown_label(status, placed, code, reason) when is_binary(reason) do
+    if unread?(reason), do: "Result not read", else: unknown_label(status, placed, code, nil)
+  end
+
+  defp unknown_label("closure_unconfirmed", _placed, _code, _reason),
+    do: "Termination unconfirmed"
+
+  defp unknown_label("failed", _placed, _code, _reason), do: "Failed"
+  defp unknown_label(_status, _placed, _code, _reason), do: "Outcome unknown"
 
   defp headline(%{status: "dispatch_unknown"}, _placed), do: @placement_unknown
 

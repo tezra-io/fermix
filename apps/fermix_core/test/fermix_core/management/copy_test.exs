@@ -1810,7 +1810,8 @@ defmodule FermixCore.Management.CopyTest do
       plugin_copy() ++
       Enum.map(summary_copy(), &elem(&1, 1)) ++
       Enum.map(source_sentences(), &elem(&1, 1)) ++
-      linux_computer_use_copy()
+      linux_computer_use_copy() ++
+      PhoneCalls.sentences()
   end
 
   defp linux_computer_use_copy do

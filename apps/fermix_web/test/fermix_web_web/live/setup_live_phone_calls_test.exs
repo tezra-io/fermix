@@ -87,14 +87,19 @@ defmodule FermixWebWeb.SetupLivePhoneCallsTest do
       manager: :"setup_phone_no_manager_#{System.unique_integer([:positive])}"
     ]
 
-  test "the Realtime tab draws Phone calls off, with the engine that calls", %{conn: conn} do
-    {:ok, view, _html} = page(conn)
+  # Read at a glance: the switch with its one sentence, the status as one
+  # line and the form; the engine that calls is a constant while it has one
+  # possible value, so it is not drawn.
+  test "the Realtime tab draws Phone calls off, with no row for the one engine", %{conn: conn} do
+    {:ok, view, html} = page(conn)
 
     assert has_element?(view, "#phone-calls")
     assert has_element?(view, "#phone-calls-switch")
     assert view |> element("#phone-calls-summary") |> render() =~ "Disabled"
-    assert view |> element("#phone-calls-engine") |> render() =~ "GPT-Live"
     assert has_element?(view, "#phone-calls-form select[name='phone_calls[voice]']")
+    refute has_element?(view, "#phone-calls-engine")
+    refute html =~ "GPT-Live"
+    refute html =~ "90 days"
   end
 
   test "saving writes the settings and the password, and leaves Talk to Fermix alone",
@@ -149,6 +154,10 @@ defmodule FermixWebWeb.SetupLivePhoneCallsTest do
 
     assert view |> element("#phone-calls-summary") |> render() =~ "Calling"
     assert view |> element("#phone-calls-call-sentence") |> render() =~ "The call is connected."
+    # Who is being called, the one headline and Stop: no usage line.
+    call = view |> element("#phone-calls-call") |> render()
+    assert call =~ "Calloway Bistro"
+    refute call =~ "Voice time"
 
     view |> element("#phone-calls-stop") |> render_submit()
 
@@ -181,14 +190,13 @@ defmodule FermixWebWeb.SetupLivePhoneCallsTest do
     {:ok, _row} = Ledger.terminalize(id, "failed", fields, server: world[:repo])
 
     send(view.pid, poll)
-    recent = view |> element("#phone-calls-recent-why-#{id}") |> render()
-    assert recent =~ "OpenAI reported that the call failed."
+    assert view |> element("#phone-calls-recent-#{id}") |> render() =~ "Failed"
     refute has_element?(view, "#phone-calls-stop")
     refute_received {:scheduled, {:phone_calls_poll, _next}, _ms}
 
     # A poll an earlier read scheduled and no longer awaits changes nothing.
     send(view.pid, {:phone_calls_poll, ref})
-    assert render(view) =~ "OpenAI reported that the call failed."
+    assert view |> element("#phone-calls-recent-#{id}") |> render() =~ "Failed"
   end
 
   test "an unresolved call shows what is known and the steps at Telnyx", %{conn: conn} do
@@ -204,6 +212,66 @@ defmodule FermixWebWeb.SetupLivePhoneCallsTest do
     assert recovery =~ "daily spend limit"
     refute has_element?(view, "#phone-calls-stop")
     assert view |> element("#phone-calls-summary") |> render() =~ "Placement unknown"
+  end
+
+  # The ids an owner reads in the Telnyx portal stay in `fermix settings
+  # phone-calls recovery`; the card says what to read and do.
+  test "the recovery card shows no OpenAI or Telnyx ids", %{conn: conn} do
+    opts = PhoneCallGoldens.world(:history)
+    {:ok, view, _html} = page(conn, opts)
+    unconfirmed = PhoneCallGoldens.ids().unconfirmed
+
+    assert {:ok, %{"calls" => [%{"provider_session_id" => session}]}} =
+             ManagementPhoneCalls.recovery(opts)
+
+    recovery = view |> element("#phone-calls-recovery-#{unconfirmed}") |> render()
+    assert is_binary(session)
+    refute recovery =~ session
+    refute recovery =~ "OpenAI session"
+    assert recovery =~ "Telnyx portal"
+    assert has_element?(view, "#phone-calls-confirm-#{unconfirmed}")
+  end
+
+  # A short list, newest first: at most five, one line each with who was
+  # called, when, and the daemon's own few words for how it went.
+  test "recent calls are at most five, one line each", %{conn: conn} do
+    world = PhoneCallGoldens.world(:empty)
+
+    ids =
+      for day <- 6..1//-1 do
+        at = DateTime.add(PhoneCallGoldens.now(), -day * 86_400, :second)
+        {:ok, {:admitted, row}} = Ledger.admit(call_attrs(day), at, server: world[:repo])
+        {:ok, _row} = Ledger.claim_dispatch(row.id, at, server: world[:repo])
+
+        {:ok, _row} =
+          Ledger.record_session(row.id, "sess_recent_#{day}", at, server: world[:repo])
+
+        fields = %{
+          ended_at: at,
+          outcome: "confirmed",
+          voice_seconds: 61,
+          evidence: [%{speaker: "recipient", text: "Yes, we have rye today."}]
+        }
+
+        {:ok, _row} = Ledger.terminalize(row.id, "ended", fields, server: world[:repo])
+        row.id
+      end
+
+    # Seeded oldest first, so the newest is the last seeded.
+    newest_first = Enum.reverse(ids)
+    {:ok, view, _html} = page(conn, world)
+    recent = view |> element("#phone-calls-recent") |> render()
+
+    lines = for id <- newest_first, has_element?(view, "#phone-calls-recent-#{id}"), do: id
+    assert lines == Enum.take(newest_first, 5)
+
+    line = view |> element("#phone-calls-recent-#{hd(newest_first)}") |> render()
+    assert line =~ "Rowan Bakery"
+    assert line =~ "Confirmed"
+    refute recent =~ "Voice time"
+    refute recent =~ "Carrier charges"
+    refute recent =~ "Backend work"
+    refute recent =~ "The call ended."
   end
 
   test "the owner's word that an unresolved call ended frees its slot", %{conn: conn} do
@@ -301,6 +369,31 @@ defmodule FermixWebWeb.SetupLivePhoneCallsTest do
       assert SecretWriterStub.get(:xai_api_key) == {:ok, "xai-invented-voice-key"}
       assert SecretWriterStub.get(:openai_api_key) == {:ok, @key}
     end
+  end
+
+  defp call_attrs(day) do
+    brief = %{
+      "destination" => "+12125550110",
+      "destination_kind" => "business",
+      "contact_name" => "Rowan Bakery",
+      "goal" => "Ask whether the bakery has rye bread on day #{day}."
+    }
+
+    %{
+      request_id: "main-recent-#{day}",
+      owner_id: "default",
+      authorization: "direct",
+      origin_kind: "chat",
+      delivery_mode: "origin",
+      platform: "telegram",
+      destination: "40017",
+      mandate: brief,
+      mandate_hash: String.duplicate("d4", 32),
+      model: "gpt-live-1",
+      voice: "marin",
+      prompt_version: "phone-test-1",
+      carrier_profile: "telnyx_credential_v1"
+    }
   end
 
   defp open(conn, tab, management) do
