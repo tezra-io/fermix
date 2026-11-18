@@ -1299,9 +1299,13 @@ up once, after the voice's own speech goes quiet (bounded, and not on
 voicemail; sent again only when the first provably never left), writes a
 confirmed closure the moment it arrives (`Ledger.record_closure/3`), drains,
 reads the outcome once (`Outcome`: one tool-free extraction at a moderate
-effort of its own, bounded by `Limits.result_extraction_timeout_ms/0`, then
-`verify/3`, which keeps `confirmed` under code's own rules and marks each fact
-`verified` or `read`; one place decides a result was not read, its reader's own
+effort of its own, tried once more on the same route after a transient
+provider failure, all inside `Limits.result_extraction_timeout_ms/0`, then
+`verify/3`, which keeps `confirmed` under code's own rules: each item the
+brief says must be confirmed rests on the recipient's own words or on their
+yes as the very next turn after the one assistant line it answers, each fact
+is marked `verified` or `read`, and a brief's time the words do not state in
+full is reported as not checked instead of sinking the result; one place decides a result was not read, its reader's own
 failure included, and such a result keeps each speaker's last words as its
 evidence, `Call.LastWords`) and sends the Manager one end report.
 An engine stop shortens that ending: the first application to stop runs

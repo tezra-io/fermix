@@ -15,7 +15,14 @@ defmodule FermixCore.PhoneCalls.Outcome.Values do
       "tomorrow", does not say a date.
     * `said?/2`: a value's words, in order, among a text's words: the value is
       the speaker's own words, not a reading of them.
+    * `date_stated?/1`, `time_stated?/1`: whether a text writes any date or
+      clock time in full by the rules above, whichever it is: a weekday or a
+      bare hour does not.
   """
+
+  @months for month <- 1..12,
+              format <- ["%B", "%b"],
+              do: 2000 |> Date.new!(month, 1) |> Calendar.strftime(format) |> String.downcase()
 
   alias FermixCore.PhoneCalls.Transcript
 
@@ -43,6 +50,22 @@ defmodule FermixCore.PhoneCalls.Outcome.Values do
       {:ok, date} -> day_said?(date, Transcript.words(text)) and month_said?(date, text)
       {:error, _reason} -> false
     end
+  end
+
+  @doc "Whether `text` writes some clock time (see the module doc)."
+  @spec time_stated?(String.t()) :: boolean()
+  def time_stated?(text) when is_binary(text), do: MapSet.size(clock_times(text)) > 0
+
+  @doc """
+  Whether `text` writes some date in full: a day of the month in digits with
+  a month named, or with a month's number beside a year.
+  """
+  @spec date_stated?(String.t()) :: boolean()
+  def date_stated?(text) when is_binary(text) do
+    words = Transcript.words(text)
+    day? = Enum.any?(words, &day_number?/1)
+    numbered? = Enum.any?(words, &(Integer.parse(&1) |> month_and_year?(words)))
+    day? and (Enum.any?(words, &(&1 in @months)) or numbered?)
   end
 
   @doc "Whether `value`'s words are, in order, among `text`'s words."
@@ -89,6 +112,18 @@ defmodule FermixCore.PhoneCalls.Outcome.Values do
       (Enum.any?(words, &number?(&1, date.month, ~r/\A\z/)) and
          Enum.any?(words, &number?(&1, date.year, ~r/\A\z/)))
   end
+
+  defp day_number?(word) do
+    case Integer.parse(word) do
+      {day, rest} when day in 1..31 -> Regex.match?(@ordinal, rest)
+      _other -> false
+    end
+  end
+
+  defp month_and_year?({month, ""}, words) when month in 1..12,
+    do: Enum.any?(words, &match?({year, ""} when year in 1000..9999, Integer.parse(&1)))
+
+  defp month_and_year?(_parsed, _words), do: false
 
   defp number?(word, expected, suffix) do
     case Integer.parse(word) do

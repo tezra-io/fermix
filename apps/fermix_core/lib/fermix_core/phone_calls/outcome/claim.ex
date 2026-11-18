@@ -9,6 +9,11 @@ defmodule FermixCore.PhoneCalls.Outcome.Claim do
   unknown key, or a list or string past its bound is malformed, never
   repaired: a claim is the model's reading, and `Outcome.verify/3` is what
   decides what survives of it.
+
+  A criterion may name the one assistant line its recipient words answer
+  (`asked`); the confirmation's is `readback_quote`. Each is a quote from one
+  line, so a reply that joins two lines is answered by the line each criterion
+  cites, never by the joined text.
   """
 
   alias FermixCore.PhoneCalls.Brief
@@ -55,7 +60,7 @@ defmodule FermixCore.PhoneCalls.Outcome.Claim do
           commitment: :completed | :offered | :requested | :none,
           confirmation_quote: String.t() | nil,
           readback_quote: String.t() | nil,
-          criteria: [%{index: pos_integer(), quote: String.t()}],
+          criteria: [%{index: pos_integer(), quote: String.t(), asked: String.t() | nil}],
           facts: [%{field: fact_field(), value: String.t(), quote: String.t()}],
           alternative: pos_integer() | nil,
           corrections: [%{field: fact_field() | :other, quote: String.t()}],
@@ -156,10 +161,13 @@ defmodule FermixCore.PhoneCalls.Outcome.Claim do
     end
   end
 
-  defp criterion(%{"index" => index, "quote" => quote} = item) when map_size(item) == 2 do
+  # `asked` is optional: the one assistant line the recipient's words answer.
+  defp criterion(%{"index" => index, "quote" => quote} = item)
+       when map_size(item) == 2 or (map_size(item) == 3 and is_map_key(item, "asked")) do
     with {:ok, index} <- index(index, "criteria"),
          {:ok, quote} <- text(quote, Limits.max_excerpt_bytes(), "quote"),
-         do: {:ok, %{index: index, quote: quote}}
+         {:ok, asked} <- optional_text(item, "asked", Limits.max_excerpt_bytes()),
+         do: {:ok, %{index: index, quote: quote, asked: asked}}
   end
 
   defp criterion(_item), do: malformed({:bad_item, "criteria"})

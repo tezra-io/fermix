@@ -7,7 +7,9 @@ defmodule FermixCore.PhoneCalls.Outcome do
   nobody answered, one that reached voicemail, and one in which the called
   party said nothing are decided here in code from what the transport proved,
   with no model call. Otherwise one bounded, tool-free extraction
-  (`Outcome.Extraction`) reads the brief and the transcript into a claim, and
+  (`Outcome.Extraction`, which asks its route once more on a transient
+  provider failure, inside the same bound) reads the brief and the
+  transcript into a claim, and
   `verify/3` decides what survives of it. A failed or malformed extraction is
   no exception: the outcome is `unknown`, with its failure class kept.
 
@@ -34,44 +36,60 @@ defmodule FermixCore.PhoneCalls.Outcome do
       by arrival, not by speech), and no detail the extraction relies on read
       on in the assistant's next turn that no assistant turn before the yes
       had said, so a yes in the middle of a read-back never confirms it;
-    * every completion criterion met by a recipient quote outside the
-      confirmation's own words, or by the affirmed read-back: a bare yes
-      states no criterion by itself;
-    * when the brief names times, the date and (for a time of day) the local
-      time found and said by their own words in digits (`Outcome.Values`);
+    * every completion criterion met by the recipient's yes to the one
+      assistant line the criterion names (below), by a recipient quote outside
+      the confirmation's own words, or by a line a yes affirmed: the
+      confirmation's bare yes states no criterion by itself;
+    * when the brief names times, a date or time whose words write another
+      in full refuses it (`Outcome.Values`); and when the words the result
+      rests on leave the brief's date or time unstated (a weekday, a bare
+      hour, nothing), the result stands with that match not checked
+      (`not_checked: [:brief_time]`, no `matched`), unless what the
+      extraction read for them is no time the brief names;
     * every supporting quote and the confirmation at or after the last
       correction of what they support;
-    * a match with the mandate: one of the brief's own times; or a permitted
+    * a match with the mandate, once the words state the brief's date and
+      time in full, the claim names an alternative, or the brief names no
+      time: one of the brief's own times; or a permitted
       alternative the extraction names by number, which must be one the brief
       lists, and, when the alternative writes clock times, whose times hold
       the agreed time; anything else was agreed outside the brief and
       `needs_owner`.
 
-  Each fact on a confirmed outcome carries its basis: `:verified` when its
-  own words say its value (a date's day and month, a time in digits, any
-  other value word for word), `:read` when the value is the extraction's
-  reading of the excerpt. A reference number is kept when the called party
+  Who answered is no part of a result unless a criterion asks it: no rule
+  reads it, and a `party` value nothing shows is left out, never a reason.
+
+  Each fact on a confirmed outcome carries its basis: `:verified` when the
+  called party's own words say its value (a date's day and month, a time in
+  digits, any other value word for word), `:read` when the value is the
+  extraction's reading, of their words or of their yes to the assistant's. A
+  date or time the brief fixes must be said so by the words it rests on,
+  whoever said them. A reference number is kept when the called party
   gave one; its absence invalidates nothing. Each downgrade records its
   reason as a code (`reasons/0`, `vocabulary/0`): this module writes no
   sentence for an owner, the view (`PhoneCalls.Report`) says each code once.
   The uncertainty is only the extraction's own note, the model's words.
 
-  ## A yes to a finished read-back
+  ## A yes to the assistant's own words
 
-  The design's task procedure ends a call with the assistant reading the
-  details back and the called party confirming them, so a plain "yes" to a
-  complete read-back is the expected confirmation. The rule, whole, is
-  `Outcome.Confirmed`'s `readback_affirmed/3`: an `:assistant` turn the
-  extraction names (`readback_quote`) carries the values it states when the
-  confirmation is the called party's very next turn and the offsets prove it
-  began after the read-back ended. The checks above still apply: an overlap,
-  a read-back that went on after the yes, a later correction, a contradiction
-  or a later read-back of the same detail with another value refuse it. Its
-  refusal is the reason when the values then lack proof; when the called
-  party stated them, a refused read-back changes nothing. The outcome says
-  which kind of confirmation it was (`:stated` or `:readback`). This is the
-  build's reading for the owner to veto: deleting `readback_affirmed/3` and
-  making its one call `{nil, nil}` turns it off.
+  A call settles details by asking about them: the assistant asks each thing
+  the brief must confirm, or reads the agreed details back, and the called
+  party says yes. One rule covers both, applied to each line on its own: the
+  confirmation's read-back (`readback_quote`, `Outcome.Confirmed`'s
+  `readback_affirmed/3`) and each criterion's own line (`asked`). An
+  `:assistant` line the extraction quotes from one turn carries the values it
+  states when the called party's yes is their very next turn and the offsets
+  prove it began after the line ended. The checks above still apply: an
+  overlap, a line read on after the yes (unless the assistant's next turn is
+  itself a line the called party answered), a later correction, a
+  contradiction or a later statement of the same detail with another value
+  refuse it, and a criterion nobody answered still leaves the result short.
+  A refused line takes down only what rests on it: its refusal is the reason
+  when the values then lack proof, and a read-back the called party's own
+  words or answered lines make unneeded changes nothing. What rests on a yes
+  is `:read`, never `:verified`, and the outcome says how it was confirmed
+  (`:stated`, `:readback` or `:answered`). This is the build's reading for
+  the owner to veto.
 
   ## What stays the extraction's judgement
 
@@ -83,8 +101,10 @@ defmodule FermixCore.PhoneCalls.Outcome do
       states the completion criterion it is cited for;
     * that the confirmation is an affirmation of the result: a "mm-hm" that
       overlaps nothing reads like a "yes";
-    * that a read-back's yes answered the read-back and not a question the
-      same assistant turn ended with;
+    * that a yes answered the line it is cited for and not another question
+      the same assistant turn held, and that it means yes;
+    * that a recipient quote cited with no assistant line states something
+      rather than assenting to it;
     * every fact marked `:read`: party and terms as summarised, a reference
       not said word for word, and a date or time not written in digits where
       the brief fixes none;
@@ -93,6 +113,9 @@ defmodule FermixCore.PhoneCalls.Outcome do
     * whether an agreed result fits a permitted alternative that writes no
       clock time, or a date the brief's times do not hold
       (`not_checked: [:alternative]`);
+    * whether the agreed date and time are the brief's, when the words the
+      result rests on do not state them in full
+      (`not_checked: [:brief_time]`);
     * the commitment word and the absence of a contradiction, which can only
       downgrade a result, never raise it.
   """
@@ -189,12 +212,12 @@ defmodule FermixCore.PhoneCalls.Outcome do
           reason: atom() | nil,
           facts: %{optional(atom()) => String.t() | pos_integer()},
           basis: %{optional(atom()) => :verified | :read},
-          not_checked: [:alternative | :must_not_commit],
+          not_checked: [:alternative | :brief_time | :must_not_commit],
           options: [String.t()],
           excerpts: [excerpt()],
           uncertainty: String.t() | nil,
           notes: [:transcript_cut],
-          confirmation: :stated | :readback | nil,
+          confirmation: :stated | :readback | :answered | nil,
           extraction: extraction()
         }
   @type report :: %{
@@ -230,9 +253,9 @@ defmodule FermixCore.PhoneCalls.Outcome do
     do: %{
       reason: @reason_codes |> Enum.map(&Atom.to_string/1) |> Enum.sort(),
       notes: ["details_left_out", "transcript_cut"],
-      confirmation: ["readback", "stated"],
+      confirmation: ["answered", "readback", "stated"],
       matched: ["alternative", "brief_time"],
-      not_checked: ["alternative", "must_not_commit"],
+      not_checked: ["alternative", "brief_time", "must_not_commit"],
       basis: ["read", "verified"]
     }
 
@@ -294,16 +317,20 @@ defmodule FermixCore.PhoneCalls.Outcome do
         long call) and `details_left_out` (the record was fitted to size);
       * a confirmed result's values, one line each: `date` (`YYYY-MM-DD`),
         `local_time` (`HH:MM`), `timezone`, `party`, `terms`, `reference`;
-        and its codes: `commitment` (`completed`), `confirmation` (`stated`
-        or `readback`), `matched` (`brief_time` or `alternative`, with
+        and its codes: `commitment` (`completed`), `confirmation` (`stated`,
+        `readback` or `answered`), `matched` (`brief_time` or `alternative`, with
         `alternative`, the number of the brief's alternative);
       * `options`: what the recipient offered, one line each, the
         extraction's reading;
-      * `verified`, `read`: the names of the values code checked against the
-        words, and of those that are the extraction's reading (`options`
-        among them); `not_checked`: `alternative`, `must_not_commit`.
+      * `verified`, `read`: the names of the values the recipient's own words
+        say, checked against them, and of those that are the extraction's
+        reading, of their words or of a yes to the assistant's (`options`
+        among them); `not_checked`: `alternative`, `brief_time`,
+        `must_not_commit`.
     * `evidence`: what was said, `%{speaker: "recipient" | "assistant",
-      text: ...}`, the transcript's own words, one line each.
+      text: ...}`, the transcript's own words, one line each: what supports
+      the result, or, for one held back, every quote it relied on that the
+      transcript holds.
     * `uncertainty`: the extraction's own note on what stays uncertain, the
       model's words, one line, or `nil`: render it as outside text.
 
@@ -479,8 +506,26 @@ defmodule FermixCore.PhoneCalls.Outcome do
     }
   end
 
+  # A result held back still shows what was said: every quote the reading
+  # relies on that the transcript holds, where it was said, by whom.
   defp downgraded(word, reason, turns, claim),
-    do: %__MODULE__{kept(word, [], turns, claim) | reason: reason}
+    do: %__MODULE__{kept(word, quoted(claim, turns), turns, claim) | reason: reason}
+
+  # Each criterion's line and answer first, in the order asked, then the
+  # read-back and the confirmation, the facts, the corrections and the
+  # reason: at its latest place in the recipient's words, else in the
+  # assistant's.
+  defp quoted(claim, turns) do
+    quotes =
+      Enum.flat_map(claim.criteria, &[&1.asked, &1.quote]) ++
+        [claim.readback_quote, claim.confirmation_quote] ++
+        Enum.map(claim.facts ++ claim.corrections, & &1.quote) ++ [claim.reason_quote]
+
+    for quote when is_binary(quote) <- quotes,
+        found <- [Transcript.locate(quote, turns)],
+        {_turn, _word} = at <- [found.remote || found.assistant],
+        do: %{quote: quote, at: at}
+  end
 
   # The extraction's own note, the one thing only it can say, one line
   # within the record's text bound.

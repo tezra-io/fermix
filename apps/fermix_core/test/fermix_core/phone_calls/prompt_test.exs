@@ -174,9 +174,9 @@ defmodule FermixCore.PhoneCalls.PromptTest do
                  "own reasoning aloud, and say nothing before the call is answered."
     end
 
-    # One opening, in one place: who the voice is, whom it calls for and what
-    # about are said by the two opening texts, and no other part of the
-    # instructions tells the voice to say any of them.
+    # One opening, in one place: who the voice is and whom it calls for are
+    # said by the two opening texts, with the first thing the task needs, and
+    # no other part of the instructions tells the voice to say any of them.
     test "the opening's content is stated by the opening texts alone" do
       rendered = rendered(business_params())
       [_brief_text, how_it_opens] = input_texts(rendered)
@@ -184,7 +184,7 @@ defmodule FermixCore.PhoneCalls.PromptTest do
       for opening <- [how_it_opens, rendered.opening] do
         assert opening =~ "AI assistant"
         assert opening =~ "whom you are calling for"
-        assert opening =~ "calling about"
+        assert opening =~ "first thing the task needs"
       end
 
       refute rendered.instructions =~ ~r/calling about|why you are calling|purpose of the call/i
@@ -197,6 +197,72 @@ defmodule FermixCore.PhoneCalls.PromptTest do
         |> Enum.reject(&String.starts_with?(&1, "If asked"))
 
       assert told_to_say_ai == []
+    end
+
+    # What the call is about is the first question or request itself: the
+    # opening never has the voice describe the call before it.
+    test "the opening asks the first thing the task needs and describes nothing first" do
+      for params <- [business_params(), owner_params()] do
+        rendered = rendered(params)
+        [_brief_text, how_it_opens] = input_texts(rendered)
+
+        for opening <- [how_it_opens, rendered.opening] do
+          assert opening =~ ~r/go straight to the first thing the task needs/
+          refute opening =~ ~r/\b(calling about|purpose|why)\b/i
+        end
+
+        assert how_it_opens =~ ~r/\bask it, request it or tell it\b/
+        assert how_it_opens =~ ~r/\bdescribe nothing\b/
+      end
+    end
+
+    # How a date or time is said serves the person on the line, never the
+    # outcome's check: said in full once, and never in the brief's own form.
+    test "a date or time is said in full the first time, for the person who hears it" do
+      instructions = rendered(business_params()).instructions
+
+      assert [rule] =
+               instructions
+               |> sentences()
+               |> Enum.filter(&(&1 =~ ~r/\bdate\b.*\btime\b.*in full/))
+
+      assert rule =~ ~r/\bfirst time\b/
+      refute instructions =~ ~r/as the brief (writes|spells)/
+    end
+
+    # The instructions name the destination in the brief's own words, and on
+    # the owner's own phone nobody is asked who they are.
+    test "on the owner's own phone, whoever answers is the person the voice works for" do
+      phrase = "the owner's own phone"
+      owner = rendered(owner_params())
+      [owner_brief, owner_opens] = input_texts(owner)
+      [business_brief, _business_opens] = input_texts(rendered(business_params()))
+
+      assert owner_brief =~ ~s(Calling: "Rowan Tellis", #{phrase})
+      refute business_brief =~ phrase
+      refute owner_brief =~ ~r/not confirmed to be the owner/
+      assert owner_brief =~ "not as a change to this brief"
+
+      assert [item] = Enum.filter(procedure_items(owner.instructions), &(&1 =~ phrase))
+      assert item =~ ~r/never check who answered/
+
+      for opening <- [owner_opens, owner.opening] do
+        assert opening =~ "AI assistant"
+        refute opening =~ ~r/whom you are calling for|calling for/
+      end
+    end
+
+    # The reading of a result takes the brief's own words for the owner's phone,
+    # and its note is about the result.
+    test "the outcome's reading never makes who answered part of a result" do
+      lines = Extraction.prompt() |> String.split("\n") |> Enum.map(&String.trim/1)
+      [owner_brief, _opens] = input_texts(rendered(owner_params()))
+
+      assert [rule] = Enum.filter(lines, &(&1 =~ "the owner's own phone"))
+      assert rule =~ ~s("Must be confirmed")
+      assert owner_brief =~ "the owner's own phone"
+      assert [note] = for(~s("note") <> _ = line <- lines, do: line)
+      assert note =~ "about the result"
     end
 
     # Every instruction to say details back is conditioned, so a person who

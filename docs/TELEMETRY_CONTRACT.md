@@ -921,8 +921,9 @@ session: each carries the call's `session_id` as its own, with no
 `parent_session`, and `agent: "phone_call"`, so its provider spans and tool
 spans nest under the call's root as its turns, never as a root of their own;
 a turn emits no `[:fermix, :agent, :message]`, which would close the trace as
-a turn's end. The outcome extraction's one provider call
-(`Providers.Telemetry.emit_call/3`, through the adapter) carries the same
+a turn's end. The outcome extraction's provider call, and its one retry
+after a transient provider failure, each
+(`Providers.Telemetry.emit_call/3`, through the adapter) carry the same
 session with `agent: "phone_call_outcome"`. The feature's three tools,
 `phone_call`, `phone_call_press_keys` and `phone_call_end`, each emit exactly
 one `[:fermix, :tool, :exec]` per model call under the tool's own name, held

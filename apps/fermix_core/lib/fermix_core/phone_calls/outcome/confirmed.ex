@@ -16,12 +16,21 @@ defmodule FermixCore.PhoneCalls.Outcome.Confirmed do
   alias FermixCore.PhoneCalls.Transcript
 
   @type evidence :: %{quote: String.t(), at: Transcript.position()}
+  @typedoc "Where a value rests: the recipient's words, or a line a yes affirmed."
+  @type source :: :remote | :readback | :answered
   @type checked :: %{
-          facts: %{atom() => %{value: String.t(), quote: String.t(), at: Transcript.position()}},
+          facts: %{
+            atom() => %{
+              value: String.t(),
+              quote: String.t(),
+              at: Transcript.position(),
+              from: source()
+            }
+          },
           basis: %{atom() => :verified | :read},
           matched: :brief_time | {:alternative, pos_integer()} | nil,
-          not_checked: [:alternative | :must_not_commit],
-          kind: :stated | :readback,
+          not_checked: [:alternative | :brief_time | :must_not_commit],
+          kind: :stated | :readback | :answered,
           evidence: [evidence()]
         }
   @type downgrade :: {:downgrade, atom(), atom()}
@@ -39,8 +48,10 @@ defmodule FermixCore.PhoneCalls.Outcome.Confirmed do
          :ok <- not_overlapped(confirmation, turns),
          :ok <- not_read_on(claim, confirmation, turns) do
       {readback, refusal} = readback_affirmed(claim, confirmation, turns)
+      answers = answers(claim, turns, readback)
+      lines = answered_lines(readback, answers)
 
-      case values(brief, turns, claim, confirmation, readback) do
+      case values(brief, turns, claim, confirmation, {readback, answers, lines}) do
         {:ok, checked} -> {:ok, checked}
         {:downgrade, word, reason} -> {:downgrade, word, why(reason, refusal)}
       end
@@ -60,38 +71,47 @@ defmodule FermixCore.PhoneCalls.Outcome.Confirmed do
 
   defp why(reason, _refusal), do: reason
 
-  defp values(brief, turns, claim, confirmation, readback) do
-    with {:ok, facts} <- verified_facts(claim.facts, turns, readback),
-         :ok <- no_later_readback(claim.facts, facts, readback, turns),
+  defp values(brief, turns, claim, confirmation, {readback, answers, lines}) do
+    with {:ok, facts} <- verified_facts(claim.facts, turns, lines),
+         :ok <- no_later_readback(claim.facts, facts, lines, turns),
          :ok <- after_corrections(claim.corrections, facts, confirmation, turns),
-         {:ok, criteria} <- criteria_met(brief, claim, turns, readback, confirmation),
-         :ok <- required_times(brief, facts, claim.facts),
-         {:ok, basis} <- supported(brief, facts, turns),
-         {:ok, mandate} <- mandate_match(brief, claim.alternative, facts, basis) do
+         {:ok, criteria} <- criteria_met(brief, claim, turns, {answers, lines}, confirmation),
+         {:ok, said} <- supported(brief, facts, turns),
+         {:ok, mandate} <- times_checked(brief, claim, facts, said, turns) do
       fact_evidence = for field <- @fact_order, fact = facts[field], do: fact
+      kind = kind(Enum.map(criteria, & &1.from) ++ Enum.map(fact_evidence, & &1.from))
       lead = if readback, do: [readback, confirmation], else: [confirmation]
+      shown = Enum.flat_map(criteria, & &1.evidence)
 
       {:ok,
        %{
          facts: facts,
-         basis: basis,
+         basis: basis(facts, said),
          matched: mandate.matched,
          not_checked: mandate.not_checked ++ must_not_commit(brief),
-         kind: kind(criteria ++ fact_evidence, readback),
-         evidence: lead ++ criteria ++ fact_evidence
+         kind: kind,
+         evidence: ordered(kind, lead, shown) ++ fact_evidence
        }}
     end
   end
+
+  # A yes to the assistant's questions reads in the order each was asked.
+  defp ordered(:answered, lead, criteria), do: criteria ++ lead
+  defp ordered(_kind, lead, criteria), do: lead ++ criteria
 
   # A `must_not_commit` item is the extraction's judgement: no string match
   # can tell whether what was agreed is one.
   defp must_not_commit(%Brief{must_not_commit: []}), do: []
   defp must_not_commit(_brief), do: [:must_not_commit]
 
-  defp kind(_evidence, nil), do: :stated
-
-  defp kind(evidence, %{at: {index, _word}}) do
-    if Enum.any?(evidence, &match?(%{at: {^index, _}}, &1)), do: :readback, else: :stated
+  # How the result was confirmed: by a yes to the assistant's own questions,
+  # by a yes to its read-back, or in the recipient's own words throughout.
+  defp kind(sources) do
+    cond do
+      :answered in sources -> :answered
+      :readback in sources -> :readback
+      true -> :stated
+    end
   end
 
   defp completed(:completed), do: :ok
@@ -132,16 +152,19 @@ defmodule FermixCore.PhoneCalls.Outcome.Confirmed do
   # said in its very next turn that no assistant turn before the yes said. A
   # read-back that goes on after the yes is not finished, however it chunked.
   defp not_read_on(claim, %{at: {index, _word}}, turns) do
+    if read_on_after?(claim, index, turns),
+      do: downgrade(:unknown, :interrupted_confirmation),
+      else: :ok
+  end
+
+  defp read_on_after?(claim, index, turns) do
     case Enum.at(turns, index + 1) do
       %{speaker: :assistant} = next ->
         before = turns |> Enum.take(index) |> Enum.filter(&(&1.speaker == :assistant))
-
-        if Enum.any?(claim_quotes(claim), &read_on?(&1, next, before)),
-          do: downgrade(:unknown, :interrupted_confirmation),
-          else: :ok
+        Enum.any?(claim_quotes(claim), &read_on?(&1, next, before))
 
       _no_assistant_after ->
-        :ok
+        false
     end
   end
 
@@ -185,29 +208,114 @@ defmodule FermixCore.PhoneCalls.Outcome.Confirmed do
     Enum.any?([read.end_ms, yes.start_ms, yes.end_ms, next_start], &is_nil/1)
   end
 
-  # Where `quote` is evidence: its latest place in a `:remote` turn, else its
-  # place in the affirmed read-back, else nowhere.
-  defp evidence_at(quote, turns, readback) do
+  # -- a yes to the assistant's question --------------------------------------------
+
+  # Each criterion that names the assistant line it answers (`asked`), with
+  # what its yes proves: `{:ok, pair}` or `{:refused, reason}`. The read-back's
+  # rule, applied to each line: the line said by the assistant, the yes the
+  # recipient's very next turn, the offsets placing it after the line ended,
+  # no assistant speech over it, and no detail read on after it, unless the
+  # assistant's next turn is itself a line the recipient answered.
+  defp answers(claim, turns, readback) do
+    placed =
+      for %{asked: asked} = item <- claim.criteria, asked != nil, do: {item, answer(item, turns)}
+
+    asked_turns = for %{at: {index, _word}} <- answered_lines(readback, placed), do: index
+
+    Enum.map(placed, fn {item, result} ->
+      {item, not_read_on_answer(result, claim, turns, asked_turns)}
+    end)
+  end
+
+  defp answer(%{asked: asked, quote: quote}, turns) do
+    said = Transcript.locate(quote, turns)
+
+    cond do
+      Transcript.locate(asked, turns).assistant == nil -> {:refused, :readback_not_found}
+      said.remote == nil and said.any != nil -> {:refused, :assistant_only_evidence}
+      said.remote == nil -> {:refused, :unverifiable_excerpt}
+      true -> placed_answer(asked, quote, turns)
+    end
+  end
+
+  defp placed_answer(asked, quote, turns) do
+    case right_after(asked, quote, turns) do
+      nil ->
+        {:refused, :readback_not_answered}
+
+      {asked_at, answer_at} ->
+        timed_answer(%{quote: asked, at: asked_at}, quote, answer_at, turns)
+    end
+  end
+
+  # The latest place the recipient said `quote` as the very next turn after an
+  # assistant turn that said `asked`.
+  defp right_after(asked, quote, turns) do
+    found =
+      for {:remote, {yes_at, _word} = answer_at} <- Transcript.occurrences(quote, turns),
+          yes_at > 0,
+          %{speaker: :assistant} = line <- [Enum.at(turns, yes_at - 1)],
+          word when is_integer(word) <- [Transcript.within(asked, line)],
+          do: {{yes_at - 1, word}, answer_at}
+
+    List.last(found)
+  end
+
+  defp timed_answer(%{at: {line_at, _}} = asked, quote, {yes_at, _} = answer_at, turns) do
+    yes = %{quote: quote, at: answer_at}
+
+    cond do
+      untimed?(Enum.at(turns, line_at), Enum.at(turns, yes_at), Enum.at(turns, yes_at + 1)) ->
+        {:refused, :readback_untimed}
+
+      not_overlapped(yes, turns) != :ok ->
+        {:refused, :interrupted_confirmation}
+
+      true ->
+        {:ok, %{asked: asked, answer: yes}}
+    end
+  end
+
+  defp not_read_on_answer({:ok, %{answer: %{at: {yes_at, _}}}} = ok, claim, turns, asked_turns) do
+    if (yes_at + 1) in asked_turns or not read_on_after?(claim, yes_at, turns),
+      do: ok,
+      else: {:refused, :interrupted_confirmation}
+  end
+
+  defp not_read_on_answer(refused, _claim, _turns, _asked_turns), do: refused
+
+  # Every assistant line a yes affirmed: the confirmation's read-back and each
+  # answered criterion's line, each with what it is.
+  defp answered_lines(readback, answers) do
+    own = for {_item, {:ok, pair}} <- answers, do: Map.put(pair.asked, :from, :answered)
+    if readback, do: [Map.put(readback, :from, :readback) | own], else: own
+  end
+
+  # Where `quote` is evidence, and what kind: its latest place in a `:remote`
+  # turn, else its latest place in a line a yes affirmed, else nowhere.
+  defp evidence_at(quote, turns, lines) do
     case Transcript.locate(quote, turns) do
-      %{remote: {_turn, _word} = at} -> at
-      _not_remote -> readback_at(quote, turns, readback)
+      %{remote: {_turn, _word} = at} -> {at, :remote}
+      _not_remote -> line_at(quote, turns, lines)
     end
   end
 
-  defp readback_at(_quote, _turns, nil), do: nil
+  defp line_at(quote, turns, lines) do
+    found =
+      for %{at: {index, _word}, from: from} <- lines,
+          word when is_integer(word) <- [Transcript.within(quote, Enum.at(turns, index))],
+          do: {{index, word}, from}
 
-  defp readback_at(quote, turns, %{at: {index, _word}}) do
-    case Transcript.within(quote, Enum.at(turns, index)) do
-      nil -> nil
-      word -> {index, word}
-    end
+    Enum.max_by(found, fn {at, _from} -> at end, fn -> nil end)
   end
 
-  # A claimed value said only by the assistant after the read-back, for a
-  # detail the read-back settled, that differs from it.
-  defp no_later_readback(_claimed, _facts, nil, _turns), do: :ok
+  # A claimed value said only by the assistant after a line a yes affirmed,
+  # for a detail that differs from what was settled.
+  defp no_later_readback(_claimed, _facts, [], _turns), do: :ok
 
-  defp no_later_readback(claimed, facts, %{at: {index, _word}}, turns) do
+  defp no_later_readback(claimed, facts, lines, turns) do
+    index = lines |> Enum.map(fn %{at: {turn, _word}} -> turn end) |> Enum.min()
+
     differs? = fn %{field: field, value: value, quote: quote} ->
       found = Transcript.locate(quote, turns)
 
@@ -223,14 +331,14 @@ defmodule FermixCore.PhoneCalls.Outcome.Confirmed do
 
   # -- facts ------------------------------------------------------------------------
 
-  # Each claimed fact found in a `:remote` turn or the affirmed read-back, by
+  # Each claimed fact found in a `:remote` turn or a line a yes affirmed, by
   # field, at its latest place. A claimed date or time that is not one, or two
   # found values that differ, end the check.
-  defp verified_facts(claimed, turns, readback) do
+  defp verified_facts(claimed, turns, lines) do
     found =
       for %{field: field, value: value, quote: quote} <- claimed,
-          {_turn, _word} = at <- [evidence_at(quote, turns, readback)],
-          do: {field, %{value: value, quote: quote, at: at}}
+          {{_turn, _word} = at, from} <- [evidence_at(quote, turns, lines)],
+          do: {field, %{value: value, quote: quote, at: at, from: from}}
 
     cond do
       Enum.any?(found, &invalid_value?/1) -> downgrade(:unknown, :invalid_fact)
@@ -280,47 +388,72 @@ defmodule FermixCore.PhoneCalls.Outcome.Confirmed do
 
   # -- criteria ---------------------------------------------------------------------
 
-  defp criteria_met(%Brief{completion_criteria: criteria}, claim, turns, readback, confirmation) do
+  defp criteria_met(%Brief{completion_criteria: criteria}, claim, turns, said, confirmation) do
     Enum.reduce_while(1..length(criteria), {:ok, []}, fn index, {:ok, met} ->
-      case criterion(index, claim.criteria, turns, readback, confirmation) do
+      case criterion(index, claim.criteria, turns, said, confirmation) do
         {:ok, evidence} -> {:cont, {:ok, met ++ [evidence]}}
         {:downgrade, _word, _reason} = down -> {:halt, down}
       end
     end)
   end
 
-  # A criterion is met by a quote said by the recipient, outside the words of
-  # the confirmation itself, or said in the affirmed read-back. The yes alone
-  # states nothing a criterion asks for.
-  defp criterion(index, claimed, turns, readback, confirmation) do
-    quotes = for %{index: ^index, quote: quote} <- claimed, do: quote
-    found = Enum.find_value(quotes, &criterion_at(&1, turns, readback, confirmation))
+  # A criterion is met by the recipient's yes to the one assistant line it
+  # names (`asked`), and only so when it names one; else by a quote said by
+  # the recipient, outside the words of the confirmation itself, or said in a
+  # line a yes affirmed. The confirmation's yes alone states nothing a
+  # criterion asks for.
+  defp criterion(index, claimed, turns, {answers, lines}, confirmation) do
+    items = for %{index: ^index} = item <- claimed, do: item
+    found = Enum.find_value(items, &item_met(&1, turns, {answers, lines}, confirmation))
 
     cond do
-      found != nil ->
-        {:ok, found}
-
-      quotes == [] ->
-        downgrade(:unknown, :missing_required_fact)
-
-      Enum.any?(quotes, &said_by_recipient?(&1, turns)) ->
-        downgrade(:unknown, :criterion_unstated)
-
-      true ->
-        downgrade(:unknown, :unverifiable_excerpt)
+      found != nil -> {:ok, found}
+      items == [] -> downgrade(:unknown, :missing_required_fact)
+      true -> downgrade(:unknown, unmet(items, turns, answers))
     end
   end
 
-  defp criterion_at(quote, turns, readback, confirmation) do
+  defp item_met(%{asked: nil, quote: quote}, turns, {_answers, lines}, confirmation) do
+    case criterion_at(quote, turns, lines, confirmation) do
+      nil -> nil
+      {at, from} -> %{evidence: [%{quote: quote, at: at}], from: from}
+    end
+  end
+
+  defp item_met(item, _turns, {answers, _lines}, _confirmation) do
+    case List.keyfind(answers, item, 0) do
+      {_item, {:ok, pair}} -> %{evidence: [pair.asked, pair.answer], from: :answered}
+      {_item, {:refused, _reason}} -> nil
+    end
+  end
+
+  # Why no item met the criterion: a refused yes says why; a statement the
+  # recipient made inside the confirmation's own words states nothing.
+  defp unmet(items, turns, answers) do
+    refusals =
+      for item <- items, {_item, {:refused, why}} <- [List.keyfind(answers, item, 0)], do: why
+
+    cond do
+      refusals != [] ->
+        hd(refusals)
+
+      Enum.any?(items, &(&1.asked == nil and said_by_recipient?(&1.quote, turns))) ->
+        :criterion_unstated
+
+      true ->
+        :unverifiable_excerpt
+    end
+  end
+
+  defp criterion_at(quote, turns, lines, confirmation) do
     outside =
       for {:remote, at} <- Transcript.occurrences(quote, turns),
           not inside?(at, quote, confirmation),
           do: at
 
-    case {Enum.max(outside, fn -> nil end), readback_at(quote, turns, readback)} do
-      {nil, nil} -> nil
-      {nil, at} -> %{quote: quote, at: at}
-      {at, _readback} -> %{quote: quote, at: at}
+    case Enum.max(outside, fn -> nil end) do
+      nil -> line_at(quote, turns, lines)
+      at -> {at, :remote}
     end
   end
 
@@ -355,22 +488,83 @@ defmodule FermixCore.PhoneCalls.Outcome.Confirmed do
 
   # -- values and the mandate ---------------------------------------------------------
 
-  # Each fact is `:verified` when its own words say its value, else `:read`,
-  # the extraction's reading of them. A date or time the brief's times fix must
-  # be verified.
+  # Whether each fact's own words say its value, whoever said them. A date or
+  # time the brief's times fix whose words write another in full is refused.
   defp supported(brief, facts, turns) do
-    basis = Map.new(facts, fn {field, fact} -> {field, basis(field, fact, turns)} end)
+    said = Map.new(facts, fn {field, fact} -> {field, value_said?(field, fact, turns)} end)
     fixed = if brief.times == [], do: [], else: fixed_fields(brief.times)
+    otherwise? = &(said[&1] == false and states?(&1, facts[&1], turns))
 
-    if Enum.any?(fixed, &(basis[&1] != :verified)),
+    if Enum.any?(fixed, otherwise?),
       do: downgrade(:unknown, :unsupported_value),
-      else: {:ok, basis}
+      else: {:ok, said}
   end
 
-  defp basis(field, %{value: value, quote: quote, at: {index, _word} = at}, turns) do
-    turn = Enum.at(turns, index)
-    if said?(field, value, turn, at, quote), do: :verified, else: :read
+  defp states?(:date, %{quote: quote, at: {index, _word} = at}, turns),
+    do: Values.date_stated?(Transcript.said(Enum.at(turns, index), at, quote))
+
+  defp states?(:local_time, %{quote: quote, at: {index, _word} = at}, turns),
+    do: Values.time_stated?(Transcript.said(Enum.at(turns, index), at, quote, @meridiem_words))
+
+  # The brief's times held to the words: in full when the words state them,
+  # and when the claim names an alternative or the brief names no time. When
+  # every criterion is met but the words leave the brief's date or time
+  # unstated, the result stands and its match is not checked.
+  defp times_checked(brief, claim, facts, said, turns) do
+    if brief.times == [] or claim.alternative != nil or stated?(brief, said) do
+      with :ok <- required_times(brief, facts, claim.facts),
+           :ok <- all_said(brief, said),
+           do: mandate_match(brief, claim.alternative, facts, said)
+    else
+      unchecked_time(brief, claim.facts, turns)
+    end
   end
+
+  defp stated?(%Brief{times: times}, said),
+    do: Enum.all?(fixed_fields(times), &(said[&1] == true))
+
+  defp all_said(%Brief{times: []}, _said), do: :ok
+
+  defp all_said(brief, said),
+    do: if(stated?(brief, said), do: :ok, else: downgrade(:unknown, :unsupported_value))
+
+  # What the reading gave for the brief's date and time still has to be one
+  # of its times: a quote the transcript does not hold, a value that is no
+  # date or time, or one outside every time the brief names refuses it.
+  defp unchecked_time(%Brief{times: times}, claimed, turns) do
+    read = for %{field: field} = fact <- claimed, field in fixed_fields(times), do: fact
+
+    cond do
+      Enum.any?(read, &(Transcript.locate(&1.quote, turns).any == nil)) ->
+        downgrade(:unknown, :unverifiable_excerpt)
+
+      Enum.any?(read, &invalid_value?({&1.field, &1})) ->
+        downgrade(:unknown, :invalid_fact)
+
+      Enum.any?(times, fn %{at: at} -> Enum.all?(read, &part_of?(at, &1)) end) ->
+        {:ok, matched(nil, [:brief_time])}
+
+      true ->
+        downgrade(:needs_owner, :outside_mandate)
+    end
+  end
+
+  defp part_of?(at, %{field: :date, value: date}), do: hd(String.split(at, "T")) == date
+
+  defp part_of?(at, %{field: :local_time, value: time}),
+    do: match?([_, ^time], String.split(at, "T"))
+
+  # `:verified` when the recipient's own words say the value; `:read` when the
+  # value is the extraction's reading, of their words or of a yes to the
+  # assistant's.
+  defp basis(facts, said) do
+    Map.new(facts, fn {field, fact} ->
+      {field, if(said[field] and fact.from == :remote, do: :verified, else: :read)}
+    end)
+  end
+
+  defp value_said?(field, %{value: value, quote: quote, at: {index, _word} = at}, turns),
+    do: said?(field, value, Enum.at(turns, index), at, quote)
 
   defp said?(:date, value, turn, at, quote),
     do: Values.date_said?(value, Transcript.said(turn, at, quote))
@@ -381,7 +575,7 @@ defmodule FermixCore.PhoneCalls.Outcome.Confirmed do
   defp said?(_field, value, turn, at, quote),
     do: Values.said?(value, Transcript.said(turn, at, quote))
 
-  defp mandate_match(brief, alternative, facts, basis) do
+  defp mandate_match(brief, alternative, facts, said) do
     listed = alternative_text(brief, alternative)
 
     cond do
@@ -392,7 +586,7 @@ defmodule FermixCore.PhoneCalls.Outcome.Confirmed do
         {:ok, matched(:brief_time)}
 
       alternative != nil ->
-        alternative_match(alternative, listed, brief, facts, basis)
+        alternative_match(alternative, listed, brief, facts, said)
 
       brief.times == [] ->
         {:ok, matched(nil)}
@@ -409,7 +603,7 @@ defmodule FermixCore.PhoneCalls.Outcome.Confirmed do
 
   # An alternative that writes clock times holds the agreed time to them; one
   # that writes none is the extraction's reading, and says so.
-  defp alternative_match(n, text, brief, facts, basis) do
+  defp alternative_match(n, text, brief, facts, said) do
     stated = Values.clock_times(text)
     label = {:alternative, n}
 
@@ -420,7 +614,7 @@ defmodule FermixCore.PhoneCalls.Outcome.Confirmed do
       not Map.has_key?(facts, :local_time) ->
         downgrade(:unknown, :missing_required_fact)
 
-      basis.local_time != :verified ->
+      not said.local_time ->
         downgrade(:unknown, :unsupported_value)
 
       MapSet.member?(stated, facts.local_time.value) ->

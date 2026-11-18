@@ -91,7 +91,8 @@ defmodule FermixCore.PhoneCalls.Report do
   # (`PhoneCalls.Outcome.vocabulary/0`), said here and nowhere else.
   @confirmations %{
     "stated" => "The recipient stated the details.",
-    "readback" => "The recipient said yes when the assistant read the details back."
+    "readback" => "The recipient said yes when the assistant read the details back.",
+    "answered" => "The recipient said yes to the assistant's questions."
   }
   # What code could not check (`Outcome`'s "What stays the extraction's
   # judgement"), one sentence each.
@@ -101,7 +102,10 @@ defmodule FermixCore.PhoneCalls.Report do
         "Fermix's reading of the call, not checked against the words.",
     "alternative" =>
       "Whether the result fits the alternative the brief allows is Fermix's reading of the " <>
-        "call, not checked against the words."
+        "call, not checked against the words.",
+    "brief_time" =>
+      "Whether the agreed date and time are the brief's is Fermix's reading of the call, " <>
+        "not checked against the words."
   }
   @notes %{
     "transcript_cut" => "The start of a long call was left out of the review.",
@@ -138,10 +142,11 @@ defmodule FermixCore.PhoneCalls.Report do
     "unlisted_alternative" => "The result relies on an alternative the brief does not list.",
     "no_evidence" => "Nothing the recipient said supports this result.",
     "readback_not_found" =>
-      "The read-back the result relies on is not among the assistant's words.",
+      "The assistant's line the result relies on is not one line the assistant said.",
     "readback_not_answered" =>
-      "The recipient's yes did not come right after the assistant's read-back.",
-    "readback_untimed" => "The call's timing cannot show the yes came after the read-back ended.",
+      "The recipient's yes did not come right after the assistant's line it answers.",
+    "readback_untimed" =>
+      "The call's timing cannot show the yes came after the assistant's line ended.",
     "later_readback_differs" => "A later read-back gave a different value for a detail.",
     "extraction_timeout" => "Fermix could not read the call's result in time.",
     "extraction_crashed" => "Fermix could not read the call's result: the reading stopped.",

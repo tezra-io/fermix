@@ -264,7 +264,7 @@ defmodule FermixCore.PhoneCalls.ReportTest do
                "How it was confirmed: The recipient said yes when the assistant read the " <>
                  "details back. It matches a time in the brief."
 
-      assert text =~ "- date: 2031-12-06 (checked against what was said)"
+      assert text =~ "- date: 2031-12-06 (Fermix's reading of what was said)"
       assert text =~ ~s(- The assistant: "A table for four on)
       assert text =~ ~s(- The recipient: "Yes")
       assert text =~ @not_checked_commit

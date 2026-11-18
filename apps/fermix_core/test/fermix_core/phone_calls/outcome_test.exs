@@ -364,11 +364,15 @@ defmodule FermixCore.PhoneCalls.OutcomeTest do
       assert {outcome.outcome, outcome.reason} == {:unknown, :missing_required_fact}
     end
 
-    test "a brief with times needs the agreed date and time" do
+    # Every criterion is met: the time nobody read from the words is the one
+    # thing said as unchecked, and nothing claims it matched.
+    test "a brief's time the reading never gave is not checked, and the result stands" do
       outcome =
         Outcome.verify(brief(), booked_call(), claim(%{"facts" => facts_without(:local_time)}))
 
-      assert {outcome.outcome, outcome.reason} == {:unknown, :missing_required_fact}
+      assert {outcome.outcome, outcome.reason} == {:confirmed, nil}
+      assert outcome.not_checked == [:brief_time, :must_not_commit]
+      refute Map.has_key?(outcome.facts, :matched)
     end
 
     test "a required time claimed from words the transcript lacks is unverifiable" do
@@ -469,7 +473,7 @@ defmodule FermixCore.PhoneCalls.OutcomeTest do
       assert {outcome.outcome, outcome.reason} == {:unknown, :missing_required_fact}
     end
 
-    test "a value its own words do not say: a time, and a date without its day" do
+    test "a time its words state otherwise is refused; a date they leave unstated is unchecked" do
       facts =
         facts_without(:local_time) ++
           [%{"field" => "local_time", "value" => "21:30", "quote" => "at 7:30"}]
@@ -482,7 +486,9 @@ defmodule FermixCore.PhoneCalls.OutcomeTest do
           [%{"field" => "date", "value" => "2026-12-05", "quote" => "Saturday"}]
 
       outcome = Outcome.verify(brief(), booked_call(), claim(%{"facts" => facts}))
-      assert {outcome.outcome, outcome.reason} == {:unknown, :unsupported_value}
+
+      assert {outcome.outcome, outcome.not_checked} ==
+               {:confirmed, [:brief_time, :must_not_commit]}
     end
 
     test "the confirmation's own words never prove a criterion" do
@@ -602,6 +608,8 @@ defmodule FermixCore.PhoneCalls.OutcomeTest do
       assert outcome.confirmation == :readback
       assert outcome.facts.confirmation == "readback"
       assert %{date: "2026-12-05", local_time: "19:30"} = outcome.facts
+      # The assistant's words, affirmed by a yes: Fermix's reading, never the recipient's own.
+      assert outcome.basis == %{date: :read, local_time: :read}
 
       assert [
                %{speaker: :assistant, text: "A table for four on" <> _, end_ms: 9_000},
@@ -734,7 +742,7 @@ defmodule FermixCore.PhoneCalls.OutcomeTest do
       assert {requested.outcome, requested.reason} == {:unknown, :awaiting_action}
     end
 
-    test "a read-back that leaves out a value the brief requires" do
+    test "a read-back that leaves out the brief's time confirms, the time not checked" do
       call =
         with_turn(
           readback_call(),
@@ -753,9 +761,285 @@ defmodule FermixCore.PhoneCalls.OutcomeTest do
         })
 
       outcome = Outcome.verify(brief(), call, claim)
-      assert {outcome.outcome, outcome.reason} == {:unknown, :missing_required_fact}
+      assert {outcome.outcome, outcome.reason} == {:confirmed, nil}
+      assert outcome.not_checked == [:brief_time, :must_not_commit]
+      refute Map.has_key?(outcome.facts, :matched)
     end
   end
+
+  @asked_table "Do you have a table for four on Saturday, December 5 at 7:30 PM"
+  @asked_name "Could you put it under Rowan Tellis"
+
+  # The assistant asks each thing the brief must confirm, and the recipient's
+  # very next words are a yes to each.
+  defp asked_call do
+    [
+      said(
+        :assistant,
+        "Hi, I'm an AI assistant calling for Rowan Tellis. #{@asked_table}?",
+        0,
+        5_000
+      ),
+      said(:remote, "Yeah, we do.", 5_300, 6_000),
+      said(:assistant, "Great. #{@asked_name}?", 6_200, 8_000),
+      said(:remote, "Yes.", 8_300, 8_700),
+      said(:assistant, "Thank you, goodbye.", 9_000, 10_000)
+    ]
+  end
+
+  defp asked_claim(overrides) do
+    %{
+      "confirmation_quote" => "Yes",
+      "criteria" => [
+        %{"index" => 1, "quote" => "Yeah, we do", "asked" => @asked_table},
+        %{"index" => 2, "quote" => "Yes", "asked" => @asked_name}
+      ],
+      "facts" => asked_facts()
+    }
+    |> Map.merge(overrides)
+    |> claim()
+  end
+
+  defp asked_facts,
+    do: [
+      %{"field" => "date", "value" => "2026-12-05", "quote" => "Saturday, December 5"},
+      %{"field" => "local_time", "value" => "19:30", "quote" => "at 7:30 PM"},
+      %{"field" => "party", "value" => "Rowan Tellis", "quote" => "under Rowan Tellis"}
+    ]
+
+  defp first_criterion(overrides),
+    do: [Map.merge(%{"index" => 1, "quote" => "Yeah, we do", "asked" => @asked_table}, overrides)]
+
+  defp asked_outcome(call, overrides \\ %{}),
+    do: Outcome.verify(brief(), call, asked_claim(overrides))
+
+  describe "a yes to each of the assistant's questions" do
+    test "confirms the result, each question shown before its yes" do
+      outcome = asked_outcome(asked_call())
+
+      assert {outcome.outcome, outcome.reason} == {:confirmed, nil}
+      assert outcome.confirmation == :answered
+
+      assert %{
+               date: "2026-12-05",
+               local_time: "19:30",
+               party: "Rowan Tellis",
+               matched: "brief_time",
+               confirmation: "answered"
+             } = outcome.facts
+
+      assert [
+               %{speaker: :assistant, text: @asked_table},
+               %{speaker: :remote, text: "Yeah, we do"},
+               %{speaker: :assistant, text: @asked_name},
+               %{speaker: :remote, text: "Yes"} | _
+             ] = outcome.excerpts
+    end
+
+    test "what the recipient said is verified, and what rests on their yes is read" do
+      call = with_turn(asked_call(), 3, said(:remote, "Yes, under Rowan Tellis.", 8_300, 9_000))
+      outcome = asked_outcome(call)
+
+      assert outcome.outcome == :confirmed
+      assert outcome.basis == %{date: :read, local_time: :read, party: :verified}
+
+      report = Outcome.to_report(outcome).outcome_facts
+      assert {report["verified"], report["read"]} == {["party"], ["date", "local_time"]}
+    end
+
+    test "a time stated in full matches the brief's, and nothing is left unchecked" do
+      outcome = asked_outcome(asked_call())
+
+      assert outcome.facts.matched == "brief_time"
+      assert outcome.not_checked == [:must_not_commit]
+    end
+
+    # A weekday and a bare hour, and a plain yes: every item is established,
+    # so the result stands, and that its time is the brief's is said as unchecked.
+    test "a yes to a question naming a weekday and a bare hour confirms, its time not checked" do
+      outcome = Outcome.verify(seven_brief(), weekday_call("Saturday"), weekday_claim("Saturday"))
+
+      assert {outcome.outcome, outcome.reason} == {:confirmed, nil}
+      assert outcome.not_checked == [:brief_time, :must_not_commit]
+      refute Map.has_key?(outcome.facts, :matched)
+      assert %{date: "2026-12-05", local_time: "19:00"} = outcome.facts
+      assert outcome.basis == %{date: :read, local_time: :read}
+
+      report = Outcome.to_report(outcome).outcome_facts
+      assert report["not_checked"] == ["brief_time", "must_not_commit"]
+      refute Map.has_key?(report, "matched")
+
+      assert [%{speaker: "assistant"}, %{speaker: "recipient", text: "Yeah"} | _] =
+               Outcome.to_report(outcome).evidence
+    end
+
+    test "a question that states another full date never confirms the brief's time" do
+      other = weekday_call("Sunday, December 6")
+
+      # Read as the date the words say: outside the brief.
+      assert {:needs_owner, :outside_mandate} ==
+               reason(Outcome.verify(seven_brief(), other, weekday_claim("Sunday, December 6")))
+
+      # Read as the brief's date: not what the words say.
+      brief_date = weekday_claim("Sunday, December 6", "2026-12-05")
+
+      assert {:unknown, :unsupported_value} ==
+               reason(Outcome.verify(seven_brief(), other, brief_date))
+    end
+
+    test "a reply that joins two lines into one quote does not sink the result" do
+      joined = "#{@asked_table}? Great. #{@asked_name}"
+      outcome = asked_outcome(asked_call(), %{"readback_quote" => joined})
+
+      assert {outcome.outcome, outcome.confirmation} == {:confirmed, :answered}
+    end
+
+    test "a yes spoken over the question, or with no offsets to place it" do
+      over = with_turn(asked_call(), 1, said(:remote, "Yeah, we do.", 4_000, 6_000))
+      untimed = with_turn(asked_call(), 1, said(:remote, "Yeah, we do.", nil, 6_000))
+
+      assert {:unknown, :interrupted_confirmation} == reason(asked_outcome(over))
+      assert {:unknown, :readback_untimed} == reason(asked_outcome(untimed))
+    end
+
+    test "a yes that is not the recipient's very next turn after the question" do
+      call =
+        Enum.take(asked_call(), 1) ++
+          [
+            said(:remote, "One moment.", 5_300, 6_000),
+            said(:assistant, "Are you still there?", 6_200, 7_000),
+            said(:remote, "Yeah, we do.", 7_300, 8_000)
+          ] ++ Enum.drop(asked_call(), 2)
+
+      assert {:unknown, :readback_not_answered} == reason(asked_outcome(call))
+    end
+
+    test "a question that is not one line of the assistant's, and an answer only it said" do
+      joined = first_criterion(%{"asked" => "#{@asked_table}? Great. #{@asked_name}"})
+      own = first_criterion(%{"quote" => "Do you have a table"})
+
+      assert {:unknown, :readback_not_found} ==
+               reason(asked_outcome(asked_call(), %{"criteria" => joined ++ second()}))
+
+      assert {:unknown, :assistant_only_evidence} ==
+               reason(asked_outcome(asked_call(), %{"criteria" => own ++ second()}))
+    end
+
+    test "a question read on after the yes, its rest never answered" do
+      call = [
+        said(:assistant, "Hi. Do you have a table for four on Saturday, December 5", 0, 4_000),
+        said(:remote, "Yeah, we do.", 4_300, 5_000),
+        said(:assistant, "at 7:30 PM.", 5_200, 6_000),
+        said(:remote, "One second.", 6_300, 7_000),
+        said(:assistant, "Great. #{@asked_name}?", 7_200, 9_000),
+        said(:remote, "Yes.", 9_300, 9_700)
+      ]
+
+      criteria =
+        first_criterion(%{"asked" => "Do you have a table for four on Saturday, December 5"})
+
+      assert {:unknown, :interrupted_confirmation} ==
+               reason(asked_outcome(call, %{"criteria" => criteria ++ second()}))
+    end
+
+    test "a later correction wins, and a criterion nobody answered leaves the result short" do
+      call =
+        asked_call() ++ [said(:remote, "Oh wait, 7:30 just went, only 8:00.", 10_200, 12_000)]
+
+      corrections = [%{"field" => "local_time", "quote" => "7:30 just went, only 8:00"}]
+
+      assert {:unknown, :superseded_value} ==
+               reason(asked_outcome(call, %{"corrections" => corrections}))
+
+      unasked = %{"criteria" => first_criterion(%{}), "facts" => Enum.take(asked_facts(), 2)}
+      assert {:unknown, :missing_required_fact} == reason(asked_outcome(asked_call(), unasked))
+    end
+
+    test "a result held back still shows what was said, each line by who said it" do
+      call = with_turn(asked_call(), 3, said(:remote, "Yes.", 7_500, 8_700))
+      outcome = asked_outcome(call)
+
+      assert {:unknown, :interrupted_confirmation} == reason(outcome)
+
+      assert [
+               %{speaker: "assistant", text: @asked_table},
+               %{speaker: "recipient", text: "Yeah, we do"},
+               %{speaker: "assistant", text: @asked_name},
+               %{speaker: "recipient", text: "Yes"} | _
+             ] = Outcome.to_report(outcome).evidence
+    end
+
+    # On the owner's own phone the recipient is the owner; whoever answered is
+    # no part of a result the brief does not ask about.
+    test "who answered holds nothing back" do
+      owner =
+        brief(%{
+          "destination_kind" => "owner",
+          "number_source" => "The owner's own mobile number, from setup.",
+          "contact_name" => "Rowan Tellis"
+        })
+
+      note = "The recipient never said who they are."
+      outcome = Outcome.verify(owner, asked_call(), asked_claim(%{"note" => note}))
+
+      assert {outcome.outcome, outcome.reason} == {:confirmed, nil}
+      assert outcome.uncertainty == note
+    end
+
+    test "a criterion names the one line its yes answers, or none" do
+      for asked <- [nil, @asked_name] do
+        criteria = [%{"index" => 1, "quote" => "Yes", "asked" => asked}]
+        assert {:ok, %{criteria: [%{asked: ^asked}]}} = Claim.from_map(claim_map(criteria))
+      end
+
+      assert {:ok, %{criteria: [%{asked: nil}]}} =
+               Claim.from_map(claim_map([%{"index" => 1, "quote" => "Yes"}]))
+
+      for bad <- [%{"asked" => ""}, %{"asked" => 7}, %{"heard" => "Yes"}] do
+        criterion = Map.merge(%{"index" => 1, "quote" => "Yes"}, bad)
+        assert {:error, {:malformed, _}} = Claim.from_map(claim_map([criterion]))
+      end
+    end
+  end
+
+  # The brief's table at 7:00 PM, asked about by its weekday or another date
+  # and a bare hour, and answered yes.
+  defp seven_brief,
+    do: brief(%{"times" => [%{"label" => "Requested table", "at" => "2026-12-05T19:00"}]})
+
+  defp weekday_call(day) do
+    [
+      said(:assistant, "Hi, I'm an AI assistant calling for Rowan Tellis.", 0, 3_000),
+      said(:remote, "Hello?", 3_200, 3_600),
+      said(:assistant, "Does #{day} at 7 still work for the table for four?", 3_800, 6_000),
+      said(:remote, "Yeah.", 6_300, 6_700),
+      said(:assistant, "And is it still under Rowan Tellis?", 6_900, 8_500),
+      said(:remote, "Yes.", 8_800, 9_200),
+      said(:assistant, "Thank you, goodbye.", 9_500, 10_500)
+    ]
+  end
+
+  defp weekday_claim(day, date \\ nil) do
+    asked = "Does #{day} at 7 still work for the table for four"
+    date = date || if day == "Saturday", do: "2026-12-05", else: "2026-12-06"
+
+    asked_claim(%{
+      "criteria" => [
+        %{"index" => 1, "quote" => "Yeah", "asked" => asked},
+        %{"index" => 2, "quote" => "Yes", "asked" => "And is it still under Rowan Tellis"}
+      ],
+      "facts" => [
+        %{"field" => "date", "value" => date, "quote" => day},
+        %{"field" => "local_time", "value" => "19:00", "quote" => "at 7"}
+      ]
+    })
+  end
+
+  defp second, do: [%{"index" => 2, "quote" => "Yes", "asked" => @asked_name}]
+  defp reason(outcome), do: {outcome.outcome, outcome.reason}
+
+  defp claim_map(criteria),
+    do: %{"outcome" => "confirmed", "commitment" => "completed", "criteria" => criteria}
 
   describe "the other outcomes" do
     test "unavailable needs the recipient's own words" do
@@ -892,9 +1176,9 @@ defmodule FermixCore.PhoneCalls.OutcomeTest do
       vocabulary = Outcome.vocabulary()
 
       assert vocabulary.reason == Outcome.reasons() |> Enum.map(&Atom.to_string/1) |> Enum.sort()
-      assert vocabulary.confirmation == ["readback", "stated"]
+      assert vocabulary.confirmation == ["answered", "readback", "stated"]
       assert vocabulary.matched == ["alternative", "brief_time"]
-      assert vocabulary.not_checked == ["alternative", "must_not_commit"]
+      assert vocabulary.not_checked == ["alternative", "brief_time", "must_not_commit"]
       assert vocabulary.notes == ["details_left_out", "transcript_cut"]
       assert vocabulary.basis == ["read", "verified"]
       refute "busy" in vocabulary.reason or "rejected" in vocabulary.reason

@@ -19,17 +19,22 @@ defmodule FermixCore.PhoneCalls.OutcomeExtractionTest do
     base_url: "https://api.openai.com/v1"
   }
 
-  # A provider that answers as the test says and tells the test what it was sent.
+  # A provider that answers as the test says and tells the test what it was
+  # sent. `{:queue, agent}` answers each call with the agent's next answer.
   defmodule ExtractionAdapter do
     def chat(messages, tools, opts) do
       send(Keyword.fetch!(opts, :test_pid), {:extraction_call, messages, tools, opts})
-
-      case Keyword.fetch!(opts, :answer) do
-        :hang -> receive(do: (:never_sent -> {:error, :unreachable}))
-        {:raise, message} -> raise message
-        answer -> answer
-      end
+      opts |> Keyword.fetch!(:answer) |> next() |> give()
     end
+
+    defp next({:queue, agent}),
+      do: Agent.get_and_update(agent, fn [next | rest] -> {next, rest} end)
+
+    defp next(answer), do: answer
+
+    defp give(:hang), do: receive(do: (:never_sent -> {:error, :unreachable}))
+    defp give({:raise, message}), do: raise(message)
+    defp give(answer), do: answer
   end
 
   defp brief do
@@ -92,6 +97,27 @@ defmodule FermixCore.PhoneCalls.OutcomeExtractionTest do
   end
 
   @answered %{answered: true, end_reason: :hangup}
+
+  @overloaded {:error,
+               {:provider_error,
+                %{kind: :provider_unavailable, message: "servers are currently overloaded"}}}
+  # The retry's pause, injected: no test waits on a clock.
+  @no_wait [retry_delay_fn: &__MODULE__.no_pause/1]
+
+  def no_pause(_ms), do: :ok
+
+  defp queue(answers),
+    do: {:queue, start_supervised!({Agent, fn -> answers end}, id: make_ref())}
+
+  # The `at` of every route asked so far, in order.
+  defp asked_routes(asked \\ []) do
+    receive do
+      {:extraction_call, _messages, _tools, call_opts} ->
+        asked_routes(asked ++ [Keyword.get(call_opts, :at, 1)])
+    after
+      0 -> asked
+    end
+  end
 
   describe "decided in code, with no model call" do
     # How the call ended is the row's own failure words; the outcome says
@@ -223,21 +249,74 @@ defmodule FermixCore.PhoneCalls.OutcomeExtractionTest do
                Outcome.extract(brief(), call(), @answered, opts(turn(claim)))
     end
 
-    # An error the chain would retry on its route and then fail over from.
-    test "only the first route is asked, once, with no retry and no failover" do
-      retryable = {:error, {:provider_error, %{kind: :provider_unavailable}}}
-
+    # An error the chain would retry on its route and then fail over from: the
+    # first route is asked again, once, and the next is never asked.
+    test "only the first route is asked, at most twice, with no failover" do
       routes = [
-        {@route, [adapter: ExtractionAdapter, test_pid: self(), answer: retryable]},
+        {@route, [adapter: ExtractionAdapter, test_pid: self(), answer: @overloaded, at: 1]},
         {%{@route | model: "gpt-second"},
-         [adapter: ExtractionAdapter, test_pid: self(), answer: turn(claim_json())]}
+         [adapter: ExtractionAdapter, test_pid: self(), answer: turn(claim_json()), at: 2]}
       ]
 
       assert {:ok, %Outcome{outcome: :unknown, reason: :extraction_provider_error}} =
-               Outcome.extract(brief(), call(), @answered, opts(nil, routes: routes))
+               Outcome.extract(
+                 brief(),
+                 call(),
+                 @answered,
+                 opts(nil, [routes: routes] ++ @no_wait)
+               )
 
-      assert_received {:extraction_call, _, _, _}
-      refute_received {:extraction_call, _, _, _}
+      assert [1, 1] == asked_routes()
+    end
+
+    test "a transient failure, then an answer: the outcome is read" do
+      opts = opts(queue([@overloaded, turn(claim_json())]), @no_wait)
+
+      assert {:ok, %Outcome{outcome: :confirmed, extraction: :ok}} =
+               Outcome.extract(brief(), call(), @answered, opts)
+
+      assert [1, 1] == asked_routes()
+    end
+
+    test "two transient failures report the provider's error" do
+      opts = opts(queue([@overloaded, @overloaded, turn(claim_json())]), @no_wait)
+
+      assert {:ok, %Outcome{outcome: :unknown, reason: :extraction_provider_error}} =
+               Outcome.extract(brief(), call(), @answered, opts)
+
+      assert [1, 1] == asked_routes()
+    end
+
+    test "a refusal, a malformed answer and an error that is not transient are asked once" do
+      refusal =
+        {:ok,
+         %{content: "", tool_calls: [], provider_state: %{stop_reason: "refusal"}, model: "m"}}
+
+      not_transient = {:error, {:provider_error, %{kind: :auth, message: "bad key"}}}
+
+      for {first, reason} <- [
+            {refusal, :extraction_refused},
+            {turn("not json"), :extraction_malformed},
+            {not_transient, :extraction_provider_error}
+          ] do
+        opts = opts(queue([first, turn(claim_json())]), @no_wait)
+
+        assert {:ok, %Outcome{outcome: :unknown, reason: ^reason}} =
+                 Outcome.extract(brief(), call(), @answered, opts)
+
+        assert [1] == asked_routes()
+      end
+    end
+
+    # One bound over the whole reading: a second attempt that never answers
+    # ends with the bound, not with a bound of its own.
+    test "the one bound covers both attempts" do
+      opts = opts(queue([@overloaded, :hang]), [timeout_ms: 100] ++ @no_wait)
+
+      assert {:ok, %Outcome{reason: :extraction_timeout, extraction: {:failed, :timeout, _}}} =
+               Outcome.extract(brief(), call(), @answered, opts)
+
+      assert [1, 1] == asked_routes()
     end
 
     # Why the call ended is the row's failure words, said once, by the view.
