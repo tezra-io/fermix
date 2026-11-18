@@ -61,6 +61,7 @@ defmodule FermixCore.PhoneCalls.Report do
   alias FermixCore.Memory.Repo.PhoneCallsSql
   alias FermixCore.PhoneCalls.Ledger
   alias FermixCore.PhoneCalls.Limits
+  alias FermixCore.PhoneCalls.Outcome
   alias FermixCore.PhoneCalls.PromptText
   alias FermixCore.PhoneCalls.Readiness
   alias FermixCore.PhoneCalls.Transcript
@@ -158,9 +159,6 @@ defmodule FermixCore.PhoneCalls.Report do
   }
   # A reason code no table holds: said without a claim about it.
   @outcome_reason_other "Fermix could not tell why the result is what it is."
-  # A result never read: its evidence is the call's last words
-  # (`PhoneCalls.Outcome.unread_report/1`).
-  @unread ~w(not_read extraction_timeout extraction_crashed)
   @not_checked_other "Part of this result is Fermix's reading of the call, not checked " <>
                        "against the words."
   @note_other "The record of this call is incomplete."
@@ -326,7 +324,7 @@ defmodule FermixCore.PhoneCalls.Report do
       notes: outcome_facts |> list("notes") |> Enum.map(&Map.get(@notes, &1, @note_other)),
       end_note: line(Map.get(outcome_facts, "note"), Limits.max_record_text_bytes()),
       excerpts: excerpts(Map.get(row, :evidence)),
-      unread?: Map.get(outcome_facts, "reason") in @unread,
+      unread?: unread?(Map.get(outcome_facts, "reason")),
       still_uncertain: line(Map.get(row, :outcome_uncertainty), Limits.max_record_text_bytes()),
       slot: slot_sentence(row, now),
       usage: usage(row, placed),
@@ -669,6 +667,14 @@ defmodule FermixCore.PhoneCalls.Report do
 
   defp unless_said(sentence, sentence), do: nil
   defp unless_said(sentence, _said), do: sentence
+
+  # A result never read, by the worker or by a reader that failed
+  # (`Outcome.unread_reasons/0`, the one list): its evidence is the call's
+  # last words, each speaker's closing line.
+  defp unread?(code) when is_binary(code),
+    do: Enum.any?(Outcome.unread_reasons(), &(Atom.to_string(&1) == code))
+
+  defp unread?(_none), do: false
 
   # Nobody was on the line: no answer, or a voicemail.
   defp unreached?(failure_code, facts),

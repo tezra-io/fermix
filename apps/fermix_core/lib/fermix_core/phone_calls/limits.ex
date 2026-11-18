@@ -78,6 +78,12 @@ defmodule FermixCore.PhoneCalls.Limits do
   @spec recipient_silence_timeout_ms() :: pos_integer()
   def recipient_silence_timeout_ms, do: 120 * 1000
 
+  # How long, once the call is answered, the voice waits for the recipient to
+  # speak first. Reached with no recipient speech: the opening line is sent,
+  # once; speech before it means the opening is never sent.
+  @spec opening_wait_ms() :: pos_integer()
+  def opening_wait_ms, do: 2 * 1000
+
   # -- delegation ----------------------------------------------------------------
 
   # Reached: a further delegation waits as the pending one.
@@ -197,9 +203,10 @@ defmodule FermixCore.PhoneCalls.Limits do
   @spec terminal_drain_ms() :: pos_integer()
   def terminal_drain_ms, do: 5 * 1000
 
-  # Reached: the extraction is stopped and the outcome is unknown.
+  # A ceiling to be reached rarely, the bound `Realtime.CallGist` gives the same
+  # kind of call. Reached: the extraction is stopped and the outcome is unknown.
   @spec result_extraction_timeout_ms() :: pos_integer()
-  def result_extraction_timeout_ms, do: 30 * 1000
+  def result_extraction_timeout_ms, do: 60 * 1000
 
   # The extraction bounds itself; past its timeout and this, the worker stops
   # the task. Reached: the outcome is unknown.

@@ -272,6 +272,58 @@ defmodule FermixCore.PhoneCalls.OutcomeExtractionTest do
     end
   end
 
+  # The reading runs at the extraction's own moderate effort, whatever the
+  # owner's main route carries, clamped for the model it runs on.
+  describe "the reading's effort" do
+    defp route_opts(extra),
+      do: [adapter: ExtractionAdapter, test_pid: self(), answer: turn(claim_json())] ++ extra
+
+    test "is moderate over a route that carries a higher level, the pre-bound adapter kept" do
+      routes = [{@route, route_opts(reasoning_effort: :xhigh)}]
+
+      assert {:ok, %Outcome{outcome: :confirmed}} =
+               Outcome.extract(brief(), call(), @answered, opts(nil, routes: routes))
+
+      assert_received {:extraction_call, _messages, [], call_opts}
+      assert Keyword.fetch!(call_opts, :reasoning_effort) == :medium
+      refute Keyword.has_key?(call_opts, :adapter)
+    end
+
+    test "is the level OpenAI Codex's gpt-6-astra accepts for it" do
+      codex = %{
+        provider: :openai_codex,
+        model: "gpt-6-astra",
+        auth_mode: :oauth,
+        base_url: "https://chatgpt.com/backend-api/codex"
+      }
+
+      routes = [{codex, route_opts(reasoning_effort: :xhigh)}]
+
+      assert {:ok, _outcome} =
+               Outcome.extract(brief(), call(), @answered, opts(nil, routes: routes))
+
+      assert_received {:extraction_call, _messages, [], call_opts}
+      assert Keyword.fetch!(call_opts, :reasoning_effort) == :medium
+    end
+
+    test "is left off a provider with no effort levels" do
+      plain = %{
+        provider: :openrouter,
+        model: "vendor/plain-model",
+        auth_mode: :api_key,
+        base_url: "https://openrouter.ai/api/v1"
+      }
+
+      routes = [{plain, route_opts([])}]
+
+      assert {:ok, _outcome} =
+               Outcome.extract(brief(), call(), @answered, opts(nil, routes: routes))
+
+      assert_received {:extraction_call, _messages, [], call_opts}
+      refute Keyword.has_key?(call_opts, :reasoning_effort)
+    end
+  end
+
   describe "a failed extraction is an unknown outcome with its class kept" do
     test "malformed: prose instead of the object" do
       assert {:ok,

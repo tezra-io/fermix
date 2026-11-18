@@ -15,7 +15,8 @@ defmodule FermixCore.Tools.PhoneCall do
       confirmation of the brief before it runs at all
       (`Capabilities.AccessGate`, which this built-in opts into as an effect
       outside the machine, `external_effect?`; see `Capabilities.Builtin`).
-      What the owner reads is `confirmation/2`, the whole brief rendered here;
+      What the owner reads is `confirmation/2`: the call as one question,
+      then every part of the brief the call acts on or says, rendered here;
       `effect_call?/1` names `start` alone;
     * the authorization evidence the Manager records is the server's own: the
       owner request's identity (`:request_id`, `Agents.RequestIdentity`,
@@ -249,8 +250,9 @@ defmodule FermixCore.Tools.PhoneCall do
 
   # --- the owner's confirmation (`Capabilities.AccessGate`, `ExternalEffect`) ---
 
-  @confirm_head "It places a phone call for you, from your number, made by Fermix as your AI " <>
-                  "assistant."
+  # The opening language a brief carries when it names none (`Brief`'s
+  # default): the one the card does not name.
+  @usual_language "en"
   @confirm_promise "Once you confirm, Fermix places exactly this call."
 
   @impl ExternalEffect
@@ -305,15 +307,20 @@ defmodule FermixCore.Tools.PhoneCall do
     do: {:ok, "This request had already started call #{id}; no second call was placed."}
 
   @doc """
-  What the owner reads before a `start` goes ahead (`Capabilities.AccessGate`):
-  the whole brief, as a person would want to read it before a call is placed
-  in their name. The number dialed and who it is, where the number came from,
-  the number it is placed from, the name it calls for, the task, what must be
-  confirmed, the times spelled out, the alternatives it may accept, what it
-  must not agree to, the facts it may share, the lookups it may use and the
-  language it opens in. Every value of the brief is quoted as its own rendering
-  quotes it (`PhoneCalls.BriefText.quoted/1`), so it reads as data, and the
-  gate keeps each on a line of its own. A start its admission would certainly
+  What the owner reads before a `start` goes ahead (`Capabilities.AccessGate`),
+  short, and their defence against a request someone else wrote. It opens with
+  the call as one question: whom it calls, a business or their own phone, at
+  which number, and for whom when the brief names someone. Then every part of
+  the brief the call acts on or says: where the number came from, the task,
+  what must be confirmed, the times with their zone (the zone alone when it
+  names no time), the alternatives it may accept, what it must not agree to,
+  the facts it may share, the lookups it may use, and an opening language
+  other than `@usual_language`. A part is left out only when it is empty (an
+  empty list, which the gate shows as no row) or the same on every call (the
+  owner's own caller number); no part is summarized, and nothing here is a
+  model's words but the brief's own values. Every value is quoted as the
+  brief's own rendering quotes it (`PhoneCalls.BriefText.quoted/1`), so it
+  reads as data, and the gate keeps each on a line of its own. A start its admission would certainly
   refuse (`admissible/2`: calls off or needing setup, an unusable brief, a
   report with nowhere to go, no request identity, a grant a call cannot use, a
   prompt too large for the call) has nothing to confirm: it answers the
@@ -325,27 +332,35 @@ defmodule FermixCore.Tools.PhoneCall do
   def confirmation(args, context) when is_map(args) and is_map(context) do
     case admissible(args, context) do
       {:ok, %{brief: brief}} ->
-        {:ok, %{head: @confirm_head, lines: confirmation_lines(brief), promise: @confirm_promise}}
+        {:ok,
+         %{head: question(brief), lines: confirmation_lines(brief), promise: @confirm_promise}}
 
       {:error, reason} ->
         {:error, sentence(reason)}
     end
   end
 
+  # The call as the question the owner answers: whom, as what, at which
+  # number, and for whom when the brief names someone.
+  defp question(%Brief{} = brief) do
+    "Call #{quoted(brief.contact_name)} (#{kind_words(brief)}) at #{brief.destination}" <>
+      for_whom(brief.on_behalf_of) <> "?"
+  end
+
+  # Every part the call acts on or says. An optional part is a list, so an
+  # empty one is no row (`Capabilities.AccessGate`); the caller number, the
+  # owner's own on every call, is never one.
   defp confirmation_lines(%Brief{} = brief) do
     [
-      {"Calls", "#{brief.destination}, #{quoted(brief.contact_name)}, #{kind_words(brief)}"},
       {"Number found", quoted(brief.number_source)},
-      {"From", "#{brief.caller_number}, your number"},
-      {"Calling for", calling_for(brief.on_behalf_of)},
       {"Task", quoted(brief.goal)},
       {"Must be confirmed", Enum.map(brief.completion_criteria, &quoted/1)},
-      {"Times, in #{brief.timezone}", Enum.map(brief.times, &time_words/1)},
+      times_line(brief),
       {"Alternatives it may accept", Enum.map(brief.alternatives, &quoted/1)},
       {"Must not agree to", Enum.map(brief.must_not_commit, &quoted/1)},
       {"Facts it may share", Enum.map(brief.shareable_facts, &fact_words/1)},
-      {"Lookups it may use", lookup_words(brief.tool_grants)},
-      {"Opens in", brief.opening_language}
+      {"Lookups it may use", brief.tool_grants},
+      {"Opens in", unusual_language(brief.opening_language)}
     ]
   end
 
@@ -354,14 +369,21 @@ defmodule FermixCore.Tools.PhoneCall do
   defp kind_words(%Brief{destination_kind: :business}), do: "a business"
   defp kind_words(%Brief{destination_kind: :owner}), do: "your own phone"
 
-  defp calling_for(nil), do: "nobody named"
-  defp calling_for(name) when is_binary(name), do: quoted(name)
+  defp for_whom(nil), do: ""
+  defp for_whom(name) when is_binary(name), do: " for #{quoted(name)}"
+
+  # The zone the call reads its times in, beside them, or alone when it names
+  # none: it still sets the call's "today".
+  defp times_line(%Brief{times: [], timezone: zone}), do: {"Time zone", zone}
+
+  defp times_line(%Brief{times: times, timezone: zone}),
+    do: {"Times, in #{zone}", Enum.map(times, &time_words/1)}
 
   defp time_words(%{label: label, at: at}), do: "#{quoted(label)}: #{BriefText.spelled(at)}"
   defp fact_words(%{label: label, value: value}), do: "#{quoted(label)}: #{quoted(value)}"
 
-  defp lookup_words([]), do: "none"
-  defp lookup_words(grants), do: Enum.join(grants, ", ")
+  defp unusual_language(@usual_language), do: []
+  defp unusual_language(language) when is_binary(language), do: [language]
 
   @doc """
   Shown on the owner's attended turn while phone calls are on; while they are

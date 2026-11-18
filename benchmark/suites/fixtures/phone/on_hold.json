@@ -10,10 +10,7 @@
       "pause_ms": 600
     },
     {
-      "answer": true
-    },
-    {
-      "say": "Bramble and Oak Hotel, front desk, this is Marisol."
+      "pick_up": "Bramble and Oak Hotel, front desk, this is Marisol."
     },
     {
       "voice": "Hi Marisol, I'm an AI assistant calling for a guest. Is a late checkout possible on Sunday, February 21st?"

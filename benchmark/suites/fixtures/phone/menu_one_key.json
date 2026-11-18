@@ -10,10 +10,7 @@
       "pause_ms": 600
     },
     {
-      "answer": true
-    },
-    {
-      "say": "Thank you for calling Harrow Street Dental. For appointments, press 2. For billing, press 3. To hear our hours, press 4."
+      "pick_up": "Thank you for calling Harrow Street Dental. For appointments, press 2. For billing, press 3. To hear our hours, press 4."
     },
     {
       "replay": true

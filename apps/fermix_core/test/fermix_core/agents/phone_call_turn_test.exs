@@ -19,6 +19,7 @@ defmodule FermixCore.Agents.PhoneCallTurnTest do
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.PhoneCalls.Brief
   alias FermixCore.PhoneCalls.Prompt
+  alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Temporal.Access
   alias FermixCore.Tools.PhoneCallEnd
   alias FermixCore.Tools.PhoneCallPressKeys
@@ -86,6 +87,41 @@ defmodule FermixCore.Agents.PhoneCallTurnTest do
         model: "mock-model"
       }
     end
+  end
+
+  # A provider that tells the test the reasoning effort it was asked to run
+  # at, then answers.
+  defmodule EffortAdapter do
+    @behaviour FermixCore.Providers.Adapter
+
+    @impl true
+    def chat(_messages, _capabilities, opts) do
+      send(Keyword.fetch!(opts, :test_pid), {:effort, Keyword.get(opts, :reasoning_effort)})
+
+      {:ok,
+       %{
+         content: "One moment.",
+         tool_calls: [],
+         provider_state: %{},
+         usage: %{prompt_tokens: 10, completion_tokens: 2, total_tokens: 12},
+         model: "mock-model"
+       }}
+    end
+
+    @impl true
+    def continue(_state, _results, _opts), do: {:error, :unexpected_continue}
+
+    @impl true
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl true
+    def parse_tool_calls(_response), do: []
+
+    @impl true
+    def parse_response(response), do: response
+
+    @impl true
+    def supports_streaming?, do: false
   end
 
   # The call's worker as the in-call controls see it: accepts only the handle
@@ -490,6 +526,72 @@ defmodule FermixCore.Agents.PhoneCallTurnTest do
 
       refute_received {:executed, _name, _args, _context}
       assert Pending.pending_from(ctx.session, ctx.pending) == :none
+    end
+  end
+
+  # A person waits on the line while a backend turn thinks, so every turn of a
+  # call runs at a low reasoning effort, whatever the owner's routes carry,
+  # clamped as the catalog clamps any route (`ModelCatalog.clamp_effort/3`).
+  describe "the reasoning effort" do
+    defp route(provider, model, opts) do
+      key = %{provider: provider, model: model, auth_mode: :api_key, base_url: "https://x.test"}
+      {key, [adapter: EffortAdapter, test_pid: self()] ++ opts}
+    end
+
+    defp effort_turn(ctx, loop) do
+      state = %{turn_state(ctx, []) | adapter: nil, adapter_opts: []}
+      msg = PhoneCallTurn.message(request(ctx))
+      TurnRunner.run(msg, Map.merge(state, loop), fn _part -> :ok end, fn _event -> :ok end)
+    end
+
+    test "a route at the owner's high effort reaches the provider at the call's low one", ctx do
+      anthropic = hd(ModelCatalog.models_for(:anthropic)).id
+
+      for {provider, model, configured} <- [
+            {:openai_codex, "gpt-6-astra", :xhigh},
+            {:anthropic, anthropic, :high},
+            {:xai, "grok-invented-1", :max}
+          ] do
+        routes = [route(provider, model, reasoning_effort: configured)]
+        assert {:ok, "One moment.", 0} = effort_turn(ctx, %{ordered_routes: routes})
+        assert_received {:effort, effort}
+        assert effort == ModelCatalog.clamp_effort(provider, model, :low)
+        assert effort == :low, "#{provider} #{model}"
+      end
+    end
+
+    test "a provider with no effort levels is left as its route has it", ctx do
+      routes = [route(:openrouter, "invented/model-1", [])]
+      assert {:ok, "One moment.", 0} = effort_turn(ctx, %{ordered_routes: routes})
+      assert_received {:effort, nil}
+    end
+
+    test "a single adapter is its one route: low on a provider with levels, else as given",
+         ctx do
+      key = %{provider: :anthropic, model: "claude-invented-1", auth_mode: :api_key}
+      opts = [test_pid: self(), reasoning_effort: :high]
+
+      runtime = fn loop ->
+        %{
+          capability_registry: ctx.registry,
+          loop: loop,
+          tell: fn _event -> :ok end,
+          now_fn: fn -> @now end,
+          controls: FakeControls
+        }
+      end
+
+      turn = PhoneCallTurn.message(request(ctx)).metadata.phone_call
+      loop = [adapter: EffortAdapter, adapter_opts: opts, route_key: Map.put(key, :base_url, "")]
+      assert {:ok, "One moment.", 0} = PhoneCallTurn.run(turn, runtime.(loop))
+      assert_received {:effort, :low}
+
+      # Without a route key the loop runs it as its own `:mock` provider, which
+      # has no effort levels.
+      assert {:ok, "One moment.", 0} =
+               effort_turn(ctx, %{adapter: EffortAdapter, adapter_opts: opts})
+
+      assert_received {:effort, :high}
     end
   end
 

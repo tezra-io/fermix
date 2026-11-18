@@ -479,8 +479,8 @@ defmodule FermixChannels.PhoneCalls.EndToEndTest do
     %{id: call_id, create: create, create_request: create_request, clock: ctx.clock}
   end
 
-  # The create answered, the sideband attached, the leg answered: the opening
-  # line is said.
+  # The create answered, the sideband attached, the leg answered, and nobody
+  # spoke within the opening's wait: the opening line is said.
   defp connect!(call) do
     Fakes.answer(
       call.create,
@@ -493,6 +493,8 @@ defmodule FermixChannels.PhoneCalls.EndToEndTest do
 
     send(worker, {:phone_sideband, sideband, :attached})
     event(worker, sideband, {:answered, %{session_id: @session, event_id: "evt_answered"}})
+    assert_receive {:scheduled, {:phone_call_timer, :opening, _token} = opening, _ms}, @arrival
+    send(worker, opening)
     assert_receive {:said, nil, _opening}, @arrival
     Map.merge(call, %{worker: worker, worker_ref: worker_ref, sideband: sideband})
   end
@@ -533,7 +535,7 @@ defmodule FermixChannels.PhoneCalls.EndToEndTest do
     {model, turn.handle}
   end
 
-  # The turn's reply is spoken: the call ends once it has been said.
+  # The voice's own goodbye goes quiet: then the one hangup.
   defp hang_up!(call, closed_reason) do
     assert_receive {:scheduled, {:phone_call_timer, :speech, _token} = speech, _ms}, @arrival
     # The clock is shared memory, not a message: every fragment this test sent
@@ -653,13 +655,25 @@ defmodule FermixChannels.PhoneCalls.EndToEndTest do
     refute_received {:dtmf, "2", _event}
   end
 
-  # The turn's model ends the call with the real end tool, then answers.
-  defp end_call!(model, delegation_id, reason, note, reply) do
+  # The turn's model ends the call with the real end tool. The call's ending
+  # begins at once; the turn that asked is left to run (a stop would race its
+  # own tool call), so its one tool event always comes, waited for here as an
+  # event. The turn then goes on by itself: it asks its model once more, its
+  # reply is never said (checked once the worker is down), and it ends.
+  # Answers the end tool's event.
+  defp end_call!(model, reason, note, reply) do
+    turn = Process.monitor(model)
     answer(model, {:tools, [{"phone_call_end", %{"reason" => reason, "note" => note}}]})
-    {model, {:continue, [ended]}} = model_asked!()
-    assert %{"status" => "ending", "reason" => ^reason} = Jason.decode!(ended.output)
+
+    assert_receive {:telemetry, [:fermix, :tool, :exec], _measurements,
+                    %{tool: "phone_call_end"} = ended},
+                   @arrival
+
+    {^model, {:continue, [result]}} = model_asked!()
+    assert %{"status" => "ending", "reason" => ^reason} = Jason.decode!(result.output)
     answer(model, {:reply, reply})
-    assert_receive {:said, ^delegation_id, ^reply}, @arrival
+    assert_receive {:DOWN, ^turn, :process, ^model, _reason}, @arrival
+    ended
   end
 
   defp confirmed_claim do
@@ -722,8 +736,8 @@ defmodule FermixChannels.PhoneCalls.EndToEndTest do
 
   # One exec event per model tool call, under each tool's own name and the
   # call's own session, carrying no number, key or note; and the one closer.
-  defp assert_call_telemetry! do
-    events = exec_events()
+  defp assert_call_telemetry!(ended) do
+    events = exec_events() ++ [ended]
     assert Enum.map(events, & &1.tool) == ["phone_call_press_keys", "phone_call_end"]
     assert Enum.all?(events, &(&1.agent == "phone_call" and &1.success))
     assert [%{key_count: 1}, %{reason: "done"}] = events
@@ -750,7 +764,7 @@ defmodule FermixChannels.PhoneCalls.EndToEndTest do
     refute second_handle == first_handle
     stale_handle_refused!(call, first_handle)
 
-    end_call!(model, "d2", "done", "Booked for two at 7:30 PM.", "Thank you, goodbye.")
+    ended = end_call!(model, "done", "Booked for two at 7:30 PM.", "The table is booked.")
     heard(call, :assistant, "Thank you, goodbye.", 13_000, 14_000)
     hang_up!(call, "close_requested")
     entries = extraction!(confirmed_claim())
@@ -767,6 +781,9 @@ defmodule FermixChannels.PhoneCalls.EndToEndTest do
 
     assert_receive {:DOWN, ref, :process, _worker, :normal}, @arrival
     assert ref == call.worker_ref
+    # Everything the worker gave the voice arrived before its `:DOWN`: the
+    # finishing turn's reply was never among it.
+    refute_received {:said, "d2", _reply}
     :ok = await_handoffs(ctx)
 
     # The row is what the call proved, written once by the Manager, and the
@@ -779,7 +796,7 @@ defmodule FermixChannels.PhoneCalls.EndToEndTest do
     refute_received {:create, _task, _request}
     refute_received {:hangup, _task, _session}
     refute_received {:manager_hangup, _session}
-    assert_call_telemetry!()
+    assert_call_telemetry!(ended)
   end
 
   test "a call that needs the owner ends and asks, and nothing is dialed again", ctx do
@@ -798,7 +815,7 @@ defmodule FermixChannels.PhoneCalls.EndToEndTest do
     {model, _handle} = delegation!(call, "d1")
 
     note = "Only 9:15 PM is open that night; Rowan must decide."
-    end_call!(model, "d1", "needs_owner", note, "Thank you. Rowan will follow up. Goodbye.")
+    end_call!(model, "needs_owner", note, "Rowan has to decide between the times.")
 
     hang_up!(call, "close_requested")
 
@@ -823,6 +840,7 @@ defmodule FermixChannels.PhoneCalls.EndToEndTest do
 
     assert_receive {:DOWN, ref, :process, _worker, :normal}, @arrival
     assert ref == call.worker_ref
+    refute_received {:said, "d1", _reply}
     :ok = await_handoffs(ctx)
 
     row = row!(ctx, call.id)

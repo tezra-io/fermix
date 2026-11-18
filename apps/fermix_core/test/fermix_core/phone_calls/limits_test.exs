@@ -21,6 +21,7 @@ defmodule FermixCore.PhoneCalls.LimitsTest do
     assert Limits.call_deadline_ms() == 10 * 60 * 1000
     assert Limits.ringing_timeout_ms() == 60 * 1000
     assert Limits.recipient_silence_timeout_ms() == 120 * 1000
+    assert Limits.opening_wait_ms() == 2 * 1000
   end
 
   test "delegation" do
@@ -42,7 +43,7 @@ defmodule FermixCore.PhoneCalls.LimitsTest do
     assert Limits.max_cleanup_retries() == 2
     assert Limits.cleanup_window_ms() == 30 * 1000
     assert Limits.terminal_drain_ms() == 5 * 1000
-    assert Limits.result_extraction_timeout_ms() == 30 * 1000
+    assert Limits.result_extraction_timeout_ms() == 60 * 1000
     assert Limits.max_report_delivery_attempts() == 3
     assert Limits.max_terminal_write_attempts() == 5
     assert Limits.terminal_write_retry_ms() == 1_000

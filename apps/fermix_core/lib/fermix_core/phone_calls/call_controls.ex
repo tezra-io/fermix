@@ -59,15 +59,18 @@ defmodule FermixCore.PhoneCalls.CallControls do
   Ends the call, for its running backend turn (`handle`): `:done`,
   `:needs_owner` (it ends as `needs_owner` with the options heard),
   `:cannot_proceed` or `:voicemail` (voicemail or a machine answered). `:ok`
-  once taken. The call ends when that turn's answer has been given to the
-  voice, or its time is up; on `:voicemail` at once, with nothing said and no
-  message left. `note` is kept with the outcome as given: the caller
+  once taken, and the call's ending begins then: the turn that asked is
+  retired (left to end by itself, since a stop would race this very call)
+  and its reply, if one still comes, is never said; the hangup waits only
+  for the voice's own speech to go quiet, and on `:voicemail` not at all, so
+  no message is left. `note` is kept with the outcome as given: the caller
   (`Tools.PhoneCallEnd`) refuses one longer than
   `Limits.max_finish_note_bytes/0`, and this control refuses it too, never
   cutting it.
 
   Refused: `:invalid_reason`, `:invalid_note`, `:unknown_call`,
-  `:bad_handle`, `:stale_handle`, `:not_active`, `:already_finishing`;
+  `:bad_handle`, `:stale_handle` (the finish retired the turn that asked, so
+  a second one is this), `:not_active`;
   `:call_ended` and `:timeout` as for `press_keys/3`.
   """
   @spec finish(String.t(), String.t(), finish_reason(), String.t() | nil, keyword()) ::

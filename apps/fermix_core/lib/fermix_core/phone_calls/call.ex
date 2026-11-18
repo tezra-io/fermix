@@ -49,11 +49,15 @@ defmodule FermixCore.PhoneCalls.Call do
     * `live`: events are reduced forward only. Ringing is optional;
       `answered`, or the recipient's first words when `answered` was missed,
       make the call active (which never means a person answered), stop the
-      ringing timer, start the recipient-silence timer and send the opening
-      line once. Transcript fragments are kept in arrival order, in bounded
+      ringing timer and start the recipient-silence timer. The opening line
+      waits `Limits.opening_wait_ms/0` for the recipient to speak first: any
+      recipient words before it (or a call made active by them) mean it is
+      never sent, the voice answering them from its instructions; with none,
+      it is sent once. Transcript fragments are kept in arrival order, in bounded
       memory (`Limits.max_transcript_bytes/0`), never logged. Delegations run
       one scoped backend turn each through the `PhoneCalls.Delegate` the
       start args name; the keypad and the finish request come from that turn.
+      A finish begins the ending at once.
     * `ending`, from any end (`Call.Ending`'s causes): backend work is
       stopped first; a reply still being spoken gets a bounded wait; the row
       advances to `closing`; `consume(:cleanup_attempts)`; ONE hangup request
@@ -72,19 +76,30 @@ defmodule FermixCore.PhoneCalls.Call do
   the report at once. An owner's stop or the off switch in the tail changes
   nothing.
 
-  An outcome that was not read (the engine stopped, the transcript reached
-  its bound, the extraction failed or ran out of time) is `unknown` with its
-  reason's code (`Outcome.unread_report/1`), and carries the call's last
-  words as its evidence (`Call.LastWords`): the transcript ends with the
-  worker, and these lines tell the owner whether anything was agreed.
+  One place decides whether the call's result was read (`reading/2`). It was
+  not when the worker never got a reading (the engine stopped, the transcript
+  reached its bound, the reading ran out of time or crashed: `unknown` with
+  `Outcome.unread_report/1`'s code) or when the reader itself failed (its
+  outcome's `extraction` is `{:failed, class, detail}`, its class kept as
+  the reason). Either way the report carries the call's last words as its
+  evidence (`Call.LastWords`): the transcript ends with the worker, and these
+  lines tell the owner whether anything was agreed.
 
-  What is said on the call when a backend turn ends it (`finish`): its reply,
-  when it has one (`:done` a goodbye, `:needs_owner` that the owner will
-  follow up, `:cannot_proceed` whatever it closes with). A turn that fails to
-  answer leaves nothing on the line after `:done` or `:cannot_proceed` (the
-  conversation is over), and the one sentence a person should hear after
-  `:needs_owner`. On `:voicemail` nothing at all is said: no reply, no line
-  and no wait; the call is hung up at once.
+  A backend turn that ends the call (`finish`, "hang up once the
+  conversation is over") ends it when the finish is taken, for every reason:
+  the turn that asked is retired, and its reply, if one still comes, is never
+  said (commentary is spoken aloud, and a turn's summary is meant for nobody
+  on the line). The hangup still waits, bounded, for the voice's own speech
+  to go quiet, so its goodbye is not cut; on `:voicemail` it does not wait.
+  That turn is not stopped: it is inside its own `phone_call_end` call, and a
+  stop would race that call and could kill it before its one tool event. It
+  ends by itself, within its own bounds (its steps, the bridge's deadline),
+  and at the latest when this worker has gone (the bridge stops a turn whose
+  worker is down); every control it presents meanwhile is refused (its handle
+  is retired, then the call is unknown), and its late answer is ignored or
+  reaches no one. Every other running turn is stopped. A turn retired at the
+  end counts as a backend turn whose usage is unknown, as a turn past its
+  time does.
 
   ## Start args and seams
 
@@ -137,7 +152,6 @@ defmodule FermixCore.PhoneCalls.Call do
                       "follow up. Thank you for your time."
   @failed_line "I can't get that done during this call; the owner will follow up on it."
   @timeout_line "That is taking too long; the owner will follow up on it."
-  @owner_follows_up "The owner will follow up with you about this."
 
   # Inspected anywhere (a crash's stack frame, which carries its arguments
   # past `format_status/1`; `:sys.get_state/1`), the state prints only these
@@ -190,6 +204,7 @@ defmodule FermixCore.PhoneCalls.Call do
     answered?: false,
     opening: nil,
     opening_sent?: false,
+    recipient_spoke?: false,
     transcript: [],
     transcript_bytes: 0,
     transcript_full?: false,
@@ -205,6 +220,7 @@ defmodule FermixCore.PhoneCalls.Call do
     ledger_logged: MapSet.new(),
     keypad: nil,
     finish: nil,
+    finishing_turn: nil,
     cancel: nil,
     engine_stop?: false,
     ending: nil
@@ -500,9 +516,17 @@ defmodule FermixCore.PhoneCalls.Call do
     %{advance(state, "active") | answered?: true, progress: :active}
     |> disarm(:ringing)
     |> rearm_silence()
-    |> send_opening()
+    |> await_opening()
   end
 
+  # The recipient may speak first: the opening waits for them, bounded.
+  defp await_opening(%{recipient_spoke?: false} = state),
+    do: arm(state, :opening, Limits.opening_wait_ms())
+
+  defp await_opening(state), do: state
+
+  # The wait passed with nobody speaking (their words disarm it, `heard/2`):
+  # sent once, while the call goes on.
   defp send_opening(%{opening_sent?: false, ending: nil, attached?: true} = state),
     do: %{say(state, nil, state.opening) | opening_sent?: true}
 
@@ -547,7 +571,12 @@ defmodule FermixCore.PhoneCalls.Call do
 
   # The recipient's words are evidence the leg is up even when `answered`
   # was missed before the attach.
-  defp heard(state, :remote), do: state |> answered() |> rearm_silence()
+  defp heard(state, :remote) do
+    %{disarm(state, :opening) | recipient_spoke?: true}
+    |> answered()
+    |> rearm_silence()
+  end
+
   defp heard(state, :assistant), do: %{state | last_assistant_ms: state.monotonic.()}
 
   defp rearm_silence(%{ending: nil} = state),
@@ -557,7 +586,7 @@ defmodule FermixCore.PhoneCalls.Call do
 
   # --- delegations ------------------------------------------------------------------
 
-  defp delegation(%{ending: nil, finish: nil} = state, %{id: id, target: target})
+  defp delegation(%{ending: nil} = state, %{id: id, target: target})
        when target in [nil, "client"],
        do: take_delegation(state, id)
 
@@ -636,7 +665,7 @@ defmodule FermixCore.PhoneCalls.Call do
         |> disarm({:turn_timeout, id})
         |> stop_turn_keys(id)
         |> answer_turn(id, result)
-        |> after_turn()
+        |> next_delegation()
 
       :stale ->
         Logger.debug("phone call #{state.call_id} stale backend answer ignored")
@@ -659,26 +688,16 @@ defmodule FermixCore.PhoneCalls.Call do
 
   defp answer_turn(state, id, {:error, reason}) do
     Logger.warning("phone call #{state.call_id} backend turn failed: #{describe(reason)}")
-    state |> add_backend(nil) |> say_limitation(id, @failed_line)
+    state |> add_backend(nil) |> say(id, @failed_line)
   end
 
   defp answer_turn(state, id, _malformed) do
     Logger.error("phone call #{state.call_id} backend turn answered in an unknown shape")
-    state |> add_backend(nil) |> say_limitation(id, @failed_line)
+    state |> add_backend(nil) |> say(id, @failed_line)
   end
 
-  defp say_reply(state, id, ""), do: say_limitation(state, id, @failed_line)
+  defp say_reply(state, id, ""), do: say(state, id, @failed_line)
   defp say_reply(state, id, reply), do: say(state, id, reply)
-
-  # A turn that finished the call and could not answer: after `:done` or
-  # `:cannot_proceed` the conversation is over and nothing is said; after
-  # `:needs_owner` the person hears that the owner will follow up.
-  defp say_limitation(%{finish: nil} = state, id, line), do: say(state, id, line)
-
-  defp say_limitation(%{finish: %{reason: :needs_owner}} = state, id, _line),
-    do: say(state, id, @owner_follows_up)
-
-  defp say_limitation(state, _id, _line), do: state
 
   defp turn_timed_out(state, id) do
     case Delegations.finish(state.delegations, id) do
@@ -687,18 +706,15 @@ defmodule FermixCore.PhoneCalls.Call do
         |> cancel_turn(record)
         |> stop_turn_keys(id)
         |> add_backend(nil)
-        |> say_limitation(id, @timeout_line)
-        |> after_turn()
+        |> say(id, @timeout_line)
+        |> next_delegation()
 
       :stale ->
         state
     end
   end
 
-  defp after_turn(%{finish: %{reason: reason}} = state), do: begin_end(state, {:finish, reason})
-  defp after_turn(state), do: next_delegation(state)
-
-  defp next_delegation(%{ending: nil, finish: nil} = state) do
+  defp next_delegation(%{ending: nil} = state) do
     case Delegations.promote(state.delegations) do
       {:ok, record, delegations} -> consume_turn(%{state | delegations: delegations}, record)
       :none -> state
@@ -847,22 +863,21 @@ defmodule FermixCore.PhoneCalls.Call do
   # --- finish and cancel ------------------------------------------------------------------
 
   defp finish_request(state, handle, reason, note) do
-    with {:ok, _record} <- Delegations.check_handle(state.delegations, handle),
+    with {:ok, record} <- Delegations.check_handle(state.delegations, handle),
          :ok <- finish_ready(state) do
-      {:ok, finish_taken(%{state | finish: %{reason: reason, note: note}})}
+      finish = %{reason: reason, note: note}
+      {:ok, finish_taken(%{state | finish: finish, finishing_turn: record.id})}
     end
   end
 
-  defp finish_ready(%{finish: %{}}), do: {:error, :already_finishing}
   defp finish_ready(%{phase: :live, ending: nil}), do: :ok
   defp finish_ready(_state), do: {:error, :not_active}
 
-  # Voicemail: nothing is left on it, so the call ends now and the turn's
-  # reply is never said. Any other finish ends once that turn has answered.
-  defp finish_taken(%{finish: %{reason: :voicemail}} = state),
-    do: begin_end(state, {:finish, :voicemail})
-
-  defp finish_taken(state), do: state
+  # The conversation is over: the ending begins now, for every reason. The
+  # finishing turn is retired, never stopped (`stopped_turn/2`), and its reply
+  # never said; the hangup waits only for the voice's own speech to go quiet
+  # (not on voicemail, `Call.Ending`).
+  defp finish_taken(%{finish: %{reason: reason}} = state), do: begin_end(state, {:finish, reason})
 
   # Remembered while the create is in flight: the first cancel's reason, but
   # an engine stop always, whatever came before it, so the end fits the drain.
@@ -889,7 +904,7 @@ defmodule FermixCore.PhoneCalls.Call do
   defp engine_stops(%{phase: :finalizing} = state) do
     %{state | tasks: Tasks.shutdown(state.tasks, :extract)}
     |> disarm(:extract_watchdog)
-    |> report_outcome(unread_outcome(state, :not_read))
+    |> report_reading({:not_read, :not_read})
   end
 
   defp engine_stops(%{ending: %Ending{stage: :speech}} = state),
@@ -923,11 +938,30 @@ defmodule FermixCore.PhoneCalls.Call do
 
   defp stop_attaching(state), do: state
 
+  # A turn retired here ran and never answered: it counts as a backend turn
+  # whose usage is unknown, as a turn past its time does. One that had not
+  # started yet ran nothing.
   defp stop_backend_work(state) do
     {running, delegations} = Delegations.stop_all(state.delegations)
-    state = Enum.reduce(running, %{state | delegations: delegations}, &cancel_turn(&2, &1))
-    keypad_done(state, :call_ending)
+
+    running
+    |> Enum.reduce(%{state | delegations: delegations}, &stopped_turn(&2, &1))
+    |> keypad_done(:call_ending)
   end
+
+  # The turn that asked for the finish is left to run: it is waiting on its
+  # own `phone_call_end` call to this worker, and a stop sent now would race
+  # that call's return and could kill the turn before its one tool event. Its
+  # record is retired all the same, so its controls are refused and its
+  # answer is ignored; it ends by itself (see the moduledoc).
+  defp stopped_turn(%{finishing_turn: id} = state, %{id: id, handle: handle})
+       when is_binary(handle),
+       do: add_backend(state, nil)
+
+  defp stopped_turn(state, %{handle: handle} = record) when is_binary(handle),
+    do: state |> cancel_turn(record) |> add_backend(nil)
+
+  defp stopped_turn(state, _never_started), do: state
 
   defp await_speech(state) do
     if speaking?(state) and Ending.waits_for_speech?(state.ending, state.engine_stop?),
@@ -1050,11 +1084,10 @@ defmodule FermixCore.PhoneCalls.Call do
 
   # --- finalizing ----------------------------------------------------------------------------
 
-  defp extract(%{engine_stop?: true} = state),
-    do: report_outcome(state, unread_outcome(state, :not_read))
+  defp extract(%{engine_stop?: true} = state), do: report_reading(state, {:not_read, :not_read})
 
   defp extract(%{transcript_full?: true} = state),
-    do: report_outcome(state, unread_outcome(state, :not_read))
+    do: report_reading(state, {:not_read, :not_read})
 
   defp extract(state) do
     %{outcome: outcome, brief: brief} = state
@@ -1070,30 +1103,42 @@ defmodule FermixCore.PhoneCalls.Call do
 
   defp extraction(outcome, brief, entries, facts, opts) do
     case outcome.extract(brief, entries, facts, opts) do
-      {:ok, extracted} -> {:ok, outcome.to_report(extracted)}
+      {:ok, %Outcome{} = extracted} -> {:ok, extracted}
       other -> {:error, {:unexpected, other}}
     end
   end
 
-  defp extracted(state, {:ok, %{outcome: word} = outcome}) when is_binary(word),
-    do: report_outcome(state, outcome)
-
-  defp extracted(state, other) do
-    Logger.warning("phone call #{state.call_id} outcome not read: #{describe(other)}")
-    report_outcome(state, unread_outcome(state, unread_reason(other)))
+  # Every way to the report passes here, so one place decides whether the
+  # result was read: the reader's outcome, or why there is none.
+  defp report_reading(state, result) do
+    case reading(state, result) do
+      {:read, report} -> report_outcome(state, report)
+      {:not_read, report} -> report_outcome(state, with_last_words(state, report))
+    end
   end
 
-  defp unread_reason({:error, :extraction_timeout}), do: :extraction_timeout
-  defp unread_reason(_failed), do: :extraction_crashed
+  # Not read: the reader itself failed (its class kept as the reason), or the
+  # worker never got a reading (the engine stopped, the transcript reached its
+  # bound, the reading ran out of time or crashed).
+  defp reading(state, {:ok, %Outcome{extraction: {:failed, _class, _detail}} = outcome}),
+    do: {:not_read, state.outcome.to_report(outcome)}
 
-  # Not read: `unknown` with the reason's code (`Outcome.unread_report/1`),
-  # and the call's last words as its evidence, when anyone said any
-  # (`Call.LastWords`); the end report fits it (`Outcome.fit_report/1`).
-  defp unread_outcome(state, reason) do
-    reason
-    |> Outcome.unread_report()
-    |> Map.put(:evidence, state.transcript |> Enum.reverse() |> LastWords.evidence())
+  defp reading(state, {:ok, %Outcome{} = outcome}), do: {:read, state.outcome.to_report(outcome)}
+  defp reading(_state, {:not_read, code}), do: {:not_read, Outcome.unread_report(code)}
+
+  defp reading(_state, {:error, :extraction_timeout}),
+    do: {:not_read, Outcome.unread_report(:extraction_timeout)}
+
+  defp reading(state, failed) do
+    Logger.warning("phone call #{state.call_id} outcome not read: #{describe(failed)}")
+    {:not_read, Outcome.unread_report(:extraction_crashed)}
   end
+
+  # A result not read carries the call's last words as its evidence, when
+  # anyone said any (`Call.LastWords`); the end report fits it
+  # (`Outcome.fit_report/1`).
+  defp with_last_words(state, report),
+    do: Map.put(report, :evidence, state.transcript |> Enum.reverse() |> LastWords.evidence())
 
   defp report_outcome(state, outcome) do
     failure =
@@ -1155,6 +1200,7 @@ defmodule FermixCore.PhoneCalls.Call do
   defp fired(state, {:turn_timeout, id}), do: turn_timed_out(state, id)
   defp fired(state, :dtmf_ack), do: keypad_done(state, :ack_timeout)
   defp fired(state, :speech), do: speech_check(state)
+  defp fired(state, :opening), do: send_opening(state)
   defp fired(state, :drain), do: finalize(state)
 
   defp arm(state, kind, ms), do: %{state | timers: Timers.arm(state.timers, kind, ms)}
@@ -1199,7 +1245,7 @@ defmodule FermixCore.PhoneCalls.Call do
     do: state |> disarm(:hangup_watchdog) |> hangup_answered(task_result(:hangup, message))
 
   defp task_done(state, :extract, message),
-    do: state |> disarm(:extract_watchdog) |> extracted(task_result(:extract, message))
+    do: state |> disarm(:extract_watchdog) |> report_reading(task_result(:extract, message))
 
   # A task that crashed, or was stopped at its watchdog, answered nothing.
   defp task_result(_kind, {:result, result}), do: result

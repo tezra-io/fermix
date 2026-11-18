@@ -1,7 +1,7 @@
 {
   "name": "owner_phone",
   "number": "+16465550175",
-  "party": "The owner's own cell. The owner answers, hears the message and says thanks.",
+  "party": "The owner's own cell. The owner answers a number they do not know without a word and waits; the assistant opens, gives the message, and the owner says thanks.",
   "steps": [
     {
       "ring": true
@@ -13,7 +13,8 @@
       "answer": true
     },
     {
-      "say": "Hello?"
+      "await": "opening",
+      "timeout_ms": 15000
     },
     {
       "voice": "Hi, this is your AI assistant calling as you asked, with a reminder: the plumber from Bellwether Plumbing arrives at 9 am on Tuesday, February 9th."

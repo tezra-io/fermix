@@ -531,7 +531,10 @@ March statement; only this one can say which button was pressed, and only
   create's `session.input`, for value clauses on what the mandate carries:
   `matches:` the party, the time in any form, the date, the name), `briefed`
   (the first pattern the script forbids, or a seeded credential, that the
-  create's instructions or input carried), `attached`, `opening`, `replies`
+  create's instructions or input carried), `attached`, `opening` (Fermix
+  appended its opening line, which it does only when the call was answered and
+  nobody spoke within its wait: a case whose script picks up speaking asserts it
+  `absent:`, a case answered silent `equals: true`), `replies`
   (every reply Fermix sent for a delegation, in order, each `{text, at_ms}` on
   the call's clock), `marks.<label>` (when the script passed a `mark` step) and
   `said_after.<label>` (every commentary but the opening instruction sent once

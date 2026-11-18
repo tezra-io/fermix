@@ -137,8 +137,11 @@ review all agree. A trusted Live hand-off names it in its `voice_call` map
 channel); a phone message carries the Mac's chat in `conversation_key`, which
 only `Gateway.ingest/2` sets, from the adapter (M56 D9).
 A phone call's backend turn (`Agents.PhoneCallTurn`) is chosen before anything
-of the owner's turn is composed: it derives its whole context itself, and keeps
-no history and starts no memory review. `Agents.RequestIdentity` mints one
+of the owner's turn is composed: it derives its whole context itself, keeps
+no history, starts no memory review, and runs at a low reasoning effort of its
+own whatever the owner's routes carry (`Providers.RoutingOverrides.apply_effort/2`,
+clamped per provider and model), since someone waits on the line for its
+answer. `Agents.RequestIdentity` mints one
 owner request's identity once per turn (and once per function call on a
 Realtime session), which a tool whose effect outlives the turn records, so a
 repeated call inside that request finds what it already started; a call the
@@ -1284,16 +1287,23 @@ The worker is that one process over parts of its own (`Call.Delegations`,
 `Call.LastWords`, `Call.Printable`), and other modules reach it only through
 `PhoneCalls.CallControls`. It claims the dispatch, sends the one create through
 `CallTransport` (`OpenAILive`, `OpenAILive.Sideband`), records the session id
-before anything else, attaches the sideband, speaks the opening line on the
-first answered evidence, and runs each delegation as one scoped backend turn
+before anything else, attaches the sideband, and once the call is answered
+waits `Limits.opening_wait_ms/0` for the recipient to speak first: their words
+mean the voice answers them from its instructions, and only silence sends the
+opening line, once. It runs each delegation as one scoped backend turn
 through the `PhoneCalls.Delegate` it was handed, fenced by a handle it mints per
-turn; it never waits on the delegate, and a turn's keys stop with the turn. At
-the end it hangs up once (sent again only when the first provably never left),
-writes a confirmed closure the moment it arrives (`Ledger.record_closure/3`),
-drains, reads the outcome once (`Outcome`: one bounded, tool-free extraction,
-then `verify/3`, which keeps `confirmed` under code's own rules and marks each
-fact `verified` or `read`; a result it did not read keeps each speaker's last
-words as its evidence, `Call.LastWords`) and sends the Manager one end report.
+turn; it never waits on the delegate, and a turn's keys stop with the turn. A
+turn that ends the call (`phone_call_end`) begins the ending at once, for every
+reason: its reply is never said and nothing waits for it. At the end it hangs
+up once, after the voice's own speech goes quiet (bounded, and not on
+voicemail; sent again only when the first provably never left), writes a
+confirmed closure the moment it arrives (`Ledger.record_closure/3`), drains,
+reads the outcome once (`Outcome`: one tool-free extraction at a moderate
+effort of its own, bounded by `Limits.result_extraction_timeout_ms/0`, then
+`verify/3`, which keeps `confirmed` under code's own rules and marks each fact
+`verified` or `read`; one place decides a result was not read, its reader's own
+failure included, and such a result keeps each speaker's last words as its
+evidence, `Call.LastWords`) and sends the Manager one end report.
 An engine stop shortens that ending: the first application to stop runs
 `Manager.drain_for_stop/0` from its `prep_stop/1`, while every tree, the
 call's backend among them, still runs: it asks each live call to hang up, and

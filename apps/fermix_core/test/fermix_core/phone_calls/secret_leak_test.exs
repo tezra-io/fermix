@@ -356,6 +356,8 @@ defmodule FermixCore.PhoneCalls.SecretLeakTest do
     answered = %{"type" => "transport.answered", "event_id" => "s1", "session_id" => @session}
     send(socket, {:push, [Jason.encode!(answered)]})
     assert_receive {:scheduled, {:phone_call_timer, :silence, _token}, _ms}, @arrival_ms
+    # Nobody speaks within the opening's wait: the opening goes.
+    fire!(worker, :opening)
 
     fire!(worker, :deadline)
     _state = :sys.get_state(worker)
@@ -433,6 +435,8 @@ defmodule FermixCore.PhoneCalls.SecretLeakTest do
     ])
 
     assert_receive {:scheduled, {:phone_call_timer, :silence, _token}, _ms}, @arrival_ms
+    # Nobody speaks within the opening's wait: the opening goes.
+    fire!(worker, :opening)
     %{id: id, worker: worker, socket: socket, session: session}
   end
 

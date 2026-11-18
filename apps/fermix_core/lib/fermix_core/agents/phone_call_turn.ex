@@ -46,6 +46,9 @@ defmodule FermixCore.Agents.PhoneCallTurn do
       memory or coding-run chain.
     * **Bounded** by the request's `max_steps` (the loop's iterations); its
       deadline is the bridge's, which stops the queue turn.
+    * **Quick to answer.** Someone waits on the line while it thinks, so it runs
+      at a low reasoning effort (`@call_effort`) whatever the owner's routes
+      carry, clamped per route as any routing overlay is.
     * **Checked before it leaves.** A reply passes `PhoneCalls.Disclosure`
       before it is told to the bridge, or the turn fails with
       `{:reply_withheld, why}` and nothing of it is sent. An empty reply fails
@@ -79,6 +82,7 @@ defmodule FermixCore.Agents.PhoneCallTurn do
   alias FermixCore.PhoneCalls.Disclosure
   alias FermixCore.PhoneCalls.Grants
   alias FermixCore.PhoneCalls.Prompt
+  alias FermixCore.Providers.RoutingOverrides
   alias FermixCore.Tools.PhoneCallEnd
   alias FermixCore.Tools.PhoneCallPressKeys
 
@@ -86,6 +90,9 @@ defmodule FermixCore.Agents.PhoneCallTurn do
   @trust :phone_call
   @agent_name "phone_call"
   @controls FermixCore.PhoneCalls.CallControls
+  # The reasoning effort every turn of a call runs at: a person waits on the
+  # line for its answer, so it never pays the owner's configured level.
+  @call_effort :low
   @fields [:call_id, :handle, :delegation_id, :brief, :window, :session_id, :max_steps]
 
   @typedoc "One delegation's turn, as the bridge puts it on the message (`message/1`)."
@@ -270,7 +277,26 @@ defmodule FermixCore.Agents.PhoneCallTurn do
       dispatchable_capabilities: capabilities,
       allowed_tools: names,
       max_iterations: turn.max_steps
-    ] ++ runtime.loop
+    ] ++ at_call_effort(runtime.loop)
+  end
+
+  # The loop's provider options at `@call_effort`, by the one rule any route
+  # overlay follows (`RoutingOverrides.apply_effort/2`: clamped per provider and
+  # model, a provider with no effort levels left alone), for both shapes
+  # `TurnRunner` hands a turn. A single adapter is the one route the loop builds
+  # from it (`AgentLoop`): keyed by the loop's `route_key`, or without one by
+  # the loop's own `:mock` provider, which has no effort levels.
+  defp at_call_effort(loop) do
+    case Keyword.fetch(loop, :routes) do
+      {:ok, routes} ->
+        Keyword.put(loop, :routes, RoutingOverrides.apply_effort(routes, @call_effort))
+
+      :error ->
+        key = Keyword.get(loop, :route_key, %{provider: :mock, model: "mock"})
+        route = {key, Keyword.get(loop, :adapter_opts, [])}
+        [{_key, adapter_opts}] = RoutingOverrides.apply_effort([route], @call_effort)
+        Keyword.put(loop, :adapter_opts, adapter_opts)
+    end
   end
 
   # Everything a tool of this turn can read. No owner surface is here: no

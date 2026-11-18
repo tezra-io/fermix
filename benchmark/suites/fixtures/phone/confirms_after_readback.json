@@ -10,10 +10,7 @@
       "pause_ms": 600
     },
     {
-      "answer": true
-    },
-    {
-      "say": "Good evening, Copperleaf Grill, this is Imani."
+      "pick_up": "Good evening, Copperleaf Grill, this is Imani."
     },
     {
       "voice": "Hi Imani, I'm an AI assistant calling for a customer. I'd like to book a table for four on Friday, February 5th, at 7:30 in the evening, under the name Rowan."

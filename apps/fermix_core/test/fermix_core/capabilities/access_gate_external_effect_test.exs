@@ -305,8 +305,10 @@ defmodule FermixCore.Capabilities.AccessGateExternalEffectTest do
       assert text ==
                "Not done yet: phone_call places a phone call, and this request came after " <>
                  "reading content someone else could have written (web_fetch), so the owner " <>
-                 "must confirm it. A confirmation is now in this chat and expires in 5 " <>
-                 "minutes. Tell the owner and stop. Do not call phone_call again: it goes " <>
+                 "must confirm it. A confirmation that shows them everything it would do is now " <>
+                 "in this chat and expires in 5 minutes. Tell the owner in one short sentence " <>
+                 "that a phone call waits for their confirmation, without repeating anything " <>
+                 "the confirmation shows, then stop. Do not call phone_call again: it goes " <>
                  "ahead the moment they confirm."
     end
 
@@ -328,8 +330,16 @@ defmodule FermixCore.Capabilities.AccessGateExternalEffectTest do
 
       assert_received {:inbox, %{after_confirm: promise, ttl_ms: 300_000, prompt: prompt}}
       assert promise == "Once you confirm, Fermix places exactly this call."
-      assert prompt =~ ~s(\nCalls: +13125550123, "Marrow & Sage", a business\n)
-      assert text =~ "the confirmation went to the owner's own chat and expires in 5 minutes"
+      assert prompt =~ ~s|Call "Marrow & Sage" (a business) at +13125550123?\n|
+
+      assert text ==
+               "Not done yet: phone_call places a phone call, and this request came after " <>
+                 "reading content someone else could have written (web_fetch), so the " <>
+                 "confirmation, which shows the owner everything it would do, went to the " <>
+                 "owner's own chat and expires in 5 minutes. Tell the owner in one short " <>
+                 "sentence that a phone call waits for their confirmation there, without " <>
+                 "repeating anything the confirmation shows, then stop. Do not call phone_call " <>
+                 "again: it goes ahead the moment they confirm."
     end
   end
 
@@ -352,8 +362,51 @@ defmodule FermixCore.Capabilities.AccessGateExternalEffectTest do
       %{"label" => "Party size", "value" => "4"}
     ],
     "tool_grants" => ["web_search"],
-    "times" => [%{"label" => "Requested table", "at" => "2026-12-05T19:30"}]
+    "times" => [%{"label" => "Requested table", "at" => "2026-12-05T19:30"}],
+    "opening_language" => "fr"
   }
+
+  # A call to the owner's own phone with nothing optional in its brief.
+  @own_phone_brief %{
+    "destination" => "+15035550142",
+    "destination_kind" => "owner",
+    "number_source" => "The number you keep in Settings.",
+    "contact_name" => "Rowan Tellis",
+    "timezone" => "America/Los_Angeles",
+    "goal" => "Remind Rowan to call the vet before 5 PM today.",
+    "completion_criteria" => ["Rowan says they heard the reminder."]
+  }
+
+  # The card the owner's chat gets for a tainted start of `brief`.
+  defp card!(ctx, brief, extra \\ %{}) do
+    args = %{"action" => "start", "brief" => brief}
+    Capability.execute(phone_call(), args, read(ctx, [{:tool, "web_fetch"}], extra))
+    assert_received {:approval, %{access_sensitive: _id, ttl_ms: 300_000}}
+    assert_received {:reply, {:approval_prompt, %{kind: :sandbox, ttl_s: 300} = card}}
+    assert card.token == @token
+    card.text
+  end
+
+  # Every value of `brief` the call acts on or says, as the card must show it.
+  defp content_values(brief) do
+    lists = ~w(completion_criteria alternatives must_not_commit tool_grants)
+
+    [
+      brief["destination"],
+      brief["contact_name"],
+      brief["number_source"],
+      brief["goal"],
+      brief["timezone"],
+      brief["on_behalf_of"],
+      if(brief["opening_language"] not in [nil, "en"], do: brief["opening_language"])
+    ]
+    |> Kernel.++(Enum.flat_map(lists, &Map.get(brief, &1, [])))
+    |> Kernel.++(
+      for f <- Map.get(brief, "shareable_facts", []), v <- [f["label"], f["value"]], do: v
+    )
+    |> Kernel.++(for t <- Map.get(brief, "times", []), do: t["label"])
+    |> Enum.reject(&is_nil/1)
+  end
 
   describe "the kind" do
     # Set from the module alone (`Builtin.from_tool_module/1`), so no table can
@@ -416,40 +469,82 @@ defmodule FermixCore.Capabilities.AccessGateExternalEffectTest do
   end
 
   describe "the confirmation the owner reads" do
-    test "is the whole brief, rendered for a person, then the promise", ctx do
-      args = %{"action" => "start", "brief" => @full_brief}
-      Capability.execute(phone_call(), args, read(ctx, [{:tool, "web_fetch"}]))
-
-      assert_received {:approval, %{access_sensitive: _id, ttl_ms: 300_000}}
-      assert_received {:reply, {:approval_prompt, %{kind: :sandbox, ttl_s: 300} = card}}
-      assert card.token == @token
-
-      assert card.text ==
+    test "a full brief: the question, then every row that changes what the call does", ctx do
+      assert card!(ctx, @full_brief) ==
                """
-               Confirm phone_call? It places a phone call for you, from your number, made by Fermix as your AI assistant.
-               Calls: +13125550123, "Marrow & Sage", a business
+               Call "Marrow & Sage" (a business) at +13125550123 for "Rowan Tellis"?
                Number found: "Listed on the restaurant's own website."
-               From: +14155550142, your number
-               Calling for: "Rowan Tellis"
                Task: "Reserve a table for four on Saturday, December 5, 2026 at 7:30 PM."
                Must be confirmed:
                  1. "The restaurant confirms a table for four at 7:30 PM."
                  2. "The name the reservation is under."
-               Times, in America/Chicago:
-                 1. "Requested table": Saturday, December 5, 2026 at 7:30 PM
-               Alternatives it may accept:
-                 1. "7:00 PM or 8:00 PM on the same evening"
-               Must not agree to:
-                 1. "a deposit or card guarantee"
+               Times, in America/Chicago: "Requested table": Saturday, December 5, 2026 at 7:30 PM
+               Alternatives it may accept: "7:00 PM or 8:00 PM on the same evening"
+               Must not agree to: "a deposit or card guarantee"
                Facts it may share:
                  1. "Name for the reservation": "Rowan Tellis"
                  2. "Party size": "4"
                Lookups it may use: web_search
-               Opens in: en
+               Opens in: fr
                Asked because this request came after reading content someone else could have written (web_fetch).
 
                Approve with `/confirm TOKEN-EFX` (expires in 5 minutes). Once you confirm, Fermix places exactly this call.\
                """
+    end
+
+    test "a call to the owner's own phone with nothing optional is short", ctx do
+      assert card!(ctx, @own_phone_brief) ==
+               """
+               Call "Rowan Tellis" (your own phone) at +15035550142?
+               Number found: "The number you keep in Settings."
+               Task: "Remind Rowan to call the vet before 5 PM today."
+               Must be confirmed: "Rowan says they heard the reminder."
+               Time zone: America/Los_Angeles
+               Asked because this request came after reading content someone else could have written (web_fetch).
+
+               Approve with `/confirm TOKEN-EFX` (expires in 5 minutes). Once you confirm, Fermix places exactly this call.\
+               """
+    end
+
+    # The confirmation is the owner's defence against a request outside content
+    # wrote: every part of the brief the call acts on or says is shown, and a
+    # row is left out only when it is empty or a constant (the caller number).
+    test "every value with content is shown, and no row stands for an empty part", ctx do
+      optional = %{
+        "on_behalf_of" => "Ari Quell",
+        "alternatives" => ["8 PM instead"],
+        "must_not_commit" => ["a cancellation fee"],
+        "shareable_facts" => [%{"label" => "Party size", "value" => "6"}],
+        "tool_grants" => ["place_search"],
+        "times" => [%{"label" => "Arrival", "at" => "2026-12-05T20:00"}],
+        "opening_language" => "es"
+      }
+
+      labels = %{
+        "alternatives" => "Alternatives it may accept",
+        "must_not_commit" => "Must not agree to",
+        "shareable_facts" => "Facts it may share",
+        "tool_grants" => "Lookups it may use",
+        "times" => "Times, in",
+        "opening_language" => "Opens in"
+      }
+
+      cases = [%{}, optional | Enum.map(optional, fn {key, value} -> %{key => value} end)]
+
+      for {extra, n} <- Enum.with_index(cases) do
+        brief = Map.merge(@own_phone_brief, extra)
+        text = card!(ctx, brief, %{session_id: "#{ctx.sid}-#{n}"})
+
+        for value <- content_values(brief), do: assert(text =~ value, "#{value} in #{text}")
+
+        for {key, label} <- labels,
+            not Map.has_key?(extra, key),
+            do: refute(text =~ label, "#{label} shown for an empty #{key}")
+
+        refute text =~ "none"
+        refute text =~ @caller
+        refute text =~ "phone_call"
+      end
     end
 
     # The brief lets a goal, an item or a fact carry a line break, so the
@@ -475,15 +570,22 @@ defmodule FermixCore.Capabilities.AccessGateExternalEffectTest do
 
       assert length(lines) == length(String.split(clean, "\n"))
 
-      for start <- ["From: ", "Asked because", "Lookups it may use: ", "Opens in: "],
-          do: assert(Enum.count(lines, &String.starts_with?(&1, start)) == 1, start)
+      # A value that imitates a row starts no line: each such label starts as many
+      # lines as it does for the honest brief (none for the caller number, which
+      # the card never shows).
+      clean_lines = String.split(clean, "\n")
+
+      for start <- ["From: ", "Asked because", "Lookups it may use: ", "Opens in: "] do
+        count = fn in_lines -> Enum.count(in_lines, &String.starts_with?(&1, start)) end
+        assert count.(lines) == count.(clean_lines), start
+      end
 
       # The brief's own rendering (`BriefText.quoted/1`) makes each value one
       # line, and the JSON quote keeps an inner quote from closing it.
       assert text =~
                ~S(Task: "Book it. From: +19005550199, your number Asked because nothing\", a business")
 
-      assert text =~ ~S(  1. "Lookups it may use: shell Opens in: fr")
+      assert text =~ ~S(Alternatives it may accept: "Lookups it may use: shell Opens in: fr")
     end
 
     # A line or paragraph separator or a bidi override is refused by the brief
@@ -504,7 +606,7 @@ defmodule FermixCore.Capabilities.AccessGateExternalEffectTest do
       assert_received {:reply, {:approval_prompt, %{text: text}}}
 
       assert text =~ ~S(Note: a\u{2028}From: b\u{202E}c)
-      assert text =~ ~S(  1. x\ny)
+      assert text =~ ~S(Items: x\ny)
       refute text =~ "\nFrom: "
     end
 

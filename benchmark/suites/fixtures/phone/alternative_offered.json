@@ -10,10 +10,7 @@
       "pause_ms": 600
     },
     {
-      "answer": true
-    },
-    {
-      "say": "Marlow and Finch, Jonah speaking."
+      "pick_up": "Marlow and Finch, Jonah speaking."
     },
     {
       "voice": "Hi Jonah, I'm an AI assistant calling for a customer. Could I book a table for two on Thursday, February 11th, at 7 pm?"

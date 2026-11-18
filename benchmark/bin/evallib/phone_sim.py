@@ -42,6 +42,24 @@ uses) the script also waits out each line in real time before sending it, as
 a transcript arrives once the words are said; specs turn that off and keep the
 same timeline.
 
+HOW A CALL OPENS. Fermix waits a moment once a call is answered for the person
+to speak first, and appends its opening line only if nobody did. Which of the
+two a call is, is the script's to state, never a race of a line's length
+against that wait: `pick_up` answers speaking (a person or a business saying
+who they are, a menu, a recording), sending the answer and the line's first
+word together, as a streaming transcript's first words follow the pickup, and
+the rest of the line once it is said; `answer` followed by `await: opening`
+answers silent, the recipient saying nothing until Fermix's opening arrives
+(bounded by its `timeout_ms`; past it the script goes on, and `opening` stays
+absent). A line after a bare `answer` is refused as a script problem, as is an
+`await: opening` anywhere else.
+
+A BACKEND TURN MAY END THE CALL. Fermix answers a delegation with a reply, or
+ends the call from that turn, and then says nothing more into it. So an
+`await: reply` also ends when Fermix hangs up, and the script stops there; a
+script says whatever a case needs Fermix to have heard before the delegation
+that decides, never after a reply it assumes.
+
 WHAT IT CHECKS. A create must be the documented shape: `transport.type` sip,
 an E.164 destination, the certified trunk address, digest auth with a username
 and a password, an E.164 caller number, `store: false`, client delegation, a
@@ -68,7 +86,8 @@ fixture state (`fixture_server.FixtureServer`), so `fixture_state` reads it:
   phone.calls.<n>.briefed           the first forbidden pattern the brief or the
                                     instructions carried
   phone.calls.<n>.attached          the sideband attached
-  phone.calls.<n>.opening           Fermix sent its opening instruction
+  phone.calls.<n>.opening           Fermix sent its opening line (only on a call
+                                    answered silent; see HOW A CALL OPENS)
   phone.calls.<n>.replies           every reply Fermix sent for a delegation,
                                     in order, `{text, at_ms}`
   phone.calls.<n>.marks.<label>     when the script passed its `mark` step
@@ -178,10 +197,11 @@ _FICTIONAL = re.compile(r"\A\+1[2-9][0-9]{2}5550[1][0-9]{2}\Z")
 _SESSION_ID = re.compile(r"\A[A-Za-z0-9_-]{1,120}\Z")
 _LABEL = re.compile(r"\A[a-z0-9_]+\Z")
 _DTMF = re.compile(r"\A[0-9A-D*#]\Z")
-_LINE_STEPS = ("say", "voice", "cut_in")
+_LINE_STEPS = ("say", "voice", "cut_in", "pick_up")
+_ANSWER_STEPS = ("answer", "pick_up")
 _STEP_KINDS = ("ring", "answer", *_LINE_STEPS, "delegate", "await", "pause_ms", "mark",
                "fail", "replay", "hang_up", "hold_ms")
-_AWAITABLE = ("reply", "key", "hangup")
+_AWAITABLE = ("reply", "key", "hangup", "opening")
 _TERMINAL_STEPS = ("hang_up", "hold_ms")
 _SCRIPT_KEYS = {"name", "number", "party", "create", "steps", "forbid"}
 
@@ -240,6 +260,16 @@ def timeline(script: Script, reply: str = "Thank you, that's all I needed.") -> 
         lines.append({"speaker": speaker, "start_ms": start, "end_ms": end,
                       "cut_in": kind == "cut_in", "text": text})
     return lines
+
+
+def pick_up_fragments(text: str, start: int, end: int) -> tuple[tuple[str, int], str | None]:
+    """A picked-up line's two fragments (pure): its first word, lasting one
+    word on the clock, and the rest with its own leading space (the engine
+    joins a speaker's fragments exactly as they came), or None for a line of
+    one word."""
+    first, space, rest = text.partition(" ")
+    first_end = min(start + line_ms(first), end)
+    return (first, first_end), (space + rest if rest else None)
 
 
 def talked_over(lines: list[dict]) -> list[dict]:
@@ -315,15 +345,52 @@ def script_problems(raw, where: str) -> list[str]:
 
 
 def _order_problems(steps: list, where: str) -> list[str]:
-    """A cut-in needs a line to cut into; the last step ends the call."""
-    problems, spoken = [], False
+    """A cut-in needs a line to cut into, a line an answered call, the call is
+    answered once and opens as the script says; the last step ends the call."""
+    problems, spoken, answered = [], False, False
     for index, step in enumerate(steps):
-        if isinstance(step, dict) and "cut_in" in step and not spoken:
-            problems.append(f"{where}: steps[{index}]: a cut_in needs a line before it")
-        spoken = spoken or (isinstance(step, dict) and bool(set(step) & set(_LINE_STEPS)))
+        kinds = set(step) if isinstance(step, dict) else set()
+        at = f"{where}: steps[{index}]"
+        if "cut_in" in kinds and not spoken:
+            problems.append(f"{at}: a cut_in needs a line before it")
+        if kinds & set(_ANSWER_STEPS):
+            if answered:
+                problems.append(f"{at}: the call is answered once (`answer` or `pick_up`)")
+            answered = True
+        elif kinds & set(_LINE_STEPS) and not answered:
+            problems.append(f"{at}: a line needs the call answered first (`answer` or `pick_up`)")
+        spoken = spoken or bool(kinds & set(_LINE_STEPS))
     last = steps[-1]
     if not (isinstance(last, dict) and set(last) & set(_TERMINAL_STEPS)):
         problems.append(f"{where}: the last step must end the call (hang_up or hold_ms)")
+    return problems + _opening_problems(steps, where)
+
+
+def _opening_problems(steps: list, where: str) -> list[str]:
+    """How the call opens, stated: a bare `answer` is followed (marks aside) by
+    `await: opening`, the recipient silent until Fermix opens, and nothing else
+    awaits an opening, which Fermix sends only on a line nobody has spoken on.
+    A line after a bare `answer` would race Fermix's wait for the recipient to
+    speak first; `pick_up` is the call answered speaking."""
+    def is_step(index, kind, value=None):
+        step = steps[index]
+        return isinstance(step, dict) and kind in step and (value is None or step[kind] == value)
+    problems, expected = [], set()
+    for index in range(len(steps)):
+        if not is_step(index, "answer"):
+            continue
+        after = next((j for j in range(index + 1, len(steps)) if not is_step(j, "mark")), None)
+        if after is not None and is_step(after, "await", "opening"):
+            expected.add(after)
+            continue
+        problems.append(f"{where}: steps[{index}]: after a bare `answer` the recipient waits "
+                        "for the assistant's opening (`await: opening`); a call answered "
+                        "speaking is `pick_up`, never a line racing Fermix's wait for the "
+                        "recipient to speak first")
+    problems.extend(f"{where}: steps[{index}]: `await: opening` follows a bare `answer` "
+                    "directly: Fermix opens only a line nobody has spoken on"
+                    for index in range(len(steps))
+                    if is_step(index, "await", "opening") and index not in expected)
     return problems
 
 
@@ -436,7 +503,7 @@ def seeded_checks(body: dict, authorization: str | None) -> list[str]:
 
 def brief_text(session: dict) -> str:
     """Every text the create's `session.input` carries, in order: the brief the
-    engine wrote and its opening instruction, bounded."""
+    engine wrote and how the call opens, bounded."""
     texts: list[str] = []
     pending = [session.get("input", [])]
     for _node in range(10_000):
@@ -677,18 +744,20 @@ class _Session:
         self.ended = False
         self.replies = 0
         self.keys = 0
+        self.openings = 0
         self.hangup: str | None = None
         self.client_closed = False
 
     # -- shared state --
 
     def signal(self, hangup: str | None = None, reply: bool = False, key: bool = False,
-               client_closed: bool = False) -> None:
+               client_closed: bool = False, opening: bool = False) -> None:
         with self._cond:
             if hangup and self.hangup is None:
                 self.hangup = hangup
             self.replies += 1 if reply else 0
             self.keys += 1 if key else 0
+            self.openings += 1 if opening else 0
             self.client_closed = self.client_closed or client_closed
             self._cond.notify_all()
 
@@ -733,7 +802,7 @@ class _Session:
             reader.join(timeout=5)
 
     def _play(self) -> None:
-        heard = {"reply": 0, "key": 0}
+        heard = {"reply": 0, "key": 0, "opening": 0}
         for step in self.script.steps:
             if self._terminal():
                 break
@@ -784,18 +853,42 @@ class _Session:
         """A scripted line: placed on the clock, said (in real time when the
         session runs realtime), then sent with its offsets."""
         start, end = self._place(text, cut_in=(kind == "cut_in"))
-        if self._realtime and end > self.elapsed_ms():
-            self._wait(lambda: False, end - self.elapsed_ms())
+        if kind == "pick_up":
+            self._pick_up(text, start, end)
+            return
+        self._say_by(end)
         speaker = "session.output_transcript.delta" if kind == "voice" else \
             "session.input_transcript.delta"
         self._play_event(speaker, delta=text, start_ms=start, end_ms=end)
+
+    def _pick_up(self, text: str, start: int, end: int) -> None:
+        """The call answered speaking: the answer and the line's first word go
+        out back to back, so Fermix hears the recipient the moment it hears the
+        answer, as a streaming transcript's first words follow the pickup; the
+        rest of the line follows once it is said. One line on the clock, in two
+        fragments that join back into it."""
+        (first, first_end), rest = pick_up_fragments(text, start, end)
+        self._play_event("transport.answered", session_id=self.session_id)
+        self._play_event("session.input_transcript.delta", delta=first, start_ms=start,
+                         end_ms=first_end)
+        if rest is None:
+            return
+        self._say_by(end)
+        self._play_event("session.input_transcript.delta", delta=rest, start_ms=first_end,
+                         end_ms=end)
+
+    def _say_by(self, end: int) -> None:
+        """In real time, wait until the line ending at `end` has been said."""
+        if self._realtime and end > self.elapsed_ms():
+            self._wait(lambda: False, end - self.elapsed_ms())
 
     def _await(self, what: str, timeout_ms: int, heard: dict) -> None:
         if what == "hangup":
             self._wait(lambda: False, timeout_ms)
             return
         target = heard[what] + 1
-        count = (lambda: self.replies) if what == "reply" else (lambda: self.keys)
+        count = {"reply": lambda: self.replies, "key": lambda: self.keys,
+                 "opening": lambda: self.openings}[what]
         self._wait(lambda: count() >= target, timeout_ms)
         heard[what] = max(heard[what], min(count(), target))
 
@@ -877,13 +970,14 @@ class _Session:
 
     def _spoken(self, delegation_id, content: str) -> None:
         """A commentary: what the voice is given to say. The call's first one
-        with no delegation is its opening instruction; every other one is
+        with no delegation is its opening line; every other one is
         recorded against the marks the script has passed, and a delegation's
         reply is spoken on the call's clock."""
         opening = delegation_id is None and self._openings == 0
         self._openings += 1 if delegation_id is None else 0
         if opening:
             self._rec.phone_set(self.token, f"calls.{self.key}.opening", True)
+            self.signal(opening=True)
             return
         for mark in list(self._marks):
             self._rec.phone_append(self.token, f"calls.{self.key}.said_after.{mark}",

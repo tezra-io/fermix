@@ -209,6 +209,16 @@ defmodule FermixCore.PhoneCalls.Outcome do
   def reasons, do: @reason_codes
 
   @doc """
+  The reasons that mean the call's result was not read: the worker's own
+  (`unread_report/1`) and every class of a reader that itself failed
+  (`extract/4`). A report with one of them carries the call's last words as
+  its evidence, never what supports a result; the view says so
+  (`PhoneCalls.Report`).
+  """
+  @spec unread_reasons() :: [atom(), ...]
+  def unread_reasons, do: Enum.uniq(@unread_codes ++ Map.values(@extraction_reasons))
+
+  @doc """
   Every code a report (`to_report/1`) can carry, by the key that carries it:
   `reason` (`outcome_facts["reason"]`), `notes`, `confirmation`, `matched`,
   `not_checked`, and `basis` (the names of the `verified` and `read`

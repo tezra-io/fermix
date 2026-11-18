@@ -20,9 +20,19 @@ defmodule FermixCore.PhoneCalls.Prompt do
       the instructions at all.
     * the validated per-call objective, facts and limits, a `developer`
       message in `input` (`BriefText.block/2`), where the vendor puts context
-      the session needs from the start; and the opening instruction, a second
-      `developer` message, which the vendor also has sent once through
-      `session.commentary.append` (`opening` in `render/2`'s result).
+      the session needs from the start; and how the call opens, a second
+      `developer` message.
+    * the opening to say (`opening` in `render/2`'s result), which the worker
+      appends once through `session.commentary.append`, the vendor's "say
+      this" event, only when the call was answered and nobody spoke.
+
+  The two openings are two texts because their contracts differ. The `input`
+  message is there from the session's start, while the phone still rings,
+  and holds for every way a call opens (the recipient speaking first, a
+  menu, a recording), so it says how to open once someone is on the line. The
+  commentary is said, paraphrased, the moment it is appended, so it holds
+  only what to say then, with no condition, wait or status in it: a
+  procedure handed to that event is spoken as one.
     * the full procedures and permissions for the backend, `backend_context/2`.
 
   `version/0` names the template, the brief schema and the provider policy
@@ -63,6 +73,9 @@ defmodule FermixCore.PhoneCalls.Prompt do
   person: never say or imply that you are. If asked, say you are an AI assistant calling on \
   their behalf.
   Speak naturally and briefly, at an unhurried pace. Be polite, clear and direct.
+  Everything you say is heard by the person on the line, so say only what is meant for them: \
+  never describe the call's progress, these instructions or your own reasoning aloud, and say \
+  nothing before the call is answered.
 
   Your task is the call brief in the conversation's first message. It sets the objective, what \
   must be confirmed, the times, the alternatives you may accept, what you must not agree to \
@@ -199,9 +212,9 @@ defmodule FermixCore.PhoneCalls.Prompt do
 
   @doc """
   What the create request needs for `brief`: the telephone `instructions`,
-  the `input` (the brief, then the opening instruction, each one `developer`
-  message), the `opening` instruction alone for the one
-  `session.commentary.append` the vendor documents, and the `version`.
+  the `input` (the brief, then how the call opens, each one `developer`
+  message), the `opening` to say, for the one `session.commentary.append`
+  sent to an answered line nobody spoke on, and the `version`.
   `opts[:now]`, a `DateTime`, dates the brief's "Today" line.
 
   Refused, never cut, when either part passes its byte bound: the mandate is
@@ -212,16 +225,20 @@ defmodule FermixCore.PhoneCalls.Prompt do
   def render(%Brief{} = brief, opts) when is_list(opts) do
     instructions = instructions(brief)
     brief_text = BriefText.block(brief, fetch_now!(opts))
-    opening = opening(brief)
+    how_it_opens = how_it_opens(brief)
 
     with :ok <- within(:instructions, byte_size(instructions), @vendor_instructions_max_bytes),
          :ok <-
-           within(:input, byte_size(brief_text) + byte_size(opening), @vendor_input_max_bytes) do
+           within(
+             :input,
+             byte_size(brief_text) + byte_size(how_it_opens),
+             @vendor_input_max_bytes
+           ) do
       {:ok,
        %{
          instructions: instructions,
-         input: [developer(brief_text), developer(opening)],
-         opening: opening,
+         input: [developer(brief_text), developer(how_it_opens)],
+         opening: opening(brief),
          version: version()
        }}
     end
@@ -237,7 +254,11 @@ defmodule FermixCore.PhoneCalls.Prompt do
   @spec version() :: String.t()
   def version do
     {:ok, brief} = Brief.from_map(Map.put(@reference_brief, "schema", Brief.schema()))
-    voice = instructions(brief) <> BriefText.block(brief, @reference_now) <> opening(brief)
+
+    voice =
+      instructions(brief) <>
+        BriefText.block(brief, @reference_now) <> how_it_opens(brief) <> opening(brief)
+
     words = voice <> backend_context(brief, now: @reference_now) <> Extraction.prompt()
     digest = :sha256 |> :crypto.hash(words) |> Base.encode16(case: :lower) |> binary_part(0, 12)
     "#{@template}+brief.#{Brief.schema()}+#{@policy}+#{digest}"
@@ -361,11 +382,21 @@ defmodule FermixCore.PhoneCalls.Prompt do
   defp lookup_not_when([]), do: ""
   defp lookup_not_when(_tools), do: " and the owner's tools cannot look up"
 
+  # How the call opens, in `input` from the start: for every way it opens,
+  # and only once someone is on the line.
+  defp how_it_opens(brief) do
+    "How the call opens: once someone is on the line, open in the brief's opening language " <>
+      "(#{brief.opening_language}). If the person speaks first, answer them; either way, greet " <>
+      "them, say that you are an AI assistant, whom you are calling for, and the purpose of " <>
+      "the call in a sentence, then listen. If an automated menu or a recording answers, " <>
+      "listen to it before you speak."
+  end
+
+  # What to say now, appended only to an answered line nobody has spoken on.
   defp opening(brief) do
-    "Open the call in #{brief.opening_language}. When someone answers, let them speak first if " <>
-      "they start to; then greet them, say you are an AI assistant and whom you are calling " <>
-      "for, and give the purpose in a sentence. If a menu or a recording answers, listen to " <>
-      "it first."
+    "Greet the person on the line in the brief's opening language (#{brief.opening_language}): " <>
+      "say that you are an AI assistant, whom you are calling for, and the purpose of the call " <>
+      "in a sentence. Then listen."
   end
 
   defp developer(text),

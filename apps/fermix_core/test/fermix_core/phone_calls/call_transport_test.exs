@@ -200,10 +200,13 @@ defmodule FermixCore.PhoneCalls.CallTransportTest do
     assert body["transport"]["trunk"]["provider_url"] == "sips:sip.telnyx.com:5061"
     assert body["transport"]["trunk"]["caller_number"] == Fakes.caller()
 
-    # The attach, and the call answered: the opening goes once, to the call.
+    # The attach, and the call answered: nobody speaks within the opening's
+    # wait, so the opening goes once, to the call.
     assert_receive {:vendor_socket, socket}, @arrival_ms
 
     push(socket, [%{"type" => "transport.answered", "event_id" => "s1", "session_id" => @session}])
+
+    fire!(call, :opening)
 
     opening = got!("session.commentary.append")
     assert opening["delegation_id"] == nil
@@ -248,21 +251,19 @@ defmodule FermixCore.PhoneCalls.CallTransportTest do
 
     assert {:ok, %{confirmed: "1", unconfirmed: "", stopped: nil}} = Task.await(press)
 
-    # The turn finishes the call, and its reply goes to the voice.
+    # The turn finishes the call: the ending begins at once, the turn is
+    # retired (never stopped: it is inside its own end call), and a reply it
+    # still sends never reaches the voice.
     assert :ok = CallControls.finish(call.id, request.handle, :done, nil, registry: ctx.registry)
 
     send(
       call.pid,
       {:phone_call_delegation, call.id, "dlg_e2e_1",
-       {:ok, %{reply: "Thank you, goodbye.", backend_usage: %{"total_tokens" => 640}}}}
+       {:ok, %{reply: "The recipient said yes.", backend_usage: %{"total_tokens" => 640}}}}
     )
 
-    reply = got!("session.commentary.append")
-    assert reply["delegation_id"] == "dlg_e2e_1"
-    assert reply["content"] == "Thank you, goodbye."
-
-    # The goodbye is spoken; then one hangup, and the vendor's close. The
-    # clock moves only once the worker has taken the answer in.
+    # The voice's own goodbye goes quiet; then one hangup, and the vendor's
+    # close. The clock moves only once the worker has taken the answer in.
     _state = :sys.get_state(call.pid)
     :atomics.add(ctx.clock, 1, 60_000)
     fire!(call, :speech)
@@ -287,7 +288,10 @@ defmodule FermixCore.PhoneCalls.CallTransportTest do
     assert report.status == "ended"
     assert report.voice_seconds == 61
     assert report.usage_state == "voice_duration_confirmed"
-    assert report.backend_usage == %{"total_tokens" => 640, "turns" => 1}
+    # The cut turn ran and never answered: one turn, its usage unknown.
+    assert report.backend_usage == %{"turns" => 1, "turns_unmeasured" => 1}
+    refute_received {:vendor_got, %{"type" => "session.commentary.append"}}
+    refute_received {:delegate_cancel, _call_id, _id}
     refute_received {:vendor_create, _headers, _body}
     refute_received {:vendor_hangup, _headers}
 

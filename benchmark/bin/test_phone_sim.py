@@ -44,6 +44,11 @@ SUITES_DIR = os.path.join(os.path.dirname(HERE), "suites")
 NUMBER = "+12125550147"
 KEY = "n12125550147"
 ARRIVAL_S = 10
+# The words Fermix appends as its opening line (`PhoneCalls.Prompt`), for the
+# specs that send one; nothing here depends on them.
+OPENING = ("Greet the person on the line in the brief's opening language (en): say that you "
+           "are an AI assistant, whom you are calling for, and the purpose of the call in a "
+           "sentence. Then listen.")
 with open(ps.WIRE_FIXTURE, encoding="utf-8") as _fh:
     WIRE = json.load(_fh)
 
@@ -59,12 +64,11 @@ def _script_dir(tmp_path, *scripts: dict) -> str:
 
 
 def _quick_call(**overrides) -> dict:
-    """A short call: ring, answer, a line, a delegation the test answers, a key it
-    presses, then the line stays until the test hangs up."""
+    """A short call: ring, picked up speaking, a delegation the test answers, a key
+    it presses, then the line stays until the test hangs up."""
     script = {"name": "quick_call", "number": NUMBER,
               "forbid": {"private_address": "(?i)wexley"},
-              "steps": [{"ring": True}, {"answer": True},
-                        {"say": "Copperleaf Grill, this is Imani."},
+              "steps": [{"ring": True}, {"pick_up": "Copperleaf Grill, this is Imani."},
                         {"delegate": True}, {"await": "reply", "timeout_ms": 10000},
                         {"await": "key", "timeout_ms": 10000},
                         {"hold_ms": 20000}]}
@@ -75,7 +79,7 @@ def _quick_call(**overrides) -> dict:
 # One script for every event the simulator can send: progress, both speakers,
 # a delegation, a mark, a carrier failure, a replay, then the line held.
 EVERYTHING = {"name": "everything", "number": "+14045550177",
-              "steps": [{"ring": True}, {"answer": True}, {"say": "Peachtree Print Shop."},
+              "steps": [{"ring": True}, {"pick_up": "Peachtree Print Shop."},
                         {"voice": "Hello, I'm an AI assistant."}, {"mark": "greeting"},
                         {"delegate": True}, {"await": "reply", "timeout_ms": 10000},
                         {"fail": {"code": "busy", "message": "The called number is busy."}},
@@ -95,7 +99,7 @@ def server(tmp_path):
                                "code": "initialization_timeout", "type": "server_error"}}},
         {"name": "losing", "number": "+13035550157", "create": "lose_response"},
         {"name": "hanging_up", "number": "+15035550118",
-         "steps": [{"answer": True}, {"say": "Wrong number, bye."}, {"hang_up": True}]},
+         "steps": [{"pick_up": "Wrong number, bye."}, {"hang_up": True}]},
         {"name": "expiring", "number": "+12065550171",
          "steps": [{"ring": True}, {"hold_ms": 200}]}))
     served.start()
@@ -227,6 +231,23 @@ def _attached_call(server, destination: str = NUMBER) -> tuple[str, Sideband]:
     return session_id, Sideband(server.port, session_id)
 
 
+def _lines(events: list[dict]) -> list[dict]:
+    """The transcript's lines as the engine joins them: a speaker's fragments
+    that are contiguous on the clock (a picked-up line's two) are one line."""
+    lines: list[dict] = []
+    for event in events:
+        if not event["type"].endswith("_transcript.delta"):
+            continue
+        speaker = "remote" if event["type"].startswith("session.input") else "assistant"
+        last = lines[-1] if lines else None
+        if last and last["speaker"] == speaker and last["end_ms"] == event["start_ms"]:
+            last["end_ms"], last["text"] = event["end_ms"], last["text"] + event["delta"]
+        else:
+            lines.append({"speaker": speaker, "start_ms": event["start_ms"],
+                          "end_ms": event["end_ms"], "text": event["delta"]})
+    return lines
+
+
 def _shape(value):
     """A JSON value's shape: maps by key, lists by their first item, scalars by kind."""
     if isinstance(value, dict):
@@ -277,14 +298,27 @@ def test_every_number_the_suite_dials_has_a_script():
     ({"steps": [{"cut_in": "Yes!"}, {"hang_up": True}]}, "a cut_in needs a line before it"),
     ({"steps": [{"mark": "Voice Mail"}, {"hang_up": True}]}, "`mark` is a"),
     ({"steps": [{"fail": {"code": "busy"}}, {"hang_up": True}]}, "`fail` is {code, message}"),
+    # How the call opens is stated, never a line racing Fermix's wait.
+    ({"steps": [{"answer": True}, {"say": "Hello?"}, {"hang_up": True}]},
+     "after a bare `answer` the recipient waits"),
+    ({"steps": [{"answer": True}, {"pause_ms": 400}, {"say": "Hello?"}, {"hang_up": True}]},
+     "after a bare `answer` the recipient waits"),
+    ({"steps": [{"pick_up": "Hello?"}, {"await": "opening", "timeout_ms": 5000},
+                {"hang_up": True}]}, "Fermix opens only a line nobody has spoken on"),
+    ({"steps": [{"say": "Hello?"}, {"hang_up": True}]}, "a line needs the call answered first"),
+    ({"steps": [{"pick_up": "Hello?"}, {"answer": True}, {"hang_up": True}]},
+     "the call is answered once"),
+    ({"steps": [{"answer": True}, {"mark": "silence"}, {"await": "opening", "timeout_ms": 5000},
+                {"hang_up": True}]}, None),
 ])
 def test_a_script_outside_the_vocabulary_or_its_bounds_is_refused(change, problem):
-    raw = {"name": "x", "number": NUMBER, "steps": [{"answer": True}, {"hang_up": True}]}
+    raw = {"name": "x", "number": NUMBER, "steps": [{"pick_up": "Hello?"}, {"hang_up": True}]}
     raw.update(change)
     found = ps.script_problems(raw, "x.json")
     if problem is None:
         # A 555-01xx number outside the US plan's area codes is still fiction; the
-        # engine refuses it as not US, which is a scenario, not a script problem.
+        # engine refuses it as not US, which is a scenario, not a script problem. A
+        # silent answer may mark its silence before it waits.
         assert found == []
     else:
         assert any(problem in item for item in found), found
@@ -345,10 +379,9 @@ def test_a_played_call_keeps_one_clock_for_both_speakers(tmp_path):
             side.close()
     finally:
         served.stop()
-    lines = [{"speaker": "remote" if e["type"].startswith("session.input") else "assistant",
-              "start_ms": e["start_ms"], "end_ms": e["end_ms"]}
-             for e in side.seen if e["type"].endswith("_transcript.delta")]
+    lines = _lines(side.seen)
     assert len(lines) == 9
+    assert lines[0]["text"] == "Good evening, Copperleaf Grill, this is Imani."
     assert ps.talked_over(lines) == []
     for before, after in zip(lines, lines[1:]):
         assert after["start_ms"] >= before["end_ms"] + ps.TURN_GAP_MS
@@ -544,14 +577,15 @@ def test_a_whole_call_plays_its_script_and_records_what_fermix_did(server):
         assert "Sec-WebSocket-Accept" in side.headers
         assert side.until("transport.ringing")["session_id"] == session_id
         side.until("transport.answered")
+        # Picked up speaking: the answer and the line's first word back to back,
+        # then the rest of the line, joining back into it.
+        first = side.until("session.input_transcript.delta")
+        assert side.seen[-2]["type"] == "transport.answered"
         line = side.until("session.input_transcript.delta")
-        assert line["delta"] == "Copperleaf Grill, this is Imani."
+        assert first["delta"] + line["delta"] == "Copperleaf Grill, this is Imani."
+        assert first["delta"] == "Copperleaf" and line["start_ms"] == first["end_ms"]
         delegation = side.until("session.delegation.created")["delegation"]
         assert delegation["target"] == "client" and delegation["type"] == "delegation"
-        # The opening: an instruction to the voice, recorded but not a reply.
-        side.send({"type": "session.commentary.append", "event_id": "ev_1",
-                   "delegation_id": None, "content": "Open the call in en."})
-        assert side.until("session.commentary.appended")["client_event_id"] == "ev_1"
         side.send({"type": "session.commentary.append", "event_id": "ev_2",
                    "delegation_id": delegation["id"], "content": "A table for four, please."})
         side.until("session.commentary.appended")
@@ -571,7 +605,8 @@ def test_a_whole_call_plays_its_script_and_records_what_fermix_did(server):
         side.close()
     server.settle("attempt-1")
     call = server.state("attempt-1")["phone"]["calls"][KEY]
-    assert call["attached"] is True and call["opening"] is True
+    # Fermix sent no opening line over a call picked up speaking.
+    assert call["attached"] is True and "opening" not in call
     assert [reply["text"] for reply in call["replies"]] == ["A table for four, please."]
     assert all(isinstance(reply["at_ms"], int) for reply in call["replies"])
     assert call["keys"] == "2" and call["hangups"] == 1
@@ -580,13 +615,157 @@ def test_a_whole_call_plays_its_script_and_records_what_fermix_did(server):
     assert "leaked" not in call and "protocol_errors" not in call and "said_after" not in call
 
 
+SILENT = {"name": "silent", "number": "+16465550175",
+          "steps": [{"ring": True}, {"answer": True},
+                    # Far past the specs' arrival bound: only the opening releases it.
+                    {"await": "opening", "timeout_ms": 60000},
+                    {"voice": "Hi, this is an AI assistant calling with a reminder."},
+                    {"say": "Oh, thanks."}, {"hold_ms": 20000}]}
+
+
+def _served(tmp_path, *scripts, realtime=False):
+    served = fx.FixtureServer(PAGES_DIR, phone_realtime=realtime,
+                              phone_scripts=_script_dir(tmp_path, *scripts))
+    served.start()
+    return served
+
+
+def test_a_call_answered_silent_says_nothing_until_fermix_opens(tmp_path):
+    """The silent answer: after the answer nothing is said until Fermix's
+    opening line arrives, and only then does the call go on."""
+    served = _served(tmp_path, SILENT)
+    try:
+        session_id, side = _attached_call(served, SILENT["number"])
+        try:
+            side.until("transport.answered")
+            side.send({"type": "session.commentary.append", "event_id": "ev_0",
+                       "delegation_id": None, "content": OPENING})
+            side.until("session.output_transcript.delta")
+            after = [e["type"] for e in side.seen[[e["type"] for e in side.seen]
+                                                  .index("transport.answered") + 1:]]
+            assert after == ["session.commentary.appended", "session.output_transcript.delta"]
+            _hang_up(served, session_id)
+            side.until("session.closed")
+        finally:
+            side.close()
+        served.settle("attempt-1")
+        call = served.state("attempt-1")["phone"]["calls"]["n16465550175"]
+        assert call["opening"] is True and "said_after" not in call
+    finally:
+        served.stop()
+
+
+def test_a_silent_answer_whose_opening_never_comes_goes_on_without_one(tmp_path):
+    """Bounded: past its wait the script goes on and the record holds no opening,
+    so a case answered silent that asserts `opening` fails."""
+    script = json.loads(json.dumps(SILENT))
+    script["steps"][2]["timeout_ms"] = 300
+    served = _served(tmp_path, script)
+    try:
+        session_id, side = _attached_call(served, SILENT["number"])
+        try:
+            assert side.until("session.output_transcript.delta")["delta"].startswith("Hi,")
+            _hang_up(served, session_id)
+            side.until("session.closed")
+        finally:
+            side.close()
+        served.settle("attempt-1")
+        call = served.state("attempt-1")["phone"]["calls"]["n16465550175"]
+        assert "opening" not in call
+        clause = [{"path": "phone.calls.n16465550175.opening", "equals": True}]
+        assert not fx.check_state(served.state("attempt-1"), clause).passed
+    finally:
+        served.stop()
+
+
+def test_an_opening_sent_over_a_call_picked_up_speaking_fails_its_case(server):
+    """What a case picked up speaking asserts absent: an opening line Fermix
+    appended anyway (one that talked over the person) is recorded, and the
+    clause fails conclusively, as a violated `absent:` always does."""
+    session_id, side = _attached_call(server)
+    try:
+        side.until("transport.answered")
+        side.send({"type": "session.commentary.append", "event_id": "ev_0",
+                   "delegation_id": None, "content": OPENING})
+        side.until("session.commentary.appended")
+        _hang_up(server, session_id)
+        side.until("session.closed")
+    finally:
+        side.close()
+    server.settle("attempt-1")
+    verdict = fx.check_state(server.state("attempt-1"),
+                             [{"path": f"phone.calls.{KEY}.opening", "absent": True}])
+    assert not verdict.passed and verdict.conclusive
+
+
+def test_a_long_line_picked_up_in_real_time_reaches_fermix_with_the_answer(tmp_path):
+    """In real time the first word goes out with the answer, not once a long
+    greeting has been said: Fermix hears the recipient before its wait for
+    them to speak first can pass, whatever the line's length."""
+    greeting = "Thank you for calling Harrow Street Dental, " * 12 + "how can I help?"
+    assert ps.line_ms(greeting) > ARRIVAL_S * 1000
+    served = _served(tmp_path, {"name": "long_pick_up", "number": "+14155550126",
+                                "steps": [{"pick_up": greeting}, {"hold_ms": 60000}]},
+                     realtime=True)
+    try:
+        _session_id, side = _attached_call(served, "+14155550126")
+        try:
+            side.until("transport.answered")
+            first = side.until("session.input_transcript.delta")
+            assert first["delta"] == "Thank" and side.seen[-2]["type"] == "transport.answered"
+        finally:
+            side.close()
+    finally:
+        served.stop()
+
+
+def test_a_picked_up_line_is_two_fragments_that_join_back_into_it():
+    (first, first_end), rest = ps.pick_up_fragments("Good evening, Copperleaf Grill.", 600, 2700)
+    assert first + rest == "Good evening, Copperleaf Grill." and first == "Good"
+    assert first_end == 600 + ps.line_ms("Good")
+    assert ps.pick_up_fragments("Hello?", 600, 1250) == (("Hello?", 1250), None)
+
+
+def _opening_case(script) -> str | None:
+    kinds = [next(key for key in step if key != "timeout_ms") for step in script.steps]
+    if "pick_up" in kinds:
+        return "speaks_first"
+    return "silent" if "answer" in kinds else None
+
+
+def test_every_answered_call_states_its_opening_and_the_suite_holds_it_there():
+    """Each answered script is one opening case, both cases are played, and
+    every case that dials an answered script asserts its own: no opening line
+    over a call picked up speaking, the opening once on a call answered silent."""
+    scripts = {ps.number_key(number): script for number, script in ps.load_scripts().items()}
+    cases = {key: _opening_case(script) for key, script in scripts.items()}
+    assert {"speaks_first", "silent"} <= set(cases.values())
+    want = {"speaks_first": {"absent": True}, "silent": {"equals": True}}
+    suite = next(s for s in suites.load_all(SUITES_DIR) if s.name == "phone_call")
+    held = set()
+    for scenario in suite.scenarios:
+        for case in scenario.cases:
+            clauses = case.expect.get("fixture_state", [])
+            dialed = {c["path"].split(".")[2] for c in clauses
+                      if c["path"].endswith(".creates") and c.get("equals") == 1
+                      and c["path"].startswith("phone.calls.")}
+            for key in dialed:
+                if cases.get(key) is None:
+                    continue
+                assert {"path": f"phone.calls.{key}.opening", **want[cases[key]]} in clauses, \
+                    (case.id, key, cases[key])
+                held.add(cases[key])
+    assert held == {"speaks_first", "silent"}
+
+
 def test_what_fermix_says_after_a_mark_is_recorded_the_opening_aside(server):
     """A voicemail case's floor: nothing given to the voice to say after the
-    greeting began. The opening instruction is not a reply."""
+    greeting began. The opening line is recorded as `opening`, not here (a case
+    picked up speaking asserts that absent too)."""
     session_id, side = _attached_call(server, EVERYTHING["number"])
     try:
         side.send({"type": "session.commentary.append", "event_id": "ev_0",
-                   "delegation_id": None, "content": "Open the call in en."})
+                   "delegation_id": None, "content": OPENING})
         delegation = side.until("session.delegation.created")["delegation"]
         side.send({"type": "session.commentary.append", "event_id": "ev_1",
                    "delegation_id": delegation["id"], "content": "Please call us back."})

@@ -460,6 +460,12 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
              {1, 5}
 
     assert reference =~ "One call at a time, and at most five attempts in any 24 hours."
+
+    # The two waits it states, as the bounds the worker reads.
+    assert PhoneCallLimits.opening_wait_ms() == 2_000
+    assert reference =~ "it greets them after a moment (about two seconds)"
+    assert PhoneCallLimits.result_extraction_timeout_ms() == 60_000
+    assert reference =~ "up to about a minute after the call ends"
     assert reference =~ "#{PhoneCallLimits.outcome_retention_days()} days"
     assert reference =~ "#{PhoneCallLimits.excerpt_retention_days()} days"
 
@@ -486,6 +492,9 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
           "when Fermix looked the number up itself",
           "changes no outcome",
           "each side's last words",
+          "for any reason (the model reading it failed",
+          "The person called usually speaks first",
+          "nothing is said after the goodbyes",
           "the tokens they reported",
           "Unreadable"
         ] do

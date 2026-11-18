@@ -560,12 +560,17 @@ defmodule FermixCore.Tools.PhoneCallTest do
       assert {:ok, %{success: false}} = Capability.execute(ctx.capability, start_args(), tainted)
       refute_received {:ran, _args}
       assert_received {:reply, {:approval_prompt, %{text: prompt, token: @token, ttl_s: 300}}}
-      assert prompt =~ "Confirm phone_call? It places a phone call for you, from your number"
+
+      assert String.starts_with?(
+               prompt,
+               ~s|Call "Calloway Bistro" (a business) at +12125550101?\n|
+             )
+
       assert prompt =~ ~s(\nTask: "Ask for a table for two on Saturday at 19:30."\n)
       assert prompt =~ ~s("Calloway Bistro")
     end
 
-    test "the confirmation says what it dials, from which number, and that it places the call",
+    test "the confirmation asks to call whom, at which number, and promises exactly that call",
          ctx do
       tainted =
         owner_turn(ctx, Map.put(ctx.gate, :outside_sources, MapSet.new([{:tool, "web_fetch"}])))
@@ -573,8 +578,9 @@ defmodule FermixCore.Tools.PhoneCallTest do
       Capability.execute(ctx.capability, start_args(), tainted)
       assert_received {:reply, {:approval_prompt, %{text: prompt}}}
 
-      assert prompt =~ ~s(\nCalls: +12125550101, "Calloway Bistro", a business\n)
-      assert prompt =~ "\nFrom: #{@caller}, your number\n"
+      assert prompt =~ ~s|Call "Calloway Bistro" (a business) at +12125550101?\n|
+      # The caller number is the owner's own, the same on every call: never a row.
+      refute prompt =~ @caller
       assert String.ends_with?(prompt, "Once you confirm, Fermix places exactly this call.")
       refute prompt =~ "command"
     end
@@ -598,7 +604,7 @@ defmodule FermixCore.Tools.PhoneCallTest do
       Capability.execute(ctx.capability, start_args(), owner_turn(ctx, gate))
       assert_received {:inbox, %{prompt: prompt, ttl_ms: 300_000} = request}
       assert request.after_confirm == "Once you confirm, Fermix places exactly this call."
-      assert prompt =~ ~s(\nCalls: +12125550101, "Calloway Bistro", a business\n)
+      assert prompt =~ ~s|Call "Calloway Bistro" (a business) at +12125550101?\n|
       refute_received {:ran, _args}
     end
 

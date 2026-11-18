@@ -17,9 +17,10 @@ defmodule FermixCore.Capabilities.ExternalEffect do
       the owner ("a phone call");
     * `c:effect_call?/1`, which of the tool's calls make it, so only those are
       decided;
-    * `c:confirmation/2`, what the owner reads before it goes ahead, or the
-      sentence the call is refused with when it would certainly be refused
-      anyway, so the owner is never asked about it;
+    * `c:confirmation/2`, what the owner reads before it goes ahead (the
+      question, then the rows that change what it does), or the sentence the
+      call is refused with when it would certainly be refused anyway, so the
+      owner is never asked about it;
     * `c:confirmed/1`, what the owner reads once a call they confirmed has
       run, read from the facts the tool's result carries (`effect`), never by
       parsing its output;
@@ -27,18 +28,25 @@ defmodule FermixCore.Capabilities.ExternalEffect do
       runs with (its stores and seams), which the gate keeps in the parked
       call's snapshot beside its own keys.
 
-  The gate composes the rest itself: the question, the reason it asks, the
-  approval line, the window, and the refusal when the whole confirmation is
-  too long to show in one message.
+  The gate composes the rest itself: the reason it asks, the approval line,
+  the window, and the refusal when the whole confirmation is too long to show
+  in one message. It also owns how a row is shown, so one rule decides it for
+  every effect: a list of one on its label's line, a longer list numbered,
+  and an empty list no row at all (never "none").
+
   """
 
   alias FermixCore.Capabilities.Builtin.Tool
 
   @typedoc """
-  What the owner reads before the effect goes ahead: `head`, one
-  Fermix-authored sentence of what it does; `lines`, each a label and its
-  value, or a label and a list of values the gate numbers, every value data
-  the gate keeps on its own line; `promise`, what happens on the owner's yes.
+  What the owner reads before the effect goes ahead: `head`, the effect as
+  the one question the owner answers, which opens the confirmation (the gate
+  adds no tool name to it), its values quoted as data; `lines`, each a label
+  and its value, or a label and a list of values, every value data the gate
+  keeps on its own line, a part that may be absent given as a list so an
+  empty one is no row; `promise`, what happens on the owner's yes. A module
+  leaves out only what is the same on every call; nothing with content is
+  summarized away.
   """
   @type confirmation :: %{
           head: String.t(),

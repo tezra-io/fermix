@@ -177,6 +177,9 @@ defmodule FermixCore.PhoneCalls.CallLifecycleTest do
       {:phone_sideband, sideband, {:event, {:answered, %{session_id: @session, event_id: nil}}}}
     )
 
+    # Nobody speaks within the opening's wait: the opening goes once.
+    assert_receive {:scheduled, {:phone_call_timer, :opening, _token} = opening, _ms}
+    send(call.worker, opening)
     assert_receive {:said, nil, _opening}
     Map.put(call, :sideband, sideband)
   end

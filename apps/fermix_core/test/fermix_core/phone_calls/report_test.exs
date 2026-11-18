@@ -581,6 +581,51 @@ defmodule FermixCore.PhoneCalls.ReportTest do
 
       refute Report.text(stated_row()) =~ "last words"
     end
+
+    # A reader that itself failed keeps its class as the reason, and the
+    # worker gives that report the call's last words too: every code that
+    # means the result was not read, the worker's own and the reader's five
+    # failure classes, is said the same way, with why in the owner's words.
+    test "every reason the result was not read heads the last words, in both renderings" do
+      reasons = %{
+        "not_read" => "Fermix did not read the call's result.",
+        "extraction_timeout" => "Fermix could not read the call's result in time.",
+        "extraction_crashed" => "Fermix could not read the call's result: the reading stopped.",
+        "extraction_provider_error" =>
+          "Fermix could not read the call's result: the model it asked failed.",
+        "extraction_refused" =>
+          "Fermix could not read the call's result: the model it asked refused.",
+        "extraction_malformed" =>
+          "Fermix could not read the call's result: the answer was not in the expected form."
+      }
+
+      for {code, why} <- reasons do
+        call =
+          row(%{
+            outcome: "unknown",
+            outcome_facts: %{"reason" => code},
+            evidence: [%{"speaker" => "recipient", "text" => "Let me ask my manager."}],
+            voice_seconds: 50
+          })
+
+        text = Report.text(call)
+        lead = "The call's last words, since its result was not read:\n"
+
+        assert text =~ lead <> ~s(- The recipient: "Let me ask my manager."), code
+        assert text =~ "Outcome: Fermix could not tell what was agreed, if anything. " <> why
+        refute text =~ "What was said:", code
+
+        [_before, framed] = String.split(Report.notice(call), "<untrusted_tool_result", parts: 2)
+        assert framed =~ lead <> ~s(- the recipient: "Let me ask my manager."), code
+      end
+
+      assert Enum.sort(Map.keys(reasons)) ==
+               Outcome.unread_reasons() |> Enum.map(&Atom.to_string/1) |> Enum.sort()
+
+      read = row(%{evidence: [%{"speaker" => "recipient", "text" => "We open at nine."}]})
+      assert Report.text(read) =~ ~s(What was said:\n- The recipient: "We open at nine.")
+      assert Report.notice(read) =~ ~s(What was said:\n- the recipient: "We open at nine.")
+    end
   end
 
   describe "the backend's work" do

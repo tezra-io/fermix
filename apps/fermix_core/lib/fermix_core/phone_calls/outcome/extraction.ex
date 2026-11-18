@@ -1,8 +1,8 @@
 defmodule FermixCore.PhoneCalls.Outcome.Extraction do
   @moduledoc """
   The one bounded, tool-free extraction over a finished call's transcript
-  (M94 §7, "Completion reporting"; §10, one extraction of at most 30
-  seconds).
+  (M94 §7, "Completion reporting"; §10, one extraction, bounded by
+  `Limits.result_extraction_timeout_ms/0`).
 
   It follows `Realtime.CallGist`'s shape: no tools and no agent loop, the
   call's own `session_id` (so the provider call reassembles into the call's
@@ -12,6 +12,14 @@ defmodule FermixCore.PhoneCalls.Outcome.Extraction do
   retry and no failover, since a call reads its outcome once
   (`PhoneCalls.Call` runs one extraction per call). The provider call rides
   the adapter's own `Providers.Telemetry.emit_call/3`.
+
+  It reads at one fixed, moderate reasoning effort (`@effort`), whatever level
+  the owner's main route carries: a call's transcript is short and its
+  answer one object, and the main route's own level (the highest, often) can
+  spend the whole bound thinking. The level is overlaid on the route it uses
+  and clamped there (`Providers.RoutingOverrides.apply_effort/2`, as
+  compaction and the tool-result digest set their own): to what the provider
+  and model accept, and not at all for a provider with no effort levels.
 
   It answers the claim (`Outcome.Claim`) or a failure of one of five
   classes, each kept distinct: `:timeout`, `:crashed`, `:provider_error`,
@@ -26,10 +34,13 @@ defmodule FermixCore.PhoneCalls.Outcome.Extraction do
   alias FermixCore.PhoneCalls.Transcript
   alias FermixCore.Providers.Adapter
   alias FermixCore.Providers.Failover
+  alias FermixCore.Providers.RoutingOverrides
   alias FermixCore.Providers.Selection
   alias FermixCore.Text
 
   @agent "phone_call_outcome"
+  # The reading's own effort: one internal constant, no setting.
+  @effort :medium
   @source "phone_call_transcript"
 
   @prompt """
@@ -152,7 +163,7 @@ defmodule FermixCore.PhoneCalls.Outcome.Extraction do
 
   defp first_route(opts) do
     case Keyword.fetch(opts, :routes) do
-      {:ok, [route | _rest]} -> {:ok, route}
+      {:ok, [route | _rest]} -> {:ok, moderated(route)}
       {:ok, []} -> failed(:provider_error, :no_routes)
       :error -> configured_route()
     end
@@ -160,11 +171,14 @@ defmodule FermixCore.PhoneCalls.Outcome.Extraction do
 
   defp configured_route do
     case Selection.ordered_routes() do
-      {:ok, [route | _rest]} -> {:ok, route}
+      {:ok, [route | _rest]} -> {:ok, moderated(route)}
       {:ok, []} -> failed(:provider_error, :no_routes)
       {:error, reason} -> failed(:provider_error, {:route_resolution_failed, reason})
     end
   end
+
+  # The route with the reading's own effort, clamped to its provider and model.
+  defp moderated(route), do: [route] |> RoutingOverrides.apply_effort(@effort) |> hd()
 
   defp dispatch(route, messages, session_id) do
     call_opts = [agent: @agent, session_id: session_id, temperature: 0]

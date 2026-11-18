@@ -130,9 +130,11 @@ defmodule FermixCore.PhoneCalls.CallTest do
     call
   end
 
+  # Answered, and nobody spoke within the opening's wait: the opening is said.
   defp live!(ctx, overrides \\ %{}, prepare \\ fn _id -> :ok end) do
     call = ctx |> start!(overrides, prepare) |> created!() |> attached!()
     event!(call, {:answered, %{session_id: @session, event_id: "evt_answered"}})
+    fire!(call, :opening)
     assert_receive {:said, nil, _opening}
     call
   end
@@ -617,9 +619,11 @@ defmodule FermixCore.PhoneCalls.CallTest do
       event!(call, {:ringing, %{session_id: @session, event_id: "evt_ringing"}})
       said!(call, :remote, "Calloway Bistro, how can I help?")
 
-      assert_receive {:said, nil, _opening}
       sync!(call)
       assert row!(ctx, call.id).status == "active"
+      # Someone spoke first: the voice answers them, and no opening is armed or said.
+      refute_received {:scheduled, {:phone_call_timer, :opening, _token}, _ms}
+      refute_received {:said, nil, _opening}
 
       # Its ringing timer was stopped: a late expiry ends nothing.
       fire!(call, :ringing)
@@ -629,6 +633,48 @@ defmodule FermixCore.PhoneCalls.CallTest do
       quiet!(ctx, call)
       Call.cancel(call.pid, :owner)
       hung_up_and_closed!(call, 9)
+    end
+
+    test "on answer the opening waits for the recipient, and goes once when nobody speaks",
+         ctx do
+      call = ctx |> start!() |> created!() |> attached!()
+      event!(call, {:answered, %{session_id: @session, event_id: "evt_answered"}})
+
+      assert_receive {:scheduled, {:phone_call_timer, :opening, _token} = opening, 2_000}
+      sync!(call)
+      refute_received {:said, nil, _opening}
+
+      send(call.pid, opening)
+      assert_receive {:said, nil, text}
+      assert is_binary(text) and text != ""
+
+      # Its expiry again, or a second answer, says nothing more.
+      send(call.pid, opening)
+      event!(call, {:answered, %{session_id: @session, event_id: "evt_answered_again"}})
+      sync!(call)
+      refute_received {:said, nil, _again}
+    end
+
+    test "a recipient who speaks within the wait is answered by the voice: no opening", ctx do
+      call = ctx |> start!() |> created!() |> attached!()
+      event!(call, {:answered, %{session_id: @session, event_id: "evt_answered"}})
+      assert_receive {:scheduled, {:phone_call_timer, :opening, _token} = opening, 2_000}
+
+      said!(call, :remote, "Hello?")
+      send(call.pid, opening)
+      sync!(call)
+      refute_received {:said, nil, _opening}
+    end
+
+    test "nothing is sent once the call is ending", ctx do
+      call = ctx |> start!() |> created!() |> attached!()
+      event!(call, {:answered, %{session_id: @session, event_id: "evt_answered"}})
+      assert_receive {:scheduled, {:phone_call_timer, :opening, _token} = opening, 2_000}
+
+      Call.cancel(call.pid, :owner)
+      send(call.pid, opening)
+      hung_up_and_closed!(call, 2)
+      refute_received {:said, nil, _opening}
     end
 
     test "no answer by the ringing deadline: hung up once, ended as no answer", ctx do
@@ -1207,30 +1253,55 @@ defmodule FermixCore.PhoneCalls.CallTest do
   # --- finish ----------------------------------------------------------------------------
 
   describe "finish/4" do
-    test ":done ends the call once its turn's answer has been said", ctx do
+    # The finish tool's contract: hang up once the conversation is over. The
+    # ending begins when the finish is taken; the turn that asked is retired,
+    # its reply is never spoken (commentary is spoken aloud), and the hangup
+    # waits only for the voice's own goodbye to go quiet.
+    test ":done ends the call at once: the turn is retired, its reply is never said", ctx do
       call = live!(ctx)
       request = running!(call, "del_1")
-      quiet!(ctx, call)
 
       assert :ok =
                CallControls.finish(call.id, request.handle, :done, nil, registry: ctx.registry)
 
+      # The voice is still saying goodbye: the hangup waits for it, bounded.
+      assert_receive {:scheduled, {:phone_call_timer, :speech, _token} = speech, 1_500}
+
+      answer!(call, request, "The recipient confirmed. His answer was a clear yes.")
       sync!(call)
+      refute_received {:said, "del_1", _summary}
       refute_received {:hangup, _task, _session}
 
-      answer!(call, request, "Thank you, goodbye.")
-      assert_receive {:said, "del_1", "Thank you, goodbye."}
-      # The goodbye is being spoken: the hangup waits for it, bounded.
-      assert_receive {:scheduled, {:phone_call_timer, :speech, _token} = speech, 1_500}
-      sync!(call)
-      refute_received {:hangup, _task, _session}
       quiet!(ctx, call)
       send(call.pid, speech)
-
       report = hung_up_and_closed!(call, 75)
       assert_receive {:extract, _entries, %{answered: true, end_reason: :hangup}, _opts}
       assert report.status == "ended"
       assert is_nil(report.failure_reason)
+      refute_received {:said, "del_1", _late}
+    end
+
+    # Like a turn past its time: a backend turn ran, and its usage is unknown,
+    # which is not zero.
+    test "the turn a finish cuts counts as a backend turn whose usage is unknown", ctx do
+      call = live!(ctx)
+      first = running!(call, "del_1")
+      answer!(call, first, "Eight works.", %{"total_tokens" => 120, "iterations" => 2})
+      assert_receive {:said, "del_1", "Eight works."}
+
+      request = running!(call, "del_2")
+      quiet!(ctx, call)
+      :ok = CallControls.finish(call.id, request.handle, :done, nil, registry: ctx.registry)
+      answer!(call, request, "A summary.", %{"total_tokens" => 999, "iterations" => 9})
+
+      report = hung_up_and_closed!(call, 40)
+
+      assert report.backend_usage == %{
+               "total_tokens" => 120,
+               "iterations" => 2,
+               "turns" => 2,
+               "turns_unmeasured" => 1
+             }
     end
 
     test ":needs_owner ends as needs_owner with the options heard and the turn's note", ctx do
@@ -1255,6 +1326,7 @@ defmodule FermixCore.PhoneCalls.CallTest do
       fire!(call, :speech)
 
       report = hung_up_and_closed!(call, 50)
+      refute_received {:said, "del_1", _reply}
       assert report.outcome == "needs_owner"
 
       assert Map.take(report.outcome_facts, ["options", "note"]) ==
@@ -1276,7 +1348,6 @@ defmodule FermixCore.PhoneCalls.CallTest do
                )
 
       assert_receive {:hangup, _task, @session}
-      assert_receive {:delegate_cancel, _call_id, "del_1"}
       answer!(call, request, "Ending the call.")
       sync!(call)
       refute_received {:said, _id, _text}
@@ -1287,34 +1358,60 @@ defmodule FermixCore.PhoneCalls.CallTest do
       refute_received {:said, _id, _text}
     end
 
-    test "a turn that finishes but fails to answer leaves no engine sentence on the line",
-         ctx do
-      for reason <- [:done, :cannot_proceed] do
-        assert failed_finish_says(ctx, reason) == [], "#{reason} put a line on the call"
+    # The turn asking for the finish is inside its own tool call: a stop now
+    # would race that call and could kill it before its one tool event. It is
+    # left to end by itself, retired and counted; the delegation waiting
+    # behind it is dropped and never runs (one turn runs at a time,
+    # `Limits.max_active_delegations/0`, so no other is running then).
+    test "a finish asks no stop for the turn that made it, for every reason", ctx do
+      for reason <- [:done, :needs_owner, :cannot_proceed, :voicemail] do
+        call = live!(ctx)
+        request = running!(call, "del_1")
+        delegation!(call, "del_2")
+        quiet!(ctx, call)
+
+        :ok = CallControls.finish(call.id, request.handle, reason, nil, registry: ctx.registry)
+
+        answer!(call, request, "A summary nobody on the line should hear.", %{
+          "total_tokens" => 50
+        })
+
+        report = hung_up_and_closed!(call, 5)
+        refute_received {:delegate_cancel, _call_id, _id}, "#{reason} stopped its own turn"
+        refute_received {:delegate_run, %{delegation_id: "del_2"}}
+        refute_received {:said, _id, _text}
+        assert report.backend_usage == %{"turns" => 1, "turns_unmeasured" => 1}, "#{reason}"
+        {:ok, _row} = Ledger.terminalize(call.id, "ended", %{ended_at: @t0}, server: ctx.repo)
       end
     end
 
-    test ":needs_owner whose turn fails to answer still tells the person the owner follows up",
+    test "a finishing turn's late answer, a reply or a failure, puts nothing on the line",
          ctx do
-      assert [{"del_1", line}] = failed_finish_says(ctx, :needs_owner)
-      assert line == "The owner will follow up with you about this."
+      reply = {:ok, %{reply: "Wrapping up now.", backend_usage: nil}}
+
+      for {reason, answer} <- [
+            done: reply,
+            done: {:error, :boom},
+            needs_owner: reply,
+            cannot_proceed: {:error, :boom}
+          ] do
+        assert finish_then_answer_says(ctx, reason, answer) == [], "#{reason} said something"
+      end
     end
 
-    test "a turn that finishes and then runs out of time still ends the call", ctx do
+    test "a finish stops the turn's own timeout: the call ends as finished", ctx do
       call = live!(ctx)
       request = running!(call, "del_1")
+      quiet!(ctx, call)
 
       assert :ok =
                CallControls.finish(call.id, request.handle, :cannot_proceed, nil,
                  registry: ctx.registry
                )
 
-      fire!(call, {:turn_timeout, "del_1"})
-      quiet!(ctx, call)
-      fire!(call, :speech)
-
       report = hung_up_and_closed!(call, 33)
       assert report.failure_reason == "cannot_proceed"
+      refute_received {:said, "del_1", _timeout_line}
     end
 
     test "refusals, each in its own class", ctx do
@@ -1341,7 +1438,8 @@ defmodule FermixCore.PhoneCalls.CallTest do
       assert {:error, :bad_handle} = CallControls.finish(call.id, "forged", :done, nil, opts)
       assert :ok = CallControls.finish(call.id, request.handle, :done, nil, opts)
 
-      assert {:error, :already_finishing} =
+      # The finish stopped the turn that asked: its handle is spent.
+      assert {:error, :stale_handle} =
                CallControls.finish(call.id, request.handle, :done, nil, opts)
     end
   end
@@ -1773,24 +1871,14 @@ defmodule FermixCore.PhoneCalls.CallTest do
   # A call whose turn finishes it with `reason`, then fails to answer (the
   # bridge withheld its reply): what was said on the call after the finish.
   # The row is ended afterwards so the next call in the same test is admitted.
-  defp failed_finish_says(ctx, reason) do
+  defp finish_then_answer_says(ctx, reason, answer) do
     call = live!(ctx)
     request = running!(call, "del_1")
     quiet!(ctx, call)
     :ok = CallControls.finish(call.id, request.handle, reason, nil, registry: ctx.registry)
-
-    send(
-      call.pid,
-      {:phone_call_delegation, call.id, "del_1", {:error, {:reply_withheld, :too_long}}}
-    )
-
+    send(call.pid, {:phone_call_delegation, call.id, "del_1", answer})
     sync!(call)
     said = collect_said([])
-
-    if said != [] do
-      quiet!(ctx, call)
-      fire!(call, :speech)
-    end
 
     hung_up_and_closed!(call, 5)
     {:ok, _row} = Ledger.terminalize(call.id, "ended", %{ended_at: @t0}, server: ctx.repo)
@@ -1860,6 +1948,42 @@ defmodule FermixCore.PhoneCalls.CallTest do
       end)
     end
 
+    # A reading that failed inside the outcome reader (a timeout, a crash, a
+    # provider error, a refusal, a malformed answer) comes back as an ordinary
+    # outcome: it is still a result that was not read, and keeps the last words.
+    test "a reading that failed inside the reader keeps the last words, its class kept", ctx do
+      for {class, code} <- [
+            timeout: "extraction_timeout",
+            crashed: "extraction_crashed",
+            provider_error: "extraction_provider_error",
+            refused: "extraction_refused",
+            malformed: "extraction_malformed"
+          ] do
+        failed = %Outcome{
+          reason: String.to_existing_atom(code),
+          extraction: {:failed, class, "the reader's own detail"}
+        }
+
+        Fakes.script(:extract, {:result, {:ok, failed}})
+        call = live!(ctx)
+        said!(call, :remote, "Yeah, that works.")
+        said!(call, :assistant, "Thank you, goodbye.")
+        closed!(call, 9, "remote_hangup")
+
+        report = ended!(call)
+        assert report.outcome == "unknown", code
+        assert report.outcome_facts["reason"] == code
+
+        assert report.evidence == [
+                 %{speaker: "recipient", text: "Yeah, that works"},
+                 %{speaker: "assistant", text: "Thank you, goodbye"}
+               ],
+               code
+
+        {:ok, _row} = Ledger.terminalize(call.id, "ended", %{ended_at: @t0}, server: ctx.repo)
+      end
+    end
+
     test "a long closing turn keeps its end, within the ledger's excerpt bound", ctx do
       call = live!(ctx)
       words = Enum.map_join(1..200, " ", &"word#{&1}")
@@ -1891,8 +2015,10 @@ defmodule FermixCore.PhoneCalls.CallTest do
         closed!(call, 7, "remote_hangup")
         assert_receive {:extract, _entries, _facts, _opts}
 
+        watchdog_ms = Limits.result_extraction_timeout_ms() + Limits.result_extraction_grace_ms()
+
         assert_receive {:scheduled, {:phone_call_timer, :extract_watchdog, _token} = watchdog,
-                        35_000}
+                        ^watchdog_ms}
 
         send(call.pid, watchdog)
 

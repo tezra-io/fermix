@@ -13,10 +13,7 @@
       "pause_ms": 600
     },
     {
-      "answer": true
-    },
-    {
-      "say": "Larkin's Table, this is Theo."
+      "pick_up": "Larkin's Table, this is Theo."
     },
     {
       "voice": "Hi Theo, I'm an AI assistant calling for a customer. I'd like to reserve a table for eight on Saturday, February 13th, at 8 pm."
@@ -28,6 +25,9 @@
       "say": "We can seat eight at 8 on the 13th, but a party of eight needs a fifty dollar deposit by card to hold the table. Can you give me a card number now?"
     },
     {
+      "say": "If they'd rather not leave a deposit, I could seat eight at 5:30 that evening with no deposit. Either way they'll need to call us back to set it up, I can't hold anything today."
+    },
+    {
       "delegate": true
     },
     {
@@ -35,10 +35,7 @@
       "timeout_ms": 45000
     },
     {
-      "say": "Okay. If they'd rather not leave a deposit, I could seat eight at 5:30 that evening with no deposit. Either way they'll need to call us back to set it up, I can't hold anything today."
-    },
-    {
-      "voice": "Thank you, I'll pass both options on. Goodbye."
+      "say": "Okay, have them give us a call. Bye now."
     },
     {
       "delegate": true

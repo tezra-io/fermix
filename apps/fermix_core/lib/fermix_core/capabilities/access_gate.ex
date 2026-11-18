@@ -1462,9 +1462,10 @@ defmodule FermixCore.Capabilities.AccessGate do
 
   # A plugin command shows its description and JSON arguments; a host command
   # shows everything that will run, verbatim (`shown_command/1`); an effect
-  # outside the machine shows what its module rendered (`effect_lines/2`).
-  defp owner_prompt(%{capability: capability, confirmation: confirmation} = call) do
-    ["Confirm #{capability.name}? " <> visible(confirmation.head)]
+  # outside the machine opens with its module's own question, then shows the
+  # rows it rendered (`effect_lines/2`).
+  defp owner_prompt(%{confirmation: confirmation} = call) do
+    [shown(confirmation.head, call.context)]
     |> Kernel.++(effect_lines(confirmation.lines, call.context))
     |> Kernel.++(["Asked because #{reason_phrase(call)}."])
     |> Enum.join("\n")
@@ -1505,13 +1506,17 @@ defmodule FermixCore.Capabilities.AccessGate do
   defp approval_kind(%{confirmation: %{promise: promise}}), do: {:effect, promise}
   defp approval_kind(_call), do: :parked
 
-  # An effect's lines as the owner reads them: a label and its value on one
-  # line, or a label and its values numbered on the lines under it ("none" for
-  # an empty list). Every label and value is redacted and made `visible/1`, so
+  # An effect's lines as the owner reads them, the one place an empty part is
+  # left out: a label and its value on one line, a list of one on its label's
+  # line, a longer list numbered on the lines under it, and no line at all for
+  # an empty list. Every label and value is redacted and made `visible/1`, so
   # no value can break a line, start one, or reorder what the owner reads.
   defp effect_lines(lines, context), do: Enum.flat_map(lines, &effect_line(&1, context))
 
-  defp effect_line({label, []}, context), do: [shown(label, context) <> ": none"]
+  defp effect_line({_label, []}, _context), do: []
+
+  defp effect_line({label, [value]}, context) when is_binary(value),
+    do: [shown(label, context) <> ": " <> shown(value, context)]
 
   defp effect_line({label, values}, context) when is_list(values) do
     numbered =
@@ -1729,11 +1734,16 @@ defmodule FermixCore.Capabilities.AccessGate do
   end
 
   # An effect outside the machine waits for the owner in its own words: what it
-  # does (its module's `effect/0`) and its own window.
+  # does (its module's `effect/0` and `effect_name/0`) and its own window. The
+  # confirmation already shows the owner all of it, so the turn says only that
+  # it waits, in one short sentence, and repeats none of it.
   defp chat_text(%{confirmation: _rendered, capability: %{name: tool} = capability} = call) do
     "Not done yet: #{tool} #{effect_of(capability)}, and #{reason_phrase(call)}, so the owner " <>
-      "must confirm it. A confirmation is now in this chat and expires in #{effect_window()}. " <>
-      "Tell the owner and stop. Do not call #{tool} again: it goes ahead the moment they confirm."
+      "must confirm it. A confirmation that shows them everything it would do is now in this " <>
+      "chat and expires in #{effect_window()}. Tell the owner in one short sentence that " <>
+      "#{effect_name(capability)} waits for their confirmation, without repeating anything " <>
+      "the confirmation shows, then stop. Do not call #{tool} again: it goes ahead the moment " <>
+      "they confirm."
   end
 
   defp chat_text(%{capability: %{name: tool}} = call) do
@@ -1744,9 +1754,11 @@ defmodule FermixCore.Capabilities.AccessGate do
 
   defp inbox_text(%{confirmation: _rendered, capability: %{name: tool} = capability} = call) do
     "Not done yet: #{tool} #{effect_of(capability)}, and #{reason_phrase(call)}, so the " <>
-      "confirmation went to the owner's own chat and expires in #{effect_window()}. Say it is " <>
-      "waiting on the owner's confirmation there, then stop. Do not call #{tool} again: it " <>
-      "goes ahead the moment they confirm."
+      "confirmation, which shows the owner everything it would do, went to the owner's own " <>
+      "chat and expires in #{effect_window()}. Tell the owner in one short sentence that " <>
+      "#{effect_name(capability)} waits for their confirmation there, without repeating " <>
+      "anything the confirmation shows, then stop. Do not call #{tool} again: it goes ahead " <>
+      "the moment they confirm."
   end
 
   defp inbox_text(%{capability: %{name: tool}} = call) do
@@ -1885,6 +1897,7 @@ defmodule FermixCore.Capabilities.AccessGate do
   end
 
   defp effect_of(capability), do: effect_module!(capability).effect()
+  defp effect_name(capability), do: effect_module!(capability).effect_name()
 
   defp host_rule(:worker, _tool) do
     "A delegated worker never runs one after such content. Report that the owner must ask " <>

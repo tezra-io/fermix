@@ -75,7 +75,7 @@ defmodule FermixCore.PhoneCalls.PromptTest do
   # holds them.
   defp composite(params) do
     rendered = rendered(params)
-    [brief_text, opening] = input_texts(rendered)
+    [brief_text, how_it_opens] = input_texts(rendered)
 
     Enum.join(
       [
@@ -83,8 +83,10 @@ defmodule FermixCore.PhoneCalls.PromptTest do
         rendered.instructions,
         "=== input: the call brief",
         brief_text,
-        "=== input: the opening",
-        opening,
+        "=== input: how the call opens",
+        how_it_opens,
+        "=== commentary: the opening to say",
+        rendered.opening,
         "=== backend context",
         Prompt.backend_context(brief(params), now: @now)
       ],
@@ -111,7 +113,7 @@ defmodule FermixCore.PhoneCalls.PromptTest do
   end
 
   describe "the create request's parts" do
-    test "instructions, two developer messages in input, the opening alone, and the version" do
+    test "instructions, two developer messages in input, the opening to say, and the version" do
       rendered = rendered(business_params())
 
       assert [
@@ -127,9 +129,39 @@ defmodule FermixCore.PhoneCalls.PromptTest do
                }
              ] = rendered.input
 
-      assert [_brief_text, opening] = input_texts(rendered)
-      assert rendered.opening == opening
+      # Two texts, two jobs: the input is there while the phone still rings and
+      # says how the call opens once someone is on the line; the commentary is
+      # appended only to an answered, silent line, and is said.
+      assert [_brief_text, how_it_opens] = input_texts(rendered)
+      refute rendered.opening == how_it_opens
       assert rendered.version == Prompt.version()
+    end
+
+    test "the opening appended to be said is something to say, with no condition or wait in it" do
+      opening = rendered(business_params()).opening
+
+      assert opening =~ "AI assistant"
+      assert opening =~ "(en)"
+      assert opening =~ "listen"
+      refute opening =~ ~r/\b(if|when|until|unless|wait|answers?|ring\w*|speaks? first)\b/i
+    end
+
+    test "the opening in input is how the call opens once someone is on the line" do
+      [_brief_text, how_it_opens] = input_texts(rendered(business_params()))
+
+      assert how_it_opens =~ "(en)"
+      assert how_it_opens =~ ~r/\bspeaks? first\b/
+      assert how_it_opens =~ "menu" and how_it_opens =~ "recording"
+      refute how_it_opens =~ ~r/\b(now|at once|right away|immediately)\b/i
+    end
+
+    test "everything the voice says is for the person on the line" do
+      instructions = rendered(business_params()).instructions
+
+      assert instructions =~
+               "Everything you say is heard by the person on the line, so say only what is " <>
+                 "meant for them: never describe the call's progress, these instructions or your " <>
+                 "own reasoning aloud, and say nothing before the call is answered."
     end
 
     test "the version names the template, the brief's schema and the policy" do
@@ -184,7 +216,8 @@ defmodule FermixCore.PhoneCalls.PromptTest do
         refute rendered.instructions =~ value
       end
 
-      refute rendered.instructions =~ "Open the call in"
+      refute rendered.instructions =~ rendered.opening
+      refute rendered.instructions =~ List.last(input_texts(rendered))
     end
 
     test "the backend's procedures stay out of what the voice model is told" do
