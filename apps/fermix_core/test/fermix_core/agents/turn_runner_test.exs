@@ -1894,7 +1894,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert format =~ "xai/grok-5"
       assert format =~ "JPEG or PNG"
       assert pdf =~ "the current model (xai/grok-5) can't take a PDF inline"
-      assert pdf =~ "OpenAI Codex, OpenAI, Anthropic, OpenRouter, Venice"
+      assert pdf =~ "OpenAI Codex, OpenAI, Anthropic, OpenRouter, Venice, Vercel AI Gateway,"
       refute pdf =~ "SpaceXAI"
       assert pdf =~ "send the pages as pictures"
     end

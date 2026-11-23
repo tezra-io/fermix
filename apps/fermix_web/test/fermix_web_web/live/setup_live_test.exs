@@ -4675,6 +4675,135 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert Keyword.get(providers[:venice], :default_model) == "grok-4-6"
     end
 
+    # M105 §4: the Vercel AI Gateway card is descriptor-driven too — the pane,
+    # its key field and the save path, with no Vercel-specific page code.
+    test "vercel pane renders its key field and saves the provider block", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup?tab=provider")
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "vercel"})
+        |> render_change()
+
+      assert html =~ "Configuring Vercel AI Gateway"
+      assert html =~ ~s(name="provider_form[vercel_api_key]")
+
+      view
+      |> form("form[phx-submit=\"save_provider\"]",
+        provider_form: %{
+          provider: "vercel",
+          vercel_api_key: "vck-live",
+          default_model: "spacexai/grok-4.7"
+        }
+      )
+      |> render_submit()
+
+      {:ok, persisted} = ConfigStore.load_runtime_config()
+      providers = Keyword.get(persisted.fermix_core, :providers, [])
+
+      assert Keyword.get(providers[:vercel], :api_key) == "vck-live"
+      assert Keyword.get(providers[:vercel], :default_model) == "spacexai/grok-4.7"
+    end
+
+    # The page lists a provider's live models when the registry says it has a
+    # listing (`impl.live?/1`). This stub asks the real registry for Vercel and
+    # answers the listing itself, so nothing leaves the test.
+    test "vercel pane offers the live gateway listing", %{conn: conn} do
+      defmodule VercelLiveListing do
+        alias FermixCore.Providers.ModelListing
+
+        def live?(:vercel), do: ModelListing.live?(:vercel)
+        def live?(_provider), do: false
+
+        def live_models(:vercel, _opts) do
+          {:ok,
+           [
+             %{id: "vendor/brand-new", label: "Brand New", context_window: 2_000_000},
+             %{
+               id: "anthropic/claude-sonnet-4.6",
+               label: "Claude Sonnet 4.6",
+               context_window: 1_000_000
+             }
+           ]}
+        end
+      end
+
+      Application.put_env(:fermix_web, :model_listing_impl, VercelLiveListing)
+
+      on_exit(fn ->
+        Application.put_env(
+          :fermix_web,
+          :model_listing_impl,
+          FermixWebWeb.TestSupport.StaticModelListing
+        )
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup?tab=provider")
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "vercel"})
+        |> render_change()
+
+      assert html =~ "vendor/brand-new"
+      assert html =~ "Brand New"
+      # The live listing replaces the curated suggestions.
+      refute html =~ "GPT-6 Luna via Vercel"
+      assert html =~ ~s(name="provider_form[default_model]")
+      assert html =~ "<datalist"
+    end
+
+    # An empty live list is Ollama's "nothing pulled" only on the Ollama pane.
+    # Any other provider with a listing names itself and keeps the typed field;
+    # the default-model field is read alone, since the provider cards above it
+    # name Ollama on every pane.
+    test "an empty live list names the provider, and only Ollama's says ollama pull", %{
+      conn: conn
+    } do
+      defmodule EmptyLiveListing do
+        alias FermixCore.Providers.ModelListing
+
+        @listed [:vercel, :openrouter, :venice, :ollama]
+
+        def live?(provider) when provider in @listed, do: ModelListing.live?(provider)
+        def live?(_provider), do: false
+
+        def live_models(provider, _opts) when provider in @listed, do: {:ok, []}
+      end
+
+      Application.put_env(:fermix_web, :model_listing_impl, EmptyLiveListing)
+
+      on_exit(fn ->
+        Application.put_env(
+          :fermix_web,
+          :model_listing_impl,
+          FermixWebWeb.TestSupport.StaticModelListing
+        )
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup?tab=provider")
+
+      for provider <- [:vercel, :openrouter, :venice] do
+        provider_pane_html(view, Atom.to_string(provider))
+        field = view |> element("label.form-control", "Default model") |> render()
+        label = Descriptor.fetch!(provider).label
+
+        assert field =~ "#{label} listed no models Fermix can use; enter a model id manually."
+        assert field =~ ~s(type="text" name="provider_form[default_model]")
+        refute field =~ "<datalist"
+        refute String.downcase(field) =~ "ollama"
+      end
+
+      provider_pane_html(view, "ollama")
+      field = view |> element("label.form-control", "Default model") |> render()
+
+      assert field =~
+               "No models installed on this server; run <code>ollama pull &lt;model&gt;</code>."
+
+      assert field =~ ~s(type="text" name="provider_form[default_model]")
+      refute field =~ "listed no models"
+    end
+
     # M49 §3.4: the model explanation is the descriptor's, drawn beside "Default
     # model" behind an info control rather than inline, and read out of the same
     # field the management wire publishes as the row's `info`. A provider that

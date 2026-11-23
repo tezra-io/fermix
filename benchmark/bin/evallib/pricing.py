@@ -62,17 +62,19 @@ so effort is not part of the key.
 
 --- Rates: sources and as-of date ---------------------------------------------
 All figures are published list prices in US dollars per MILLION tokens, standard
-(non-batch, non-priority) processing. Every block but Venice's was read
-2026-09-05 and re-checked against first-party vendor pricing the same day;
-Venice's was read 2026-09-19 and carries its own line below. The four models
+(non-batch, non-priority) processing. Every block but Venice's and Vercel AI
+Gateway's was read 2026-09-05 and re-checked against first-party vendor
+pricing the same day; Venice's was read 2026-09-19 and carries its own line
+below. The four models
 released 2026-09-22 (gpt-6-sol, gpt-6-luna, claude-opus-5-5, grok-4.7) were
 read from the same first-party pages that day, gpt-6.1-sol on its release
 day, 2026-09-29, gpt-6.1-terra (with its OpenRouter twin) on its release
 day, 2026-10-26, and gpt-6.2-astra and gpt-6.2-sol (with their OpenRouter
 twins) from their first-party model pages on their release day, 2026-11-17.
 The OpenRouter and Venice entries added with the catalog's
-2026-10-03 refresh were read from each one's public listing that day, and
-claude-haiku-5-5 from the first-party model page on 2026-10-10:
+2026-10-03 refresh were read from each one's public listing that day,
+claude-haiku-5-5 from the first-party model page on 2026-10-10, and the
+Vercel AI Gateway block from its public listing on 2026-11-22:
 
   OpenAI      https://developers.openai.com/api/docs/pricing (first-party;
               input / cached input / output for every slug). Cache WRITES are
@@ -121,6 +123,15 @@ claude-haiku-5-5 from the first-party model page on 2026-10-10:
               here are private. An absent key is the vendor saying nothing, not
               the vendor saying "no premium", so those write legs are
               unestablished.
+  Vercel      `GET https://ai-gateway.vercel.sh/v1/models` (first-party and
+              public — the listing answers 200 with no key), read 2026-11-22:
+              `pricing.input`, `.output`, `.input_cache_read` and
+              `.input_cache_write`, US dollars per token, here per million.
+              The gateway bills at the model maker's list price, and on every
+              curated id the listing's figures equal the direct entry's on
+              every leg it publishes. Where it publishes no write leg (GPT-5.5,
+              both Groks) the entry carries its direct entry's, as OpenRouter's
+              passthrough slugs do: a cache leg is the vendor's.
 
 Two known bounds, both accepted rather than modelled:
 
@@ -156,7 +167,7 @@ from typing import Protocol
 # onto a stored row. It is not an ordered sequence and the values in between
 # need not exist: `.1` never did, and renaming `.2` now would make a token that
 # is already on disk mean two different tables.
-CARD_VERSION = "2026-11-17.1"
+CARD_VERSION = "2026-11-22.1"
 
 
 class LlmSpanUsage(Protocol):
@@ -462,6 +473,33 @@ _VENICE_RATES: dict[str, Rate] = {
     "minimax-m3-preview": Rate(0.30, 1.20, 0.06),
 }
 
+# The curated `@vercel` catalog list: the mirror of `@openrouter` under Vercel
+# AI Gateway's own ids (Grok is `spacexai/` here, `x-ai/` there). Every figure
+# is the listing's own and equals the direct entry's, so each slug carries its
+# vendor's legs exactly as the OpenRouter block above does: `openai/gpt-5.5`
+# bills a written token as ordinary input and the Groks leave the write leg
+# unestablished, as their `openai` and `xai` entries do. Standard tier only:
+# the listing reprices the GPT models above 272k and the Groks above 200k input
+# tokens, the long-context cliffs this card does not model.
+_VERCEL_RATES: dict[str, Rate] = {
+    "anthropic/claude-sonnet-4.6": Rate(3.00, 15.00, 0.30, 3.75),
+    "anthropic/claude-sonnet-5.5": Rate(2.00, 10.00, 0.10, 2.50),
+    "anthropic/claude-fable-5.2": Rate(8.00, 40.00, 0.20, 10.00),
+    "anthropic/claude-fable-5.1": Rate(10.00, 50.00, 0.25, 12.50),
+    "anthropic/claude-fable-5": Rate(10.00, 50.00, 1.00, 12.50),
+    "anthropic/claude-opus-5.5": Rate(4.00, 20.00, 0.20, 5.00),
+    "anthropic/claude-opus-4.8": Rate(5.00, 25.00, 0.50, 6.25),
+    "openai/gpt-6-astra": Rate(10.00, 50.00, 1.00, 12.50),
+    "openai/gpt-6.2-astra": Rate(8.00, 40.00, 0.40, 10.00),
+    "openai/gpt-6.2-sol": Rate(2.00, 10.00, 0.10, 2.50),
+    "openai/gpt-6.1-sol": Rate(2.00, 10.00, 0.10, 2.50),
+    "openai/gpt-6.1-terra": Rate(1.00, 5.00, 0.05, 1.25),
+    "openai/gpt-6-luna": Rate(0.10, 0.50, 0.01, 0.125),
+    "openai/gpt-5.5": Rate(5.00, 30.00, 0.50, BILLS_AT_INPUT_RATE),
+    "spacexai/grok-4.7": Rate(2.00, 6.00, 0.50),
+    "spacexai/grok-4.3": Rate(1.25, 2.50, 0.20),
+}
+
 CARD: dict[tuple[str, str], Rate] = {
     **{("openai", model): rate for model, rate in _OPENAI_RATES.items()},
     **{("openai", model): rate for model, rate in _OPENAI_LEGACY_RATES.items()},
@@ -471,6 +509,7 @@ CARD: dict[tuple[str, str], Rate] = {
     **{("mistral", model): rate for model, rate in _MISTRAL_RATES.items()},
     **{("openrouter", model): rate for model, rate in _OPENROUTER_RATES.items()},
     **{("venice", model): rate for model, rate in _VENICE_RATES.items()},
+    **{("vercel", model): rate for model, rate in _VERCEL_RATES.items()},
 }
 
 # Routes seen in live spans or offered by the product's model catalog for which

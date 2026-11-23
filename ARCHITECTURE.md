@@ -184,14 +184,15 @@ snapshot built when the loop starts, never hard-coded in the loop.
 single source of truth for the supported providers: `openai_codex` (OpenAI
 Codex, Sign in with ChatGPT on the person's plan), OpenAI (API key), Anthropic
 (API key or subscription OAuth), xAI (API key or Grok OAuth, shown as
-SpaceXAI), OpenRouter, Mistral, Venice, and a keyless local Ollama. Each entry names the adapter module, auth modes, secrets,
-config keys, and whether the provider supports reasoning effort. Adapters
-include `OpenAI.ChatCompletions`, `OpenAI.Responses`, `OpenAI.ChatGPTPlan`
-(OpenAI Codex on the public Responses API), `Anthropic.Messages`, and
-`XAI.Responses`; OpenAI is `:routed` (model + base_url pick Responses vs
-ChatCompletions). OpenAI Codex ships no model catalog: `ModelListing` reads the
-signed-in account's list, and after a sign-in `Setup.LiveModel` sets the
-configured model to the first listed one when the list does not have it.
+SpaceXAI), OpenRouter, Mistral, Venice, Vercel AI Gateway, and a keyless local
+Ollama. Each entry names the adapter module, auth modes, secrets, config keys,
+and whether the provider supports reasoning effort. Adapters include
+`OpenAI.ChatCompletions`, `OpenAI.Responses`, `OpenAI.ChatGPTPlan` (OpenAI Codex
+on the public Responses API), `Anthropic.Messages`, and `XAI.Responses`; OpenAI
+is `:routed` (model + base_url pick Responses vs ChatCompletions). OpenAI Codex
+ships no model catalog: `ModelListing` reads the signed-in account's list, and
+after a sign-in `Setup.LiveModel` sets the configured model to the first listed
+one when the list does not have it.
 
 `Selection` builds the primary-plus-fallback chain (at most one provider may be
 marked `primary`), `RouteResolver` resolves a route to `{route_key,

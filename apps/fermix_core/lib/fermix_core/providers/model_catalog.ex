@@ -28,6 +28,7 @@ defmodule FermixCore.Providers.ModelCatalog do
           | :ollama
           | :mistral
           | :venice
+          | :vercel
   @type entry :: Entry.t()
 
   @unknown_model_default_ctx 100_000
@@ -525,6 +526,76 @@ defmodule FermixCore.Providers.ModelCatalog do
     }
   ]
 
+  # Vercel AI Gateway (M105 §3.3): the mirror of @openrouter, entry for entry
+  # and in the same order, under Vercel's own ids from its public listing of
+  # 2026-11-22. They are `maker/model` like OpenRouter's but not always the same
+  # string: Grok is `spacexai/` here and `x-ai/` there. The Claude entries take
+  # @anthropic's 200_000 compaction ceiling and the GPT-6 entries @openai's
+  # 320_000 calibration, as on OpenRouter: Vercel lists them at 1,050,000 and
+  # reprices the input above 272k tokens. GPT-5.5 and the Groks take the
+  # listed window. When a vendor's list moves, this one moves with @openrouter.
+  @vercel [
+    %Entry{
+      id: "anthropic/claude-sonnet-4.6",
+      label: "Claude Sonnet 4.6 via Vercel (default)",
+      context_window: 1_000_000,
+      compaction_ceiling: 200_000
+    },
+    %Entry{
+      id: "anthropic/claude-sonnet-5.5",
+      label: "Claude Sonnet 5.5 via Vercel",
+      context_window: 1_000_000,
+      compaction_ceiling: 200_000
+    },
+    %Entry{
+      id: "anthropic/claude-fable-5.2",
+      label: "Claude Fable 5.2 via Vercel",
+      context_window: 1_000_000,
+      compaction_ceiling: 200_000
+    },
+    %Entry{
+      id: "anthropic/claude-fable-5.1",
+      label: "Claude Fable 5.1 via Vercel",
+      context_window: 1_000_000,
+      compaction_ceiling: 200_000
+    },
+    %Entry{
+      id: "anthropic/claude-fable-5",
+      label: "Claude Fable 5 via Vercel",
+      context_window: 1_000_000,
+      compaction_ceiling: 200_000
+    },
+    %Entry{
+      id: "anthropic/claude-opus-5.5",
+      label: "Claude Opus 5.5 via Vercel",
+      context_window: 1_000_000,
+      compaction_ceiling: 200_000
+    },
+    %Entry{
+      id: "anthropic/claude-opus-4.8",
+      label: "Claude Opus 4.8 via Vercel",
+      context_window: 1_000_000,
+      compaction_ceiling: 200_000
+    },
+    %Entry{id: "openai/gpt-6-astra", label: "GPT-6 Astra via Vercel", context_window: 320_000},
+    %Entry{
+      id: "openai/gpt-6.2-astra",
+      label: "GPT-6.2 Astra via Vercel",
+      context_window: 320_000
+    },
+    %Entry{id: "openai/gpt-6.2-sol", label: "GPT-6.2 Sol via Vercel", context_window: 320_000},
+    %Entry{id: "openai/gpt-6.1-sol", label: "GPT-6.1 Sol via Vercel", context_window: 320_000},
+    %Entry{
+      id: "openai/gpt-6.1-terra",
+      label: "GPT-6.1 Terra via Vercel",
+      context_window: 320_000
+    },
+    %Entry{id: "openai/gpt-6-luna", label: "GPT-6 Luna via Vercel", context_window: 320_000},
+    %Entry{id: "openai/gpt-5.5", label: "GPT-5.5 via Vercel", context_window: 1_000_000},
+    %Entry{id: "spacexai/grok-4.7", label: "Grok 4.7 via Vercel", context_window: 500_000},
+    %Entry{id: "spacexai/grok-4.3", label: "Grok 4.3 via Vercel", context_window: 1_000_000}
+  ]
+
   # Ollama windows are model CAPABILITY; the local server may serve far
   # less (default num_ctx is small) and truncates silently — the doctor
   # probe checks the served num_ctx against these (M12 §3.2, [verify]
@@ -568,6 +639,7 @@ defmodule FermixCore.Providers.ModelCatalog do
   def models_for(:openrouter), do: @openrouter
   def models_for(:mistral), do: @mistral
   def models_for(:venice), do: @venice
+  def models_for(:vercel), do: @vercel
   def models_for(:ollama), do: @ollama
 
   @doc """

@@ -57,6 +57,14 @@ defmodule FermixCore.Setup.SecretPaths do
       path: [:fermix_core, :providers, :venice, :api_key],
       sandbox_env: true
     },
+    # Vercel's own name for an AI Gateway key (M105 §9 D2).
+    %{
+      key: :vercel_api_key,
+      env: "AI_GATEWAY_API_KEY",
+      env_overlay: true,
+      path: [:fermix_core, :providers, :vercel, :api_key],
+      sandbox_env: true
+    },
     %{
       key: :tavily_api_key,
       env: "TAVILY_API_KEY",

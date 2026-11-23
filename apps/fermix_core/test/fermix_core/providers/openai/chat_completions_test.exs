@@ -366,7 +366,7 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
       assert_receive {:auth_header, []}
     end
 
-    test "sends OpenRouter attribution headers only for :openrouter" do
+    test "sends the attribution headers only for :openrouter and :vercel" do
       test_pid = self()
 
       Req.Test.stub(__MODULE__, fn conn ->
@@ -394,6 +394,16 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
           [%{role: "user", content: "hi"}],
           [],
           Keyword.put(base_opts, :provider, :openrouter)
+        )
+
+      assert_receive {:headers, ["https://fermix.sh"], ["Fermix"]}
+
+      # M105 §9 D3: the gateway reads the same two app-attribution headers.
+      {:ok, _turn} =
+        ChatCompletions.chat(
+          [%{role: "user", content: "hi"}],
+          [],
+          Keyword.put(base_opts, :provider, :vercel)
         )
 
       assert_receive {:headers, ["https://fermix.sh"], ["Fermix"]}
@@ -446,7 +456,7 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
                "strip_thinking_response" => true
              }
 
-      for provider <- [:openai, :openrouter, :mistral, :ollama] do
+      for provider <- [:openai, :openrouter, :mistral, :vercel, :ollama] do
         {:ok, _turn} =
           ChatCompletions.chat(
             [%{role: "user", content: "hi"}],
@@ -494,6 +504,94 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
       assert_receive {:body, body}
       assert body["venice_parameters"]["include_venice_system_prompt"] == false
       assert body["venice_parameters"]["strip_thinking_response"] == true
+    end
+
+    # M105 §3.2: the gateway places prompt-cache markers itself only when asked,
+    # and by Vercel's documentation nothing on Anthropic's models is cached
+    # without them. A constant on every Vercel request, on no other provider's,
+    # and nothing else changes: temperature
+    # rides as it does everywhere and no reasoning field is sent.
+    test "sends providerOptions.gateway.caching only for :vercel" do
+      test_pid = self()
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:body, Jason.decode!(raw)})
+
+        Req.Test.json(conn, %{
+          "choices" => [%{"message" => %{"content" => "ok"}}],
+          "usage" => %{"prompt_tokens" => 1, "completion_tokens" => 1, "total_tokens" => 2}
+        })
+      end)
+
+      base_opts = [
+        model: "anthropic/claude-sonnet-4.6",
+        api_key: "vck-test",
+        base_url: "https://ai-gateway.vercel.test/v1",
+        req_options: [plug: {Req.Test, __MODULE__}]
+      ]
+
+      {:ok, _turn} =
+        ChatCompletions.chat(
+          [%{role: "user", content: "hi"}],
+          [],
+          Keyword.put(base_opts, :provider, :vercel)
+        )
+
+      assert_receive {:body, vercel_body}
+      assert vercel_body["providerOptions"] == %{"gateway" => %{"caching" => "auto"}}
+      assert vercel_body["temperature"] == 0.7
+      refute Map.has_key?(vercel_body, "reasoning")
+      refute Map.has_key?(vercel_body, "reasoning_effort")
+      refute Map.has_key?(vercel_body, "venice_parameters")
+
+      for provider <- [:openai, :openrouter, :mistral, :venice, :ollama] do
+        {:ok, _turn} =
+          ChatCompletions.chat(
+            [%{role: "user", content: "hi"}],
+            [],
+            Keyword.put(base_opts, :provider, provider)
+          )
+
+        assert_receive {:body, other_body}
+        refute Map.has_key?(other_body, "providerOptions"), "#{provider} sent providerOptions"
+      end
+    end
+
+    # The continuation builds its own request, so caching asked for on the
+    # first call alone would leave every later turn of a tool loop uncached.
+    test "continue/3 sends providerOptions.gateway.caching too" do
+      test_pid = self()
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:body, Jason.decode!(raw)})
+
+        Req.Test.json(conn, %{
+          "choices" => [%{"message" => %{"content" => "done"}}],
+          "usage" => %{"prompt_tokens" => 1, "completion_tokens" => 1, "total_tokens" => 2}
+        })
+      end)
+
+      state = %{
+        messages: [%{role: "user", content: "hi"}],
+        assistant: %{role: "assistant", content: ""},
+        capabilities: []
+      }
+
+      {:ok, _turn} =
+        ChatCompletions.continue(
+          state,
+          [%{call_id: "call-1", output: "42"}],
+          model: "anthropic/claude-sonnet-4.6",
+          api_key: "vck-test",
+          provider: :vercel,
+          base_url: "https://ai-gateway.vercel.test/v1",
+          req_options: [plug: {Req.Test, __MODULE__}]
+        )
+
+      assert_receive {:body, body}
+      assert body["providerOptions"] == %{"gateway" => %{"caching" => "auto"}}
     end
 
     # M12 §2.3-5: the adapter serves several providers; attribution must

@@ -2,11 +2,12 @@ defmodule FermixCore.Providers.ModelListing do
   @moduledoc """
   Live model discovery for setup surfaces (M12 follow-up).
 
-  Four providers can answer "which models can I actually use right now?"
+  Five providers can answer "which models can I actually use right now?"
   better than the static catalog: Ollama (only the locally installed
   models matter), OpenRouter (the upstream catalog moves weekly), Venice
   (a moving catalog whose per-model privacy tier is what the person picks
-  by — M49 §3.3) and OpenAI Codex (it signs in with ChatGPT, the account's
+  by — M49 §3.3), Vercel AI Gateway (a moving catalog of many makers —
+  M105 §3.3) and OpenAI Codex (it signs in with ChatGPT, the account's
   plan decides, and nothing is shipped for it — M57 §6.2). The static `ModelCatalog` stays
   authoritative for wizard defaults and
   context-window budgeting; this module only feeds setup-time pickers and
@@ -40,6 +41,7 @@ defmodule FermixCore.Providers.ModelListing do
   def live?(:ollama), do: true
   def live?(:openrouter), do: true
   def live?(:venice), do: true
+  def live?(:vercel), do: true
   def live?(:openai_codex), do: true
   def live?(provider) when is_atom(provider), do: false
 
@@ -49,7 +51,9 @@ defmodule FermixCore.Providers.ModelListing do
   public upstream catalog (`GET <base>/models`), tool-capable models only,
   newest first; Venice lists its text catalog
   (`GET <base>/models?type=text`, public), tool-capable models only, by
-  family then newest. OpenAI Codex lists the signed-in account's catalog
+  family then newest; Vercel AI Gateway lists its public catalog
+  (`GET <base>/models`), tool-capable language models only, by maker then
+  newest. OpenAI Codex lists the signed-in account's catalog
   (`GET <base>/models` with its bearer), `visibility == "list"` entries in
   the server's order, and refuses while the sign-in cannot carry a turn.
   `base_url:`/`req_options:` are injectable; defaults come from the
@@ -82,6 +86,16 @@ defmodule FermixCore.Providers.ModelListing do
 
     case get_json(url, opts) do
       {:ok, %{"data" => models}} when is_list(models) -> {:ok, venice_entries(models)}
+      {:ok, _body} -> {:error, "unexpected response from #{url}"}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def live_models(:vercel, opts) do
+    url = resolved_base_url(:vercel, opts) <> "/models"
+
+    case get_json(url, opts) do
+      {:ok, %{"data" => models}} when is_list(models) -> {:ok, vercel_entries(models)}
       {:ok, _body} -> {:error, "unexpected response from #{url}"}
       {:error, reason} -> {:error, reason}
     end
@@ -320,6 +334,54 @@ defmodule FermixCore.Providers.ModelListing do
   # reordering the ones that have one.
   defp venice_created(%{"created" => created}) when is_integer(created), do: created
   defp venice_created(_model), do: 0
+
+  # Chat models that can call tools only, for the reason openrouter_entries/1
+  # filters: Fermix sends `tools` on every request. The listing also carries
+  # embedding, image, video, speech and other models, and one of another type
+  # can carry the `tool-use` tag, so the type is checked as well. An id ending
+  # in `-batch` is dropped too: Vercel names its batch-capable models by that
+  # suffix and does not accept one on a synchronous request, which is the only
+  # kind Fermix makes. Ordered by maker (`owned_by`) ascending, then `released`
+  # descending, with the id breaking a same-day tie (M105 §3.3), so the newest
+  # model of each maker heads its group. An entry without an integer `released`
+  # is kept and sorts after its maker's dated ones, as Venice's undated models
+  # do; one missing any other field the order or the label needs is dropped,
+  # as the other listings drop a malformed one.
+  defp vercel_entries(models) do
+    models
+    |> Enum.flat_map(&vercel_sortable/1)
+    |> Enum.sort_by(fn {maker, released, id, _entry} -> {maker, -released, id} end)
+    |> Enum.map(fn {_maker, _released, _id, entry} -> entry end)
+  end
+
+  defp vercel_sortable(
+         %{
+           "id" => id,
+           "name" => name,
+           "owned_by" => maker,
+           "type" => "language",
+           "tags" => tags
+         } = model
+       )
+       when is_binary(id) and id != "" and is_binary(name) and name != "" and is_binary(maker) and
+              is_list(tags) do
+    if "tool-use" in tags and not String.ends_with?(id, "-batch") do
+      entry = %{
+        id: id,
+        label: name,
+        context_window: positive_integer(Map.get(model, "context_window"))
+      }
+
+      [{maker, vercel_released(model), id, entry}]
+    else
+      []
+    end
+  end
+
+  defp vercel_sortable(_other), do: []
+
+  defp vercel_released(%{"released" => released}) when is_integer(released), do: released
+  defp vercel_released(_model), do: 0
 
   # Quiet catalog lookup — context_window_for/2 emits unknown_model
   # telemetry, which a setup-page render must not spam.

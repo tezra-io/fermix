@@ -597,8 +597,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
   #
   # Provider sections are the exception: there is one per descriptor, and which
   # providers exist is data every app reads from the daemon, not wire shape. The
-  # golden illustrates some of them, so a provider added to the engine moves no
-  # export an app vendors.
+  # inventory illustrates some of them, so a provider added to the engine need
+  # not join it; it still adds its own `settings.get` golden (the test below).
   test "the golden section inventory is the one the daemon publishes" do
     published = Enum.map(Settings.sections(macos?: true), & &1.id)
 

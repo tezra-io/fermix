@@ -706,6 +706,10 @@ defmodule FermixWebWeb.SetupLive.Components do
     """
   end
 
+  # An empty list from Ollama means nothing is pulled on that server, and that
+  # has a fix to name. From any other provider with a live listing it means
+  # the provider listed none Fermix can use; the typed field takes any model id
+  # either way.
   defp default_model_input(%{live_models: {:ok, []}} = assigns) do
     ~H"""
     <div class="space-y-1">
@@ -715,8 +719,11 @@ defmodule FermixWebWeb.SetupLive.Components do
         value={@provider_form.default_model}
         class="input input-bordered w-full bg-base-100 font-mono"
       />
-      <p class="text-xs text-warning">
+      <p :if={@provider_form.provider == :ollama} class="text-xs text-warning">
         No models installed on this server; run <code>ollama pull &lt;model&gt;</code>.
+      </p>
+      <p :if={@provider_form.provider != :ollama} class="text-xs text-warning">
+        {provider_label(@provider_form.provider)} listed no models Fermix can use; enter a model id manually.
       </p>
     </div>
     """

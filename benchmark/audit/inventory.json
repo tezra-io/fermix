@@ -466,6 +466,7 @@
         "openrouter",
         "mistral",
         "venice",
+        "vercel",
         "ollama"
       ],
       "/properties/reasoning_effort": [

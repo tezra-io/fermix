@@ -18,6 +18,21 @@ defmodule FermixCore.Setup.SecretPathsTest do
     end
   end
 
+  # M105 §9 D2: the gateway's key is read from Vercel's own variable name, and
+  # config/runtime.exs layers it over the stored key like every other provider
+  # key (the env_override/2 tests below hold the flag to that file).
+  test "the Vercel AI Gateway key is AI_GATEWAY_API_KEY, overlaid like every provider key" do
+    secret = SecretPaths.fetch!(:vercel_api_key)
+
+    assert secret.env == "AI_GATEWAY_API_KEY"
+    assert secret.path == [:fermix_core, :providers, :vercel, :api_key]
+    assert secret.env_overlay
+    assert secret.sandbox_env
+
+    env = %{"AI_GATEWAY_API_KEY" => "vck-from-the-shell"}
+    assert SecretPaths.env_override(:vercel_api_key, &Map.get(env, &1)) == "AI_GATEWAY_API_KEY"
+  end
+
   # M31 §14.1: one key, two consumers. The operator-facing string is what a
   # keyring-resolution warning names, so it must not claim only web search.
   test "the Brave key names both of its consumers" do

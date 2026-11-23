@@ -385,6 +385,13 @@ defmodule FermixCore.Management.SettingsTest do
 
       refute "openai/gpt-6-sol" in published.("providers.openrouter")
       assert "grok-4-7" in published.("providers.venice")
+
+      assert [
+               "anthropic/claude-fable-5.2",
+               "openai/gpt-6.2-astra",
+               "openai/gpt-6.2-sol",
+               "spacexai/grok-4.7"
+             ] -- published.("providers.vercel") == []
     end
 
     # Fast mode is a per-provider toggle, off until turned on, published only by

@@ -449,9 +449,10 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
   defp auth_headers(nil), do: []
   defp auth_headers(api_key), do: [{"authorization", "Bearer #{api_key}"}]
 
-  # OpenRouter app-attribution headers (M12 §3.1, decision D3: static, not
-  # configurable). Other providers add nothing.
-  defp provider_headers(:openrouter) do
+  # App-attribution headers (M12 §3.1, decision D3: static, not configurable).
+  # Vercel AI Gateway reads the same two names OpenRouter does (M105 §9 D3).
+  # Other providers add nothing.
+  defp provider_headers(provider) when provider in [:openrouter, :vercel] do
     [{"http-referer", "https://fermix.sh"}, {"x-title", "Fermix"}]
   end
 
@@ -461,12 +462,18 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
   # Venice prepends its own system prompt beside the caller's unless told not
   # to, and its reasoning models return thinking inline in `content` unless told
   # to strip it — and this adapter reads `content` only, so without both fields
-  # Fermix's prompt is not the prompt and thinking text reaches the user. Other
-  # providers add nothing.
+  # Fermix's prompt is not the prompt and thinking text reaches the user.
   defp provider_body(:venice) do
     %{venice_parameters: %{include_venice_system_prompt: false, strip_thinking_response: true}}
   end
 
+  # Vercel AI Gateway caches a prompt prefix on Anthropic's models (and some
+  # others) only when asked, and `caching: "auto"` makes the gateway place the
+  # cache markers itself (M105 §3.2). By Vercel's documentation, nothing on
+  # those models is cached without it.
+  defp provider_body(:vercel), do: %{providerOptions: %{gateway: %{caching: "auto"}}}
+
+  # Other providers add nothing.
   defp provider_body(_provider), do: %{}
 
   # OpenRouter parses a PDF with a paid OCR engine unless told otherwise (M67):

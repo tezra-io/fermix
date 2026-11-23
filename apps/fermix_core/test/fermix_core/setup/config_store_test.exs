@@ -5095,6 +5095,37 @@ defmodule FermixCore.Setup.ConfigStoreTest do
              Keyword.get(loaded.fermix_core, :providers)
   end
 
+  test "a vercel block round-trips through dump -> parse -> normalize" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.providers.vercel]
+    api_key = "vck-disk"
+    base_url = "https://ai-gateway.vercel.sh/v1"
+    default_model = "spacexai/grok-4.7"
+    primary = true
+    """)
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    providers = Keyword.get(loaded.fermix_core, :providers, [])
+
+    assert Keyword.get(providers[:vercel], :api_key) == "vck-disk"
+    assert Keyword.get(providers[:vercel], :base_url) == "https://ai-gateway.vercel.sh/v1"
+    assert Keyword.get(providers[:vercel], :default_model) == "spacexai/grok-4.7"
+    assert Keyword.get(providers[:vercel], :primary) == true
+
+    assert :ok = ConfigStore.save_snapshot(loaded, secure_secrets: false)
+    assert {:ok, reloaded} = ConfigStore.load_runtime_config()
+
+    assert Keyword.get(reloaded.fermix_core, :providers) ==
+             Keyword.get(loaded.fermix_core, :providers)
+  end
+
   test "rejects an api_key in the keyless ollama block from hand-edited TOML" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")

@@ -225,6 +225,7 @@ existing_openrouter = Keyword.get(existing_providers, :openrouter, [])
 existing_ollama = Keyword.get(existing_providers, :ollama, [])
 existing_mistral = Keyword.get(existing_providers, :mistral, [])
 existing_venice = Keyword.get(existing_providers, :venice, [])
+existing_vercel = Keyword.get(existing_providers, :vercel, [])
 
 # The one environment rule for credentials and auth modes: a nonblank variable
 # overlays the TOML-hydrated value, and an empty or absent one leaves it
@@ -280,6 +281,11 @@ merged_venice =
   existing_venice
   |> put_env_overlay.(:api_key, "VENICE_API_KEY")
 
+# Credential only, as for Venice: the gateway's base URL stays a config value.
+merged_vercel =
+  existing_vercel
+  |> put_env_overlay.(:api_key, "AI_GATEWAY_API_KEY")
+
 merged_providers =
   existing_providers
   |> Keyword.put(:openai, merged_openai)
@@ -290,6 +296,7 @@ merged_providers =
   |> Keyword.put(:ollama, merged_ollama)
   |> Keyword.put(:mistral, merged_mistral)
   |> Keyword.put(:venice, merged_venice)
+  |> Keyword.put(:vercel, merged_vercel)
 
 config :fermix_core, providers: merged_providers
 

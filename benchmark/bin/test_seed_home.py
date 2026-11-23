@@ -50,6 +50,14 @@ def test_explicit_mode_allows_env_key_anthropic():
     assert pid == "anthropic"
 
 
+def test_explicit_mode_seeds_vercel_from_its_gateway_key():
+    # The eval home's daemon reads the key from Vercel's own variable name,
+    # the one the engine's secret registry overlays.
+    pid, _blk = seed.explicit_spec(_args(provider="vercel", model="anthropic/claude-sonnet-4.6"))
+    assert pid == "vercel"
+    assert seed._ENV_KEY_PROVIDERS["vercel"] == "AI_GATEWAY_API_KEY"
+
+
 def test_explicit_mode_allows_keyless_ollama():
     pid, _blk = seed.explicit_spec(_args(provider="ollama", model="llama3"))
     assert pid == "ollama"

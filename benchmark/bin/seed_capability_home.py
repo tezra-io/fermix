@@ -393,6 +393,7 @@ _ENV_KEY_PROVIDERS = {
     "openrouter": "OPENROUTER_API_KEY",
     "mistral": "MISTRAL_API_KEY",
     "venice": "VENICE_API_KEY",
+    "vercel": "AI_GATEWAY_API_KEY",
 }
 
 

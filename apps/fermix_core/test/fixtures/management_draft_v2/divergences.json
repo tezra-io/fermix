@@ -913,6 +913,18 @@
       "why": "M49: the model row of the providers.venice section the draft predates. Its option labels carry the model's privacy tier after a middle dot (Private, Private (TEE), Anonymized) because the label is the one model field both doors draw; no new field and no Swift work."
     },
     {
+      "method": "settings.get:providers.vercel",
+      "field": "rows:vercel_api_key",
+      "kind": "engine_only",
+      "why": "M105: Vercel AI Gateway is a provider added after the draft was written, so the draft draws no providers.vercel section at all. Its two rows are the ordinary descriptor shape (one secret field, one model choice) and the providers pane renders an unknown providers.<id> section generically, so this is a row the app draws with no Swift work."
+    },
+    {
+      "method": "settings.get:providers.vercel",
+      "field": "rows:default_model",
+      "kind": "engine_only",
+      "why": "M105: the model row of the providers.vercel section the draft predates. Its options are the gateway's vendor-prefixed model ids with plain labels, the shape every other provider's model row has; no new field and no Swift work."
+    },
+    {
       "method": "settings.get:sandbox",
       "field": "rows:env:ALPACA_API_KEY",
       "kind": "engine_only",

@@ -13,6 +13,7 @@ defmodule FermixCore.Providers.ModelCatalogTest do
                :openrouter,
                :mistral,
                :venice,
+               :vercel,
                :ollama
              ]
     end
@@ -591,6 +592,66 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       end
     end
   end
+
+  # M105 §3.3: the curated Vercel list mirrors OpenRouter's entry for entry, in
+  # the same order, under Vercel's own ids (Grok is `spacexai/` there and
+  # `x-ai/` on OpenRouter) and at the windows Vercel's listing publishes.
+  describe "the Vercel catalog" do
+    test "mirrors the OpenRouter list entry for entry, under Vercel's ids" do
+      vercel = ModelCatalog.models_for(:vercel)
+      openrouter = ModelCatalog.models_for(:openrouter)
+
+      assert Enum.map(vercel, &openrouter_id(&1.id)) == Enum.map(openrouter, & &1.id)
+
+      assert Enum.map(vercel, & &1.label) ==
+               Enum.map(openrouter, &String.replace(&1.label, "via OpenRouter", "via Vercel"))
+    end
+
+    test "defaults to the OpenRouter head, which follows the Anthropic default" do
+      assert ModelCatalog.default_model_for(:vercel) == "anthropic/claude-sonnet-4.6"
+
+      assert hd(ModelCatalog.models_for(:vercel)).label ==
+               "Claude Sonnet 4.6 via Vercel (default)"
+    end
+
+    test "every entry is a model its vendor's list carries" do
+      for %{id: id} <- ModelCatalog.models_for(:vercel) do
+        {vendor, vendor_id} = vendor_model(openrouter_id(id))
+        assert ModelCatalog.known_model?(vendor, vendor_id), "#{id} has no #{vendor} entry"
+      end
+    end
+
+    # The Claude entries compact at @anthropic's ceiling and the GPT-6 entries at
+    # @openai's 320,000 calibration, as on OpenRouter; GPT-5.5 and the Groks take
+    # the window Vercel's listing publishes for them.
+    test "windows are the listed ones, with the vendor calibrations OpenRouter's carry" do
+      by_id = Map.new(ModelCatalog.models_for(:vercel), &{&1.id, &1})
+
+      for {id, entry} <- by_id, String.starts_with?(id, "anthropic/") do
+        assert {entry.context_window, entry.compaction_ceiling} == {1_000_000, 200_000}, id
+      end
+
+      for {id, entry} <- by_id, String.starts_with?(id, "openai/gpt-6") do
+        assert entry.context_window == 320_000, id
+      end
+
+      assert by_id["openai/gpt-5.5"].context_window == 1_000_000
+      assert by_id["spacexai/grok-4.7"].context_window == 500_000
+      assert by_id["spacexai/grok-4.3"].context_window == 1_000_000
+    end
+
+    # The gateway takes the model's own default rather than an effort level (the
+    # descriptor's `effort?: false`), so no entry may carry a per-model cap.
+    test "no Vercel entry declares a reasoning-effort ceiling" do
+      for entry <- ModelCatalog.models_for(:vercel) do
+        assert ModelCatalog.model_effort_ceiling(:vercel, entry.id) == nil
+      end
+    end
+  end
+
+  # Vercel names Grok's maker `spacexai`; OpenRouter names it `x-ai`.
+  defp openrouter_id("spacexai/" <> model), do: "x-ai/" <> model
+  defp openrouter_id(id), do: id
 
   # OpenRouter prefixes every vendor and writes Anthropic's dashes as dots.
   defp vendor_model("anthropic/" <> model), do: {:anthropic, String.replace(model, ".", "-")}

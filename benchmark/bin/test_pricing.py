@@ -770,6 +770,61 @@ def test_an_openrouter_slug_with_a_direct_entry_carries_its_rate():
         assert routed == direct, model
 
 
+# Vercel AI Gateway's Grok ids name the maker `spacexai`, OpenRouter's `x-ai`.
+_VERCEL_DIRECT_ROUTES = {"anthropic": "anthropic", "openai": "openai", "spacexai": "xai"}
+
+
+def test_a_vercel_slug_prices_exactly_as_its_direct_entry():
+    """Vercel AI Gateway bills at the model maker's list price and a cache leg
+    belongs to the vendor's price list, so every curated Vercel slug prices as
+    the direct entry for the same model. Vercel's public listing
+    (`GET https://ai-gateway.vercel.sh/v1/models`, read 2026-11-22) agrees on
+    every leg it publishes for every pair here."""
+    pairs = {}
+    for (route, model), rate in pricing.CARD.items():
+        if route != "vercel":
+            continue
+        vendor, _, slug = model.partition("/")
+        direct_route = _VERCEL_DIRECT_ROUTES[vendor]
+        direct = slug.replace(".", "-") if direct_route == "anthropic" else slug
+        pairs[model] = (rate, pricing.CARD[(direct_route, direct)])
+    # Derived, so it must not pass by finding nothing.
+    assert len(pairs) == 16, sorted(pairs)
+    for model, (routed, direct) in pairs.items():
+        assert routed == direct, model
+
+
+# The figures Vercel's listing publishes for the curated `@vercel` list, read
+# 2026-11-22: `pricing.input`, `.output` and `.input_cache_read`, per token in
+# the listing and per million here. Standard tier only: the listing's tiers
+# above 272k (GPT) and 200k (Grok) input tokens are the long-context cliffs the
+# card does not model.
+_VERCEL_LISTING_RATES = (
+    ("anthropic/claude-sonnet-4.6", (3.00, 15.00, 0.30)),
+    ("anthropic/claude-fable-5.2", (8.00, 40.00, 0.20)),
+    ("openai/gpt-6.2-astra", (8.00, 40.00, 0.40)),
+    ("openai/gpt-5.5", (5.00, 30.00, 0.50)),
+    ("spacexai/grok-4.7", (2.00, 6.00, 0.50)),
+    ("spacexai/grok-4.3", (1.25, 2.50, 0.20)),
+)
+
+
+@pytest.mark.parametrize("model,expected", _VERCEL_LISTING_RATES)
+def test_the_vercel_route_carries_the_listing_figures(model, expected):
+    rate = pricing.CARD[("vercel", model)]
+    assert (rate.input_per_mtok, rate.output_per_mtok,
+            rate.cached_input_per_mtok) == expected, model
+
+
+def test_a_vercel_model_outside_the_curated_list_is_unpriced_not_silently_zero():
+    # The picker offers every tool-calling model the gateway lists, not just the
+    # carded sixteen, so a run can route to one with no card entry.
+    result = pricing.price([Span("alibaba/qwen4-max", "vercel", "chat_completions",
+                                 prompt_tokens=1_000, completion_tokens=10)])
+    assert result.basis == "unpriced"
+    assert result.unpriced_routes == ("vercel/alibaba/qwen4-max",)
+
+
 # Venice's curated `@venice` catalog list, with the figures transcribed from
 # `model_spec.pricing` on the listing read 2026-09-19, and grok-4-7's on the
 # listing read 2026-10-03.
@@ -922,7 +977,7 @@ _CATALOG_PATH = ("apps/fermix_core/lib/fermix_core/providers/model_catalog.ex")
 # models are listed live per account), so there is nothing to extract for it.
 # Its observed routes stay covered by _SPAN_CENSUS below.
 _CATALOG_PROVIDERS = ("openai", "anthropic", "xai", "openrouter",
-                      "mistral", "venice", "ollama")
+                      "mistral", "venice", "vercel", "ollama")
 
 
 def _catalog_models() -> dict[str, list[str]]:

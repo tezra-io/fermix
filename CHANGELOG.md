@@ -22,6 +22,16 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   trace says which speed it ran at. OpenAI Codex stays without one: signed in
   with ChatGPT, OpenAI refuses the fast tier or runs the turn at standard speed.
 
+- **Vercel AI Gateway is a provider.** Save an AI Gateway API key under
+  Providers and Vercel AI Gateway joins the fallback chain after Venice, ahead
+  of the local Ollama hop. The model picker lists every tool-calling chat model
+  the gateway serves, grouped by maker with the newest first, and suggests the
+  same models OpenRouter does; the default is Claude Sonnet 4.6. Every request
+  asks the gateway to place the prompt-cache markers itself, which is how
+  Vercel documents prompt caching for Anthropic's models through it. The
+  gateway is paid from credits bought in your Vercel account: a team that has
+  bought none is on a free tier with fewer models and lower limits.
+
 ### Fixed
 
 - **The first phone you pair can be on any network.** Turning phone access on

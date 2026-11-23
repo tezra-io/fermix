@@ -45,6 +45,7 @@ defmodule FermixCore.Setup.Wizard do
           | {:openrouter_api_key, String.t()}
           | {:mistral_api_key, String.t()}
           | {:venice_api_key, String.t()}
+          | {:vercel_api_key, String.t()}
           | {:ollama_base_url, String.t()}
           | {:openai_base_url, String.t()}
           | {:anthropic_base_url, String.t()}

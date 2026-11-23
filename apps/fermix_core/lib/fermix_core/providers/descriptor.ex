@@ -296,8 +296,35 @@ defmodule FermixCore.Providers.Descriptor do
           "Anonymized models are passed to their maker without your account, and the " <>
           "maker still reads the prompt. TEE models run inside a sealed hardware enclave."
     },
+    # Vercel AI Gateway (M105): one bearer key over the Chat Completions wire,
+    # in front of many model makers. After Venice so no existing fallback order
+    # changes. `reasoning_effort` is omitted for the reason OpenRouter's is:
+    # what each model takes differs, so the model's own default stands.
+    %{
+      id: :vercel,
+      label: "Vercel AI Gateway",
+      adapter: FermixCore.Providers.OpenAI.ChatCompletions,
+      default_base_url: "https://ai-gateway.vercel.sh/v1",
+      locality: :remote,
+      auth_modes: [:api_key],
+      secrets: [:vercel_api_key],
+      config_keys: [:api_key, :base_url, :default_model, :primary],
+      setup_fields: [
+        %{
+          key: :vercel_api_key,
+          config_key: :api_key,
+          label: "Vercel AI Gateway API key",
+          secret?: true,
+          default: nil
+        }
+      ],
+      effort?: false,
+      documents?: true,
+      image_formats: :any
+    },
     # Ollama stays last: a local model is the last-resort fallback hop, so
-    # every cloud provider (Mistral and Venice included) is tried before it.
+    # every cloud provider (Mistral, Venice and Vercel included) is tried
+    # before it.
     %{
       id: :ollama,
       label: "Ollama",

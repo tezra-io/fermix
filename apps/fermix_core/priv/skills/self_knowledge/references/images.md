@@ -29,12 +29,13 @@ it `paths`: one to six local paths, in the order you want to refer to them
 Inbound pictures, `view_image` results and images a tool returns (a `browser`
 screenshot) all reach the model as image content. Anthropic, OpenAI and OpenAI
 Codex (the Responses wire) take JPEG, PNG, WebP and GIF; Grok takes JPEG and
-PNG only. OpenRouter, Mistral, Venice and Ollama depend on the model: a model
-the built-in catalog marks text-only (Ollama's three default models, Venice's
-GLM 5.3) is refused before the call, any other model is sent the image and the
-provider refuses it if it cannot see. Fermix converts no picture. A route that
-cannot take one fails over to the next route that can; when none can, the reply
-says so. An image is never silently dropped. Prompt caching is unaffected.
+PNG only. OpenRouter, Mistral, Venice, Vercel AI Gateway and Ollama depend on
+the model: a model the built-in catalog marks text-only (Ollama's three default
+models, Venice's GLM 5.3) is refused before the call, any other model is sent
+the image and the provider refuses it if it cannot see. Fermix converts no
+picture. A route that cannot take one fails over to the next route that can;
+when none can, the reply says so. An image is never silently dropped. Prompt
+caching is unaffected.
 
 ## Inbound attachments
 
@@ -48,7 +49,7 @@ up to ten per message, four at a time, names each one's kind from its bytes
 | Picture (JPEG, PNG, WebP, GIF) | the picture, up to 10 MB |
 | GIF, animation, video | with ffmpeg installed: up to four frames spread over it, 1024 px on the long edge; without: one still, a GIF file's own first frame (cut from the file, no conversion) or the preview the sender's app made (Telegram's thumbnail, Slack's video thumbnail, the phone's poster). An animated WebP or sticker always takes the still |
 | A video's sound | its transcript, beside its pictures (see below); an animation and a sticker are silent |
-| PDF | a document, on Anthropic, OpenAI, OpenAI Codex, OpenRouter and Venice (OpenRouter is pinned to the model's own PDF reading, so no paid OCR runs) |
+| PDF | a document, on Anthropic, OpenAI, OpenAI Codex, OpenRouter, Venice and Vercel AI Gateway (OpenRouter is pinned to the model's own PDF reading, so no paid OCR runs) |
 | Text file | inlined under the attachment list; all the text files of one message share 32 KB |
 | Voice note, audio, Telegram video note | its transcript (see `transcription`) |
 
