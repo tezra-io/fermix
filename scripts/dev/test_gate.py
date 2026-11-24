@@ -130,13 +130,15 @@ class StepsTest(GateCase):
         self.assertEqual(code, 0)
         self.assertFalse(Path(made[-1]).exists())
 
-    def test_names_each_test_that_passed_only_on_its_rerun(self):
+    def test_names_each_test_that_passed_only_on_its_rerun_and_keeps_its_failure(self):
         flaky = [{"module": "A.BTest", "name": "x", "path": "apps/a/test/b_test.exs", "line": 7}]
 
         code, out = self.run_gate(flaky=flaky)
 
         self.assertEqual(code, 0)
         self.assertIn("A.BTest x (apps/a/test/b_test.exs:7)", out)
+        kept = Path(re.search(r"Logs: (\S+)", out).group(1))
+        self.assertTrue((kept / "flaky.json").exists())
 
 
 class ReceiptTest(GateCase):

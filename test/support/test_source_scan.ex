@@ -31,6 +31,20 @@ defmodule FermixTestSupport.TestSourceScan do
     |> Enum.reject(&(&1 in scan_tests))
   end
 
+  @doc """
+  A test file's text, read without the VM's file server. Every `File.read/1`
+  in the VM queues on that one process, and a scan of every test file through
+  it outlasted the 60 s test timeout on the loaded Intel runner; with the
+  server busy it took 2.5 s here against 55 ms raw.
+  """
+  @spec read!(String.t()) :: String.t()
+  def read!(path) when is_binary(path) do
+    case :file.read_file(path, [:raw]) do
+      {:ok, source} -> source
+      {:error, reason} -> raise File.Error, reason: reason, action: "read file", path: path
+    end
+  end
+
   @doc "A path relative to the umbrella root, as reports print it."
   @spec relative_path(String.t()) :: String.t()
   def relative_path(path) when is_binary(path), do: Path.relative_to(path, umbrella_root())

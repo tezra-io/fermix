@@ -37,15 +37,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # linux-x64 alone checks formatting and credo, which read source only.
-          - { os: ubuntu-24.04, leg: linux-x64, timeout: 45 }
-          - { os: ubuntu-24.04-arm, leg: linux-arm64, timeout: 30 }
-          - { os: macos-15, leg: macos-arm64, timeout: 45 }
-          # The Intel runner is the slowest leg and the least even: the same
-          # tree's suites took 38 minutes on one runner and 54 on another
-          # (runs 44089094271 and 44117704249), and a full compile adds 7. Its
-          # bound leaves room for the slow runner.
-          - { os: macos-15-intel, leg: macos-x64, timeout: 75 }
+          # linux-x64 alone checks formatting and credo, which read source only,
+          # and holds the suite to its time budget.
+          - { os: ubuntu-24.04, leg: linux-x64, timeout: 45, partition: 1, partitions: 1 }
+          - { os: ubuntu-24.04-arm, leg: linux-arm64, timeout: 30, partition: 1, partitions: 1 }
+          - { os: macos-15, leg: macos-arm64, timeout: 45, partition: 1, partitions: 1 }
+          # The Intel runner runs everything about seven times slower than the
+          # others: its whole suite took 29 minutes against 9 on linux-x64 (run
+          # 45327201430), and it was alone on the run's critical path. So it runs
+          # its suite in three legs, each a third of every app's test files
+          # (`mix test --partitions`), on one runner each. The other legs still run
+          # the whole suite in one VM, where a test that leaks state into another
+          # is caught.
+          - { os: macos-15-intel, leg: macos-x64-1of3, timeout: 45, partition: 1, partitions: 3 }
+          - { os: macos-15-intel, leg: macos-x64-2of3, timeout: 45, partition: 2, partitions: 3 }
+          - { os: macos-15-intel, leg: macos-x64-3of3, timeout: 45, partition: 3, partitions: 3 }
     env:
       MIX_ENV: test
       ELIXIR_VERSION: "1.19.7"
@@ -136,10 +142,22 @@ jobs:
         # pass then are flagged "Flaky test" (annotation, job summary,
         # flaky-tests.json) and the leg passes. `scripts/ci/flaky_report.py`
         # counts the flags across runs: fix anything flagged twice.
+        env:
+          MIX_TEST_PARTITION: ${{ matrix.partition }}
         run: >-
           uv run scripts/ci/mix_test_retry.py
           --log "${RUNNER_TEMP}/mix-test.log"
           --flaky-json "${RUNNER_TEMP}/flaky-tests.json"
+          -- --partitions ${{ matrix.partitions }}
+
+      - name: Hold each app's suite to its time budget
+        # This leg runs the whole suite in one VM on the same runner image every
+        # time, so its times are the ones test/suite_time_budget.toml names.
+        if: matrix.leg == 'linux-x64'
+        run: >-
+          uv run scripts/ci/suite_time_budget.py
+          --log "${RUNNER_TEMP}/mix-test.log"
+          --budget test/suite_time_budget.toml
 
       - name: Upload flaky-test evidence
         if: success() && steps.test.outputs.flaky == 'true'

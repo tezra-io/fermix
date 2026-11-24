@@ -1,0 +1,15 @@
+# Each app's ExUnit wall time ("Finished in N seconds") on CI's linux-x64 leg,
+# the one leg that runs the whole suite in one VM, held by
+# scripts/ci/suite_time_budget.py after that leg's suite. Each is about 1.5
+# times what the app took on 2026-11-24 (run 45327201430), with a 30 s floor:
+# one hosted runner can be that much slower than another.
+#
+# Lower a budget when the suite gets faster; the step says when one is twice
+# what its app takes. Raise one only in the change that makes the suite slower
+# on purpose, with the reason in its commit message.
+[seconds]
+fermix_channels = 160
+fermix_core = 600
+fermix_nif = 30
+fermix_opik = 30
+fermix_web = 40

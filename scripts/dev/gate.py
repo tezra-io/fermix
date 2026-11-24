@@ -203,7 +203,10 @@ def run_gate(root: Path, force: bool, execute: Execute = run_command) -> int:
     code = run_specs(root, logs, execute)
     if code != 0:
         return code
-    shutil.rmtree(logs)
+    if (logs / "flaky.json").exists():
+        print(f"\nThe first run's failures, to fix them from: Logs: {logs}")
+    else:
+        shutil.rmtree(logs)
     print("\nGate passed. CI still owns the other platforms, the stress run, checksums and cross-compiles.")
     return 0
 

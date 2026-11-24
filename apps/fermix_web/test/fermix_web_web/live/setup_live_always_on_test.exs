@@ -768,9 +768,11 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
                  "the six digits it shows."
 
       # The page's own text, never its markup: the root element carries
-      # LiveView's signed session and static tokens, random on every render,
-      # in which any three digits turn up now and then.
-      refute text(html, "main") =~ "482"
+      # LiveView's signed session and static tokens, random on every render.
+      # And the whole code, in either spelling: the page shows the suite's
+      # config path, whose random temporary directory holds any three digits
+      # now and then (one run in about 340).
+      refute text(html, "main") =~ ~r/482\s?913/
 
       html = press(view, "approve_computer")
       assert html =~ ~s(name="always_on_step[sas]")

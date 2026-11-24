@@ -29,7 +29,7 @@ defmodule FermixCore.TestSafetyTest do
   # prefix holds a line break, so a line can match only where its file does, and
   # matching every line of every test file made this the slowest test here.
   defp direct_cleanup_calls(path) do
-    source = File.read!(path)
+    source = TestSourceScan.read!(path)
     if String.contains?(source, cleanup_prefixes()), do: cleanup_lines(path, source), else: []
   end
 
@@ -84,7 +84,7 @@ defmodule FermixCore.TestSafetyTest do
   # its source spells it, so the AST check can match only a call the text check
   # has already kept.
   defp async_app_env_writers(file) do
-    source = File.read!(file)
+    source = TestSourceScan.read!(file)
 
     if String.contains?(source, ["put_env", "delete_env"]),
       do: app_env_writers_in(file, source),
