@@ -446,21 +446,28 @@ defmodule FermixCore.Management.ProtocolContractTest do
   # green while the vendored macOS target validated against a shape the daemon
   # no longer produces. This drives the real router and compares key shapes.
   test "every golden success result carries the key shape the router returns", %{} do
-    for {method, params, opts} <- router_cases(), do: assert_router_shape(method, params, opts)
+    # The golden file is read once for every case below: read per case, its
+    # 134 reads went through the VM's one file server, which the runner's other
+    # tests share, and a loaded runner took them past the test's 60 s.
+    successes = fixtures(@successes)
+
+    for {method, params, opts} <- router_cases(),
+        do: assert_router_shape(successes, method, params, opts)
 
     # Minted only now, each just before it is read: a job left running holds
     # that state only for its kind's budget, and a loaded runner has taken
     # longer than a probe's 15 s to get through the cases above.
-    for {method, params, opts} <- job_view_cases(), do: assert_router_shape(method, params, opts)
+    for {method, params, opts} <- job_view_cases(),
+        do: assert_router_shape(successes, method, params, opts)
   end
 
-  defp assert_router_shape(method, params, opts) do
+  defp assert_router_shape(successes, method, params, opts) do
     {:ok, minimum} = Protocol.minimum_version(method)
     request = %{request_id: "req-1", protocol_version: minimum, method: method, params: params}
 
     assert {:ok, result} = Router.route(request, opts), "router refused #{method}"
 
-    assert shape(result) == shape(fixture_result(method, params)),
+    assert shape(result) == shape(fixture_result(successes, method, params)),
            "the golden #{method} fixture no longer matches the router's own result shape"
   end
 
@@ -3805,9 +3812,10 @@ defmodule FermixCore.Management.ProtocolContractTest do
   # A method with more than one golden result is selected by the parameters that
   # produced it, so `settings.get` on one section is compared with the fixture
   # for that section rather than with whichever one comes first.
-  defp fixture_result(method, params) do
-    @successes
-    |> fixtures()
+  defp fixture_result(method, params), do: fixture_result(fixtures(@successes), method, params)
+
+  defp fixture_result(successes, method, params) do
+    successes
     |> Enum.filter(&(&1["method"] == method))
     |> Enum.find(&matching_result?(&1, params))
     |> get_in(["response", "result"])
