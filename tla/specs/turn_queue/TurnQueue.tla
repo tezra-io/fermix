@@ -60,8 +60,8 @@
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/acp/peer.ex#@moduledoc,handle_info,start_prompt,hand_off,watch_queue,ingest,handle_ingest,apply_turn_result,cancel_turn,cancel_prompt_request,stop_turn,settle_queue_down,close_turn,demonitor_queue,apply_if_open @ 37fc57942bd1
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/acp/session.ex#start_turn,clear_turn,turn_open?,put_queue_ref,queue_ref,queue @ ad21422f117f
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway.ex#ingest,do_deliver_to_agent @ a988106fa5ca
-\* SOURCE: apps/fermix_core/lib/fermix_core/agents/turn_runner.ex#run,run_message_loop,persist_user_message,commit,commit_turn @ 5539b9a97546
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/conversation_store.ex @ a81b127db387
+\* SOURCE: apps/fermix_core/lib/fermix_core/agents/turn_runner.ex#run,run_message_loop,persist_user_message,commit,commit_turn @ e19e708014bf
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/conversation_store.ex @ e2e62caf2351
 EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS
@@ -126,6 +126,10 @@ VARIABLES
     outcomes,   \* channel-visible: turn results fired for m
     shown,      \* user-visible: what the user saw for m, "reply" and/or "error"
     history,    \* ConversationStore (SQLite): Seq of <<kind, msg>>
+                \* (the store loads a conversation before any write to it and
+                \* writes its rows one at a time in call order, so a read gives
+                \* this sequence even for a conversation nobody had read since
+                \* the store started)
     dropped,    \* bookkeeping: messages discarded without a turn
     watch       \* consumer (Acp.Peer): watch[m] is "down" while the :DOWN of the
                 \* Queue m was handed to waits in its mailbox, ahead of any
@@ -179,7 +183,7 @@ InHistory(e) == e \in Range(history)
 LastKind == IF history = <<>> THEN "none" ELSE history[Len(history)][1]
 
 \* ConversationStore handle_call({:append_stopped_marker, ...})
-\* (conversation_store.ex:173): appends only when the last message is the user's.
+\* (conversation_store.ex:176): appends only when the last message is the user's.
 AppendMarker(h) ==
     IF h /= <<>> /\ h[Len(h)][1] = "user"
     THEN Append(h, <<"marker", h[Len(h)][2]>>)
@@ -418,6 +422,9 @@ MarkDelivered(m) ==
 \* runner.commit/4 (queue.ex:551 -> turn_runner.ex:199, commit_turn/4
 \* :208-257): persist the reply, then synchronous auto-compaction; the
 \* claim comes only after it returns.
+\* The compaction replaces only the history it read (a message written
+\* meanwhile drops it; the next reply's check compacts again), which is
+\* no step here: compaction is not modelled.
 \* An orphan that passed fresh? before its Queue died still commits here,
 \* until QueueRestart kills it.
 Commit(m) ==

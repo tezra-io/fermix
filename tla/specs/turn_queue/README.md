@@ -233,7 +233,7 @@ watch was added to the model).
   so it persists no user message, and `commit/4` writes nothing for it
   (`:199-206`; the owner's commit is `commit_turn/4`). That conversation's
   history stays empty, a stop's or crash's marker finds no user message to
-  close (`conversation_store.ex:173`), and its Queue steps are the ones the
+  close (`conversation_store.ex:176`), and its Queue steps are the ones the
   spec models.
 
 ## Findings
@@ -282,7 +282,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
   - `stop_active_turn` kills the task and writes the stopped marker
     (`queue.ex:1101-1106`, `:1151-1164`).
   - The marker is written because the last stored message is still the
-    user's (`conversation_store.ex:173`).
+    user's (`conversation_store.ex:176`).
 - **Impact:** the user saw a full answer, but history says "stopped before I
   finished it". The next turn's model does not know it already answered.
 - **Why accepted:** a stop wins until the turn claims its outcome. That is
