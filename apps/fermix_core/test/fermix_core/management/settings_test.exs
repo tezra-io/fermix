@@ -42,6 +42,7 @@ defmodule FermixCore.Management.SettingsTest do
     :compaction,
     :memory,
     :skill_curation,
+    :open_loops,
     :realtime,
     :transcription,
     :meetings,
@@ -271,6 +272,7 @@ defmodule FermixCore.Management.SettingsTest do
       refute Enum.any?(rows("transcription"), & &1["restart"])
       assert %{"restart" => false} = row("personalization", "user_name")
       assert %{"restart" => true} = row("personalization", "skill_curation_enabled")
+      assert %{"restart" => true} = row("personalization", "open_loops_enabled")
     end
 
     test "every channel section carries its credentials and a real enable toggle" do
@@ -1363,6 +1365,26 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert {:ok, _style} =
                Settings.apply("personalization", %{"communication_style" => "Terse, no preamble."})
+    end
+
+    # Open loops run unless they are switched off, and the switch is a row both
+    # apps show. A home with no `[fermix_core.open_loops]` section publishes it
+    # on; turning it off writes the disable and turning it on removes it again.
+    test "the open-loops switch is published on by default and writes only the disable" do
+      Application.put_env(:fermix_core, :open_loops, [])
+
+      assert %{"kind" => "toggle", "value" => true} =
+               row("personalization", "open_loops_enabled")
+
+      assert {:ok, _result} = Settings.apply("personalization", %{"open_loops_enabled" => false})
+      assert %{"value" => false} = row("personalization", "open_loops_enabled")
+      assert {:ok, off} = ConfigStore.load_runtime_config()
+      assert off[:fermix_core][:open_loops] == [enabled: false]
+
+      assert {:ok, _result} = Settings.apply("personalization", %{"open_loops_enabled" => true})
+      assert %{"value" => true} = row("personalization", "open_loops_enabled")
+      assert {:ok, on} = ConfigStore.load_runtime_config()
+      assert on[:fermix_core][:open_loops] == []
     end
 
     # MGMT-1 shaping. A value that names something is one line: the line break a

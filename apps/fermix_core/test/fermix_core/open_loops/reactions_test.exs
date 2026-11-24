@@ -533,6 +533,34 @@ defmodule FermixCore.OpenLoops.ReactionsTest do
       assert [%{source_channel: "telegram"}] = rows(ctx)
     end
 
+    # The owner said it in that conversation, so their answer arrives under its
+    # key whatever the platform: the app's chat has no owner id to key a DM by.
+    test "a send to the conversation the loop came from is recorded on any platform", ctx do
+      loop = loop!(ctx, "Hear back from the Larchmont pottery residency")
+
+      said_in_app = %{
+        loop
+        | source_channel: "companion",
+          source_chat_id: "main",
+          delivery_platform: "companion",
+          delivery_destination: "main"
+      }
+
+      assert {:ok, %{rung: 2, source_channel: "companion", source_chat_id: "main"}} =
+               Reactions.record_sent(
+                 said_in_app,
+                 "How did it go?",
+                 @raised,
+                 sent_opts(ctx, false)
+               )
+
+      # The same inbox for a loop said elsewhere is still one whose reply is lost.
+      elsewhere = %{said_in_app | source_channel: "cli", source_chat_id: "session-7"}
+
+      assert {:skipped, :reply_uncapturable} =
+               Reactions.record_sent(elsewhere, "How did it go?", @raised, sent_opts(ctx, false))
+    end
+
     # A check-in run that read outside content (a loop noted after it, a
     # stamped follow-up, a tool's result) says so, and every send states it.
     test "a send states whether its run read outside content", ctx do

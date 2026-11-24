@@ -2945,8 +2945,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   end
 
   # `[fermix_core.open_loops]` (MILESTONE_78_OPEN_LOOPS §10) is wired like
-  # skill curation with the inverse default: off until the file says otherwise.
-  test "a fresh home loads an empty open_loops section, which reads as disabled" do
+  # skill curation, default included: on until the file says otherwise.
+  test "a fresh home loads an empty open_loops section, which reads as enabled" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
 
@@ -2956,7 +2956,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert {:ok, loaded} = ConfigStore.load_runtime_config()
     open_loops = Keyword.fetch!(loaded.fermix_core, :open_loops)
     assert open_loops == []
-    refute OpenLoopsConfig.enabled?(open_loops)
+    assert OpenLoopsConfig.enabled?(open_loops)
   end
 
   test "save/load round-trips the open_loops config section" do

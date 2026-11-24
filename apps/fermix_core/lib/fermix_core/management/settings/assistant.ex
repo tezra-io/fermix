@@ -3,7 +3,8 @@ defmodule FermixCore.Management.Settings.Assistant do
   The `personalization` and `memory` sections (M34 native setup §5.7).
 
   Both are hot: nothing here is read once at boot, so no row is flagged for a
-  restart except the skill-curation switch, which seeds a scheduler.
+  restart except the skill-curation and open-loops switches, each of which
+  seeds a scheduler.
 
   `timezone` and `communication_style` are choice rows carrying the daemon's own
   suggestions, and `settings.apply` still accepts a value that is not among
@@ -16,6 +17,7 @@ defmodule FermixCore.Management.Settings.Assistant do
   alias FermixCore.Management.Settings.Source
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Memory.Config, as: MemoryConfig
+  alias FermixCore.OpenLoops.Config, as: OpenLoopsConfig
   alias FermixCore.SkillCuration.Delivery, as: SkillCurationDelivery
 
   # Suggestions, ordered west to east, each rendered with its current offset.
@@ -76,7 +78,8 @@ defmodule FermixCore.Management.Settings.Assistant do
         value: Source.string(Source.core(snapshot, :agent), :name),
         restart: hot
       ),
-      skill_curation_row(snapshot)
+      skill_curation_row(snapshot),
+      open_loops_row(snapshot)
     ]
   end
 
@@ -195,5 +198,18 @@ defmodule FermixCore.Management.Settings.Assistant do
       {:ok, target} -> "Suggestions arrive in #{target.platform}."
       :no_delivery_target -> "Suggestions wait until a channel owner is configured."
     end
+  end
+
+  # On unless switched off (`OpenLoops.Config`). The footer says where a
+  # check-in arrives: the conversation the loop came from.
+  defp open_loops_row(snapshot) do
+    Row.new(
+      "open_loops_enabled",
+      :toggle,
+      "Check in on things you plan to do by a date",
+      footer: "A check-in arrives in the chat where you mentioned it.",
+      value: snapshot |> Source.core(:open_loops) |> OpenLoopsConfig.enabled?(),
+      restart: Row.restart?(:open_loops)
+    )
   end
 end

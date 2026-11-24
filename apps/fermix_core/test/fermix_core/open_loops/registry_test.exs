@@ -18,6 +18,15 @@ defmodule FermixCore.OpenLoops.RegistryTest do
     def send_message(_destination, _payload, _opts), do: :ok
   end
 
+  # The app's chat as a delivery channel: a transport that names its own inbox.
+  defmodule FakeAppChat do
+    @moduledoc false
+    def send_message(_destination, _payload, _opts), do: :ok
+    def owner_inbox, do: {:ok, "main"}
+  end
+
+  @app_channels %{"telegram" => FakeChannel, "companion" => FakeAppChat, "cli" => FakeChannel}
+
   @attended %{
     source_trust: :operator,
     computer_use_origin: :interactive,
@@ -63,6 +72,15 @@ defmodule FermixCore.OpenLoops.RegistryTest do
   end
 
   defp at(opts, now), do: Keyword.put(opts, :now, now)
+
+  defp dated, do: %{"intention" => @intention, "matters_by" => @date, "reach" => "message"}
+
+  # The owner's attended private turn in another conversation.
+  defp said_in(channel, chat_id) do
+    @attended
+    |> Map.put(:conversation_key, {channel, chat_id, :root})
+    |> Map.put(:channel, channel)
+  end
 
   # The due scan at `at`, as the scheduler runs it: a loop whose touch has
   # arrived becomes due, the only state a raise may be recorded on.
@@ -315,6 +333,54 @@ defmodule FermixCore.OpenLoops.RegistryTest do
                )
     end
 
+    # A check-in arrives where the owner said it (M78 §06 as amended): the
+    # owner's inbox on the platform of the conversation the loop came from,
+    # when that inbox is that conversation; the inbox ladder only otherwise.
+    test "a loop said in the app's chat is delivered there, ahead of the owner's other inbox",
+         %{opts: opts} do
+      opts = Keyword.put(opts, :jobs_config, delivery_channels: @app_channels)
+
+      assert {:ok, result} = Registry.note(dated(), said_in("companion", "main"), opts)
+
+      assert result.delivery == %{platform: "companion", source: :transport}
+
+      assert %{
+               source_channel: "companion",
+               source_chat_id: "main",
+               delivery_platform: "companion",
+               delivery_destination: "main",
+               delivery_thread_scope: "root"
+             } = result.loop
+    end
+
+    test "a loop said in the app's chat is recorded on an install with no other inbox",
+         %{opts: opts} do
+      opts =
+        opts
+        |> Keyword.put(:jobs_config, delivery_channels: @app_channels)
+        |> Keyword.put(:configured_owners, %{})
+
+      assert {:ok, %{delivery: %{platform: "companion"}}} =
+               Registry.note(dated(), said_in("companion", "main"), opts)
+    end
+
+    test "a loop said where no check-in can be sent goes to the owner's inbox", %{opts: opts} do
+      opts = Keyword.put(opts, :jobs_config, delivery_channels: @app_channels)
+
+      assert {:ok, result} = Registry.note(dated(), said_in("cli", "session-7"), opts)
+
+      assert result.delivery == %{platform: "telegram", source: :derived}
+      assert %{source_channel: "cli", delivery_destination: "40001"} = result.loop
+    end
+
+    test "a loop said on a platform whose inbox is another chat goes to the owner's inbox",
+         %{opts: opts} do
+      # A private Telegram chat that is not the configured owner's own DM.
+      assert {:ok, %{loop: loop}} = Registry.note(dated(), said_in("telegram", "40777"), opts)
+
+      assert %{source_chat_id: "40777", delivery_destination: "40001"} = loop
+    end
+
     test "refuses without a chat-capable owner inbox", %{opts: opts} do
       params = %{"intention" => @intention, "matters_by" => @date, "reach" => "message"}
 
@@ -416,6 +482,70 @@ defmodule FermixCore.OpenLoops.RegistryTest do
 
       assert {:ok, %{loop: unknown}} = Registry.note(params, unstamped, opts)
       assert unknown.noted_after_outside_content
+    end
+
+    # The stamp says the loop's words may be someone else's. Words found in what
+    # the owner typed on that turn are the owner's, whatever else the turn read,
+    # the rule an answer's `owner_words` already holds to; a check-in then names
+    # them as said, instead of asking whether they were ever meant.
+    test "after outside content, a loop in the owner's own typed words is not stamped",
+         %{opts: opts} do
+      typed = "The revised Halden grant budget has to reach Odile by June 10, not opened yet."
+      turn = Map.merge(@attended, %{outside_sources: @read_a_page, owner_text: typed})
+
+      own_words = %{
+        "intention" => "the revised Halden grant budget has to reach Odile by June 10",
+        "why_it_matters" => "not opened yet",
+        "matters_by" => @date,
+        "reach" => "message"
+      }
+
+      assert {:ok, %{loop: loop}} = Registry.note(own_words, turn, opts)
+      refute loop.noted_after_outside_content
+
+      # A word the owner did not type keeps the stamp, in the intention or in
+      # why it matters: it may have come from what the turn read.
+      another_name = %{
+        "intention" => "The revised Halden grant budget has to reach Mallory by June 10",
+        "matters_by" => @date,
+        "reach" => "message"
+      }
+
+      assert {:ok, %{loop: renamed}} = Registry.note(another_name, turn, opts)
+      assert renamed.noted_after_outside_content
+
+      typed = "I need to send the Corvale deposit by June 10."
+      turn = Map.put(turn, :owner_text, typed)
+
+      another_reason = %{
+        "intention" => "send the Corvale deposit by June 10",
+        "why_it_matters" => "the booking is cancelled otherwise",
+        "matters_by" => @date,
+        "reach" => "message"
+      }
+
+      assert {:ok, %{loop: reasoned}} = Registry.note(another_reason, turn, opts)
+      assert reasoned.noted_after_outside_content
+    end
+
+    test "after outside content, a loop noted with nothing typed to check it against stays stamped",
+         %{opts: opts} do
+      params = %{
+        "intention" => "Renew the Pellworth lease",
+        "matters_by" => @date,
+        "reach" => "message"
+      }
+
+      # A voice call types nothing, and a turn with no typed text carries none.
+      spoken =
+        Map.merge(@attended, %{
+          outside_sources: @read_a_page,
+          owner_text: "Renew the Pellworth lease",
+          computer_use_origin: :voice
+        })
+
+      assert {:ok, %{loop: loop}} = Registry.note(params, spoken, opts)
+      assert loop.noted_after_outside_content
     end
   end
 

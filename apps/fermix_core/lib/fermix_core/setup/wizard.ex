@@ -5,7 +5,6 @@ defmodule FermixCore.Setup.Wizard do
 
   alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
   alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
-  alias FermixCore.Delivery.OwnerInbox
   alias FermixCore.Management.Settings.Channels.Inventory
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Net.Egress
@@ -651,7 +650,7 @@ defmodule FermixCore.Setup.Wizard do
       %{
         key: :open_loops_enabled,
         label: open_loops_label(),
-        # Optional: off by default; blank keeps the current state.
+        # Optional: on by default; blank keeps the default (no TOML entry).
         required?: false
       }
     ]
@@ -677,19 +676,12 @@ defmodule FermixCore.Setup.Wizard do
   @doc """
   The setup question for `[fermix_core.open_loops] enabled`
   (MILESTONE_78_OPEN_LOOPS §10): what the feature does, and where its check-ins
-  will land, resolved from the owner inbox they are sent to. Pure config reads;
-  `opts` are the seams of `FermixCore.Delivery.OwnerInbox.resolve/1`.
+  arrive, which is the conversation the loop came from.
   """
-  @spec open_loops_label(keyword()) :: String.t()
-  def open_loops_label(opts \\ []) when is_list(opts) do
-    destination =
-      case OwnerInbox.resolve(opts) do
-        {:ok, inbox} -> "Check-ins will arrive in #{inbox.platform}."
-        :no_delivery_target -> "Until a channel has an owner configured, Fermix records no loops."
-      end
-
+  @spec open_loops_label() :: String.t()
+  def open_loops_label do
     "When you mention something you plan to do by a date, Fermix can check in " <>
-      "before it matters. #{destination} Enable? (yes/no; blank = no)"
+      "before it matters. A check-in arrives in the chat where you mentioned it. Enable? (yes/no; blank = yes)"
   end
 
   @doc """
@@ -2736,14 +2728,14 @@ defmodule FermixCore.Setup.Wizard do
   end
 
   # `[fermix_core.open_loops] enabled` (MILESTONE_78_OPEN_LOOPS §10) defaults
-  # to false, so its rule is skill curation's inverted: accepting writes
-  # `enabled = true`; declining writes NOTHING (the key is removed and the
+  # to true, so its rule is skill curation's: declining writes
+  # `enabled = false`; accepting writes NOTHING (the key is removed and the
   # default applies). An absent or blank answer preserves the existing state.
   defp put_open_loops_enabled(snapshot, answer) do
     case normalize_realtime_bool(answer, :open_loops_enabled) do
       nil -> snapshot
-      true -> put_open_loops_key(snapshot, :enabled, true)
-      false -> delete_open_loops_key(snapshot, :enabled)
+      true -> delete_open_loops_key(snapshot, :enabled)
+      false -> put_open_loops_key(snapshot, :enabled, false)
     end
   end
 

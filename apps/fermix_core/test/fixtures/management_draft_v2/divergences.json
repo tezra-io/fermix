@@ -3941,6 +3941,12 @@
       "field": "params:call_id",
       "kind": "engine_only",
       "why": "M94 §12: phone_calls.recovery.confirm names the unresolved call the owner checked in their Telnyx portal by its id. The draft predates the phone call methods."
+    },
+    {
+      "method": "settings.get:personalization",
+      "field": "rows:open_loops_enabled",
+      "kind": "engine_only",
+      "why": "Open loops run unless they are switched off, so the switch that turns them off joins About you beside the skill-curation toggle. The draft predates it; it is an ordinary toggle row the pane renders through the descriptor form with no Swift work."
     }
   ]
 }

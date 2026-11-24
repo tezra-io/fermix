@@ -237,23 +237,32 @@ defmodule FermixCore.OpenLoops.Reactions do
   `opts[:raised_after_outside_content]`, whether the run that wrote it had
   read outside content, which every send states.
 
-  Only where the owner's reply can be captured: an inbox keyed by the owner's
-  own id (`Delivery.OwnerInbox.dm_origin/1`), where their DM arrives under the
-  conversation the follow-up is recorded in. A Slack or Discord DM arrives
-  under its DM channel's id and a CLI turn under its session id, so a follow-up
-  there would only ever read as silence; it is `{:skipped,
-  :reply_uncapturable}`, and nothing is written.
+  Only where the owner's reply can be captured, which is where it arrives
+  under the conversation the follow-up is recorded in: the conversation the
+  loop came from (the owner wrote in it, so their answer is keyed as that turn
+  was), or an inbox keyed by the owner's own id
+  (`Delivery.OwnerInbox.dm_origin/1`). A Slack or Discord DM arrives under its
+  DM channel's id and a CLI turn under its session id, so a follow-up sent
+  there for a loop said elsewhere would only ever read as silence; it is
+  `{:skipped, :reply_uncapturable}`, and nothing is written.
   """
   @spec record_sent(Repo.open_loop_row(), String.t(), DateTime.t(), keyword()) ::
           {:ok, reaction()} | {:skipped, :reply_uncapturable} | {:error, term()}
   def record_sent(%{id: _id} = loop, text, %DateTime{} = now, opts)
       when is_binary(text) and is_list(opts) do
-    inbox = %{platform: loop.delivery_platform, destination: loop.delivery_destination}
+    if reply_capturable?(loop),
+      do: record_sent_text(loop, text, now, opts),
+      else: {:skipped, :reply_uncapturable}
+  end
 
-    case OwnerInbox.dm_origin(inbox) do
-      {:ok, _origin} -> record_sent_text(loop, text, now, opts)
-      :error -> {:skipped, :reply_uncapturable}
-    end
+  defp reply_capturable?(loop) do
+    inbox = %{platform: loop.delivery_platform, destination: loop.delivery_destination}
+    sent_where_said?(loop) or match?({:ok, _origin}, OwnerInbox.dm_origin(inbox))
+  end
+
+  defp sent_where_said?(loop) do
+    {loop.delivery_platform, loop.delivery_destination, loop.delivery_thread_scope} ==
+      {loop.source_channel, loop.source_chat_id, loop.source_thread_scope}
   end
 
   defp record_sent_text(loop, text, now, opts) do

@@ -15,10 +15,13 @@ defmodule FermixChannels.OpenLoopReplyKeysTest do
   # global app env this module pins in setup and restores on exit.
   use ExUnit.Case, async: false
 
+  alias FermixChannels.Channels.Companion
   alias FermixChannels.Channels.IMessage
+  alias FermixChannels.Channels.Mobile
   alias FermixChannels.Channels.Signal
   alias FermixChannels.Channels.Telegram
   alias FermixChannels.Channels.WhatsApp
+  alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.Source
   alias FermixCore.Agents.ConversationKey
   alias FermixCore.Capabilities.UntrustedContent
@@ -159,6 +162,81 @@ defmodule FermixChannels.OpenLoopReplyKeysTest do
 
     {:ok, message} = IMessage.parse_row(row, policy, %{})
     assert_reply_captured(ctx, "imessage", owner, message)
+  end
+
+  # The app's chat has no owner id: a loop said there is delivered there
+  # (`Companion.owner_inbox/0`), and the owner's answer arrives under the chat's
+  # own key whether they type it on the Mac or on the phone, whose turns join
+  # that conversation (M56 D9).
+  test "the app's chat: a reply from the Mac or the phone is keyed by the chat the check-in went to",
+       ctx do
+    profile = Companion.chat_profile()
+
+    from_mac = app_message("companion", profile)
+    from_phone = app_message("mobile", profile)
+    from_phone = %{from_phone | conversation_key: Mobile.joined_conversation(from_phone)}
+
+    for message <- [from_mac, from_phone] do
+      loop = note_in_app!(ctx, profile)
+      assert {loop.delivery_platform, loop.delivery_destination} == {"companion", profile}
+
+      sent_opts = [repo: ctx.repo, raised_after_outside_content: false]
+      {:ok, sent} = Reactions.record_sent(loop, @check_in, @sent, sent_opts)
+
+      turn = %{
+        conversation_key: ConversationKey.from(message),
+        source_trust: :operator,
+        computer_use_origin: :interactive,
+        channel: message.channel,
+        memory_repo: ctx.repo,
+        memory_owner_id: "default",
+        memory_agent_id: "main"
+      }
+
+      assert {:ok, 1} = Reactions.capture(turn, UntrustedContent.owner_text(message), @replied)
+      {:ok, rows} = Repo.list_open_loop_reactions("default", server: ctx.repo)
+      assert %{outcome: "replied", reply_text: @reply} = Enum.find(rows, &(&1.id == sent.id))
+    end
+  end
+
+  defp app_message(channel, profile) do
+    %Message{
+      id: "app-reply-#{channel}",
+      content: @reply,
+      sender: "owner",
+      channel: channel,
+      chat_id: profile,
+      reply_target: profile
+    }
+  end
+
+  defp note_in_app!(ctx, profile) do
+    params = %{
+      "intention" => "Sign the Linden Street lease #{System.unique_integer([:positive])}",
+      "timezone" => "Etc/UTC",
+      "reach" => "message",
+      "matters_by" => %{"type" => "date", "date" => "2031-06-20"}
+    }
+
+    attended = %{
+      source_trust: :operator,
+      computer_use_origin: :interactive,
+      conversation_key: Companion.conversation_key(profile),
+      channel: "companion",
+      memory_owner_id: "default",
+      memory_agent_id: "main"
+    }
+
+    opts = [
+      repo: ctx.repo,
+      now: @said,
+      jobs_config: [delivery_channels: %{"companion" => Companion}],
+      configured_owners: %{},
+      scheduler: nil
+    ]
+
+    {:ok, %{loop: loop}} = Registry.note(params, attended, opts)
+    loop
   end
 
   # The loop is noted with `owner` as the platform's configured owner, so the

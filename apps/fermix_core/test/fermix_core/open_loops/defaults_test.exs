@@ -27,6 +27,7 @@ defmodule FermixCore.OpenLoops.DefaultsTest do
       assert Defaults.active_hours_min_messages() == 40
       assert Defaults.active_hours_percentiles() == {15, 85}
       assert Defaults.active_hours_min_span_hours() == 6
+      assert Defaults.active_hours_first_hour() == 4
     end
 
     test "the check-in run keeps the follow-up run's bounds" do

@@ -5891,7 +5891,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       refute File.read!(Path.join(tmp_home, "config.toml")) =~ "[fermix_core.skill_curation]"
     end
 
-    test "the open-loops toggle renders off by default and names where check-ins land", %{
+    test "the open-loops toggle renders on by default and names where check-ins land", %{
       conn: conn
     } do
       Application.put_env(:fermix_core, :open_loops, [])
@@ -5901,12 +5901,11 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       assert html =~ "Check in on things you plan to do by a date"
       assert html =~ ~s(name="personalization_form[open_loops_enabled]")
-      assert html =~ ~s(data-open-loops="false")
-      # No channel owner configured in the test home.
-      assert html =~ "Until a channel has an owner configured, Fermix records no loops."
+      assert html =~ ~s(data-open-loops="true")
+      assert html =~ "A check-in arrives in the chat where you mentioned it."
     end
 
-    test "enabling open loops persists enabled=true; turning it off removes the key", %{
+    test "turning open loops off persists enabled=false; turning it on removes the key", %{
       conn: conn,
       tmp_home: tmp_home
     } do
@@ -5917,7 +5916,7 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       view
       |> form("form[phx-submit=\"save_personalization\"]",
-        personalization_form: %{open_loops_enabled: "true"}
+        personalization_form: %{open_loops_enabled: "false"}
       )
       |> render_submit()
 
@@ -5925,15 +5924,15 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ "Personalization saved."
       # The scheduler is a child-absent gate, so the change offers a restart.
       assert html =~ "Apply &amp; restart"
-      assert html =~ ~s(data-open-loops="true")
+      assert html =~ ~s(data-open-loops="false")
 
       contents = File.read!(Path.join(tmp_home, "config.toml"))
-      assert contents =~ "[fermix_core.open_loops]\nenabled = true"
+      assert contents =~ "[fermix_core.open_loops]\nenabled = false"
 
-      # Turning it off writes NOTHING: the default is already off.
+      # Turning it on writes NOTHING: the default is already on.
       view
       |> form("form[phx-submit=\"save_personalization\"]",
-        personalization_form: %{open_loops_enabled: "false"}
+        personalization_form: %{open_loops_enabled: "true"}
       )
       |> render_submit()
 

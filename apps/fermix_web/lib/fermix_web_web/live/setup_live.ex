@@ -19,7 +19,6 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.ComputerHistory.InstalledApps
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.SidecarInstaller
-  alias FermixCore.Delivery.OwnerInbox
   alias FermixCore.Harness.SignIn, as: HarnessSignIn
   alias FermixCore.Harness.Vendors, as: HarnessVendors
   alias FermixCore.Home.Role
@@ -2766,14 +2765,9 @@ defmodule FermixWebWeb.SetupLive do
     end
   end
 
-  # Names where check-ins will land (MILESTONE_78_OPEN_LOOPS §10): the owner
-  # inbox they are sent to, pure config reads.
-  defp open_loops_destination do
-    case OwnerInbox.resolve() do
-      {:ok, inbox} -> "Check-ins will arrive in #{inbox.platform}."
-      :no_delivery_target -> "Until a channel has an owner configured, Fermix records no loops."
-    end
-  end
+  # Where check-ins land (MILESTONE_78_OPEN_LOOPS §10): the conversation the
+  # loop came from.
+  defp open_loops_destination, do: "A check-in arrives in the chat where you mentioned it."
 
   defp tool_summary do
     if Process.whereis(CapabilityRegistry) do
@@ -4811,8 +4805,8 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   # The open-loops toggle (MILESTONE_78_OPEN_LOOPS §10), the same hidden-false
-  # pairing; the wizard reducer writes `enabled = true` on accept and deletes
-  # the key on decline (default already false).
+  # pairing; the wizard reducer writes `enabled = false` on decline and deletes
+  # the key on accept (default already true).
   defp maybe_put_open_loops_enabled(answers, params) do
     case Map.fetch(params, "open_loops_enabled") do
       {:ok, "true"} -> [{:open_loops_enabled, true} | answers]

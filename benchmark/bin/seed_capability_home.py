@@ -501,13 +501,12 @@ def render_config(
     # model wanders into it, and keeps suite behavior independent of daemon
     # uptime.
     lines += ["[fermix_core.skill_curation]", "enabled = false", ""]
-    # Open loops (MILESTONE_78) are off until the owner turns them on, and a fresh
-    # eval home has never made that decision — so the open_loop_* tools are not
-    # advertised, the scheduler never starts, and both open-loop suites
-    # (open_loops.yaml, capability/candidates/open_loop_checkin.yaml) score 0 with
-    # nothing wrong in the product. Same rule as the harness consent (`harness_lines`):
-    # pre-grant every human-decision gate, scoped to this throwaway home. `enabled`
-    # is the section's only key; any other stops the daemon booting.
+    # Open loops (MILESTONE_78) are on unless switched off. The eval home says so
+    # itself, so both open-loop suites (open_loops.yaml,
+    # capability/candidates/open_loop_checkin.yaml) keep their tools and scheduler
+    # whatever the default becomes: switched off, they would score 0 with nothing
+    # wrong in the product. `enabled` is the section's only key; any other stops
+    # the daemon booting.
     lines += ["[fermix_core.open_loops]", "enabled = true", ""]
     # Temporal events (MILESTONE_30) hinge on two operator-setup decisions a
     # fresh home lacks, and event_store fails loudly without both — an unseeded

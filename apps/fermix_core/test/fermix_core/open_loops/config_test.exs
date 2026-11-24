@@ -39,8 +39,8 @@ defmodule FermixCore.OpenLoops.ConfigTest do
   end
 
   describe "enabled?/1" do
-    test "defaults to false when the key is absent" do
-      assert OpenLoopsConfig.enabled?([]) == false
+    test "defaults to true when the key is absent" do
+      assert OpenLoopsConfig.enabled?([]) == true
     end
 
     test "reads an explicit value" do

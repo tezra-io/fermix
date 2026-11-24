@@ -2,14 +2,15 @@ defmodule FermixCore.OpenLoops.Config do
   @moduledoc """
   `[fermix_core.open_loops]` config (MILESTONE_78_OPEN_LOOPS §10).
 
-  One key: `enabled` (default false). Touch counts, windows, caps and active
-  hours are constants in `FermixCore.OpenLoops.Defaults`; tuning is not config.
+  One key: `enabled` (default true), kept as the way to turn open loops off.
+  Touch counts, windows, caps and active hours are constants in
+  `FermixCore.OpenLoops.Defaults`; tuning is not config.
   There is no compile-time baseline: the persisted TOML section is the complete
   intended state and the config store applies it replace-style, so
   `normalize/1` emits only keys that are actually present.
   """
 
-  @default_enabled false
+  @default_enabled true
 
   @config_keys [:enabled]
 

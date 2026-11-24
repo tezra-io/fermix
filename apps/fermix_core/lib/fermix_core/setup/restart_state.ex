@@ -72,6 +72,7 @@ defmodule FermixCore.Setup.RestartState do
     {:sandbox, "Sandbox settings changed since Fermix started."},
     {:harness, "Coding agent settings changed since Fermix started."},
     {:skill_curation, "Skill curation settings changed since Fermix started."},
+    {:open_loops, "Open loop settings changed since Fermix started."},
     {:meetings, "Meeting settings changed since Fermix started."},
     {:computer_use, "Computer control settings changed since Fermix started."},
     {:computer_history, "Computer history settings changed since Fermix started."},
