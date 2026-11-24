@@ -1365,6 +1365,16 @@ defmodule FermixCore.Agents.TurnRunner do
       "settings and retry."
   end
 
+  # Vercel AI Gateway answers 403 to a team with no payment method on file,
+  # free credits included, and 401 to a bad key, so key advice would send the
+  # person to a key that is fine (M105 §11).
+  defp auth_reply({:provider_error, %{provider: :vercel, status: 403}}, _get_env) do
+    "Vercel AI Gateway refused this request (HTTP 403), which it does when the Vercel team " <>
+      "has to add a payment method before AI Gateway serves it. Add one in the Vercel " <>
+      "dashboard under AI Gateway and retry; if one is already on file, check the Vercel " <>
+      "AI Gateway API key in Fermix's Providers settings."
+  end
+
   # config/runtime.exs layers a nonblank `<PROVIDER>_API_KEY` over the stored
   # key at every start, so "check the key in setup" would send the operator to
   # a key the daemon is not using.

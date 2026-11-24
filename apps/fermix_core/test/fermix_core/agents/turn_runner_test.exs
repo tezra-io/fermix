@@ -1706,6 +1706,45 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert reply =~ "check the Anthropic API key in Fermix's Providers settings"
     end
 
+    # Vercel AI Gateway answers HTTP 403 to every request from a team with no
+    # payment method on file, free credits included, and 401 to a wrong or
+    # missing key (M105 §11). The body is the live gateway's answer.
+    test "a Vercel AI Gateway 403 names the payment method instead of the key" do
+      reason =
+        ProviderError.api(:vercel, :chat_completions, 403, %{
+          "error" => %{
+            "message" =>
+              "AI Gateway requires a valid credit card on file to service requests. " <>
+                "Please visit " <>
+                "https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai%3Fmodal%3Dadd-credit-card " <>
+                "to add a card and unlock your free credits.",
+            "type" => "customer_verification_required"
+          }
+        })
+
+      expected =
+        "Vercel AI Gateway refused this request (HTTP 403), which it does when the Vercel " <>
+          "team has to add a payment method before AI Gateway serves it. Add one in the " <>
+          "Vercel dashboard under AI Gateway and retry; if one is already on file, check the " <>
+          "Vercel AI Gateway API key in Fermix's Providers settings."
+
+      assert TurnRunner.error_reply(reason, get_env: fn _ -> nil end) == expected
+
+      env = %{"AI_GATEWAY_API_KEY" => "vck-from-env"}
+      assert TurnRunner.error_reply(reason, get_env: &Map.get(env, &1)) == expected
+    end
+
+    test "a Vercel AI Gateway 401 keeps the API key advice" do
+      reason =
+        ProviderError.api(:vercel, :chat_completions, 401, %{
+          "error" => %{"message" => "Invalid API key", "type" => "authentication_error"}
+        })
+
+      assert TurnRunner.error_reply(reason, get_env: fn _ -> nil end) ==
+               "vercel authentication failed — check the vercel API key in Fermix's " <>
+                 "Providers settings and retry."
+    end
+
     test "maps Anthropic OAuth auth failures to a subscription reconnect hint" do
       reply =
         TurnRunner.error_reply(

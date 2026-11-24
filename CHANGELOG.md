@@ -36,7 +36,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   asks the gateway to place the prompt-cache markers itself, which is how
   Vercel documents prompt caching for Anthropic's models through it. The
   gateway is paid from credits bought in your Vercel account: a team that has
-  bought none is on a free tier with fewer models and lower limits.
+  bought none is on a free tier with fewer models and lower limits. Vercel
+  serves no request until the team has a payment method on file, and a turn
+  refused for that says so instead of blaming the key.
 
 ### Fixed
 

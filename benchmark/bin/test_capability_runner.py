@@ -1069,6 +1069,12 @@ _AUTH_REPLIES = [
     # buy a plan tier. Permanent for the run all the same.
     "SpaceXAI subscription access denied — the Grok plan may not include API "
     "access. Switch to an API key in Fermix's Providers settings, or check the plan tier.",
+    # Worded as a refusal for a missing payment method, not an authentication
+    # failure: the key is fine. Permanent for the run all the same.
+    "Vercel AI Gateway refused this request (HTTP 403), which it does when the Vercel "
+    "team has to add a payment method before AI Gateway serves it. Add one in the "
+    "Vercel dashboard under AI Gateway and retry; if one is already on file, check the "
+    "Vercel AI Gateway API key in Fermix's Providers settings.",
 ]
 
 
@@ -1108,8 +1114,8 @@ def test_auth_invalidated_covers_every_reply_clause():
     # carrying `#{...}` interpolations of a provider label.
     clauses = re.findall(r"^  defp auth_reply\(.*?^  end$", source,
                          re.MULTILINE | re.DOTALL)
-    assert len(clauses) == 7, (
-        f"parsed {len(clauses)} auth_reply clauses, expected 7 — the extraction "
+    assert len(clauses) == 8, (
+        f"parsed {len(clauses)} auth_reply clauses, expected 8 — the extraction "
         "below is stale, not the regex"
     )
     for clause in clauses:
@@ -1124,6 +1130,8 @@ def test_is_auth_invalidated_reply_rejects_content_mentions_and_limits():
     # ANSWER that merely discusses auth failures must not abort the sweep.
     assert driver.is_auth_invalidated_reply(
         "The login endpoint returned 401: authentication failed for that user.") is False
+    assert driver.is_auth_invalidated_reply(
+        "The gateway refused this request (HTTP 403) because the token had expired.") is False
     assert driver.is_auth_invalidated_reply(
         "You've hit your Codex usage limit. Try again in ~15 min.") is False
     assert driver.is_auth_invalidated_reply("") is False
