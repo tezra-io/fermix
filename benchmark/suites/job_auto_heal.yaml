@@ -1,0 +1,85 @@
+# Auto Heal (MILESTONE_106), stage S2: the owner asks why a job's result never arrived.
+#
+# WHAT A TURN CAN DRIVE. The heal itself runs outside every turn: a failed run of the
+# owner's job opens it in the run's own settle, and the daemon's Scheduler sends one
+# message, written by code, to the owner's inbox. The capability candidate
+# `capability/candidates/job_auto_heal.yaml` grades that from memory.db. What a turn
+# reaches is the owner's question afterwards, answered from the record: `list_jobs`
+# carries each job's open heal (its kind, its runs, and whether the owner was told),
+# and `list_job_runs` / `get_job_run` the failed run's own error.
+#
+# THE SEEDED WORLD. Each case's `state:` seeds, before every attempt, the job and one run
+# of it that failed three hours ago with the tide service's own error. Seeded history is
+# the product's history (bin/seed_state.exs): that failure opens a heal, and the runner
+# waits until the daemon has sent its message before the owner asks, so the record says
+# the owner was told. The home must make the local chat the owner's inbox
+# (`requires: [owner_inbox_cli]`); on the default eval inbox, a Telegram chat with no bot
+# token, the heal is never sent, and the cases are NOT EVALUATED.
+#
+# FLOORS. No wording gate names what the reply must say. `min_tool_calls: 1` is the floor
+# a correct reply cannot miss: nothing outside the record knows why the report failed.
+# `reply_not_matches` names only what has no place in a correct reply, a claim that the
+# run went fine. Asking why changes nothing, so every case bans the edits
+# (`tools_none_succeeded`, always sticky). `tide_report_never_came_route_sanity` is the
+# one labelled route case: the record is read through the jobs tools. The rubric owns the
+# rest. Every name, place and number is invented.
+suite: job_auto_heal
+risk: isolated_mutation
+requires: [owner_inbox_cli]
+title: "Auto Heal — the owner asks why a job's result never came"
+description: >
+  The owner's scheduled job failed and Fermix already told them in their inbox (M106
+  §5.4); the owner, in their own words, asks why its result did not arrive. The reply
+  states the failure Fermix recorded and that Fermix already sent them a message about
+  it, from the record (`list_jobs` shows the job's heal and whether the owner was told),
+  invents no other cause or fix, and changes nothing.
+defaults:
+  timeout_ms: 180000
+  judge: true
+  expect:
+    status: ok
+    no_tool_errors: true
+
+scenarios:
+  - id: why_did_my_result_not_arrive
+    title: "Asked why a job's result never came, Fermix states the recorded failure and that it already told the owner"
+    severity: critical
+    risk: isolated_mutation
+    tags: [jobs, auto_heal]
+    cases:
+      - id: tide_report_never_came_route_sanity
+        state: fixtures/state/job_auto_heal_tide_report.json
+        query: "My Kelmscott pier tide report never showed up. What happened with it?"
+        expect:
+          tools_any: [list_jobs, list_job_runs, get_job_run]
+          tools_none_succeeded: [update_job, remove_job, pause_job, schedule_job]
+          reply_not_matches: "(?i)\\b(ran|completed|finished|succeeded)\\s+(fine|successfully|normally|without (any )?(errors?|issues?|problems?))\\b"
+        rubric: |
+          1. The reply says the tide report's latest run failed and gives the cause Fermix
+             recorded for it: the tide service at tides.kelmscott.example answered 503
+             Service Unavailable. A paraphrase that keeps the cause (the tide service was
+             unavailable or down) meets this.
+          2. The reply says Fermix has already sent the owner a message about this
+             failure.
+          3. The reply states no cause, time limit, change or fix that Fermix's record
+             does not hold.
+          Not required: offering to run the job again, or saying when it runs next.
+      - id: tide_report_missing
+        state: fixtures/state/job_auto_heal_tide_report.json
+        query: >-
+          I was waiting on the Kelmscott pier tide report and nothing came through. Did
+          something go wrong?
+        expect:
+          min_tool_calls: 1
+          tools_none_succeeded: [update_job, remove_job, pause_job, schedule_job]
+          reply_not_matches: "(?i)\\b(ran|completed|finished|succeeded)\\s+(fine|successfully|normally|without (any )?(errors?|issues?|problems?))\\b"
+        rubric: |
+          1. The reply says the tide report's latest run failed and gives the cause Fermix
+             recorded for it: the tide service at tides.kelmscott.example answered 503
+             Service Unavailable. A paraphrase that keeps the cause (the tide service was
+             unavailable or down) meets this.
+          2. The reply says Fermix has already sent the owner a message about this
+             failure.
+          3. The reply states no cause, time limit, change or fix that Fermix's record
+             does not hold.
+          Not required: offering to run the job again, or saying when it runs next.

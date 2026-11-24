@@ -958,6 +958,32 @@ def test_a_seed_without_phone_calls_takes_them_away(tmp_path, monkeypatch):
     assert any((home / "secrets").glob("cue_source.*.token")) and cue_token.parent.is_dir()
 
 
+def test_owner_inbox_cli_makes_the_local_chat_the_default_target(tmp_path, monkeypatch, capsys):
+    # M106: `Delivery.OwnerInbox` takes a configured local target as the owner's own
+    # inbox, and the CLI adapter sends with no credentials, so a heal's message lands.
+    home = tmp_path / "x-eval"
+    on = _seed_main(monkeypatch, home, "--owner-inbox-cli")
+    assert on["fermix_core"]["jobs"]["default_delivery_target"] == {"platform": "cli",
+                                                                     "chat_id": "cli"}
+    assert on["fermix_core"]["jobs"]["default_delivery_mode"] == "channel"
+    # The Telegram owner id stays: only the configured rung moves.
+    assert on["fermix_channels"]["telegram"] == {"owner_user_id": "100001"}
+    manifest = json.loads((home / seed.owner_inbox.MANIFEST).read_text())
+    assert manifest["default_delivery_target"] == {"platform": "cli", "chat_id": "cli"}
+    assert seed.owner_inbox.home_problem(str(home)) is None
+    assert "owner inbox: the local cli chat" in capsys.readouterr().out
+
+
+def test_a_seed_without_owner_inbox_cli_puts_the_telegram_target_back(tmp_path, monkeypatch):
+    home = tmp_path / "x-eval"
+    _seed_main(monkeypatch, home, "--owner-inbox-cli")
+    off = _seed_main(monkeypatch, home)
+    assert off["fermix_core"]["jobs"]["default_delivery_target"] == {"platform": "telegram",
+                                                                      "chat_id": "100001"}
+    assert not (home / seed.owner_inbox.MANIFEST).exists()
+    assert "--owner-inbox-cli" in seed.owner_inbox.home_problem(str(home))
+
+
 @pytest.mark.parametrize("flags", [("--provider", "openai", "--model", "gpt-x"),
                                    ("--provider", "ollama", "--model", "brindle-7b",
                                     "--voice", "--voice-engine", "openai_live")])

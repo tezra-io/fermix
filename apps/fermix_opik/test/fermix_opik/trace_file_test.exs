@@ -77,6 +77,64 @@ defmodule FermixOpik.TraceFileTest do
              TraceFile.normalize("agent_event", Map.put(base, "event", "job_run_start"))
   end
 
+  # M106 §5.3: a replayed failure still says whether the run is run again.
+  test "a job_run_error row keeps its retry" do
+    row = %{
+      "ts" => "2026-11-20T07:00:50.000Z",
+      "type" => "agent_event",
+      "event" => "job_run_error",
+      "job_id" => "j",
+      "session_id" => "cron_j_20261120_070000_d4e5f6",
+      "status" => "error",
+      "retry_disposition" => "retry",
+      "retry_attempts" => 2,
+      "retry_at" => "2026-11-20T07:02:50.000000Z"
+    }
+
+    assert {[:fermix, :job, :run_error], _measurements, meta} =
+             TraceFile.normalize("agent_event", row)
+
+    assert {meta.retry_disposition, meta.retry_attempts, meta.retry_at} ==
+             {"retry", 2, "2026-11-20T07:02:50.000000Z"}
+  end
+
+  # M106 §5.4: a replayed failure names its heal, and a heal row replays as
+  # the heal's own event.
+  test "a job_run_error row keeps its heal, and a job_heal row is the heal's event" do
+    failed = %{
+      "ts" => "2026-11-20T07:10:00.000Z",
+      "type" => "agent_event",
+      "event" => "job_run_error",
+      "job_id" => "j",
+      "session_id" => "cron_j_20261120_071000_d4e5f6",
+      "status" => "timeout",
+      "heal" => "joined",
+      "heal_id" => "jhl_0a1b"
+    }
+
+    assert {[:fermix, :job, :run_error], _measurements, meta} =
+             TraceFile.normalize("agent_event", failed)
+
+    assert {meta.heal, meta.heal_id} == {"joined", "jhl_0a1b"}
+
+    heal = %{
+      "ts" => "2026-11-20T07:30:00.000Z",
+      "type" => "agent_event",
+      "event" => "job_heal",
+      "agent" => "scheduled:j",
+      "phase" => "delivered",
+      "heal_id" => "jhl_0a1b",
+      "job_id" => "j",
+      "platform" => "telegram"
+    }
+
+    assert {[:fermix, :job, :heal], %{count: 1}, heal_meta} =
+             TraceFile.normalize("agent_event", heal)
+
+    assert {heal_meta.phase, heal_meta.heal_id, heal_meta.platform} ==
+             {"delivered", "jhl_0a1b", "telegram"}
+  end
+
   test "a job_run_complete row carries its tool failure count" do
     row = %{
       "ts" => "2026-06-02T12:00:00.000Z",

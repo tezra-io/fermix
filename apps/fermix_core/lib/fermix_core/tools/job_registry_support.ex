@@ -496,6 +496,32 @@ defmodule FermixCore.Tools.JobRegistrySupport do
   end
 
   @doc """
+  A job's heal that is not closed (M106 §5.4), as `list_jobs` shows it: its
+  state, whose it is (`job` or `provider`, with the provider), the failure's
+  kind, since when, how many runs it took, and whether the owner was told.
+  Nil for a job with none.
+  """
+  @spec heal_payload(map() | nil) :: map() | nil
+  def heal_payload(nil), do: nil
+
+  def heal_payload(%{subject_kind: kind} = heal) do
+    %{
+      state: heal.state,
+      subject: kind,
+      failure_kind: heal.failure_kind,
+      since: timestamp(heal.opened_at),
+      runs: heal.run_count,
+      owner_told: heal.delivery_status == "delivered"
+    }
+    |> put_heal_provider(heal)
+  end
+
+  defp put_heal_provider(payload, %{subject_kind: "provider", subject_id: provider}),
+    do: Map.put(payload, :provider, provider)
+
+  defp put_heal_provider(payload, _heal), do: payload
+
+  @doc """
   The words a job echo (`list_jobs` first) shows for a job a watcher starts,
   in place of a schedule it does not have, or `nil` for any other job: "runs
   on cues from watcher <name>" (M60 build decision 8), or "runs on cues" for

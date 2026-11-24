@@ -453,8 +453,8 @@ defmodule FermixCore.Memory.Repo.CuesMandateSql do
 
   @doc """
   Sets `job_runs.tools_started_at` to `stamp` unless it is set: the run's
-  first allowed or proposed mandate call, in that call's transaction, and the
-  runner's stamp at a scheduled run's first tool start
+  first allowed or proposed mandate call, in that call's transaction, and a
+  scheduled run's first tool start, stored by its loop before that tool runs
   (`Memory.Repo.mark_job_run_tools_started/3`). The first writer wins.
   """
   @spec mark_tools_started(CuesSql.conn(), String.t(), String.t()) :: :ok | {:error, term()}

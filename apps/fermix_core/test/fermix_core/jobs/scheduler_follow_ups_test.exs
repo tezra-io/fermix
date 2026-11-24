@@ -75,7 +75,7 @@ defmodule FermixCore.Jobs.SchedulerFollowUpsTest do
       receive do
         {:finish, %DateTime{} = now} ->
           attrs = Map.merge(run, %{status: "ok", completed_at: now, updated_at: now})
-          {:ok, _settled} = Repo.settle_job_run(attrs, server: repo)
+          {:ok, _settled} = Repo.settle_job_run(attrs, :ok, server: repo)
           send(notify, {:settled, run.id})
       end
     end

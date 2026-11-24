@@ -263,7 +263,40 @@ defmodule FermixOpik.TraceFile do
 
   defp normalize_agent_event("job_run_error", row) do
     {[:fermix, :job, :run_error], %{count: 1, duration_ms: int(row["duration_ms"])},
-     meta(row, [:agent, :job_id, :run_id, :session_id, :status, :error, :watcher_id, :delivery_id])}
+     meta(row, [
+       :agent,
+       :job_id,
+       :run_id,
+       :session_id,
+       :status,
+       :error,
+       :watcher_id,
+       :delivery_id,
+       :retry_disposition,
+       :retry_attempts,
+       :retry_at,
+       :heal,
+       :heal_id
+     ])}
+  end
+
+  defp normalize_agent_event("job_heal", row) do
+    {[:fermix, :job, :heal], %{count: 1},
+     meta(row, [
+       :agent,
+       :phase,
+       :heal_id,
+       :job_id,
+       :run_id,
+       :subject_kind,
+       :subject_id,
+       :failure_kind,
+       :outcome,
+       :attempts,
+       :dead_letter,
+       :platform,
+       :error
+     ])}
   end
 
   defp normalize_agent_event("realtime_call_start", row) do

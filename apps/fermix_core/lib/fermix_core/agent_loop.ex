@@ -76,6 +76,9 @@ defmodule FermixCore.AgentLoop do
   # replays, so it breaks the prompt cache, and a batch breaks it rarely.
   @superseded_look_bytes 32_000
 
+  # The tag a refused `before_tool` gate throws to `run/1`.
+  @before_tool_refused :agent_loop_before_tool_refused
+
   @typedoc """
   Channel-streaming events emitted through `stream_callback` (see
   docs/design/CHANNEL_STREAMING.md §5.1). The loop emits `:session_started`
@@ -111,6 +114,15 @@ defmodule FermixCore.AgentLoop do
   @type activity_callback :: (activity_event() -> any())
 
   @typedoc """
+  A caller's gate, run in the loop's process before each tool call the loop
+  would run, ahead of its `:tool_start` activity: `:ok` lets the call go on;
+  `{:error, reason}` runs nothing (the call is traced as an unexecuted call,
+  with no activity) and ends the run with `{:error, reason}`. A scheduled job
+  stores its first tool start here, before the tool can act (M106 §5.1).
+  """
+  @type before_tool :: (String.t() -> :ok | {:error, term()})
+
+  @typedoc """
   Route input is ONE shape: `routes` — an ordered `[{route_key, adapter_opts}]`
   list. A one-element list means no failover (the pre-failover behavior); the
   initial `chat/3` fails over across the list for eligible errors
@@ -141,6 +153,7 @@ defmodule FermixCore.AgentLoop do
           loop_detection_warn_threshold: pos_integer(),
           loop_detection_kill_threshold: pos_integer(),
           activity_callback: activity_callback() | nil,
+          before_tool: before_tool() | nil,
           stream_callback: stream_callback() | nil,
           context: map(),
           capability_registry: GenServer.server(),
@@ -161,7 +174,8 @@ defmodule FermixCore.AgentLoop do
           total_tokens: non_neg_integer(),
           context_tokens: non_neg_integer(),
           tool_failures: non_neg_integer(),
-          outside_sources: MapSet.t()
+          outside_sources: MapSet.t(),
+          provider: atom()
         }
 
   @spec run(loop_opts()) :: {:ok, loop_result()} | {:error, term()}
@@ -170,6 +184,8 @@ defmodule FermixCore.AgentLoop do
 
     try do
       run_with_store(opts, store)
+    catch
+      :throw, {@before_tool_refused, reason} -> {:error, reason}
     after
       ToolResultStore.delete(store)
     end
@@ -261,6 +277,7 @@ defmodule FermixCore.AgentLoop do
       task: task_excerpt(Keyword.fetch!(opts, :messages)),
       loop_detector: loop_detector_state(opts),
       activity_callback: Keyword.get(opts, :activity_callback),
+      before_tool: Keyword.get(opts, :before_tool),
       stream_callback: Keyword.get(opts, :stream_callback),
       retry_delay_fn: Keyword.get(opts, :retry_delay_fn, &Process.sleep/1)
     }
@@ -689,7 +706,9 @@ defmodule FermixCore.AgentLoop do
       total_tokens: state.total_tokens,
       context_tokens: state.context_tokens,
       tool_failures: state.tool_failures,
-      outside_sources: state.context.outside_sources
+      outside_sources: state.context.outside_sources,
+      # The route that answered, which failover may have moved off the first.
+      provider: state.route_key.provider
     }
   end
 
@@ -1367,6 +1386,7 @@ defmodule FermixCore.AgentLoop do
   defp terminal_capability?(_capability), do: false
 
   defp run_tool_call(%{name: name, arguments: arguments_raw}, state) do
+    :ok = gate_tool(name, arguments_raw, state)
     emit_activity(state, {:tool_start, name})
 
     result =
@@ -1377,6 +1397,29 @@ defmodule FermixCore.AgentLoop do
 
     emit_activity(state, {:tool_finish, name, %{status: result.status}})
     result
+  end
+
+  # The caller's `before_tool` gate, ahead of the call's start. A refusal runs
+  # nothing: the call is the model's one unexecuted call (`trace_unexecuted/4`)
+  # and the run ends with the gate's reason, thrown to `run/1` so no later call
+  # of the batch runs either.
+  defp gate_tool(_name, _arguments, %{before_tool: nil}), do: :ok
+
+  defp gate_tool(name, arguments, %{before_tool: gate} = state) when is_function(gate, 1) do
+    case gate.(name) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        trace_unexecuted(
+          name,
+          arguments,
+          "Error: Tool '#{name}' was not run: #{inspect(reason)}",
+          state
+        )
+
+        throw({@before_tool_refused, reason})
+    end
   end
 
   # The dispatch chain returns a uniform `%{output, images}` so an image-producing

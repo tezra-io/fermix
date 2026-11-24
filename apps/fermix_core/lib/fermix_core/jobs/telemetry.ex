@@ -11,6 +11,12 @@ defmodule FermixCore.Jobs.Telemetry do
 
   The events also route into `FermixCore.Trace` as `agent_event` rows, so
   scheduled runs are visible in the JSONL trace stream with or without Opik.
+
+  A heal (M106 §5.4) has one point event, `[:fermix, :job, :heal]`, with its
+  `phase`: `opened`, `joined` and `closed` from a run's settle, `delivered` and
+  `delivery_failed` from its heal run, and `closed` again when the Scheduler
+  expires one. Each carries `heal_id`, and `job_id` and `run_id` when a run
+  moved it.
   """
 
   alias FermixCore.Telemetry
@@ -18,6 +24,8 @@ defmodule FermixCore.Jobs.Telemetry do
   @run_start_event [:fermix, :job, :run_start]
   @run_complete_event [:fermix, :job, :run_complete]
   @run_error_event [:fermix, :job, :run_error]
+  @heal_event [:fermix, :job, :heal]
+  @heal_phases ~w(opened joined delivered delivery_failed closed)
 
   @trace_event_definitions [
     %{
@@ -35,6 +43,12 @@ defmodule FermixCore.Jobs.Telemetry do
     %{
       event: @run_error_event,
       trace_event: "job_run_error",
+      trace_type: :agent_event,
+      agent_field: :agent
+    },
+    %{
+      event: @heal_event,
+      trace_event: "job_heal",
       trace_type: :agent_event,
       agent_field: :agent
     }
@@ -75,16 +89,98 @@ defmodule FermixCore.Jobs.Telemetry do
     execute(@run_complete_event, measurements, metadata)
   end
 
-  @spec run_error(map(), map(), String.t(), term()) :: :ok
-  def run_error(job, run, status, error) when is_binary(status) do
+  @doc """
+  A run's failure. A scheduled run's settle passes its settlement (M106
+  §5.3), which adds `retry_disposition` (`"none"`, `"retry"` or
+  `"exhausted"`), `retry_attempts` and, for a retry with a time, `retry_at`,
+  and what the heals made of it (§5.4): `heal` (`"none"`, `"opened"`,
+  `"joined"`, `"quiet"` or `"out_of_scope"`) and, for one opened or joined,
+  `heal_id`; a cue run's passes none.
+  """
+  @spec run_error(map(), map(), String.t(), term(), map() | nil) :: :ok
+  def run_error(job, run, status, error, settlement \\ nil) when is_binary(status) do
     metadata =
       job
       |> base_metadata(run)
       |> Map.put(:status, status)
       |> Map.put(:error, format_error(error))
+      |> Map.merge(retry_metadata(settlement))
+      |> Map.merge(heal_disposition_metadata(settlement))
 
     execute(@run_error_event, %{count: 1, duration_ms: run_duration_ms(run)}, metadata)
   end
+
+  @doc """
+  The heal events a scheduled run's settle caused: `opened` or `joined` for a
+  failure a heal took, and `closed` (outcome `healed`) for each heal an ok run
+  closed. A failure retried, kept quiet or out of scope causes none; its
+  `run_error` says which.
+  """
+  @spec heal_settled(map(), map(), map()) :: :ok
+  def heal_settled(job, run, %{heal: heal, healed: healed}) when is_list(healed) do
+    ids = %{job_id: job.id, run_id: run.id}
+
+    case heal do
+      {phase, heal_id} when phase in [:opened, :joined] ->
+        heal(
+          Atom.to_string(phase),
+          Map.merge(ids, %{heal_id: heal_id, failure_kind: run.failure_kind})
+        )
+
+      _none_quiet_or_out_of_scope ->
+        :ok
+    end
+
+    Enum.each(healed, &heal("closed", Map.merge(ids, %{heal_id: &1, outcome: "healed"})))
+  end
+
+  @doc """
+  One phase of a heal's life (`opened`, `joined`, `delivered`,
+  `delivery_failed` or `closed`), with its `heal_id` and whatever of
+  `job_id`, `run_id`, `subject_kind`, `subject_id`, `failure_kind`, `outcome`,
+  `attempts`, `dead_letter`, `platform` and `error` the phase knows.
+  """
+  @spec heal(String.t(), map()) :: :ok
+  def heal(phase, %{heal_id: heal_id} = facts)
+      when phase in @heal_phases and is_binary(heal_id) do
+    job_id = Map.get(facts, :job_id)
+
+    metadata =
+      facts
+      |> Map.take(
+        ~w(job_id run_id subject_kind subject_id failure_kind outcome attempts dead_letter platform)a
+      )
+      |> Map.merge(%{
+        agent: if(job_id, do: "scheduled:#{job_id}", else: "job_heal"),
+        phase: phase,
+        heal_id: heal_id,
+        error: facts |> Map.get(:error) |> heal_error()
+      })
+
+    execute(@heal_event, %{count: 1}, metadata)
+  end
+
+  defp heal_error(nil), do: nil
+  defp heal_error(error), do: error |> format_error() |> String.slice(0, 500)
+
+  defp retry_metadata(nil), do: %{}
+
+  defp retry_metadata(%{disposition: disposition, attempts: attempts, retry_at: retry_at})
+       when disposition in [:none, :retry, :exhausted] do
+    %{
+      retry_disposition: Atom.to_string(disposition),
+      retry_attempts: attempts,
+      retry_at: retry_at && DateTime.to_iso8601(retry_at)
+    }
+  end
+
+  defp heal_disposition_metadata(%{heal: {phase, heal_id}}) when phase in [:opened, :joined],
+    do: %{heal: Atom.to_string(phase), heal_id: heal_id}
+
+  defp heal_disposition_metadata(%{heal: heal}) when heal in [:none, :quiet, :out_of_scope],
+    do: %{heal: Atom.to_string(heal)}
+
+  defp heal_disposition_metadata(_none), do: %{}
 
   # A cue run (trigger "cue", M60 §9.6) also carries the delivery it held (the
   # run row's `cue_delivery_id`) and its watcher (`watcher_id`, which the runner

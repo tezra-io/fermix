@@ -14,6 +14,7 @@ defmodule FermixCore.Jobs.RunnerTest do
   alias FermixCore.Jobs.RunnerSupervisor
   alias FermixCore.Memory.Repo
   alias FermixCore.Net.Egress
+  alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Tools.UpdateJob
 
   # How long to wait for a runner's own exit. It is an arrival bound, so a run
@@ -555,24 +556,43 @@ defmodule FermixCore.Jobs.RunnerTest do
     def supports_streaming?, do: false
   end
 
-  defmodule RefuseToolStampRepo do
+  defmodule ToolThenRateLimitAdapter do
     @moduledoc false
-    # A transparent proxy in front of the real Repo that refuses the stamp of a
-    # run's first tool start, as a store that cannot write would, and forwards
-    # every other request.
-    use GenServer
+    # The model asks for one tool; once it ran, the provider refuses the next
+    # call with a rate limit: a provider failure after a tool started.
+    @behaviour FermixCore.Providers.Adapter
 
-    def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
-
-    @impl true
-    def init(opts), do: {:ok, %{real: Keyword.fetch!(opts, :real)}}
+    alias FermixCore.Providers.Error, as: ProviderError
 
     @impl true
-    def handle_call({:mark_job_run_tools_started, _run_id, _at}, _from, state),
-      do: {:reply, {:error, :injected_fault}, state}
+    def chat(_messages, _capabilities, _opts) do
+      {:ok,
+       %{
+         content: "",
+         tool_calls: [%{id: "fc_1", call_id: "call_1", name: "stage3_echo", arguments: "{}"}],
+         usage: %{prompt_tokens: 1, completion_tokens: 0, total_tokens: 1},
+         model: "mock",
+         provider_state: %{}
+       }}
+    end
 
-    def handle_call(request, _from, state),
-      do: {:reply, GenServer.call(state.real, request), state}
+    @impl true
+    def continue(_provider_state, _tool_results, _opts),
+      do:
+        {:error,
+         ProviderError.api(:openai, :responses, 429, %{"error" => %{"message" => "Slow down."}})}
+
+    @impl true
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl true
+    def parse_tool_calls(_response), do: []
+
+    @impl true
+    def parse_response(response), do: response
+
+    @impl true
+    def supports_streaming?, do: false
   end
 
   setup do
@@ -3285,40 +3305,6 @@ defmodule FermixCore.Jobs.RunnerTest do
       assert failed.tool_timeline == []
     end
 
-    test "a first tool start the store refuses is logged, and the run's settle carries it", %{
-      repo: repo,
-      capability_registry: capability_registry,
-      output_base_dir: output_base_dir
-    } do
-      :ok = CapabilityRegistry.register(capability_registry, test_capability("stage3_echo"))
-      proxy = start_supervised!({RefuseToolStampRepo, real: repo})
-
-      assert {:ok, {job, run}} =
-               create_claimed_job(repo,
-                 name: "Refused stamp",
-                 task_prompt: "Use one tool.",
-                 allowed_tools: ["stage3_echo"]
-               )
-
-      log =
-        capture_log(fn ->
-          assert_runner_exits_normally(job, run,
-            repo: proxy,
-            capability_registry: capability_registry,
-            output_base_dir: output_base_dir,
-            script: [%{tool_calls: [scripted_call("call_1", "stage3_echo")]}, %{content: "Done."}]
-          )
-        end)
-
-      assert log =~ "Scheduled job run #{run.id}: its first tool start was not stored"
-      assert log =~ ":injected_fault"
-
-      assert {:ok, stored} = Repo.get_job_run(run.id, server: repo)
-      assert stored.status == "ok"
-      assert %DateTime{} = stored.tools_started_at
-      assert [%{"name" => "stage3_echo", "status" => "ok"}] = stored.tool_timeline
-    end
-
     # A whole-loop retry starts only before any tool ran, so the retried
     # attempt has no call to count: the timeline is the last attempt's.
     test "a run retried after a lost connection stores only the last attempt's calls", %{
@@ -3390,9 +3376,351 @@ defmodule FermixCore.Jobs.RunnerTest do
     end
   end
 
+  # M106 §5.3: a run that failed before its first tool, on a failure waiting can
+  # clear (the provider's), is retried quietly. A failure of the owner's job
+  # that is not retried goes to a heal (§5.4), which tells the owner in their
+  # inbox: the run sends no line of its own. A guest's job keeps its line.
+  describe "a failed run's retry" do
+    test "a provider failure before any tool is retried 30 s on and sends nothing", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      {job, run} = claim_with_future_next_run!(repo, name: "Harbour tide table")
+      {:ok, counter} = start_counter()
+
+      run_transient_runner(job, run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir,
+        delivery_adapter: RecordingDelivery,
+        delivery_opts: [test_pid: self()],
+        adapter_opts: [counter: counter, fail_with: rate_limited()]
+      )
+
+      refute_received {:delivery_send, _target, _text, _opts}
+
+      assert {:ok, failed} = Repo.get_job_run(run.id, server: repo)
+      assert failed.status == "error"
+      assert failed.failure_kind == "provider_rate_limit"
+      assert failed.delivery_status == "skipped"
+
+      assert {:ok, %{attempts: 1, retry_at: retry_at}} = Repo.get_job_retry(job.id, server: repo)
+      assert DateTime.diff(retry_at, failed.completed_at, :millisecond) == 30_000
+
+      assert {:ok, %{last_status: "error"}} = Registry.get_job(job.id, repo: repo)
+
+      assert {:ok, %{last_status: nil}} =
+               Registry.get_memory_source(job.memory_source_id, repo: repo)
+    end
+
+    test "a provider failure after a tool started is not retried: its provider's heal takes it",
+         %{
+           repo: repo,
+           capability_registry: capability_registry,
+           output_base_dir: output_base_dir
+         } do
+      :ok = CapabilityRegistry.register(capability_registry, test_capability("stage3_echo"))
+
+      {job, run} =
+        claim_with_future_next_run!(repo, name: "Tide after tool", allowed_tools: ["stage3_echo"])
+
+      Process.flag(:trap_exit, true)
+
+      {:ok, pid} =
+        Runner.start_link(
+          repo: repo,
+          job: job,
+          run: run,
+          notify: self(),
+          capability_registry: capability_registry,
+          adapter: ToolThenRateLimitAdapter,
+          output_base_dir: output_base_dir,
+          network_readiness_enabled: false,
+          delivery_adapter: RecordingDelivery,
+          delivery_opts: [test_pid: self()]
+        )
+
+      assert_receive {:EXIT, ^pid, :normal}, @runner_exit_ms
+      refute_received {:delivery_send, _target, _text, _opts}
+
+      assert {:ok, %{tools_started_at: %DateTime{}, delivery_status: "skipped"}} =
+               Repo.get_job_run(run.id, server: repo)
+
+      assert {:ok, nil} = Repo.get_job_retry(job.id, server: repo)
+
+      assert [
+               %{
+                 subject_kind: "provider",
+                 subject_id: "openai",
+                 failure_kind: "provider_rate_limit"
+               } = heal
+             ] =
+               open_heals(repo)
+
+      assert heal.failure_text == TurnRunner.error_reply(rate_limited(), surface: :job)
+
+      assert {:ok, %{last_status: "error"}} =
+               Registry.get_memory_source(job.memory_source_id, repo: repo)
+    end
+
+    test "a failure waiting cannot clear is not retried: a skill that is gone, the time limit", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      {:ok, skill_registry} = SkillRegistryStub.start_link(%{})
+
+      {gone, gone_run} =
+        claim_with_future_next_run!(repo, name: "Skill gone", skill_name: "harbour_tides")
+
+      assert_runner_exits_normally(gone, gone_run,
+        repo: repo,
+        capability_registry: capability_registry,
+        skill_registry: skill_registry,
+        output_base_dir: output_base_dir,
+        delivery_adapter: RecordingDelivery,
+        delivery_opts: [test_pid: self()],
+        script: [%{content: "unreachable"}]
+      )
+
+      {slow, slow_run} = claim_with_future_next_run!(repo, name: "Too slow")
+
+      assert_runner_exits_normally(slow, slow_run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir,
+        default_timeout_ms: 20,
+        adapter_opts: [sleep_ms: @adapter_hang_ms],
+        delivery_adapter: RecordingDelivery,
+        delivery_opts: [test_pid: self()],
+        script: [%{content: "too late"}]
+      )
+
+      refute_received {:delivery_send, _target, _text, _opts}
+
+      for job <- [gone, slow] do
+        assert {job.name, Repo.get_job_retry(job.id, server: repo)} == {job.name, {:ok, nil}}
+      end
+
+      heals = Map.new(open_heals(repo), &{&1.subject_id, &1})
+      assert %{failure_kind: "unknown_skill", subject_kind: "job"} = heals[gone.id]
+
+      assert %{failure_kind: "time_limit", failure_text: "wall-clock timeout after 20ms"} =
+               heals[slow.id]
+
+      for run <- [gone_run, slow_run] do
+        assert {:ok, %{delivery_status: "skipped"}} = Repo.get_job_run(run.id, server: repo)
+      end
+    end
+
+    test "a guest's job keeps its failure line and opens no heal", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      {:ok, skill_registry} = SkillRegistryStub.start_link(%{})
+
+      {job, run} =
+        claim_with_future_next_run!(repo,
+          name: "Guest skill gone",
+          skill_name: "harbour_tides",
+          created_by_trust: "guest"
+        )
+
+      assert_runner_exits_normally(job, run,
+        repo: repo,
+        capability_registry: capability_registry,
+        skill_registry: skill_registry,
+        output_base_dir: output_base_dir,
+        delivery_adapter: RecordingDelivery,
+        delivery_opts: [test_pid: self()],
+        script: [%{content: "unreachable"}]
+      )
+
+      assert_receive {:delivery_send, "123", text, _opts}
+      assert text =~ ~s(Scheduled job "Guest skill gone" finished with error.)
+      assert {:ok, %{delivery_status: "sent"}} = Repo.get_job_run(run.id, server: repo)
+      assert open_heals(repo) == []
+    end
+
+    test "an ok run closes its job's heal and the heal of the provider it ran on", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      {job, first} = claim_with_future_next_run!(repo, name: "Tide healed")
+      job_heal = settle_failed!(repo, first, "time_limit", nil)
+
+      {_other, other_run} = claim_with_future_next_run!(repo, name: "Tide on mock")
+      provider_heal = settle_failed!(repo, other_run, "provider_quota", "mock")
+
+      assert {:ok, %{subject_kind: "provider"}} =
+               Repo.job_heals_call({:get, provider_heal}, server: repo)
+
+      {:ok, {_job, run}} =
+        Repo.claim_job_now(
+          job.id,
+          %{state: "running", updated_at: DateTime.utc_now()},
+          claim_run_attrs(job, DateTime.utc_now(), "manual"),
+          server: repo
+        )
+
+      assert_runner_exits_normally(job, run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir,
+        delivery_adapter: RecordingDelivery,
+        delivery_opts: [test_pid: self()],
+        script: [%{content: "Tides fetched."}]
+      )
+
+      for id <- [job_heal, provider_heal] do
+        assert {:ok, %{state: "closed", outcome: "healed"}} =
+                 Repo.job_heals_call({:get, id}, server: repo)
+      end
+    end
+
+    test "the fourth provider failure in a row is exhausted: a heal on its provider, no line", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      {job, first} = claim_with_future_next_run!(repo, name: "Tide exhausted")
+      run = retried_three_times!(repo, job, first)
+      assert run.trigger == "retry"
+      {:ok, counter} = start_counter()
+
+      run_transient_runner(job, run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir,
+        delivery_adapter: RecordingDelivery,
+        delivery_opts: [test_pid: self()],
+        adapter_opts: [counter: counter, fail_with: rate_limited()]
+      )
+
+      refute_received {:delivery_send, _target, _text, _opts}
+      assert {:ok, nil} = Repo.get_job_retry(job.id, server: repo)
+      assert {:ok, %{delivery_status: "skipped"}} = Repo.get_job_run(run.id, server: repo)
+      assert [%{subject_kind: "provider", subject_id: "openai", run_count: 1}] = open_heals(repo)
+
+      assert {:ok, %{last_status: "error"}} =
+               Registry.get_memory_source(job.memory_source_id, repo: repo)
+    end
+  end
+
+  defp rate_limited do
+    ProviderError.api(:openai, :responses, 429, %{
+      "error" => %{"message" => "Rate limit reached."}
+    })
+  end
+
+  # A claimed run of a job delivering to a chat, whose next scheduled run is a
+  # day away, so a retry 30 s on comes before it whatever the wall clock says.
+  defp claim_with_future_next_run!(repo, attrs) do
+    now = DateTime.utc_now()
+
+    {:ok, job} =
+      Registry.create_job(
+        Map.merge(
+          %{
+            schedule: "every 15 minutes",
+            task_prompt: "Fetch the tides.",
+            created_by_trust: "operator",
+            delivery_mode: "channel",
+            delivery_target: %{"platform" => "telegram", "chat_id" => "123"}
+          },
+          Map.new(attrs)
+        ),
+        repo: repo,
+        now: now,
+        scheduler: nil
+      )
+
+    patch = %{state: "running", next_run_at: DateTime.add(now, 86_400, :second), updated_at: now}
+
+    {:ok, {claimed, run}} =
+      Repo.claim_job_now(job.id, patch, claim_run_attrs(job, now, "manual"), server: repo)
+
+    {claimed, run}
+  end
+
+  # Three failures of `first`'s job on its provider, each before any tool, and
+  # its fourth run claimed from the retry the third set.
+  defp retried_three_times!(repo, job, first) do
+    Enum.reduce(1..3, first, fn _attempt, run ->
+      failed_at = Map.fetch!(run, :claimed_at)
+
+      attrs =
+        Map.merge(run, %{
+          status: "error",
+          error: "429",
+          failure_kind: "provider_rate_limit",
+          completed_at: failed_at,
+          updated_at: failed_at,
+          heal_facts: %{failure_text: "OpenAI rate-limited this request.", provider: "openai"}
+        })
+
+      {:ok, {_run, _job, %{disposition: :retry, retry_at: retry_at}}} =
+        Repo.settle_job_run(attrs, {:failed, :provider}, server: repo)
+
+      {:ok, {_job, next}} =
+        Repo.claim_retry_job(
+          job.id,
+          %{state: "running", updated_at: retry_at},
+          claim_run_attrs(job, retry_at, "retry"),
+          retry_at,
+          server: repo
+        )
+
+      next
+    end)
+  end
+
+  # A failure of `run` settled as the runner's would be, its heal opened.
+  defp settle_failed!(repo, run, kind, provider) do
+    now = DateTime.utc_now()
+
+    attrs =
+      Map.merge(run, %{
+        status: "error",
+        error: "the run failed",
+        failure_kind: kind,
+        completed_at: now,
+        updated_at: now,
+        heal_facts: %{failure_text: "The run failed.", provider: provider}
+      })
+
+    {:ok, {_run, _job, %{heal: {:opened, id}}}} =
+      Repo.settle_job_run(attrs, {:failed, :other}, server: repo)
+
+    id
+  end
+
+  defp open_heals(repo) do
+    {:ok, heals} = Repo.job_heals_call(:open_heals, server: repo)
+    heals
+  end
+
+  defp claim_run_attrs(job, now, trigger) do
+    %{
+      id: "run_#{System.unique_integer([:positive])}",
+      job_id: job.id,
+      session_id: "cron_#{job.id}_#{System.unique_integer([:positive])}",
+      trigger: trigger,
+      status: "queued",
+      claimed_at: now,
+      delivery_status: "none",
+      created_at: now,
+      updated_at: now
+    }
+  end
+
   # A failed run's delivered text leads with a sentence the owner can act on;
   # the raw reason follows as detail, and the ledger keeps the machine-readable
-  # reason exactly as before.
+  # reason exactly as before. Only a guest's job still gets the line (M106
+  # §5.4): the owner's go to a heal.
   describe "failure delivery text" do
     test "an error run leads with the job sentence and keeps the raw reason as detail", %{
       repo: repo,
@@ -3404,6 +3732,7 @@ defmodule FermixCore.Jobs.RunnerTest do
       assert {:ok, {job, run}} =
                create_claimed_job(repo,
                  name: "Overflow Check",
+                 created_by_trust: "guest",
                  task_prompt: "Read every log.",
                  delivery_mode: "channel",
                  delivery_target: %{"platform" => "telegram", "chat_id" => "123"}
@@ -3453,6 +3782,7 @@ defmodule FermixCore.Jobs.RunnerTest do
       assert {:ok, {job, run}} =
                create_claimed_job(repo,
                  name: "Timeout Delivery Check",
+                 created_by_trust: "guest",
                  task_prompt: "This adapter will stop responding.",
                  delivery_mode: "channel",
                  delivery_target: %{"platform" => "telegram", "chat_id" => "123"}

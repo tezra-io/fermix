@@ -184,6 +184,7 @@ defmodule FermixCore.Companion.OriginBackfillTest do
     brief = job!(conn, "Daily brief")
     scheduled = run!(conn, brief, "schedule", snapshot_name: "Morning brief")
     manual = run!(conn, brief, "manual")
+    retried = run!(conn, brief, "retry")
 
     inbox = watcher!(conn, "inbox-watch")
     cue = cue_run!(conn, inbox)
@@ -193,17 +194,20 @@ defmodule FermixCore.Companion.OriginBackfillTest do
 
     scheduled_seq = sent!(repo, "job:#{scheduled}")
     manual_seq = sent!(repo, "job:#{manual}")
+    retried_seq = sent!(repo, "job:#{retried}")
     cue_seq = sent!(repo, "job:#{cue}")
     picture_seq = sent!(repo, "job:#{cue}:part-1", %{kind: "media", content: "a chart"})
     follow_up_seq = sent!(repo, "job:#{follow_up}")
 
-    assert {:ok, %{filled: 5, left: 0}} = backfill(repo)
+    assert {:ok, %{filled: 6, left: 0}} = backfill(repo)
 
     metadata = page_metadata(repo)
     # The job's name as the run recorded it, not as it reads now.
     assert metadata[scheduled_seq] == %{"origin" => origin("job", "Morning brief")}
     # A run that recorded none: the job's name now.
     assert metadata[manual_seq] == %{"origin" => origin("job", "Daily brief")}
+    # A run a retry started (M106 §5.3) names its job, as its first run did.
+    assert metadata[retried_seq] == %{"origin" => origin("job", "Daily brief")}
     # The watcher's name, never its task job's.
     assert metadata[cue_seq] == %{"origin" => origin("cue", "inbox-watch")}
     assert metadata[picture_seq] == %{"origin" => origin("cue", "inbox-watch")}

@@ -7,7 +7,8 @@ defmodule FermixCore.Jobs.TelemetryTest do
     events = [
       [:fermix, :job, :run_start],
       [:fermix, :job, :run_complete],
-      [:fermix, :job, :run_error]
+      [:fermix, :job, :run_error],
+      [:fermix, :job, :heal]
     ]
 
     handler = "job-tel-test-#{System.unique_integer([:positive])}"
@@ -128,6 +129,90 @@ defmodule FermixCore.Jobs.TelemetryTest do
     assert_receive {:job_event, [:fermix, :job, :run_error], %{count: 1}, metadata}
     assert metadata.status == "timeout"
     assert metadata.error == "loop exceeded"
+    refute Map.has_key?(metadata, :retry_disposition)
+  end
+
+  # M106 §5.3: a scheduled run's failure says whether it runs again.
+  test "run_error carries a scheduled run's retry", %{job: job, run: run} do
+    retry = %{disposition: :retry, attempts: 2, retry_at: ~U[2026-11-20 07:02:50.000000Z]}
+    JobTelemetry.run_error(job, run, "error", "rate limited", retry)
+
+    assert_receive {:job_event, [:fermix, :job, :run_error], %{count: 1}, metadata}
+    assert metadata.retry_disposition == "retry"
+    assert metadata.retry_attempts == 2
+    assert metadata.retry_at == "2026-11-20T07:02:50.000000Z"
+
+    JobTelemetry.run_error(job, run, "error", "auth", %{
+      disposition: :none,
+      attempts: 0,
+      retry_at: nil
+    })
+
+    assert_receive {:job_event, [:fermix, :job, :run_error], %{count: 1}, none}
+    assert {none.retry_disposition, none.retry_attempts} == {"none", 0}
+    refute Map.has_key?(none, :retry_at)
+  end
+
+  # M106 §5.4: what a heal made of a failure rides on its run_error, and each
+  # phase of the heal is one event of its own with the heal's id.
+  test "run_error names the heal that took a failure, or says none did", %{job: job, run: run} do
+    retry = %{disposition: :none, attempts: 0, retry_at: nil}
+
+    JobTelemetry.run_error(
+      job,
+      run,
+      "timeout",
+      "wall-clock",
+      Map.put(retry, :heal, {:opened, "jhl_1"})
+    )
+
+    assert_receive {:job_event, [:fermix, :job, :run_error], _measurements, opened}
+    assert {opened.heal, opened.heal_id} == {"opened", "jhl_1"}
+
+    JobTelemetry.run_error(job, run, "error", "auth", Map.put(retry, :heal, :out_of_scope))
+    assert_receive {:job_event, [:fermix, :job, :run_error], _measurements, guest}
+    assert guest.heal == "out_of_scope"
+    refute Map.has_key?(guest, :heal_id)
+  end
+
+  test "heal_settled emits the heal a settle opened or joined, and each it closed", %{
+    job: job,
+    run: run
+  } do
+    run = Map.put(run, :failure_kind, "time_limit")
+    JobTelemetry.heal_settled(job, run, %{heal: {:joined, "jhl_2"}, healed: []})
+
+    assert_receive {:job_event, [:fermix, :job, :heal], %{count: 1}, joined}
+
+    assert %{phase: "joined", heal_id: "jhl_2", job_id: "job-7", run_id: "run_abc"} = joined
+    assert joined.failure_kind == "time_limit"
+    assert joined.agent == "scheduled:job-7"
+
+    JobTelemetry.heal_settled(job, run, %{heal: :none, healed: ["jhl_3", "jhl_4"]})
+
+    for id <- ["jhl_3", "jhl_4"] do
+      assert_receive {:job_event, [:fermix, :job, :heal], _measurements,
+                      %{phase: "closed", heal_id: ^id, outcome: "healed"}}
+    end
+
+    JobTelemetry.heal_settled(job, run, %{heal: :quiet, healed: []})
+    refute_received {:job_event, [:fermix, :job, :heal], _measurements, _metadata}
+  end
+
+  test "a heal's delivery failure carries its bounded error and no job when it has none" do
+    JobTelemetry.heal("delivery_failed", %{
+      heal_id: "jhl_5",
+      subject_kind: "provider",
+      subject_id: "openai",
+      attempts: 3,
+      dead_letter: true,
+      error: String.duplicate("x", 900)
+    })
+
+    assert_receive {:job_event, [:fermix, :job, :heal], _measurements, failed}
+    assert %{phase: "delivery_failed", agent: "job_heal", dead_letter: true, attempts: 3} = failed
+    assert String.length(failed.error) == 500
+    refute Map.has_key?(failed, :job_id)
   end
 
   test "content is attached only when capture is enabled", %{job: job, run: run} do

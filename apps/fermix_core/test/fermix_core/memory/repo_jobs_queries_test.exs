@@ -161,14 +161,14 @@ defmodule FermixCore.Memory.RepoJobsQueriesTest do
     end
   end
 
-  describe "settle_job_run/2" do
+  describe "settle_job_run/3" do
     test "writes the final run row and releases a running job in one call", %{repo: repo} do
       job = create_job!(repo, "job_settle")
       job = put_job!(repo, job, %{state: "running", next_run_at: ~U[2026-08-02 11:00:00Z]})
       run = create_run!(repo, job.id, "run_settle", "running", ~U[2026-08-02 10:00:00Z])
 
-      assert {:ok, {settled, released}} =
-               Repo.settle_job_run(final_attrs(run, "ok", nil), server: repo)
+      assert {:ok, {settled, released, _settlement}} =
+               Repo.settle_job_run(final_attrs(run, "ok", nil), :ok, server: repo)
 
       assert settled.id == "run_settle"
       assert settled.status == "ok"
@@ -190,8 +190,10 @@ defmodule FermixCore.Memory.RepoJobsQueriesTest do
       job = put_job!(repo, job, %{state: "running"})
       run = create_run!(repo, job.id, "run_timeout", "running", ~U[2026-08-02 10:00:00Z])
 
-      assert {:ok, {settled, released}} =
-               Repo.settle_job_run(final_attrs(run, "timeout", "inactivity timeout"),
+      assert {:ok, {settled, released, _settlement}} =
+               Repo.settle_job_run(
+                 final_attrs(run, "timeout", "inactivity timeout"),
+                 {:failed, :other},
                  server: repo
                )
 
@@ -207,8 +209,8 @@ defmodule FermixCore.Memory.RepoJobsQueriesTest do
       job = put_job!(repo, job, %{state: "paused", enabled?: false})
       run = create_run!(repo, job.id, "run_paused", "running", ~U[2026-08-02 10:00:00Z])
 
-      assert {:ok, {_settled, released}} =
-               Repo.settle_job_run(final_attrs(run, "ok", nil), server: repo)
+      assert {:ok, {_settled, released, _settlement}} =
+               Repo.settle_job_run(final_attrs(run, "ok", nil), :ok, server: repo)
 
       assert released.state == "paused"
       assert released.enabled? == false
@@ -227,8 +229,8 @@ defmodule FermixCore.Memory.RepoJobsQueriesTest do
       job = put_job!(repo, job, %{state: "running", next_run_at: nil})
       run = create_run!(repo, job.id, "run_once", "queued", ~U[2026-08-02 10:00:00Z])
 
-      assert {:ok, {_settled, released}} =
-               Repo.settle_job_run(final_attrs(run, "ok", nil), server: repo)
+      assert {:ok, {_settled, released, _settlement}} =
+               Repo.settle_job_run(final_attrs(run, "ok", nil), :ok, server: repo)
 
       assert released.state == "completed"
       assert released.enabled? == false
@@ -248,8 +250,8 @@ defmodule FermixCore.Memory.RepoJobsQueriesTest do
       job = put_job!(repo, job, %{state: "running", next_run_at: ~U[2026-08-03 09:00:00Z]})
       run = create_run!(repo, job.id, "run_edited_once", "running", ~U[2026-08-02 10:00:00Z])
 
-      assert {:ok, {_settled, released}} =
-               Repo.settle_job_run(final_attrs(run, "ok", nil), server: repo)
+      assert {:ok, {_settled, released, _settlement}} =
+               Repo.settle_job_run(final_attrs(run, "ok", nil), :ok, server: repo)
 
       assert released.state == "scheduled"
       assert released.enabled? == true
@@ -263,7 +265,7 @@ defmodule FermixCore.Memory.RepoJobsQueriesTest do
       run = create_run!(repo, job.id, "run_final", "ok", ~U[2026-08-02 10:00:00Z], "sent")
 
       assert {:error, :run_not_active} =
-               Repo.settle_job_run(final_attrs(run, "error", "reaped"), server: repo)
+               Repo.settle_job_run(final_attrs(run, "error", "reaped"), :scheduler, server: repo)
 
       assert {:ok, ^run} = Repo.get_job_run("run_final", server: repo)
       assert {:ok, ^job} = Repo.get_scheduled_job(job.id, server: repo)
@@ -280,12 +282,14 @@ defmodule FermixCore.Memory.RepoJobsQueriesTest do
         trigger: "schedule",
         status: "error",
         error: "reaped",
+        failure_kind: "reaped",
         completed_at: @completed_at,
         created_at: @completed_at,
-        updated_at: @completed_at
+        updated_at: @completed_at,
+        heal_facts: %{failure_text: "The run was found with nothing running it.", provider: nil}
       }
 
-      assert {:error, :run_not_active} = Repo.settle_job_run(attrs, server: repo)
+      assert {:error, :run_not_active} = Repo.settle_job_run(attrs, :scheduler, server: repo)
       assert {:error, :not_found} = Repo.get_job_run("run_missing", server: repo)
       assert {:ok, ^job} = Repo.get_scheduled_job(job.id, server: repo)
     end
@@ -296,12 +300,20 @@ defmodule FermixCore.Memory.RepoJobsQueriesTest do
     updated
   end
 
+  # A failed run carries its kind and what a heal is told of it (M106 §5.4).
   defp final_attrs(run, status, error) do
-    Map.merge(run, %{
+    run
+    |> Map.merge(%{
       status: status,
       error: error,
       completed_at: @completed_at,
       updated_at: @completed_at
     })
+    |> Map.merge(failure_facts(status, error))
   end
+
+  defp failure_facts("ok", _error), do: %{}
+
+  defp failure_facts(_status, error),
+    do: %{failure_kind: "other", heal_facts: %{failure_text: error, provider: nil}}
 end

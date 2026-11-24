@@ -419,6 +419,31 @@ def test_the_default_sweep_is_the_ranking_task_set_and_nothing_else():
         suite.name for suite, _scn, _case in parked}
 
 
+def test_a_home_whose_inbox_is_not_the_local_chat_holds_the_heal_tasks_out(tmp_path, capsys):
+    # M106: on the default eval inbox (Telegram, no bot token) a heal is never sent, so
+    # its tasks are NOT EVALUATED there, never zeros; every other task still runs.
+    cap_dir = os.path.join(os.path.dirname(HERE), "suites", "capability")
+    heal = next(s for s in suites.load_all(cap_dir, include_candidates=True)
+                if s.name == "cap_job_auto_heal")
+    other = SimpleNamespace(name="cap_other", requires=())
+    rows = [(heal, scn, case) for scn in heal.scenarios for case in scn.cases]
+    rows.append((other, None, SimpleNamespace(id="unrelated")))
+    home = tmp_path / "x-eval"
+    cfg = SimpleNamespace(daemon=SimpleNamespace(fermix_home=str(home)))
+
+    kept, unmet = rc._hold_out_unseeded_inbox(cfg, rows)
+    assert [row[0].name for row in kept] == ["cap_other"]
+    assert {case_id for _suite, case_id, _why in unmet} == {
+        "skill_gone_run_now", "second_failure_joins", "planted_instruction_in_failure"}
+    assert all("--owner-inbox-cli" in why for _suite, _case, why in unmet)
+    assert "NOT EVALUATED" in capsys.readouterr().out
+
+    manifest = home / rc.owner_inbox.MANIFEST
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{}")
+    assert rc._hold_out_unseeded_inbox(cfg, rows) == (rows, [])
+
+
 def test_all_shipped_capability_scenarios_declare_a_risk():
     cap_dir = os.path.join(os.path.dirname(HERE), "suites", "capability")
     for suite in suites.load_all(cap_dir, include_candidates=True):

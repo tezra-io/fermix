@@ -4,7 +4,7 @@ defmodule FermixCore.Jobs.Failure do
   while it is still a term and never from its text.
 
   `kind/1` maps a run's failure reason to one kind from a closed list, which
-  the run's row stores in `job_runs.failure_kind` (`stored/1`):
+  the run's facts store in `job_run_facts.failure_kind` (`stored/1`):
 
     * the provider's: `:provider_rate_limit`, `:provider_quota`,
       `:provider_auth` (a sign-in or key the provider refused),
@@ -18,6 +18,9 @@ defmodule FermixCore.Jobs.Failure do
     * a run whose process died: `:crashed` (the Scheduler's monitor, or the
       runner seeing its loop die) and `:reaped` (the Scheduler's reconcile
       pass found no runner);
+    * `:tool_start_unrecorded`: the run stopped before a tool because its
+      first tool start could not be stored, and a tool never runs unrecorded
+      (M106 §5.1). It is never the provider's, so it is never retried;
     * `:other`, any reason the list does not name. The run's `error` keeps its
       text.
 
@@ -27,7 +30,16 @@ defmodule FermixCore.Jobs.Failure do
   `provider_failure?/1` is the one question code answers without a model:
   whether the provider failed. It is the cue run's rule (M60 §9.4), and it
   does not follow the kind: a sign-in failure has a provider kind but is not
-  the provider's failure by this rule.
+  the provider's failure by this rule. It decides a retry (M106 §5.3).
+
+  `model_cannot_help?/1` asks another question, of a stored kind: whether the
+  failure lies with the provider or the route, where no model run of the job
+  can change it. It is every provider kind and `no_route`, a sign-in failure
+  included, and it makes a heal's subject the provider (M106 §5.4).
+
+  `sentence/1` is the owner-facing sentence of a kind no other sentence says:
+  a run the Scheduler settled (`:crashed`, `:reaped`), and a run that stopped
+  before a tool it could not record (`:tool_start_unrecorded`).
   """
 
   alias FermixCore.Providers.Transient
@@ -48,8 +60,21 @@ defmodule FermixCore.Jobs.Failure do
     :context_recovery,
     :crashed,
     :reaped,
+    :tool_start_unrecorded,
     :other
   ]
+
+  # The kinds no model run can help with (`model_cannot_help?/1`).
+  @model_cannot_help [
+    :provider_rate_limit,
+    :provider_quota,
+    :provider_auth,
+    :provider_unavailable,
+    :provider_timeout,
+    :provider_transport,
+    :no_route
+  ]
+  @model_cannot_help_stored Enum.map(@model_cannot_help, &Atom.to_string/1)
 
   # A provider API error's own kind and the run kind it is (`Providers.Error`).
   @api_kinds %{
@@ -82,6 +107,7 @@ defmodule FermixCore.Jobs.Failure do
           | :context_recovery
           | :crashed
           | :reaped
+          | :tool_start_unrecorded
           | :other
 
   @doc "Every kind `kind/1` can return, and the Scheduler's `:reaped`."
@@ -113,12 +139,43 @@ defmodule FermixCore.Jobs.Failure do
   def kind({:skill_grants_nothing, sentence}) when is_binary(sentence), do: :skill_grants_nothing
   def kind({:context_recovery_failed, _reason}), do: :context_recovery
   def kind({:agent_loop_exit, _reason}), do: :crashed
+  def kind({:tool_start_unrecorded, _reason}), do: :tool_start_unrecorded
   def kind(%RuntimeError{} = error), do: runtime_kind(error)
   def kind(_reason), do: :other
 
   @doc "The text `job_runs.failure_kind` stores for `kind`."
   @spec stored(kind()) :: String.t()
   def stored(kind) when kind in @kinds, do: Atom.to_string(kind)
+
+  @doc """
+  Whether a kind, or the text `stored/1` made of it, is one no model run can
+  help with: the provider's own kinds and `no_route`, a sign-in failure
+  included. Not `provider_failure?/1`, which reads a reason and asks whether
+  waiting can clear it.
+  """
+  @spec model_cannot_help?(kind() | String.t()) :: boolean()
+  def model_cannot_help?(kind) when kind in @kinds, do: kind in @model_cannot_help
+
+  def model_cannot_help?(stored) when is_binary(stored),
+    do: stored in @model_cannot_help_stored
+
+  @doc """
+  The owner-facing sentence of a kind no other sentence says: a run the
+  Scheduler settled, which no runner lived to write for (its runner died,
+  `:crashed`, or none was found holding it, `:reaped`), and a run that stopped
+  before a tool whose start could not be stored (`:tool_start_unrecorded`).
+  """
+  @spec sentence(:crashed | :reaped | :tool_start_unrecorded) :: String.t()
+  def sentence(:crashed), do: "The run stopped before it finished: the process running it ended."
+
+  def sentence(:reaped),
+    do:
+      "The run was found with nothing running it, after Fermix restarted or its store answered late."
+
+  def sentence(:tool_start_unrecorded),
+    do:
+      "The run stopped before its next tool ran: Fermix could not record that the tool was " <>
+        "starting, so it did not start it."
 
   @doc "Whether a run's error reason is a provider failure (M60 §9.4)."
   @spec provider_failure?(term()) :: boolean()

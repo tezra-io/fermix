@@ -834,6 +834,60 @@ or running. The claim takes the job and inserts the run in one transaction, and
 `Repo.settle_job_run` writes the run's final row and releases the job in
 another; owner edits write only the columns they own.
 
+A run's row carries three facts beside its result (M106 §5.1): when its first
+tool started (`job_runs.tools_started_at`, stored by the run's loop before that
+tool runs, through AgentLoop's `before_tool` gate, so a crash the Scheduler
+settles still has it, and a start the store cannot record runs no tool and
+ends the run as `tool_start_unrecorded`; a cue run's is its mandate gate's
+marker instead, written before the mandate call acts), and, in
+`job_run_facts`, its failure's kind
+(`Jobs.Failure`, read from the reason term, never its text) and its tool
+timeline (each call's name, plugin, duration and outcome, never what a tool
+returned or was given). A failed run of an interval or cron job that failed
+before its first tool, on its provider or with no runner left
+(`Jobs.Failure.provider_failure?/1`, or the Scheduler's crash and reap settle),
+is retried quietly (M106 §5.3): the settle decides it with `Jobs.Retry` (30 s,
+then 2 min, then 10 min; the fourth such failure in a row ends it) and stores
+it in `job_retries`, the due scan claims a passed retry through the same claim
+with `trigger: "retry"` and without moving `next_run_at`, the Scheduler re-arms
+its timer at every run's end, and the owner's pause, resume, edit or run now
+clears it. Neither table is a column on `job_runs` or `scheduled_jobs`, which
+every engine at the current home format reads whole and by position.
+
+Architecture Invariant: a failed run is retried only before its first tool. No
+tool of a run that can be retried starts before its first start is on the run's
+row, and the retry is decided in the run's settle from that row's
+`tools_started_at`, read in that transaction, so a second run never repeats
+what a tool did, and a retried failure sends and writes nothing the owner
+reads.
+
+A failure that is not retried goes to a heal (M106 §5.4), written in the same
+settle after the retry (`Memory.Repo.JobHealsSql`). Any non-cue run of a job
+created at operator trust opens a heal in `job_heals` for its subject: the
+provider, when the kind is one no model run can help with
+(`Jobs.Failure.model_cannot_help?/1`) and the reason or the run's route names
+one, otherwise the job. It joins the subject's heal that is not closed, or opens
+none when one for the same subject and kind closed still failing, skipped or
+expired within 7 days; `job_heal_runs` links every run a heal took. An ok run
+closes its job's heal and the heal of the provider that answered it (the loop
+result's `provider`). A guest's job and a cue run keep their failure line; for
+every other failure the runner sends nothing and marks the delivery `skipped`.
+`Jobs.HealRun` tells the owner: the Scheduler claims the oldest due heal under a
+lease after its due scan on every due and reconcile tick and when a run or a
+heal run ends, and starts its run under `Jobs.RunnerSupervisor`, one at a time,
+monitored and never waited on. The run resolves the owner's inbox once
+(`Delivery.OwnerInbox.for_approval/1`), builds the message once with the pure
+`Jobs.HealMessage` from the store's facts, sends it once under the key
+`job_heal:<id>`, and on a failed send backs off by the harness ladder, a dead
+letter after 20 attempts, a day, or an error no wait clears. The reconcile pass
+closes a heal waiting 7 days as `expired`, and removing a job takes its heal.
+
+Architecture Invariant: one heal per subject is not closed (a partial unique
+index), and a heal is opened, joined or closed by a run only in that run's
+settle transaction, so a run's final row and what became of its failure land
+together. A heal run marks the delivery delivered before it writes the message
+to history, so a run that dies between the two never sends it again.
+
 ### `FermixCore.Cues`: Cues and Watchers
 
 `Cues` turns push input into agent work. Its tree starts at boot only when

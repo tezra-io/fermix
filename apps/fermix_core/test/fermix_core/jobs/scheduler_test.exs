@@ -8,6 +8,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
   alias FermixCore.Jobs.Scheduler
   alias FermixCore.Memory.Repo
   alias FermixCore.Tools.RunJobNow
+  alias FermixTestSupport.TelemetryCapture
 
   # How long to wait for anything a real run (FermixCore.Jobs.Runner) reports.
   # Its `:started` follows route resolution, whose `Selection.configured?/2`
@@ -165,7 +166,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
 
           # The real runner's final write: the run row and the job release
           # in one settle.
-          {:ok, {_run, _job}} =
+          {:ok, {_run, _job, _settlement}} =
             Repo.settle_job_run(
               Map.merge(run, %{
                 status: "ok",
@@ -174,6 +175,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
                 delivery_status: "pending",
                 updated_at: now
               }),
+              :ok,
               server: repo
             )
 
@@ -222,6 +224,78 @@ defmodule FermixCore.Jobs.SchedulerTest do
     end
   end
 
+  defmodule ProviderFailureRunner do
+    @moduledoc false
+    # A runner whose run failed on its provider before any tool: it publishes
+    # its run id like the real Runner, settles the run `{:failed, :provider}`
+    # now, reports, and ends :normal.
+    alias FermixCore.Jobs.Runner
+    alias FermixCore.Memory.Repo
+
+    def child_spec(opts) do
+      %{
+        id: {__MODULE__, Keyword.fetch!(opts, :run).id},
+        start: {__MODULE__, :start_link, [opts]},
+        restart: :temporary
+      }
+    end
+
+    def start_link(opts) do
+      run = Keyword.fetch!(opts, :run)
+      notify = Keyword.fetch!(opts, :notify)
+      repo = Keyword.fetch!(opts, :repo)
+
+      pid =
+        spawn_link(fn ->
+          :ok = Runner.put_run_id(run.id)
+          now = DateTime.utc_now()
+
+          attrs =
+            Map.merge(run, %{
+              status: "error",
+              error: "429",
+              failure_kind: "provider_rate_limit",
+              completed_at: now,
+              updated_at: now,
+              heal_facts: %{failure_text: "OpenAI rate-limited this request.", provider: "openai"}
+            })
+
+          {:ok, {_run, _job, settlement}} =
+            Repo.settle_job_run(attrs, {:failed, :provider}, server: repo)
+
+          send(notify, {:settled, run.id, settlement, self()})
+        end)
+
+      {:ok, pid}
+    end
+  end
+
+  defmodule CrashBeforeToolRunner do
+    @moduledoc false
+    # A runner that dies before its first tool: it says so with its pid, then
+    # exits abnormally.
+    def child_spec(opts) do
+      %{
+        id: {__MODULE__, Keyword.fetch!(opts, :run).id},
+        start: {__MODULE__, :start_link, [opts]},
+        restart: :temporary
+      }
+    end
+
+    def start_link(opts) do
+      run = Keyword.fetch!(opts, :run)
+      notify = Keyword.fetch!(opts, :notify)
+
+      pid =
+        spawn_link(fn ->
+          send(notify, {:crashing, run.id, self()})
+          exit(:crashed_before_tool)
+        end)
+
+      {:ok, pid}
+    end
+  end
+
   defmodule PendingDeliveryLiveRunner do
     @moduledoc false
     # A runner past its final write and still delivering: it publishes its run
@@ -263,7 +337,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
     defp settle_pending_delivery(run, repo) do
       now = DateTime.utc_now()
 
-      {:ok, {_run, _job}} =
+      {:ok, {_run, _job, _settlement}} =
         Repo.settle_job_run(
           Map.merge(run, %{
             status: "ok",
@@ -272,6 +346,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
             delivery_status: "pending",
             updated_at: now
           }),
+          :ok,
           server: repo
         )
     end
@@ -504,8 +579,9 @@ defmodule FermixCore.Jobs.SchedulerTest do
     @moduledoc false
     # A transparent proxy in front of the real Repo. It forwards the stamp of a
     # run's first tool start, reports {:killed_after_tool_stamp, caller} to the
-    # test, and kills the caller before replying: the stamp has landed and the
-    # runner dies mid-run. Every other request is forwarded.
+    # test, and kills the caller, the run's loop, before replying: the stamp has
+    # landed, and the loop's link takes the runner down mid-run. Every other
+    # request is forwarded.
     use GenServer
 
     def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -1539,8 +1615,8 @@ defmodule FermixCore.Jobs.SchedulerTest do
       assert_receive {:job_runner, :completed, ^next_run_id, ^job_id}, @run_completes_ms
     end
 
-    # M106 §5.1: the runner stores its first tool start at once, so the crash
-    # settle, which has no runner to ask, finds it on the row.
+    # M106 §5.1: the first tool start is on the row before the tool runs, so
+    # the crash settle, which has no runner to ask, finds it there.
     test "a runner that dies after its first tool started is settled with that moment", %{
       repo: repo,
       runner_supervisor: runner_supervisor
@@ -1549,11 +1625,15 @@ defmodule FermixCore.Jobs.SchedulerTest do
       job_id = job.id
       proxy = start_supervised!({KillAfterToolStampRepo, real: repo, notify: self()})
       scheduler = start_scheduler(proxy, runner_supervisor, adapter: ToolCallAdapter)
+      TelemetryCapture.attach([[:fermix, :job, :run_error]], job_id: job_id)
 
       assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
       assert_receive {:job_runner, :started, run_id, ^job_id}, @run_completes_ms
-      assert_receive {:killed_after_tool_stamp, runner}, @run_completes_ms
-      await_reaped(runner, scheduler)
+      assert_receive {:killed_after_tool_stamp, _loop}, @run_completes_ms
+
+      assert_receive {:telemetry, [:fermix, :job, :run_error], _measurements,
+                      %{run_id: ^run_id, retry_disposition: "none"}},
+                     @run_completes_ms
 
       assert {:ok, crashed} = Repo.get_job_run(run_id, server: repo)
       assert crashed.status == "error"
@@ -1563,6 +1643,8 @@ defmodule FermixCore.Jobs.SchedulerTest do
       assert DateTime.compare(crashed.tools_started_at, crashed.started_at) != :lt
       # The timeline lived in the runner that died; nothing settled one.
       assert crashed.tool_timeline == nil
+      # A run after its first tool is never run again (M106 §5.3).
+      assert {:ok, nil} = Repo.get_job_retry(job_id, server: repo)
 
       assert {:ok, %{state: "scheduled", last_status: "error"}} =
                Registry.get_job(job_id, repo: repo)
@@ -1752,6 +1834,244 @@ defmodule FermixCore.Jobs.SchedulerTest do
     end
   end
 
+  # M106 §5.3: a retry is a row beside the job, claimed by the due scan through
+  # the claim every run takes, and the timer wakes for it.
+  describe "retries" do
+    test "the due scan claims a passed retry as a retry: next run kept, its time cleared", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      {:ok, job} = seed_recurring_job(repo, "Tide retry")
+      job_id = job.id
+      seed_retry!(repo, job)
+      scheduler = start_scheduler(repo, runner_supervisor, runner_module: LiveRunner)
+
+      assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:39Z])
+      assert run_count(repo, job_id) == 1
+
+      assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:16:00Z])
+      assert_receive {:job_runner, :started, run_id, ^job_id}
+      assert {:ok, %{trigger: "retry"}} = Repo.get_job_run(run_id, server: repo)
+      assert {:ok, claimed} = Repo.get_scheduled_job(job_id, server: repo)
+      assert claimed.state == "running"
+      assert DateTime.compare(claimed.next_run_at, ~U[2026-05-02 14:30:00Z]) == :eq
+      assert {:ok, %{attempts: 1, retry_at: nil}} = Repo.get_job_retry(job_id, server: repo)
+    end
+
+    test "a job both due and past its retry gets one run, the due one, and its retry cleared", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      {:ok, job} = seed_recurring_job(repo, "Tide due and retry")
+      job_id = job.id
+      seed_retry!(repo, job)
+      scheduler = start_scheduler(repo, runner_supervisor, runner_module: LiveRunner)
+
+      assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:30:00Z])
+      assert_receive {:job_runner, :started, run_id, ^job_id}
+      assert run_count(repo, job_id) == 2
+      assert {:ok, %{trigger: "schedule"}} = Repo.get_job_run(run_id, server: repo)
+      assert {:ok, %{attempts: 1, retry_at: nil}} = Repo.get_job_retry(job_id, server: repo)
+    end
+
+    # The timer's delay is read from state, never waited for.
+    test "the timer wakes for a retry a run's settle sets", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      now = DateTime.utc_now()
+
+      {:ok, job} =
+        Registry.create_job(
+          %{
+            created_by_trust: "operator",
+            name: "Tide timer",
+            schedule: "every 1 hour",
+            task_prompt: "Run."
+          },
+          repo: repo,
+          now: DateTime.add(now, -3_660, :second),
+          scheduler: nil
+        )
+
+      job_id = job.id
+
+      scheduler =
+        start_scheduler(repo, runner_supervisor,
+          runner_module: ProviderFailureRunner,
+          timer_enabled: true
+        )
+
+      assert_receive {:settled, run_id, %{disposition: :retry, retry_at: %DateTime{}}, runner},
+                     @run_completes_ms
+
+      await_reaped(runner, scheduler)
+
+      assert {:ok, %{trigger: "schedule", job_id: ^job_id}} =
+               Repo.get_job_run(run_id, server: repo)
+
+      assert {:ok, %{next_run_at: next_run_at}} = Repo.get_scheduled_job(job_id, server: repo)
+      assert DateTime.diff(next_run_at, now, :second) >= 3_000
+      assert :sys.get_state(scheduler).due_delay_ms <= 30_000
+    end
+
+    test "a pending retry survives a Scheduler restart", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      {:ok, job} = seed_recurring_job(repo, "Tide restart")
+      job_id = job.id
+      seed_retry!(repo, job)
+
+      _first = start_scheduler(repo, runner_supervisor, runner_module: LiveRunner)
+      stop_supervised!(Scheduler)
+      second = start_scheduler(repo, runner_supervisor, runner_module: LiveRunner)
+
+      assert :ok = Scheduler.tick(second, now: ~U[2026-05-02 14:16:00Z])
+      assert_receive {:job_runner, :started, run_id, ^job_id}
+      assert {:ok, %{trigger: "retry"}} = Repo.get_job_run(run_id, server: repo)
+    end
+
+    test "a runner that crashes before any tool is retried from the Scheduler's settle", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      {:ok, job} = seed_recurring_job(repo, "Tide crash")
+      job_id = job.id
+
+      scheduler =
+        start_scheduler(repo, runner_supervisor,
+          runner_module: CrashBeforeToolRunner,
+          clock: fn -> ~U[2026-05-02 14:15:20.000000Z] end
+        )
+
+      assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
+      assert_receive {:crashing, run_id, runner}
+      await_reaped(runner, scheduler)
+
+      assert {:ok, %{status: "error", failure_kind: "crashed", job_id: ^job_id}} =
+               Repo.get_job_run(run_id, server: repo)
+
+      assert {:ok, %{attempts: 1, retry_at: retry_at}} = Repo.get_job_retry(job_id, server: repo)
+      assert DateTime.compare(retry_at, ~U[2026-05-02 14:15:50Z]) == :eq
+    end
+
+    test "a reaped run is retried when no tool had started, and not after one did", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      {:ok, before_tool} = seed_recurring_job(repo, "Tide reaped")
+      stuck = seed_stuck_run(repo, before_tool)
+      {:ok, after_tool} = seed_recurring_job(repo, "Tide reaped after a tool")
+      used = seed_stuck_run(repo, after_tool)
+      :ok = Repo.mark_job_run_tools_started(used.id, ~U[2026-05-02 14:15:05Z], server: repo)
+
+      # init reconciles synchronously inside start_supervised!.
+      _scheduler =
+        start_scheduler(repo, runner_supervisor,
+          runner_module: LiveRunner,
+          clock: fn -> ~U[2026-05-02 14:14:00.000000Z] end
+        )
+
+      assert {:ok, %{failure_kind: "reaped"}} = Repo.get_job_run(stuck.id, server: repo)
+
+      assert {:ok, %{attempts: 1, retry_at: retry_at}} =
+               Repo.get_job_retry(before_tool.id, server: repo)
+
+      assert DateTime.compare(retry_at, ~U[2026-05-02 14:14:30Z]) == :eq
+      assert {:ok, %{failure_kind: "reaped"}} = Repo.get_job_run(used.id, server: repo)
+      assert {:ok, nil} = Repo.get_job_retry(after_tool.id, server: repo)
+    end
+
+    test "an expired job's retry and a stale retry are not run", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      {:ok, expiring} =
+        Registry.create_job(
+          %{
+            created_by_trust: "operator",
+            name: "Tide expiring",
+            schedule: "every 15 minutes",
+            task_prompt: "Run.",
+            expires_at: ~U[2026-05-02 14:16:00Z]
+          },
+          repo: repo,
+          now: ~U[2026-05-02 14:00:00Z]
+        )
+
+      seed_retry!(repo, expiring)
+
+      {:ok, daily} =
+        Registry.create_job(
+          %{
+            created_by_trust: "operator",
+            name: "Tide daily",
+            schedule: "every 1 day",
+            task_prompt: "Run."
+          },
+          repo: repo,
+          now: ~U[2026-05-02 14:00:00Z]
+        )
+
+      seed_retry!(repo, daily,
+        claimed_at: ~U[2026-05-03 14:00:00Z],
+        next_run_at: ~U[2026-05-04 14:00:00Z]
+      )
+
+      scheduler = start_scheduler(repo, runner_supervisor, runner_module: LiveRunner)
+
+      assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:16:30Z])
+      assert run_count(repo, expiring.id) == 1
+
+      assert {:ok, %{state: "completed", last_status: "expired"}} =
+               Registry.get_job(expiring.id, repo: repo)
+
+      # Two hours after its time, past the one-hour freshness window.
+      assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-03 16:00:00Z])
+      assert run_count(repo, daily.id) == 1
+      assert {:ok, %{attempts: 1, retry_at: nil}} = Repo.get_job_retry(daily.id, server: repo)
+    end
+  end
+
+  # A run of `job` claimed when it was due and settled 10 s later on its
+  # provider, before any tool, so the job holds a retry 30 s after that.
+  defp seed_retry!(repo, job, opts \\ []) do
+    claimed_at = Keyword.get(opts, :claimed_at, ~U[2026-05-02 14:15:00Z])
+    failed_at = DateTime.add(claimed_at, 10, :second)
+    next_run_at = Keyword.get(opts, :next_run_at, DateTime.add(claimed_at, 900, :second))
+    patch = %{state: "running", next_run_at: next_run_at, updated_at: claimed_at}
+
+    run = %{
+      id: "run_#{System.unique_integer([:positive])}",
+      job_id: job.id,
+      session_id: "cron_#{job.id}_seeded_#{System.unique_integer([:positive])}",
+      trigger: "schedule",
+      status: "queued",
+      claimed_at: claimed_at,
+      delivery_status: "none",
+      created_at: claimed_at,
+      updated_at: claimed_at
+    }
+
+    {:ok, {_job, run}} = Repo.claim_due_job(job.id, patch, run, claimed_at, server: repo)
+
+    attrs =
+      Map.merge(run, %{
+        status: "error",
+        error: "429",
+        failure_kind: "provider_rate_limit",
+        completed_at: failed_at,
+        updated_at: failed_at,
+        heal_facts: %{failure_text: "OpenAI rate-limited this request.", provider: "openai"}
+      })
+
+    {:ok, {_run, _job, %{disposition: :retry}}} =
+      Repo.settle_job_run(attrs, {:failed, :provider}, server: repo)
+
+    :ok
+  end
+
   describe "refused writes after a run" do
     # A Repo that refuses the delivery-status write after a send (a full disk)
     # must not leave the row to the reaper's generic "no live runner" text: the
@@ -1889,9 +2209,12 @@ defmodule FermixCore.Jobs.SchedulerTest do
       log =
         capture_log(fn ->
           assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
-          assert_receive {:job_runner, :started, _run_id, ^job_id}
+          assert_receive {:job_runner, :started, run_id, ^job_id}
           # The run is still queued, so the crash path settles it and then
-          # writes the job's memory source.
+          # writes the job's memory source. Its first tool had started, so the
+          # run is not retried (M106 §5.3), whose settle writes no source.
+          :ok = Repo.mark_job_run_tools_started(run_id, ~U[2026-05-02 14:15:05Z], server: repo)
+
           assert [{_id, runner, _type, _modules}] =
                    DynamicSupervisor.which_children(runner_supervisor)
 
@@ -2150,7 +2473,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
          runner_notify: self(),
          runner_delay_ms: Keyword.get(opts, :runner_delay_ms, 0),
          max_active_runs: Keyword.get(opts, :max_active_runs, 4)
-       ] ++ Keyword.take(opts, [:repo_timeout_ms])}
+       ] ++ Keyword.take(opts, [:repo_timeout_ms, :clock])}
 
     start_supervised!(
       Supervisor.child_spec(child, restart: Keyword.get(opts, :restart, :permanent))

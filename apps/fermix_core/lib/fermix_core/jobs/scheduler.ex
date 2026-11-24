@@ -16,6 +16,14 @@ defmodule FermixCore.Jobs.Scheduler do
   scheduled run's context) before cue runs take the slots left. A trigger its
   claim refuses goes to `Cues.FollowUps.refused/3` in a task, which tells an
   owner who confirmed it why it did not start.
+
+  It starts the heal runs (M106 §5.4, `Jobs.HealRun`), one at a time in the
+  engine, under the runner supervisor: after its due scan on every due and
+  reconcile tick, and when a run or a heal run ends, it claims the oldest heal
+  whose message is due (or whose heal run died and let its lease run out) and
+  starts its run, which it monitors and never waits on. A heal run that
+  survived a Scheduler restart is adopted, not doubled. Its reconcile pass
+  closes the heals that have waited seven days on the owner as `expired`.
   """
 
   use GenServer
@@ -29,9 +37,12 @@ defmodule FermixCore.Jobs.Scheduler do
   alias FermixCore.Jobs.CueAdmission
   alias FermixCore.Jobs.CueRun
   alias FermixCore.Jobs.Failure
+  alias FermixCore.Jobs.HealRun
   alias FermixCore.Jobs.Runner
   alias FermixCore.Jobs.RunnerSupervisor
   alias FermixCore.Jobs.Schedule
+  alias FermixCore.Jobs.Telemetry, as: JobTelemetry
+  alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
   alias FermixCore.Timeouts
 
@@ -78,6 +89,12 @@ defmodule FermixCore.Jobs.Scheduler do
   # queue is the DB due scan itself — no separate queue structure.
   @max_active_runs 4
 
+  # Heal runs at once in the engine (M106 §5.4), and how long a claimed heal
+  # is held before a later pass may claim it again: well past the one send's
+  # 60 s bound.
+  @max_heal_runs 1
+  @heal_lease_s 300
+
   @type state :: %{
           enabled?: boolean(),
           timer_enabled?: boolean(),
@@ -106,6 +123,10 @@ defmodule FermixCore.Jobs.Scheduler do
           due_delay_ms: non_neg_integer() | nil,
           reconciliation_timer: reference() | nil,
           run_monitors: map(),
+          heal_runs: %{reference() => String.t()},
+          heal_run_module: module(),
+          heal_inbox_opts: keyword(),
+          conversation_store: GenServer.server(),
           runs_known?: boolean(),
           clock: (-> DateTime.t()),
           cues_running?: (-> boolean()),
@@ -207,6 +228,11 @@ defmodule FermixCore.Jobs.Scheduler do
       due_delay_ms: nil,
       reconciliation_timer: nil,
       run_monitors: %{},
+      heal_runs: %{},
+      heal_run_module: Keyword.get(opts, :heal_run_module, HealRun),
+      # `Delivery.OwnerInbox.for_approval/1`'s seams for the heal runs (tests).
+      heal_inbox_opts: Keyword.get(opts, :heal_inbox_opts, []),
+      conversation_store: Keyword.get(opts, :conversation_store, ConversationStore),
       # Whether the last reconcile scan succeeded, so the monitors hold every
       # surviving runner; set by `reconcile_active_runs/1`.
       runs_known?: false,
@@ -227,6 +253,7 @@ defmodule FermixCore.Jobs.Scheduler do
       |> put_default_follow_up_offer()
       |> put_default_follow_up_refused()
       |> reconcile_active_runs()
+      |> expire_waiting_heals()
       |> schedule_due_timer()
       |> schedule_reconciliation_timer()
       |> maybe_request_admission()
@@ -236,7 +263,7 @@ defmodule FermixCore.Jobs.Scheduler do
 
   @impl true
   def handle_call({:tick, %DateTime{} = now}, _from, state) do
-    {:reply, :ok, state |> run_due_and_rearm(now) |> admit_cue_runs(now)}
+    {:reply, :ok, state |> run_due_and_rearm(now) |> start_heal_run(now) |> admit_cue_runs(now)}
   end
 
   def handle_call({:run_now, job_id, %DateTime{} = now}, _from, state) do
@@ -256,7 +283,7 @@ defmodule FermixCore.Jobs.Scheduler do
   @impl true
   def handle_info(:due_tick, state) do
     now = state.clock.()
-    {:noreply, state |> run_due_and_rearm(now) |> admit_cue_runs(now)}
+    {:noreply, state |> run_due_and_rearm(now) |> start_heal_run(now) |> admit_cue_runs(now)}
   end
 
   # Reconcile before scanning: a run freed here puts its job back to "scheduled",
@@ -267,7 +294,9 @@ defmodule FermixCore.Jobs.Scheduler do
     state =
       state
       |> reconcile_active_runs()
+      |> expire_waiting_heals()
       |> run_due_and_rearm(now)
+      |> start_heal_run(now)
       |> admit_cue_runs(now)
       |> schedule_reconciliation_timer()
 
@@ -282,17 +311,47 @@ defmodule FermixCore.Jobs.Scheduler do
     {:noreply, state |> run_due_and_rearm(now) |> admit_cue_runs(now)}
   end
 
+  # A heal run's end frees the one heal slot: the next due heal starts. One
+  # that died leaves its heal's lease to run out.
+  def handle_info({:DOWN, ref, :process, _pid, reason}, state)
+      when is_map_key(state.heal_runs, ref) do
+    {heal_id, heal_runs} = Map.pop(state.heal_runs, ref)
+
+    if reason not in [:normal, :shutdown] do
+      Logger.warning("Job heal #{heal_id}: its heal run ended: #{inspect(reason)}")
+    end
+
+    state = %{state | heal_runs: heal_runs}
+    {:noreply, start_heal_run(state, state.clock.())}
+  end
+
+  # A run's end can have set its job a retry (M106 §5.3), from its runner's
+  # settle or the crash settle here, so the due timer is armed again for the
+  # earliest wakeup: one bounded store read per run. It can also have opened
+  # a heal (§5.4), whose run may start now.
   def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
     case Map.pop(state.run_monitors, ref) do
       {nil, monitors} ->
         {:noreply, %{state | run_monitors: monitors}}
 
       {_run_info, monitors} when reason in [:normal, :shutdown] ->
-        {:noreply, maybe_request_admission(%{state | run_monitors: monitors})}
+        state = %{state | run_monitors: monitors}
+
+        {:noreply,
+         state
+         |> schedule_due_timer()
+         |> start_heal_run(state.clock.())
+         |> maybe_request_admission()}
 
       {%{job_id: job_id, run_id: run_id}, monitors} ->
         state = %{state | run_monitors: monitors}
-        {:noreply, run_id |> mark_run_crashed(job_id, reason, state) |> maybe_request_admission()}
+
+        {:noreply,
+         run_id
+         |> mark_run_crashed(job_id, reason, state)
+         |> schedule_due_timer()
+         |> start_heal_run(state.clock.())
+         |> maybe_request_admission()}
     end
   end
 
@@ -357,10 +416,10 @@ defmodule FermixCore.Jobs.Scheduler do
 
   # The cue share is counted from the monitors. After a reconcile scan that
   # failed (at init, a restart, or on a tick) they may miss cue runners that
-  # survived a restart, which the runner supervisor still counts in `active`:
-  # the share would read as free and a cue run could take the last slot (TLA
-  # cue_inbox CUE-2). So no cue run starts until a scan succeeds. Cron runs
-  # keep their own rule, the ceiling on `active`.
+  # survived a restart, which the run count (`active_run_count/1`) still
+  # counts: the share would read as free and a cue run could take the last
+  # slot (TLA cue_inbox CUE-2). So no cue run starts until a scan succeeds.
+  # Cron runs keep their own rule, the ceiling on the run count.
   defp free_cue_slots(%{runs_known?: false}), do: 0
 
   defp free_cue_slots(state) do
@@ -591,12 +650,51 @@ defmodule FermixCore.Jobs.Scheduler do
   defp merge_outcome(_prev, :busy), do: :busy
   defp merge_outcome(:ok, :ok), do: :ok
 
+  # A job the scan found is due by its next run, its expiry or its retry (M106
+  # §5.3). A due run is also the retry; a job due only by its retry runs it,
+  # unless the retry is older than the freshness window, which drops it.
   defp claim_and_start(job, now, state) do
+    window = state.run_freshness_window_seconds
+
     cond do
       expired?(job, now) -> expire_job(job.id, now, state)
-      stale?(job, now, state.run_freshness_window_seconds) -> skip_stale_job(job, now, state)
+      stale?(job, now, window) -> skip_stale_job(job, now, state)
+      not due?(job, now) and stale_retry?(job, now, window) -> drop_stale_retry(job, now, state)
       at_capacity?(state) -> {:busy, state}
-      true -> claim_and_start_due_job(job, now, state)
+      due?(job, now) -> claim_and_start_due_job(job, now, state)
+      true -> claim_and_start_retry(job, now, state)
+    end
+  end
+
+  defp due?(%{next_run_at: %DateTime{} = next_run_at}, now),
+    do: DateTime.compare(next_run_at, now) != :gt
+
+  defp due?(_job, _now), do: false
+
+  # The stale-skip rule for a retry: one whose time is further back than the
+  # window is not run, and the job's next run is the retry.
+  defp stale_retry?(_job, _now, nil), do: false
+
+  defp stale_retry?(%{retry_at: %DateTime{} = retry_at}, now, window) when is_integer(window),
+    do: DateTime.diff(now, retry_at, :second) > window
+
+  defp stale_retry?(_job, _now, _window), do: false
+
+  defp drop_stale_retry(job, now, state) do
+    cutoff = DateTime.add(now, -state.run_freshness_window_seconds, :second)
+
+    case Repo.drop_stale_job_retry(job.id, cutoff, state.repo_opts) do
+      :ok ->
+        Logger.info(
+          "Scheduled job #{job.id} dropped a stale retry due at " <>
+            "#{DateTime.to_iso8601(job.retry_at)}; its next run is the retry"
+        )
+
+        {:ok, state}
+
+      {:error, reason} ->
+        Logger.error("Scheduled job #{job.id} stale retry drop failed: #{inspect(reason)}")
+        {:error, state}
     end
   end
 
@@ -605,9 +703,11 @@ defmodule FermixCore.Jobs.Scheduler do
   # floor) or reconciliation claims it once a slot frees.
   defp at_capacity?(state), do: active_run_count(state) >= state.max_active_runs
 
-  defp active_run_count(state) do
-    DynamicSupervisor.count_children(state.runner_supervisor).active
-  end
+  # The runs live under the runner supervisor, counted by the run id each
+  # runner publishes, as the reconcile pass tells them apart: a heal run
+  # (M106 §5.4) is a child there too, and it is no run, so it takes none of
+  # the run slots or the cue share. Its own bound is `@max_heal_runs`.
+  defp active_run_count(state), do: state |> live_runner_pids() |> map_size()
 
   # When the daemon is down across a recurring job's fire time, its next_run_at
   # is left far in the past. Firing it now would run the job with a wall-clock
@@ -704,27 +804,39 @@ defmodule FermixCore.Jobs.Scheduler do
 
   defp claim_patched_job(job, job_patch, now, state) do
     run_attrs = run_attrs(job, now)
-    # A claim the next tick makes again: one the Repo reaches after this call
-    # gave up is skipped, so no run is claimed that no runner starts.
-    claim_opts = Keyword.put(state.repo_opts, :skip_when_late, true)
 
-    case Repo.claim_due_job(job.id, job_patch, run_attrs, now, claim_opts) do
-      {:ok, {claimed_job, run}} ->
-        {:ok, start_or_mark_failed(claimed_job, run, state)}
+    job.id
+    |> Repo.claim_due_job(job_patch, run_attrs, now, claim_opts(state))
+    |> start_claimed(job, state)
+  end
 
-      # The previous run still holds the job (a resume put it back to
-      # "scheduled" mid-run). Backpressure, not a clean drain: the re-arm floors
-      # at the backoff, and the job is claimed once that run settles.
-      {:error, :already_running} ->
-        {:busy, state}
+  # A retry's run (M106 §5.3): the same claim, with `trigger: "retry"`, taking
+  # the job without moving its next run.
+  defp claim_and_start_retry(job, now, state) do
+    run_attrs = job |> run_attrs(now) |> Map.put(:trigger, "retry")
+    job_patch = %{state: "running", updated_at: now}
 
-      {:error, :not_due} ->
-        {:ok, state}
+    job.id
+    |> Repo.claim_retry_job(job_patch, run_attrs, now, claim_opts(state))
+    |> start_claimed(job, state)
+  end
 
-      {:error, reason} ->
-        Logger.error("Scheduled job #{job.id} claim failed: #{inspect(reason)}")
-        {:error, state}
-    end
+  # A claim the next tick makes again: one the Repo reaches after this call
+  # gave up is skipped, so no run is claimed that no runner starts.
+  defp claim_opts(state), do: Keyword.put(state.repo_opts, :skip_when_late, true)
+
+  defp start_claimed({:ok, {claimed_job, run}}, _job, state),
+    do: {:ok, start_or_mark_failed(claimed_job, run, state)}
+
+  # The previous run still holds the job (a resume put it back to "scheduled"
+  # mid-run). Backpressure, not a clean drain: the re-arm floors at the
+  # backoff, and the job is claimed once that run settles.
+  defp start_claimed({:error, :already_running}, _job, state), do: {:busy, state}
+  defp start_claimed({:error, :not_due}, _job, state), do: {:ok, state}
+
+  defp start_claimed({:error, reason}, job, state) do
+    Logger.error("Scheduled job #{job.id} claim failed: #{inspect(reason)}")
+    {:error, state}
   end
 
   # Out-of-band manual run: claim immediately regardless of the schedule, keep
@@ -1003,7 +1115,7 @@ defmodule FermixCore.Jobs.Scheduler do
   defp report_cue_failure(_settled, _state), do: :ok
 
   # A run that still holds its job is settled as "error" and its job released
-  # in the same write (`Repo.settle_job_run/2`). A settled run whose delivery
+  # in the same write (`Repo.settle_job_run/3`). A settled run whose delivery
   # never finished, whatever its status, gets only its delivery marked failed:
   # its job was released by its own settle. Any other row is already final.
   #
@@ -1013,7 +1125,8 @@ defmodule FermixCore.Jobs.Scheduler do
   # the owner reads.
   #
   # The settle writes the failure's kind beside its error; the run row read
-  # back keeps the first tool start its runner stored (M106 §5.1).
+  # back keeps the first tool start its run's loop stored before that tool ran
+  # (M106 §5.1).
   defp mark_run_error(%{status: status, trigger: "cue"} = run, {kind, error}, now, repo_opts)
        when status in ["queued", "running"] do
     attrs = Map.merge(run, crash_settle_fields(kind, error, now))
@@ -1034,13 +1147,24 @@ defmodule FermixCore.Jobs.Scheduler do
     end
   end
 
+  # A scheduled run's crash settle decides its retry as the runner's does
+  # (M106 §5.3, `:scheduler`): a run that died before any tool is retried, and
+  # a retried failure leaves the memory source as it was. A failure not
+  # retried goes to a heal (§5.4), told by its kind's sentence, since no
+  # runner lived to write one. Its failure is traced on the run's `run_error`
+  # bookend with the settlement.
   defp mark_run_error(%{status: status} = run, {kind, error}, now, repo_opts)
        when status in ["queued", "running"] do
-    attrs = Map.merge(run, crash_settle_fields(kind, error, now))
+    attrs =
+      run
+      |> Map.merge(crash_settle_fields(kind, error, now))
+      |> Map.put(:heal_facts, %{failure_text: Failure.sentence(kind), provider: nil})
 
-    case Repo.settle_job_run(attrs, repo_opts) do
-      {:ok, {_run, job}} ->
-        mark_source_error(job, now, repo_opts)
+    case Repo.settle_job_run(attrs, :scheduler, repo_opts) do
+      {:ok, {settled, job, settlement}} ->
+        JobTelemetry.run_error(job, settled, "error", error, settlement)
+        JobTelemetry.heal_settled(job, settled, settlement)
+        mark_crash_source(job, settlement, now, repo_opts)
 
       # The runner's own settle landed after all (a call that timed out still
       # runs), so what may be left is that run's delivery.
@@ -1057,6 +1181,11 @@ defmodule FermixCore.Jobs.Scheduler do
   end
 
   defp mark_run_error(_final_run, _failure, _now, _repo), do: :ok
+
+  defp mark_crash_source(_job, %{disposition: :retry}, _now, _repo_opts), do: :ok
+
+  defp mark_crash_source(job, _settlement, now, repo_opts),
+    do: mark_source_error(job, now, repo_opts)
 
   defp crash_settle_fields(kind, error, now) do
     %{
@@ -1144,6 +1273,116 @@ defmodule FermixCore.Jobs.Scheduler do
     )
   end
 
+  # --- heals (M106 §5.4) ----------------------------------------------------
+
+  # The one heal slot: a heal run that survived a Scheduler restart is
+  # adopted first, so a pass never starts a second beside it.
+  defp start_heal_run(%{enabled?: false} = state, _now), do: state
+
+  defp start_heal_run(state, now) do
+    state = adopt_heal_runs(state)
+
+    if map_size(state.heal_runs) < @max_heal_runs,
+      do: claim_heal_run(state, now),
+      else: state
+  end
+
+  defp adopt_heal_runs(state) do
+    monitored = Map.values(state.heal_runs)
+
+    state.runner_supervisor
+    |> DynamicSupervisor.which_children()
+    |> Enum.reduce(state, fn
+      {_id, pid, _type, _modules}, acc when is_pid(pid) -> adopt_heal_run(acc, pid, monitored)
+      _no_pid, acc -> acc
+    end)
+  end
+
+  defp adopt_heal_run(state, pid, monitored) do
+    case HealRun.heal_id(pid) do
+      nil ->
+        state
+
+      heal_id ->
+        if heal_id in monitored,
+          do: state,
+          else: put_in(state.heal_runs[Process.monitor(pid)], heal_id)
+    end
+  end
+
+  defp claim_heal_run(state, now) do
+    lease_until = DateTime.add(now, @heal_lease_s, :second)
+
+    case Repo.job_heals_call({:claim, now, lease_until}, state.repo_opts) do
+      {:ok, nil} ->
+        state
+
+      {:ok, heal} ->
+        start_claimed_heal(heal, state)
+
+      {:error, reason} ->
+        Logger.error("Job heal claim failed: #{inspect(reason)}")
+        state
+    end
+  end
+
+  # A heal run that cannot start leaves its heal claimed; the lease runs out
+  # and a later pass claims it again.
+  defp start_claimed_heal(heal, state) do
+    opts = [
+      runner_module: state.heal_run_module,
+      heal: heal,
+      repo: state.repo,
+      conversation_store: state.conversation_store,
+      delivery_opts: [adapter: state.delivery_adapter, channels: state.delivery_channels],
+      inbox_opts: state.heal_inbox_opts,
+      clock: state.clock,
+      notify: state.runner_notify
+    ]
+
+    case RunnerSupervisor.start_run(state.runner_supervisor, opts) do
+      {:ok, pid} when is_pid(pid) ->
+        put_in(state.heal_runs[Process.monitor(pid)], heal.id)
+
+      {:ok, pid, _info} when is_pid(pid) ->
+        put_in(state.heal_runs[Process.monitor(pid)], heal.id)
+
+      :ignore ->
+        Logger.error("Job heal #{heal.id}: its heal run did not start: ignored")
+        state
+
+      {:error, reason} ->
+        Logger.error("Job heal #{heal.id}: its heal run did not start: #{inspect(reason)}")
+        state
+    end
+  end
+
+  # One bounded statement: the heals waiting seven days on the owner close.
+  defp expire_waiting_heals(%{enabled?: false} = state), do: state
+
+  defp expire_waiting_heals(state) do
+    case Repo.job_heals_call({:expire_waiting, state.clock.()}, state.repo_opts) do
+      {:ok, heals} ->
+        Enum.each(heals, &trace_expired/1)
+        state
+
+      {:error, reason} ->
+        Logger.error("Job heal expiry failed: #{inspect(reason)}")
+        state
+    end
+  end
+
+  defp trace_expired(heal) do
+    JobTelemetry.heal("closed", %{
+      heal_id: heal.id,
+      job_id: heal.job_id,
+      subject_kind: heal.subject_kind,
+      subject_id: heal.subject_id,
+      failure_kind: heal.failure_kind,
+      outcome: "expired"
+    })
+  end
+
   defp schedule_due_timer(state, outcome \\ :ok) do
     cancel_timer(state.due_timer)
 
@@ -1185,19 +1424,12 @@ defmodule FermixCore.Jobs.Scheduler do
 
   defp arm(delay_ms), do: {Process.send_after(self(), :due_tick, delay_ms), delay_ms}
 
-  defp next_wakeup_at(%{next_run_at: nil, expires_at: nil}), do: nil
-  defp next_wakeup_at(%{next_run_at: nil, expires_at: expires_at}), do: expires_at
-  defp next_wakeup_at(%{next_run_at: next_run_at, expires_at: nil}), do: next_run_at
-
-  defp next_wakeup_at(%{
-         next_run_at: %DateTime{} = next_run_at,
-         expires_at: %DateTime{} = expires_at
-       }) do
-    if DateTime.compare(expires_at, next_run_at) == :lt do
-      expires_at
-    else
-      next_run_at
-    end
+  # The earliest of the job's next run, its expiry and its retry (M106 §5.3),
+  # or nil when it has none of them.
+  defp next_wakeup_at(job) do
+    [job.next_run_at, job.expires_at, Map.get(job, :retry_at)]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.min(DateTime, fn -> nil end)
   end
 
   defp schedule_reconciliation_timer(state) do

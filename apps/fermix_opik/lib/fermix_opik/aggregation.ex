@@ -316,8 +316,9 @@ defmodule FermixOpik.Aggregation do
               run_id: Map.get(meta, :run_id),
               schedule_kind: Map.get(meta, :schedule_kind),
               schedule_expr: Map.get(meta, :schedule_expr),
-              # What started the run: "schedule", "manual", "cue" (a watcher's
-              # task) or "watcher" (a watcher's follow-up).
+              # What started the run: "schedule", "manual", "retry" (a failed
+              # run's retry), "cue" (a watcher's task) or "watcher" (a watcher's
+              # follow-up).
               trigger: Map.get(meta, :trigger),
               # A cue run's watcher and the delivery it held (M60 §9.6); a
               # follow-up run's watcher, the cue that set it off and its
@@ -348,9 +349,25 @@ defmodule FermixOpik.Aggregation do
           job_id: Map.get(meta, :job_id),
           run_id: Map.get(meta, :run_id),
           watcher_id: Map.get(meta, :watcher_id),
-          delivery_id: Map.get(meta, :delivery_id)
+          delivery_id: Map.get(meta, :delivery_id),
+          # A scheduled run's failure: whether it runs again (M106 §5.3).
+          retry_disposition: Map.get(meta, :retry_disposition),
+          retry_attempts: Map.get(meta, :retry_attempts),
+          retry_at: Map.get(meta, :retry_at),
+          # And what a heal made of it, and which heal (§5.4).
+          heal: Map.get(meta, :heal),
+          heal_id: Map.get(meta, :heal_id)
         })
     })
+  end
+
+  # A heal (M106 §5.4) has no run of its own: each phase (opened, joined,
+  # delivered, delivery_failed, closed) is a point event that becomes its own
+  # self-closing trace, built inline and never tracked in state. Correlation
+  # is by `heal_id`, and by `job_id` and `run_id` when a run moved it; nesting
+  # under the run would resurrect a trace that has already shipped.
+  def apply_event(state, [:fermix, :job, :heal], _meas, meta, at) do
+    {state, [%{trace: job_heal_trace(state, meta, at), spans: []}]}
   end
 
   # A coding-harness run (codex/claude, local/cloud) is its OWN root trace: the
@@ -2189,6 +2206,31 @@ defmodule FermixOpik.Aggregation do
   # carries no duration: a fabricated zero would read as a measurement. The
   # metadata is exactly the four emitters' fixed keys (a reaction's delay is
   # merged in from its measurements).
+  defp job_heal_trace(state, metadata, at) do
+    Mapper.drop_nil(%{
+      id: Mapper.new_id(at.at),
+      project_name: state.project,
+      name: "job_heal:#{stringify(Map.get(metadata, :phase))}",
+      start_time: Mapper.iso(at.at),
+      end_time: Mapper.iso(at.at),
+      metadata:
+        compact(%{
+          heal_id: Map.get(metadata, :heal_id),
+          job_id: Map.get(metadata, :job_id),
+          run_id: Map.get(metadata, :run_id),
+          subject_kind: Map.get(metadata, :subject_kind),
+          subject_id: Map.get(metadata, :subject_id),
+          failure_kind: Map.get(metadata, :failure_kind),
+          outcome: Map.get(metadata, :outcome),
+          attempts: Map.get(metadata, :attempts),
+          dead_letter: Map.get(metadata, :dead_letter),
+          platform: Map.get(metadata, :platform),
+          error: Map.get(metadata, :error)
+        }),
+      tags: ["job_heal"]
+    })
+  end
+
   defp open_loop_point_trace(state, name, metadata, at) do
     Mapper.drop_nil(%{
       id: Mapper.new_id(at.at),

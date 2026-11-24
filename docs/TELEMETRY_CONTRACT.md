@@ -860,7 +860,7 @@ claim time), scheduled, manual and cue runs alike: the random suffix keeps two
 runs started in one second apart, and the `cron_` prefix is kept, so
 `fermix_opik`'s `infer_kind`, `Meetings.Session`'s origin and every other prefix
 check read a cue run as a scheduled one. The bookends carry `trigger`
-(`"schedule"`, `"manual"` or `"cue"`) on every run, and on a cue run also
+(`"schedule"`, `"manual"`, `"retry"`, `"cue"` or `"watcher"`) on every run, and on a cue run also
 `watcher_id` (which the runner puts on the run map it passes, since the run row
 does not hold it) and `delivery_id` (the row's `cue_delivery_id`, the
 `cue_deliveries.id` the run held); both are absent on any other run. The Opik
@@ -871,6 +871,50 @@ the gate labels each call it decides, a mandate call with a `mandate_*` label,
 a refused read tool `refused_reader_writes` or a `mandate_*` label, a call
 outside the run's tools `refused_cue_surface`, an access-sensitive one outside
 its mandate `refused_cue_run` (see "Access-gate labels").
+
+### Scheduled job retries
+
+A failed scheduled run is run again quietly when it failed before its first
+tool on a failure waiting can clear (M106 §5.3), and its
+`[:fermix, :job, :run_error]` bookend says what became of it:
+`retry_disposition` (`"none"`, `"retry"` or `"exhausted"`), `retry_attempts`
+(its place in the job's run of retried failures, 0 for `"none"`) and, for a
+retry with a time, `retry_at` (ISO 8601). A cue run's `run_error` carries none
+of the three. A run the Scheduler settles because its runner died or was never
+found (a monitored crash, a reap) has a `run_error` of its own, emitted by
+`Jobs.Scheduler` through `Jobs.Telemetry` with the same three fields. A retry's
+run is an ordinary job run whose bookends carry `trigger: "retry"`. The Opik
+run trace's metadata and `mix opik.replay` keep all three retry fields.
+
+### Scheduled job heals
+
+A failure that is not retried goes to a heal (M106 §5.4), and the run's
+`run_error` says what became of it: `heal` (`"none"` for a retried failure,
+`"opened"`, `"joined"`, `"quiet"` or `"out_of_scope"`, a guest's job) and, for
+one opened or joined, `heal_id`. A cue run's carries neither.
+
+The heal itself has one point event, `[:fermix, :job, :heal]` (`count: 1`),
+emitted only through `Jobs.Telemetry.heal/2` and `heal_settled/3`, with a
+`phase`:
+
+| phase | emitted by | when |
+|---|---|---|
+| `opened`, `joined` | the runner or the Scheduler's crash settle (`heal_settled/3`) | the settle took the failure |
+| `closed` | the same, `outcome: "healed"` | an ok run closed the heal |
+| `closed` | `Jobs.Scheduler`'s reconcile pass, `outcome: "expired"` | the heal waited 7 days |
+| `delivered` | `Jobs.HealRun` | the one message was sent and marked |
+| `delivery_failed` | `Jobs.HealRun`, `dead_letter` true or false | a send failed, or no inbox |
+
+Every event carries `heal_id` and `agent` (`"scheduled:<job_id>"`, or
+`"job_heal"` for a provider's heal with no run behind the event), and whichever
+of `job_id`, `run_id`, `subject_kind`, `subject_id`, `failure_kind`, `outcome`,
+`attempts`, `dead_letter`, `platform` and `error` (bounded to 500 characters)
+the phase knows. A heal is not a run kind: no model runs and it has no
+`session_id`. The trace stream writes it as the `job_heal` agent event; Opik
+makes each phase its own self-closing trace named `job_heal:<phase>`, tagged
+`job_heal`, correlated by `heal_id` and never nested under the run, and
+`mix opik.replay` reads the row back as the same event. The Opik run trace's
+metadata and the replay keep `heal` and `heal_id` on a run's error.
 
 ## Meeting notetaker runs
 

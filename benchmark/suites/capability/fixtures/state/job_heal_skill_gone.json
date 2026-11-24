@@ -1,0 +1,13 @@
+{
+  "jobs": [
+    {
+      "key": "rota",
+      "name": "Lantern Row recycling rota",
+      "description": "Which bins go out on Lantern Row this week",
+      "schedule": "40 5 * * 1",
+      "task_prompt": "Read the Lantern Row recycling rota and tell me which bins go out this week.",
+      "skill_name": "lantern-rota-digest",
+      "timeout_seconds": 300
+    }
+  ]
+}

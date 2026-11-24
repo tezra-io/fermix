@@ -3,7 +3,10 @@
 #   FERMIX_HOME=<eval home> mix run --no-start --no-compile benchmark/bin/seed_state.exs <spec.json>
 #
 # Restores the task's baseline in the disposable eval home's memory.db before a
-# trial: once no job run is in flight, removes every scheduled job, cancels
+# trial: once no job run and no heal run (M106 §5.4) is in flight, deletes every
+# heal and every run's retry and facts (job_heals, job_heal_runs, job_retries,
+# job_run_facts: a heal of a provider outlives its jobs, and a closed one keeps
+# the same failure quiet for 7 days), removes every scheduled job, cancels
 # every active reminder, closes every live open loop and deletes every recorded
 # reply to a follow-up, then creates the spec's jobs (with their past runs) and
 # reminders through the same registry and claim/settle calls the daemon uses, so
@@ -19,13 +22,21 @@
 # Prints one JSON manifest line last: the created ids, job snapshots, loops,
 # replies, the zone and local date.
 #
+# Seeded history is the product's history: a seeded failed run settles through the
+# call a live failure's does, so a failure of the owner's job opens a heal (or joins
+# the one it opened before), which the daemon claims on its next pass and sends.
+# Its run's own delivery reads `skipped`, as a healed failure's does; an ok run
+# after it closes the heal as healed.
+#
 # It runs in its own BEAM beside the eval daemon; SQLite (WAL, busy_timeout)
 # serialises the two writers. Every value a spec carries is invented.
 
 defmodule SeedState do
+  alias Exqlite.Sqlite3
   alias FermixCore.Jobs.Registry, as: Jobs
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Memory.Repo
+  alias FermixCore.Memory.Repo.CuesSql
   alias FermixCore.Memory.Repo.OpenLoopsSql
   alias FermixCore.Memory.Store, as: MemoryStore
   alias FermixCore.OpenLoops.ActiveHours
@@ -39,8 +50,12 @@ defmodule SeedState do
   @reset_poll_ms 1_000
   @max_event_pages 50
   # The refusals a reset outlasts: a run in flight (or claimed between the check and the
-  # delete) and a reminder mid-delivery. Anything else is not transient and raises.
-  @transient [:run_in_flight, :job_running, :delivery_in_progress]
+  # delete), a reminder mid-delivery, and a heal run holding its lease. Anything else is
+  # not transient and raises.
+  @transient [:run_in_flight, :job_running, :delivery_in_progress, :heal_in_flight]
+  # The heal tables (M106) the reset empties, children first. A job's own rows also
+  # go with it by cascade; a heal of a provider has no job, so only this removes it.
+  @heal_tables ~w(job_heal_runs job_heals job_retries job_run_facts)
   @anchor_kinds ~w(matters_by ask_after)
   @reaches ~w(message conversation)
   @windows ~w(open closed)
@@ -54,6 +69,10 @@ defmodule SeedState do
     config = home_config!()
     same_database!(home)
     {:ok, _} = Application.ensure_all_started(:exqlite)
+    # `--no-start` skips `FermixCore.Application.start/2`, which records the boot
+    # profile the Repo's start reads (through the Always On check); this helper is
+    # a source build run from the checkout, as benchmark/audit/export_schemas.exs is.
+    :ok = FermixCore.BootProfile.remember(:source)
     {:ok, _} = Repo.start_link([])
     {:ok, _} = MemoryStore.start_link([])
     now = DateTime.utc_now()
@@ -134,9 +153,9 @@ defmodule SeedState do
 
   # --- reset -------------------------------------------------------------------
 
-  # Delete every job, cancel every reminder and close every live open loop, once
-  # nothing is running. Removal goes through Jobs.Registry so each job's memory
-  # source is marked removed, exactly as the remove_job tool leaves it.
+  # Delete every heal and job, cancel every reminder and close every live open loop,
+  # once nothing is running. Job removal goes through Jobs.Registry so each job's
+  # memory source is marked removed, exactly as the remove_job tool leaves it.
   defp reset!(now, deadline) do
     case clear(now) do
       :ok ->
@@ -166,7 +185,8 @@ defmodule SeedState do
   end
 
   defp remove_all(jobs, now) do
-    with :ok <- remove_jobs(jobs),
+    with :ok <- delete_heals(),
+         :ok <- remove_jobs(jobs),
          :ok <- cancel_active_events(now, @max_event_pages),
          :ok <- close_open_loops(now),
          :ok <- delete_reactions(),
@@ -180,6 +200,49 @@ defmodule SeedState do
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
+  end
+
+  # Every heal, and every run's retry and facts, in one BEGIN IMMEDIATE write that the
+  # daemon's heal claim (also BEGIN IMMEDIATE) cannot interleave with, refused while a
+  # heal run holds its lease, so no send meets a heal that is gone. It runs before the
+  # jobs go, whose removal would cascade a held heal away. Through a connection of its
+  # own: the Repo has no call that removes a heal, and the engine is not changed for
+  # the harness.
+  defp delete_heals do
+    {:ok, conn} = Sqlite3.open(MemoryConfig.database_path())
+
+    try do
+      :ok = Sqlite3.execute(conn, "PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;")
+      :ok = Sqlite3.execute(conn, "BEGIN IMMEDIATE")
+      delete_unless_leased(conn)
+    after
+      :ok = Sqlite3.close(conn)
+    end
+  end
+
+  defp delete_unless_leased(conn) do
+    if leased_heals(conn) > 0 do
+      :ok = Sqlite3.execute(conn, "ROLLBACK")
+      {:error, :heal_in_flight}
+    else
+      Enum.each(@heal_tables, &(:ok = Sqlite3.execute(conn, "DELETE FROM #{&1}")))
+      Sqlite3.execute(conn, "COMMIT")
+    end
+  end
+
+  # A heal run holds its heal `diagnosing` under a lease; one whose lease ran out has
+  # died, and the daemon's next pass claims its heal again.
+  defp leased_heals(conn) do
+    sql = "SELECT count(*) FROM job_heals WHERE state = 'diagnosing' AND lease_until > ?1"
+    {:ok, statement} = Sqlite3.prepare(conn, sql)
+
+    try do
+      :ok = Sqlite3.bind(statement, [CuesSql.stamp(DateTime.utc_now())])
+      {:row, [count]} = Sqlite3.step(conn, statement)
+      count
+    after
+      :ok = Sqlite3.release(conn, statement)
+    end
   end
 
   # Listing is paged; each pass cancels what it saw, so the next pass lists the rest.
@@ -232,6 +295,7 @@ defmodule SeedState do
   end
 
   # What a checker compares the end state with ("unchanged" fields, the same id).
+  # `enabled` is the row's `enabled?`, and `delivery_target` the stored map.
   defp job_snapshot(job) do
     job
     |> Map.take([
@@ -243,9 +307,14 @@ defmodule SeedState do
       :task_prompt,
       :skill_name,
       :timeout_seconds,
-      :expires_at
+      :expires_at,
+      :delivery_mode,
+      :delivery_target,
+      :provider,
+      :model
     ])
     |> Map.update!(:expires_at, &(&1 && DateTime.to_iso8601(&1)))
+    |> Map.put(:enabled, job.enabled?)
   end
 
   defp expires_at(spec, now) do
@@ -272,23 +341,48 @@ defmodule SeedState do
       claimed_at: started,
       started_at: started,
       prompt_snapshot: job.task_prompt,
-      delivery_status: "delivered",
+      delivery_status: seeded_delivery_status(Map.fetch!(spec, "status")),
       created_at: started,
       updated_at: started
     }
 
     {:ok, _} = Repo.claim_job_now(job.id, %{state: "running", updated_at: started}, run)
+    status = Map.fetch!(spec, "status")
 
     {:ok, _} =
       Repo.settle_job_run(
-        Map.merge(run, %{
-          status: Map.fetch!(spec, "status"),
+        run
+        |> Map.merge(%{
+          status: status,
           completed_at: completed,
           error: Map.get(spec, "error"),
           final_response: Map.get(spec, "final_response"),
           updated_at: completed
         })
+        |> Map.merge(seeded_failure(status, spec)),
+        seeded_settle_by(status)
       )
+  end
+
+  # A failure the heal takes sends nothing where the job delivers (M106 §5.4), so a
+  # seeded failed run's own delivery reads as a live one's does.
+  defp seeded_delivery_status("ok"), do: "delivered"
+  defp seeded_delivery_status(_failed), do: "skipped"
+
+  # A seeded failure says nothing waiting can clear, so it sets no retry: the
+  # seeded home holds the history the spec names and nothing else.
+  defp seeded_settle_by("ok"), do: :ok
+  defp seeded_settle_by(_failed), do: {:failed, :other}
+
+  # A seeded failure is of no named kind, and its error is the sentence a heal
+  # of the owner's job is told (M106 §5.4), as a real run's settle tells it.
+  defp seeded_failure("ok", _spec), do: %{}
+
+  defp seeded_failure(_failed, spec) do
+    %{
+      failure_kind: "other",
+      heal_facts: %{failure_text: Map.fetch!(spec, "error"), provider: nil}
+    }
   end
 
   # --- reminders ---------------------------------------------------------------

@@ -23,6 +23,7 @@ import os
 import re
 import secrets
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -37,7 +38,10 @@ REPO_ROOT = os.path.dirname(SKILL_DIR)
 sys.path.insert(0, HERE)
 
 import eval_home_state
-from evallib import companion, cue_drive, voice
+# A case's `state:` is seeded by the capability runner's own `checker.state` seeding,
+# so the two tiers restore one baseline one way.
+import run_capability
+from evallib import companion, cue_drive, owner_inbox, voice
 from evallib import config as cfgmod
 from evallib import driver, grade, judge, report
 from evallib.fixture_server import (FIXTURE_URL_PLACEHOLDER, FixtureServer,
@@ -89,6 +93,15 @@ _ACCOUNT_ABORT_WHY = "This is an external account condition, not a product failu
 _RESET_ABORT_WHY = ("The eval home could not be put back to its seeded state, so no later "
                     "case could start from it either: this is the harness, not a product "
                     "failure.")
+_STATE_ABORT_WHY = ("The eval home's jobs and reminders could not be seeded, so no later "
+                    "case could start from its seed either: this is the harness, not a "
+                    "product failure.")
+# A case's `state:` can seed a failed run, which opens a heal (M106 §5.4) the daemon's
+# Scheduler claims on its next pass, at most its 60 s reconcile, and sends at once.
+# The turn waits until every heal of a seeded job has left `open` and `diagnosing`, so
+# the owner's question is asked of the record the product would have by then.
+_SEEDED_HEAL_WAIT_S = 150
+_SEEDED_HEAL_POLL_S = 1.0
 
 
 def now_utc() -> datetime:
@@ -332,6 +345,8 @@ def requirement_problem(need: str, home: str, reset_home: bool = False) -> str |
         return None if reset_home else (
             "a phone case runs only with --reset-home, each attempt from the seeded home "
             "(its five daily attempts and one call slot)")
+    if need == owner_inbox.REQUIREMENT:
+        return owner_inbox.home_problem(home)
     raise ValueError(f"unknown requirement {need!r}")
 
 
@@ -2256,6 +2271,12 @@ def _print_dry_run(chosen, profiles, judge_on: bool, args,
         print(f"  home reset: {reset_jobs} case trial(s) would each start from the seeded "
               "state (capability-daemon.sh reset: one daemon restart per attempt, "
               "--fail-retries re-drives included)")
+    state_jobs = sum(1 for _suite, _scenario, case, _trial in jobs if case.state is not None)
+    if state_jobs:
+        # Validated, not seeded: the spec files exist; a dry run starts no helper.
+        print(f"  state: {state_jobs} case trial(s) would each seed the eval home's jobs and "
+              "reminders first (bin/seed_state.exs, every attempt), then wait up to "
+              f"{_SEEDED_HEAL_WAIT_S} s for any heal the seed opened to be sent")
     for suite, scenario, case, trial in jobs:
         action = _skip_reason(case, args) or "run"
         print(f"  - {suite.name}/{scenario.id}/{case.id}#{trial} "
@@ -2355,13 +2376,84 @@ def _drive_case(cfg, client, suite, scenario, case, run_id: str, trial: int,
             suite, scenario, case, run_id, trial, exc, fixture)
 
 
+def seed_case_state(cfg, suite, case) -> tuple[dict | None, str | None]:
+    """Restore `case.state` in the eval home with `bin/seed_state.exs`, as the capability
+    runner restores a `checker.state`: (the helper's manifest, None), or (None, why it
+    could not). The spec path is relative to the suite file."""
+    try:
+        manifest = run_capability._seed_state(cfg.daemon.fermix_home,
+                                              os.path.dirname(suite.path), case.state)
+    except (run_capability.StateSeedError, run_capability.checker.CheckerBoundaryError) as exc:
+        return None, str(exc)
+    return manifest, None
+
+
+def unsent_seeded_heals(db_path: str, job_ids: list[str]) -> list[str]:
+    """The heals of the seeded jobs still `open` or `diagnosing`: their message is not
+    sent yet. Read-only: the runner never writes the store it grades."""
+    if not job_ids:
+        return []
+    marks = ", ".join("?" for _id in job_ids)
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
+    try:
+        rows = conn.execute(f"SELECT id FROM job_heals WHERE job_id IN ({marks}) "
+                            "AND state IN ('open', 'diagnosing') ORDER BY id", job_ids)
+        return [row[0] for row in rows]
+    finally:
+        conn.close()
+
+
+def await_seeded_heals(home: str, manifest: dict, timeout_s: float = _SEEDED_HEAL_WAIT_S,
+                       clock=time.monotonic, sleep=time.sleep) -> str | None:
+    """None once no heal a seeded failure opened is waiting to be sent, else why not
+    within `timeout_s`. A seeded failed run of the owner's job opens a heal in the
+    seed's own settle (bin/seed_state.exs), and the daemon claims and sends it."""
+    jobs = manifest.get("jobs") if isinstance(manifest, dict) else None
+    job_ids = [job["id"] for job in (jobs or {}).values()]
+    db_path = os.path.join(os.path.expanduser(home), "memory.db")
+    deadline = clock() + timeout_s
+    while True:
+        try:
+            pending = unsent_seeded_heals(db_path, job_ids)
+        except sqlite3.Error as exc:
+            return f"the seeded heals could not be read from {db_path}: {exc}"
+        if not pending:
+            return None
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return (f"the daemon did not send the seeded heal(s) {', '.join(pending)} within "
+                    f"{timeout_s:g} s (still open or diagnosing)")
+        sleep(min(_SEEDED_HEAL_POLL_S, remaining))
+
+
+def _seed_attempt(cfg, suite, scenario, case, run_id: str, trial: int):
+    """Seed a `state:` case's attempt: None when it may be driven, else (its undriven
+    result, the abort it raises). A seed that fails ends the run, as a failed reset
+    does: the home holds no known baseline for any later case. A seeded heal the
+    daemon did not send in time leaves only this attempt INCOMPLETE."""
+    manifest, error = seed_case_state(cfg, suite, case)
+    if error:
+        result = _ungraded_result(suite, scenario, case, run_id, trial,
+                                  f"state seed failed: {error}", "the attempt was not driven")
+        return result, {"suite": suite.name, "case": case.id, "tool": "seed_state.exs",
+                        "fragment": "state seed failed", "message": error,
+                        "why": _STATE_ABORT_WHY}
+    unsent = await_seeded_heals(cfg.daemon.fermix_home, manifest)
+    if unsent:
+        return _ungraded_result(suite, scenario, case, run_id, trial, unsent,
+                                "the attempt was not driven: its seeded record never "
+                                "reached the state the turn asks about"), None
+    return None
+
+
 def _drive_attempt(cfg, client, suite, scenario, case, run_id: str, trial: int,
                    judge_on: bool, fixtures, reset_home) -> tuple[dict, dict | None]:
     """One attempt and the abort it raises, if any.
 
     With --reset-home an isolated companion attempt starts from the seeded world.
     A reset that fails leaves the attempt undriven and ends the run: the home is in
-    no known state, so no later case could start from the seed either."""
+    no known state, so no later case could start from the seed either. A case with
+    a `state:` is seeded before each of its attempts (`_seed_attempt`)."""
     if reset_home is not None and resets_home(scenario, case):
         error = reset_home()
         if error:
@@ -2371,6 +2463,10 @@ def _drive_attempt(cfg, client, suite, scenario, case, run_id: str, trial: int,
             return result, {"suite": suite.name, "case": case.id,
                             "tool": "capability-daemon.sh reset", "fragment": "reset failed",
                             "message": error, "why": _RESET_ABORT_WHY}
+    if case.state is not None:
+        undriven = _seed_attempt(cfg, suite, scenario, case, run_id, trial)
+        if undriven is not None:
+            return undriven
     result = _drive_case(cfg, client, suite, scenario, case, run_id, trial, judge_on,
                          fixtures)
     return result, _abort_signal(suite, result) if suite.abort_on_tool_error else None

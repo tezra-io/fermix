@@ -81,7 +81,8 @@ defmodule FermixCore.Jobs.FailureTest do
             {{:context_recovery_failed, :empty_summary}, :context_recovery},
             {{:context_recovery_failed, api(503)}, :context_recovery},
             {{:agent_loop_exit, %RuntimeError{message: "adapter exploded"}}, :crashed},
-            {{:agent_loop_exit, :killed}, :crashed}
+            {{:agent_loop_exit, :killed}, :crashed},
+            {{:tool_start_unrecorded, :repo_timeout}, :tool_start_unrecorded}
           ] do
         assert Failure.kind(reason) == kind, "#{inspect(reason)} should be #{kind}"
       end
@@ -161,6 +162,7 @@ defmodule FermixCore.Jobs.FailureTest do
             {:all_routes_failed, [{:openai, api(429)}, {:anthropic, api(401)}]},
             {:context_recovery_failed, :empty_summary},
             {:agent_loop_exit, :killed},
+            {:tool_start_unrecorded, :repo_timeout},
             {:time_limit, 600_000},
             {:unknown_skill, "harbour_tides"},
             "Maximum iterations (50) reached",
@@ -169,6 +171,43 @@ defmodule FermixCore.Jobs.FailureTest do
           ] do
         refute Failure.provider_failure?(reason),
                "#{inspect(reason)} should not be the provider's"
+      end
+    end
+  end
+
+  # M106 §5.4: the question a heal's subject turns on, of a stored kind. Not
+  # the retry's question: a sign-in failure is one no model run can help with,
+  # and still not a failure waiting clears.
+  describe "model_cannot_help?/1" do
+    test "every provider kind and no route, a sign-in failure included; no other" do
+      cannot_help =
+        ~w(provider_rate_limit provider_quota provider_auth provider_unavailable
+           provider_timeout provider_transport no_route)a
+
+      for kind <- Failure.kinds() do
+        expected = kind in cannot_help
+        assert {kind, Failure.model_cannot_help?(kind)} == {kind, expected}
+        assert {kind, Failure.model_cannot_help?(Failure.stored(kind))} == {kind, expected}
+      end
+
+      refute Failure.provider_failure?(ProviderError.auth(:openai, :responses, "no key"))
+
+      assert Failure.model_cannot_help?(
+               Failure.kind(ProviderError.auth(:openai, :responses, "no key"))
+             )
+    end
+
+    test "a text no kind stores is no kind" do
+      refute Failure.model_cannot_help?("provider_said_no")
+    end
+  end
+
+  describe "sentence/1" do
+    test "a run the Scheduler settled, or stopped before a tool it could not record, is told in a sentence of its own" do
+      for kind <- [:crashed, :reaped, :tool_start_unrecorded] do
+        sentence = Failure.sentence(kind)
+        assert sentence =~ ~r/^The run .+\.$/
+        refute sentence =~ "reaped"
       end
     end
   end

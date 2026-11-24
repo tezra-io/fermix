@@ -11,6 +11,7 @@ defmodule FermixCore.Memory.Repo do
   alias FermixCore.Agents.IterationLimits
   alias FermixCore.ComputerHistory.Spool
   alias FermixCore.Home.Candidate
+  alias FermixCore.Jobs.Retry
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.Repo.ChecklistsSql
   alias FermixCore.Memory.Repo.ComputerHistorySql
@@ -24,6 +25,8 @@ defmodule FermixCore.Memory.Repo do
   alias FermixCore.Memory.Repo.CuesWatchersSql
   alias FermixCore.Memory.Repo.FtsMatch
   alias FermixCore.Memory.Repo.InboundEventsSql
+  alias FermixCore.Memory.Repo.JobHealsSql
+  alias FermixCore.Memory.Repo.JobRetriesSql
   alias FermixCore.Memory.Repo.KeptSql
   alias FermixCore.Memory.Repo.MeetingsSql
   alias FermixCore.Memory.Repo.MobileSql
@@ -105,6 +108,8 @@ defmodule FermixCore.Memory.Repo do
   @phone_calls_migration_version 67
   @phone_call_ledger_migration_version 68
   @job_run_facts_migration_version 69
+  @job_retries_migration_version 70
+  @job_heals_migration_version 71
   @sqlite_open_intent :readwritecreate
 
   # The home's requests about notes from every machine (M97 §8), all served by
@@ -406,6 +411,11 @@ defmodule FermixCore.Memory.Repo do
   );
   """
 
+  # The earliest of a job's next run, expiry and retry (M106 §5.3), for the due
+  # scan's and the timer's order; `~` sorts after every timestamp.
+  @earliest_wakeup_sql "min(coalesce(j.next_run_at, '~'), coalesce(j.expires_at, '~'), " <>
+                         "coalesce(r.retry_at, '~'))"
+
   # A run row and its facts: `job_runs` by its own columns, in the order
   # `job_run_row/1` reads them, then the facts by name, so a column a later
   # migration adds to `job_run_facts` is read past.
@@ -423,7 +433,7 @@ defmodule FermixCore.Memory.Repo do
     ON job_runs(created_at) WHERE delivery_status = 'pending';
   """
 
-  # One-time repair of the wedge `settle_job_run/2` closes. Before it, a run's
+  # One-time repair of the wedge `settle_job_run/3` closes. Before it, a run's
   # final write and its job's release were separate writes, and a crash between
   # them left the job `running` with no active run: no due scan, timer or
   # reconcile pass ever touched it again. Each is released as its settle would:
@@ -2660,10 +2670,11 @@ defmodule FermixCore.Memory.Repo do
 
   @doc """
   Stamps `job_runs.tools_started_at` with `at`, the moment the run's first tool
-  started, unless it is already set: the compare-and-set a cue run's mandate
-  gate uses (`CuesMandateSql.mark_tools_started/3`), so a second stamp, the
-  gate and the run's own settle keep whichever came first. `:ok` whether or
-  not it wrote; a run id with no row writes nothing.
+  starts, before that tool runs (`Jobs.Runner`'s gate), unless it is already
+  set: the compare-and-set a cue run's mandate gate uses
+  (`CuesMandateSql.mark_tools_started/3`), so a second stamp, the gate and the
+  run's own settle keep whichever came first. `:ok` whether or not it wrote; a
+  run id with no row writes nothing.
   """
   @spec mark_job_run_tools_started(String.t(), DateTime.t(), keyword()) :: :ok | {:error, term()}
   def mark_job_run_tools_started(run_id, %DateTime{} = at, opts \\ [])
@@ -2694,19 +2705,106 @@ defmodule FermixCore.Memory.Repo do
   becomes `completed` and disabled with no next run. The job's `last_run_at`,
   `last_status` and `last_error` are the run's `completed_at`, `status` and
   `error`.
+
+  `settle_by` is how the run ended, the cue settle's vocabulary for a
+  scheduled run: `:ok` for an ok run, the runner's `{:failed, :provider}` or
+  `{:failed, :other}`, or `:scheduler` for a reap or a monitored crash. In the
+  same transaction the run's retry is decided and stored (M106 §5.3,
+  `JobRetriesSql.settle/4`), and then what the heals make of it (M106 §5.4,
+  `JobHealsSql.settle/5`). The settlement says what became of the run:
+  `disposition` `:none`, `:retry` or `:exhausted`, with `attempts` and
+  `retry_at`; `heal`, for a failure, `:none` (retried), `{:opened, id}`,
+  `{:joined, id}`, `:quiet` or `:out_of_scope`; and `healed`, the heals an ok
+  run closed.
+
+  A failed run carries its `failure_kind` and its `heal_facts`: the
+  owner-facing `failure_text`, the provider's own `failure_words` when it gave
+  any, and the `provider` the failure names, or nil. An ok run may carry
+  `heal_facts` with the `provider` it ran on.
   """
-  @spec settle_job_run(job_run_attrs(), keyword()) ::
-          {:ok, {job_run_row(), scheduled_job_row()}} | {:error, :run_not_active | term()}
-  def settle_job_run(%{id: id, status: status, completed_at: %DateTime{}} = attrs, opts \\ [])
-      when is_binary(id) and status in @final_job_run_statuses do
-    call({:settle_job_run, attrs}, opts)
+  @spec settle_job_run(job_run_attrs(), Retry.settle_by(), keyword()) ::
+          {:ok, {job_run_row(), scheduled_job_row(), map()}}
+          | {:error, :run_not_active | term()}
+  def settle_job_run(
+        %{id: id, status: status, completed_at: %DateTime{}} = attrs,
+        settle_by,
+        opts \\ []
+      )
+      when is_binary(id) and status in @final_job_run_statuses and
+             ((status == "ok" and settle_by == :ok) or
+                (status != "ok" and
+                   settle_by in [{:failed, :provider}, {:failed, :other}, :scheduler] and
+                   is_binary(attrs.failure_kind) and is_binary(attrs.heal_facts.failure_text))) do
+    :ok = validate_heal_facts!(Map.get(attrs, :heal_facts, %{}))
+    call({:settle_job_run, attrs, settle_by}, opts)
+  end
+
+  defp validate_heal_facts!(facts) when is_map(facts) do
+    for key <- [:provider, :failure_words],
+        value = Map.get(facts, key),
+        not is_nil(value) and not is_binary(value) do
+      raise ArgumentError, "heal fact #{key} must be a string or nil, got: #{inspect(value)}"
+    end
+
+    :ok
+  end
+
+  @doc """
+  Serves one request about the heals (M106 §5.4) with `Memory.Repo.JobHealsSql`,
+  a `handle(conn, request)` with one head per request tuple. The settle opens
+  and closes heals; `Jobs.Scheduler`, `Jobs.HealRun` and `list_jobs` read and
+  move them here.
+  """
+  @spec job_heals_call(tuple() | atom(), keyword()) :: term()
+  def job_heals_call(request, opts \\ []) when is_list(opts),
+    do: call({:job_heals, request}, opts)
+
+  @doc """
+  The retry `job_id` holds (M106 §5.3): its count of retried failures in a row
+  and the time of its pending retry (nil when its next run is the retry or a
+  claim took it), or nil when it holds none.
+  """
+  @spec get_job_retry(String.t(), keyword()) ::
+          {:ok, JobRetriesSql.retry() | nil} | {:error, term()}
+  def get_job_retry(job_id, opts \\ []) when is_binary(job_id) do
+    call({:get_job_retry, job_id}, opts)
+  end
+
+  @doc """
+  Claims the run of a job whose retry time has passed (M106 §5.3), through the
+  claim every run takes: in one `BEGIN IMMEDIATE`, the job read while enabled,
+  `scheduled` and holding a retry due at or before `now`, taken with
+  `job_attrs` (which leaves `next_run_at` as it is), the run inserted, and the
+  retry's time cleared with its count kept. `{:error, :not_due}` when it holds
+  no such retry.
+  """
+  @spec claim_retry_job(
+          String.t(),
+          scheduled_job_attrs(),
+          job_run_attrs(),
+          DateTime.t(),
+          keyword()
+        ) :: {:ok, {scheduled_job_row(), job_run_row()}} | {:error, term()}
+  def claim_retry_job(id, job_attrs, run_attrs, %DateTime{} = now, opts \\ [])
+      when is_binary(id) and is_map(job_attrs) and is_map(run_attrs) do
+    call({:claim_retry_job, id, job_attrs, run_attrs, now}, opts)
+  end
+
+  @doc """
+  Drops `job_id`'s retry when it was due at or before `cutoff` (the
+  Scheduler's freshness window): its time is cleared and its count kept, so
+  the job's next run is the retry. A later retry is left as it is.
+  """
+  @spec drop_stale_job_retry(String.t(), DateTime.t(), keyword()) :: :ok | {:error, term()}
+  def drop_stale_job_retry(job_id, %DateTime{} = cutoff, opts \\ []) when is_binary(job_id) do
+    call({:drop_stale_job_retry, job_id, cutoff}, opts)
   end
 
   @cue_settles [:ignored, :acted, {:failed, :provider}, {:failed, :other}, :scheduler]
 
   @doc """
   Settles a cue run (M60 §9.4): its final row, its job's release and its
-  delivery's move, in one `BEGIN IMMEDIATE`. `settle_job_run/2` refuses a cue
+  delivery's move, in one `BEGIN IMMEDIATE`. `settle_job_run/3` refuses a cue
   run (`{:error, :cue_run}`), so no path releases one without moving its
   delivery.
 
@@ -4844,8 +4942,23 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
-  def handle_call({:settle_job_run, attrs}, _from, state) do
-    reply = with_connection(state, &settle_job_run_tx(&1, attrs))
+  def handle_call({:settle_job_run, attrs, settle_by}, _from, state) do
+    reply = with_connection(state, &settle_job_run_tx(&1, attrs, settle_by))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:get_job_retry, job_id}, _from, state) do
+    reply = with_connection(state, &JobRetriesSql.fetch(&1, job_id))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:claim_retry_job, id, job_attrs, run_attrs, now}, _from, state) do
+    reply = with_connection(state, &claim_retry_job_tx(&1, id, job_attrs, run_attrs, now))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:drop_stale_job_retry, job_id, cutoff}, _from, state) do
+    reply = with_connection(state, &JobRetriesSql.drop_stale(&1, job_id, cutoff))
     {:reply, reply, state}
   end
 
@@ -5015,6 +5128,10 @@ defmodule FermixCore.Memory.Repo do
 
   def handle_call({:checklists, request}, _from, state) do
     {:reply, with_connection(state, &ChecklistsSql.handle(&1, request)), state}
+  end
+
+  def handle_call({:job_heals, request}, _from, state) do
+    {:reply, with_connection(state, &JobHealsSql.handle(&1, request)), state}
   end
 
   def handle_call({:trips, request}, _from, state) do
@@ -5243,8 +5360,52 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_trip_towns_migration(conn, versions),
          :ok <- apply_phone_calls_migration(conn, versions),
          :ok <- apply_phone_call_ledger_migration(conn, versions),
-         :ok <- apply_job_run_facts_migration(conn, versions) do
+         :ok <- apply_job_run_facts_migration(conn, versions),
+         :ok <- apply_job_retries_migration(conn, versions),
+         :ok <- apply_job_heals_migration(conn, versions) do
       :ok
+    end
+  end
+
+  # M106 §5.4: a job's heal and the runs it took, in two tables of their own,
+  # with the version in one transaction, after 70. `job_runs` and
+  # `scheduled_jobs` are left as they were, and no row is rewritten: a failure
+  # from before has no heal. Reapplying it changes nothing: each table and
+  # index is made only if missing.
+  defp apply_job_heals_migration(conn, versions) do
+    if Enum.member?(versions, @job_heals_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{JobHealsSql.schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@job_heals_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  # M106 §5.3: a job's retry, its count and the time of its pending retry, in
+  # a table of its own beside `scheduled_jobs`, with the version in one
+  # transaction, after 69. `scheduled_jobs` is left as it was, and no row is
+  # rewritten: a job from before has no retry. Reapplying it changes nothing:
+  # the table is made only if missing.
+  defp apply_job_retries_migration(conn, versions) do
+    if Enum.member?(versions, @job_retries_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{JobRetriesSql.schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@job_retries_migration_version});
+        COMMIT;
+        """
+      )
     end
   end
 
@@ -8075,32 +8236,29 @@ defmodule FermixCore.Memory.Repo do
     {:error, reason}
   end
 
+  # Due by its next run, its expiry or its retry (M106 §5.3), earliest first.
+  # Each row carries its retry's time (`retry_at`, nil for none), read by name.
   defp fetch_due_scheduled_jobs(conn, now, limit) do
     with {:ok, rows} <-
            query_all(
              conn,
              """
-             SELECT *
-             FROM scheduled_jobs
-             WHERE enabled = 1
-               AND state = 'scheduled'
+             SELECT j.*, r.retry_at
+             FROM scheduled_jobs j
+             LEFT JOIN job_retries r ON r.job_id = j.id
+             WHERE j.enabled = 1
+               AND j.state = 'scheduled'
                AND (
-                 (next_run_at IS NOT NULL AND next_run_at <= ?)
-                 OR (expires_at IS NOT NULL AND expires_at <= ?)
+                 (j.next_run_at IS NOT NULL AND j.next_run_at <= ?)
+                 OR (j.expires_at IS NOT NULL AND j.expires_at <= ?)
+                 OR (r.retry_at IS NOT NULL AND r.retry_at <= ?)
                )
-             ORDER BY
-               CASE
-                 WHEN next_run_at IS NULL THEN expires_at
-                 WHEN expires_at IS NULL THEN next_run_at
-                 WHEN expires_at < next_run_at THEN expires_at
-                 ELSE next_run_at
-               END ASC,
-               id ASC
+             ORDER BY #{@earliest_wakeup_sql} ASC, j.id ASC
              LIMIT ?
              """,
-             [timestamp_string(now), timestamp_string(now), limit]
+             [timestamp_string(now), timestamp_string(now), CuesSql.stamp(now), limit]
            ) do
-      {:ok, Enum.map(rows, &scheduled_job_row/1)}
+      {:ok, Enum.map(rows, &scheduled_job_with_retry/1)}
     end
   end
 
@@ -8109,42 +8267,93 @@ defmodule FermixCore.Memory.Repo do
            query_all(
              conn,
              """
-             SELECT *
-             FROM scheduled_jobs
-             WHERE enabled = 1
-               AND state = 'scheduled'
-               AND (next_run_at IS NOT NULL OR expires_at IS NOT NULL)
-             ORDER BY
-               CASE
-                 WHEN next_run_at IS NULL THEN expires_at
-                 WHEN expires_at IS NULL THEN next_run_at
-                 WHEN expires_at < next_run_at THEN expires_at
-                 ELSE next_run_at
-               END ASC,
-               id ASC
+             SELECT j.*, r.retry_at
+             FROM scheduled_jobs j
+             LEFT JOIN job_retries r ON r.job_id = j.id
+             WHERE j.enabled = 1
+               AND j.state = 'scheduled'
+               AND (j.next_run_at IS NOT NULL OR j.expires_at IS NOT NULL OR r.retry_at IS NOT NULL)
+             ORDER BY #{@earliest_wakeup_sql} ASC, j.id ASC
              LIMIT 1
              """,
              []
            ) do
       case rows do
-        [row] -> {:ok, scheduled_job_row(row)}
+        [row] -> {:ok, scheduled_job_with_retry(row)}
         [] -> {:ok, nil}
       end
     end
   end
 
+  # A job row read with its retry's time appended, `SELECT j.*, r.retry_at`.
+  defp scheduled_job_with_retry(row) do
+    {job_columns, [retry_at]} = Enum.split(row, -1)
+    Map.put(scheduled_job_row(job_columns), :retry_at, CuesSql.parse_stamp(retry_at))
+  end
+
+  # A due run is also the retry a job held (M106 §5.3): its time is cleared and
+  # its count kept, so the run counts as the next attempt.
   defp claim_due_job_tx(conn, id, job_attrs, run_attrs, now) do
     transact_claim(conn, fn ->
-      claim_in_tx(conn, id, job_attrs, run_attrs, fetch_claimable_due_job(conn, id, now))
+      conn
+      |> claim_in_tx(id, job_attrs, run_attrs, fetch_claimable_due_job(conn, id, now))
+      |> then_in_claim(fn -> JobRetriesSql.clear_retry_at(conn, id) end)
     end)
   end
 
   # A manual ("run now") claim is identical to a due claim except it skips the
   # due-time gate — the same single-flight guard and atomic upserts still apply.
+  # It is the owner's action, so the job's retry goes with it (M106 §5.3).
   defp claim_job_now_tx(conn, id, job_attrs, run_attrs) do
     transact_claim(conn, fn ->
-      claim_in_tx(conn, id, job_attrs, run_attrs, fetch_claimable_job(conn, id))
+      conn
+      |> claim_in_tx(id, job_attrs, run_attrs, fetch_claimable_job(conn, id))
+      |> then_in_claim(fn -> JobRetriesSql.delete(conn, id) end)
     end)
+  end
+
+  # A retry's claim (M106 §5.3) is the due claim's with the retry for its gate:
+  # the job read while it holds a retry due by `now`, taken without moving its
+  # next run, and the retry's time cleared with its count kept.
+  defp claim_retry_job_tx(conn, id, job_attrs, run_attrs, now) do
+    transact_claim(conn, fn ->
+      conn
+      |> claim_in_tx(id, job_attrs, run_attrs, fetch_claimable_retry_job(conn, id, now))
+      |> then_in_claim(fn -> JobRetriesSql.clear_retry_at(conn, id) end)
+    end)
+  end
+
+  defp then_in_claim({:ok, _claimed} = claimed, write) do
+    case write.() do
+      :ok -> claimed
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp then_in_claim({:error, reason}, _write), do: {:error, reason}
+
+  defp fetch_claimable_retry_job(conn, id, now) do
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT j.*
+             FROM scheduled_jobs j
+             JOIN job_retries r ON r.job_id = j.id
+             WHERE j.id = ?
+               AND j.enabled = 1
+               AND j.state = 'scheduled'
+               AND r.retry_at IS NOT NULL
+               AND r.retry_at <= ?
+             LIMIT 1
+             """,
+             [id, CuesSql.stamp(now)]
+           ) do
+      case rows do
+        [row] -> {:ok, scheduled_job_row(row)}
+        [] -> {:error, :not_due}
+      end
+    end
   end
 
   # A cue claim (M60 §9.2): the eligible delivery, the job and its run, and the
@@ -8328,21 +8537,28 @@ defmodule FermixCore.Memory.Repo do
   # transaction, as `claim_in_tx/5` took the job and inserted the run together.
   # A BEGIN that fails (`:busy`) never opened the transaction, so it returns as
   # is; every failure inside it rolls both writes back.
-  defp settle_job_run_tx(conn, attrs) do
+  defp settle_job_run_tx(conn, attrs, settle_by) do
     with :ok <- execute(conn, "BEGIN IMMEDIATE", []) do
       conn
-      |> settle_job_run_in_tx(attrs)
+      |> settle_job_run_in_tx(attrs, settle_by)
       |> finish_job_settle(conn)
     end
   end
 
-  defp settle_job_run_in_tx(conn, attrs) do
+  # The retry is decided from the run row as written (its `tools_started_at`)
+  # and the job as released, so it reads what this transaction holds; the
+  # heal follows the retry, which decides whether there is a failure to take.
+  defp settle_job_run_in_tx(conn, attrs, settle_by) do
+    facts = Map.get(attrs, :heal_facts, %{})
+
     with :ok <- ensure_job_run_active(conn, attrs.id),
          :ok <- ensure_not_cue_run(conn, attrs.id),
          {:ok, run} <- upsert_job_run_row(conn, attrs),
          :ok <- release_settled_job(conn, run),
-         {:ok, job} <- fetch_scheduled_job(conn, run.job_id) do
-      {:ok, {run, job}}
+         {:ok, job} <- fetch_scheduled_job(conn, run.job_id),
+         {:ok, retry} <- JobRetriesSql.settle(conn, job, run, settle_by),
+         {:ok, settlement} <- JobHealsSql.settle(conn, job, run, retry, facts) do
+      {:ok, {run, job, settlement}}
     end
   end
 
@@ -8602,6 +8818,8 @@ defmodule FermixCore.Memory.Repo do
   # A watcher's follow-up is a job: an edit that changes what its Always allow
   # is bound to clears that approval in the same transaction
   # (M60_WATCHER_CODING_RUNS.md §5), whichever path changed the job.
+  # The owner's pause, resume and edits each leave the job with no retry (M106
+  # §5.3), in their own transaction, so an old retry never fires after one.
   defp update_scheduled_job_fields_row(conn, id, assignments) do
     {columns, values} = Enum.unzip(assignments)
     set_sql = Enum.map_join(columns, ", ", &"#{&1} = ?")
@@ -8609,7 +8827,8 @@ defmodule FermixCore.Memory.Repo do
 
     CuesSql.with_immediate_transaction(conn, fn ->
       with :ok <- execute(conn, update, values ++ [id]),
-           :ok <- CuesFollowUpAllowSql.clear_stale_approval(conn, {:follow_up_job, id}) do
+           :ok <- CuesFollowUpAllowSql.clear_stale_approval(conn, {:follow_up_job, id}),
+           :ok <- JobRetriesSql.delete(conn, id) do
         fetch_scheduled_job(conn, id)
       end
     end)

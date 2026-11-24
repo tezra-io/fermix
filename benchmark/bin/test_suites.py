@@ -213,6 +213,29 @@ def test_a_home_without_the_signed_out_claude_holds_out_only_the_case_that_needs
     assert held == [] and kept == chosen
 
 
+def test_a_home_whose_inbox_is_not_the_local_chat_holds_out_what_needs_it(tmp_path, monkeypatch):
+    # M106: a heal's message reaches only the local chat in an eval home, so a case
+    # that grades a sent heal is held out, not zeroed, on the default Telegram inbox.
+    cases = [dict(BASE_CASE, requires=["owner_inbox_cli"]), dict(FILLER_CASE)]
+    (tmp_path / "suite").mkdir()
+    loaded = suites.load_all(_write_suite(tmp_path / "suite", cases=cases))
+    chosen = [(suite, suite.scenarios) for suite in loaded]
+    home = tmp_path / "x-eval"
+    argv = ["seed_capability_home.py", str(home), "--provider", "openai", "--model", "gpt-x"]
+
+    monkeypatch.setattr(sys, "argv", argv)
+    seed.main()
+    kept, held = run_eval.hold_out_unseeded(_home_cfg(str(home)), chosen)
+    assert [case.id for _s, scns in kept for scn in scns for case in scn.cases] == ["case_b"]
+    [(_suite_name, case_id, why)] = held
+    assert case_id == "case_a" and "--owner-inbox-cli" in why
+
+    monkeypatch.setattr(sys, "argv", [*argv, "--owner-inbox-cli"])
+    seed.main()
+    kept, held = run_eval.hold_out_unseeded(_home_cfg(str(home)), chosen)
+    assert held == [] and kept == chosen
+
+
 # --- coding_harness: a signed-out Claude Code (M98 D10) ------------------------
 
 def _signed_out_case():
@@ -307,6 +330,64 @@ def test_a_capability_case_cannot_declare_workspace_paths_absent(tmp_path):
     with pytest.raises(suites.SuiteError) as exc:
         suites.load_all(str(tmp_path))
     assert any("graded by run_eval.py only" in p for p in exc.value.problems)
+
+
+# --- state (case level): the jobs baseline a behavioral case is seeded with ----
+
+def _state_spec(tmp_path, name="w.json") -> str:
+    """A spec under the suite directory's fixtures, as a case names it."""
+    spec = tmp_path / "fixtures" / "state" / name
+    spec.parent.mkdir(parents=True, exist_ok=True)
+    spec.write_text('{"jobs": []}')
+    return f"fixtures/state/{name}"
+
+
+ISOLATED = {"risk": "isolated_mutation"}
+
+
+def test_a_state_case_loads_on_an_isolated_ask_scenario(tmp_path):
+    spec = _state_spec(tmp_path)
+    scn = _load_one_scenario(tmp_path, scenario=ISOLATED,
+                             cases=[dict(BASE_CASE, state=spec), dict(FILLER_CASE)])
+    assert [case.state for case in scn.cases] == [spec, None]
+
+
+def test_state_needs_the_isolated_mutation_profile(tmp_path):
+    # The seed deletes every job, reminder and open loop in the home it writes to.
+    spec = _state_spec(tmp_path)
+    problems = _problems(tmp_path, cases=[dict(BASE_CASE, state=spec), dict(FILLER_CASE)])
+    assert any("must be isolated_mutation" in p for p in problems), problems
+
+
+@pytest.mark.parametrize("value", ["fixtures/state/missing.json", "../w.json", "/tmp/w.json",
+                                   "fixtures/state/w.txt", "spec.yaml", 3, ""])
+def test_state_must_be_a_json_spec_under_the_fixtures(tmp_path, value):
+    _state_spec(tmp_path)
+    (tmp_path / "fixtures" / "state" / "w.txt").write_text("{}")
+    problems = _problems(tmp_path, scenario=ISOLATED,
+                         cases=[dict(BASE_CASE, state=value), dict(FILLER_CASE)])
+    assert any("`state` must be a relative .json file" in p for p in problems), problems
+
+
+def test_state_needs_the_ask_drive(tmp_path):
+    spec = _state_spec(tmp_path)
+    case = {"id": "case_a", "drive": "companion", "query": "q", "state": spec,
+            "expect": {"wire": {"events_all": ["accepted"]}}}
+    problems = _problems(tmp_path, scenario=ISOLATED, cases=[case, dict(FILLER_CASE)])
+    assert any("`state` needs `drive: ask`" in p for p in problems), problems
+
+
+def test_a_capability_case_seeds_with_checker_state_not_state(tmp_path):
+    spec = _state_spec(tmp_path)
+    doc = {"suite": "cap_spec", "title": "Cap spec", "risk": "isolated_mutation",
+           "scenarios": [{"id": "scn", "title": "Scenario",
+                          "cases": [{"id": "only", "query": "q", "state": spec,
+                                     "score": {"match": "exact", "expected": "x"}}]}]}
+    with open(os.path.join(str(tmp_path), "cap_spec.yaml"), "w", encoding="utf-8") as fh:
+        yaml.safe_dump(doc, fh)
+    with pytest.raises(suites.SuiteError) as exc:
+        suites.load_all(str(tmp_path))
+    assert any("seeds its state with `checker.state`" in p for p in exc.value.problems)
 
 
 # --- requires_tools_all (case level) ----------------------------------------
@@ -798,6 +879,8 @@ def test_the_shipped_numbered_rubrics_parse():
                       "hardware": 2, "landing_page": 2, "newsletter": 2,
                       "oat_milk_route_sanity": 2, "packing": 2, "reading": 2,
                       "site_and_app": 3,
+                      # job_auto_heal.yaml
+                      "tide_report_never_came_route_sanity": 3, "tide_report_missing": 3,
                       # voice_greeting_goodbye.yaml
                       "greeted_then_asked_if_heard": 4,
                       # phone_reach.yaml

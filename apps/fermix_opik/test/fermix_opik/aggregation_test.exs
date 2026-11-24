@@ -1121,6 +1121,90 @@ defmodule FermixOpik.AggregationTest do
     refute Map.has_key?(trace.metadata, :cue_count)
   end
 
+  # M106 §5.3: a scheduled run's failure says whether it is run again.
+  test "a failed run's trace carries its retry: the disposition, the attempt and the time" do
+    session_id = "cron_job-9_20261120_070000_d4e5f6"
+    base = %{agent: "scheduled:job-9", job_id: "job-9", run_id: "run-3", session_id: session_id}
+
+    {_state, closed} =
+      run([
+        {[:fermix, :job, :run_start], %{},
+         Map.merge(base, %{name: "tide table", trigger: "retry"})},
+        {[:fermix, :job, :run_error], %{count: 1, duration_ms: 400},
+         Map.merge(base, %{
+           status: "error",
+           error: "rate limited",
+           trigger: "retry",
+           retry_disposition: "retry",
+           retry_attempts: 2,
+           retry_at: "2026-11-20T07:02:50.000000Z"
+         })}
+      ])
+
+    assert [%{trace: trace}] = closed
+    assert trace.metadata.trigger == "retry"
+    assert trace.metadata.retry_disposition == "retry"
+    assert trace.metadata.retry_attempts == 2
+    assert trace.metadata.retry_at == "2026-11-20T07:02:50.000000Z"
+  end
+
+  # M106 §5.4: a failure a heal took says which heal, and each phase of the
+  # heal is a point trace of its own, correlated by its id.
+  test "a failed run's trace names the heal that took it" do
+    session_id = "cron_job-9_20261120_071000_a1b2c3"
+    base = %{agent: "scheduled:job-9", job_id: "job-9", run_id: "run-4", session_id: session_id}
+
+    {_state, closed} =
+      run([
+        {[:fermix, :job, :run_start], %{},
+         Map.merge(base, %{name: "tide table", trigger: "schedule"})},
+        {[:fermix, :job, :run_error], %{count: 1, duration_ms: 400},
+         Map.merge(base, %{
+           status: "timeout",
+           error: "wall-clock timeout",
+           heal: "opened",
+           heal_id: "jhl_0a1b"
+         })}
+      ])
+
+    assert [%{trace: trace}] = closed
+    assert {trace.metadata.heal, trace.metadata.heal_id} == {"opened", "jhl_0a1b"}
+  end
+
+  test "each phase of a heal is its own self-closing trace" do
+    {_state, closed} =
+      run([
+        {[:fermix, :job, :heal], %{count: 1},
+         %{
+           agent: "scheduled:job-9",
+           phase: "delivery_failed",
+           heal_id: "jhl_0a1b",
+           job_id: "job-9",
+           subject_kind: "job",
+           subject_id: "job-9",
+           failure_kind: "time_limit",
+           attempts: 2,
+           dead_letter: false,
+           error: "{:transport, :timeout}"
+         }}
+      ])
+
+    assert [%{trace: trace, spans: []}] = closed
+    assert trace.name == "job_heal:delivery_failed"
+    assert trace.start_time == trace.end_time
+    assert "job_heal" in trace.tags
+
+    assert %{
+             heal_id: "jhl_0a1b",
+             job_id: "job-9",
+             subject_kind: "job",
+             failure_kind: "time_limit",
+             attempts: 2,
+             dead_letter: false,
+             error: "{:transport, :timeout}"
+           } = trace.metadata
+  end
+
   test "a soul-curation draft is its own trace nesting the bounded provider call" do
     {_state, closed} =
       run([

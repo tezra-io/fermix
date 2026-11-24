@@ -63,8 +63,8 @@ SKILL_DIR = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 
 from evallib import (aggregate, checker, config as cfgmod, cue_drive, driver, grade, judge,
-                     leaderboard, leaderboard_html, pricing, release_gate, safe_rm, scoring,
-                     uplift)
+                     leaderboard, leaderboard_html, owner_inbox, pricing, release_gate,
+                     safe_rm, scoring, uplift)
 from evallib.experiments import ExperimentWriter, OpikWriteError, stable_id
 from evallib.fixture_server import (FIXTURE_URL_PLACEHOLDER, PAGE_READY_PATH, FixtureServer,
                                     ServerError, case_uses_fixture, check_state, home_port,
@@ -1358,6 +1358,21 @@ def _hold_out_unseeded_cues(cfg, cases) -> tuple[list, list]:
     return kept, unmet
 
 
+def _hold_out_unseeded_inbox(cfg, cases) -> tuple[list, list]:
+    """Tasks of a suite that `requires: [owner_inbox_cli]`, held out NOT EVALUATED on
+    a home whose owner inbox is not the local chat (seeded without --owner-inbox-cli):
+    there a message to the owner never sends, and its task would score 0 with nothing
+    wrong in the product."""
+    needing = [row for row in cases if owner_inbox.REQUIREMENT in row[0].requires]
+    problem = owner_inbox.home_problem(cfg.daemon.fermix_home) if needing else None
+    if problem is None:
+        return cases, []
+    unmet = sorted((suite.name, case.id, problem) for suite, _scn, case in needing)
+    _print_not_evaluated(unmet)
+    held = {(suite_name, case_id) for suite_name, case_id, _why in unmet}
+    return [row for row in cases if (row[0].name, row[2].id) not in held], unmet
+
+
 def run_task(cfg, opik, s, scn, case, trials, k, threshold, run_id,
              want_judge, fixtures=None, tasks_root: str | None = None) -> TaskOutcome:
     is_checker = case.checker_spec is not None
@@ -2046,10 +2061,12 @@ def main(argv=None) -> int:
     if refusal is not None:
         return refusal
     cases, unseeded = _hold_out_unseeded_cues(cfg, cases)
-    not_evaluated = [*not_evaluated, *unseeded]
+    cases, no_inbox = _hold_out_unseeded_inbox(cfg, cases)
+    not_evaluated = [*not_evaluated, *unseeded, *no_inbox]
     if not cases:
         print("no capability task is measurable on this daemon: every selected task "
-              "needs cues this eval home was not seeded with (--cues)", file=sys.stderr)
+              "needs a seed this eval home was not seeded with (--cues, --owner-inbox-cli)",
+              file=sys.stderr)
         return 3
     return _sweep(cfg, args, lb_path, cases, want_judge, not_evaluated, tasks_root)
 

@@ -130,6 +130,16 @@ run starts no vendor and spends nothing outside Fermix. Off by default: with it,
 every Claude Code run in the home fails, the lifecycle cases' included. A seed
 without it removes the stub; the case's `requires: [coding_signed_out]` holds it
 out of a home seeded without it.
+
+`--owner-inbox-cli` (M106) makes the local `cli` chat the configured default
+delivery target, so the owner's inbox (`Delivery.OwnerInbox`) is one an eval can
+see a message reach: without it the inbox is the Telegram chat below, which has no
+bot token, and every message to the owner (a job heal's) fails to send. The CLI
+adapter needs no credentials and prints what it is sent; the heal's row records
+the send. It is off by default, because it moves every owner-inbox message and
+every job's default delivery in the home. The seed records it in
+`eval-fixtures/owner_inbox.json` (`evallib.owner_inbox`); a seed without it
+removes that, and a case that `requires: [owner_inbox_cli]` is held out.
 """
 
 from __future__ import annotations
@@ -149,7 +159,7 @@ import tomllib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from evallib import safe_rm  # noqa: E402
+from evallib import owner_inbox, safe_rm  # noqa: E402
 from evallib.fixture_server import FIXTURE_MANIFEST  # noqa: E402
 from evallib.phone_sim import SEEDED as PHONE_SEEDED  # noqa: E402
 
@@ -433,6 +443,7 @@ def render_config(
     home: str, pid: str, blk: dict, profile: str | None,
     explicit: bool = False, voice: str | None = None, cues: dict | None = None,
     computers: bool = False, voice_conversation: str = "chat", phone_calls: bool = False,
+    owner_inbox_cli: bool = False,
 ) -> str:
     uses_key = "api_key" in blk
     if explicit:
@@ -517,8 +528,13 @@ def render_config(
     # eval-window reminder ever came due, the unconfigured adapter terminates
     # the attempt first-try as adapter_unavailable without touching the network.
     lines += ["[fermix_core.jobs]", 'default_delivery_mode = "channel"', ""]
+    # With --owner-inbox-cli the target is the local chat instead: a local channel
+    # is the owner's own at rung one, and its adapter sends with no credentials, so
+    # a message to the owner's inbox lands (`evallib.owner_inbox`).
+    target = owner_inbox.TARGET if owner_inbox_cli else {"platform": "telegram",
+                                                         "chat_id": "100001"}
     lines += ["[fermix_core.jobs.default_delivery_target]",
-              'platform = "telegram"', 'chat_id = "100001"', ""]
+              *(f"{key} = {json.dumps(value)}" for key, value in target.items()), ""]
     # The owner-inbox ladder (`Delivery.OwnerInbox`) accepts that target only when
     # it IS the owner's own inbox, which it tells by the channel's explicit
     # `owner_user_id`. Without one, open-loop capture (M78) refuses every loop as
@@ -581,6 +597,25 @@ def clear_phone_fixtures(home: str) -> None:
         path = os.path.join(home, name)
         if os.path.isfile(path):
             os.remove(safe_rm.check(path, home, min_below=1))
+
+
+def write_owner_inbox_manifest(home: str) -> dict:
+    """The manifest that says this seed made the local chat the owner's inbox."""
+    manifest = {"default_delivery_target": owner_inbox.TARGET,
+                "adapter": "FermixChannels.CLI"}
+    path = os.path.join(home, owner_inbox.MANIFEST)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, indent=2)
+    return manifest
+
+
+def clear_owner_inbox_manifest(home: str) -> None:
+    """A seed without --owner-inbox-cli: the inbox is the Telegram chat again, so
+    the cases that need the local one are held out."""
+    path = os.path.join(home, owner_inbox.MANIFEST)
+    if os.path.isfile(path):
+        os.remove(safe_rm.check(path, home, min_below=1))
 
 
 def phone_calls_error(pid: str, voice_engine: str | None) -> str | None:
@@ -1226,6 +1261,10 @@ def parse_args() -> argparse.Namespace:
                         help="put a stub claude first on the daemon's PATH that fails every "
                              "run as signed out, for coding_harness's signed-out case; off "
                              "by default")
+    parser.add_argument("--owner-inbox-cli", dest="owner_inbox_cli", action="store_true",
+                        help="make the local cli chat the owner's inbox (the default "
+                             "delivery target), so a message to the owner, such as a job "
+                             "heal's, is sent and recorded; off by default")
     parser.add_argument("--extra-config", dest="extra_config",
                         help="TOML fragment appended to the rendered config (one "
                              "configuration ARM's difference); refused when it "
@@ -1317,12 +1356,16 @@ def main() -> None:
         write_phone_fixtures(home)
     else:
         clear_phone_fixtures(home)
+    if args.owner_inbox_cli:
+        write_owner_inbox_manifest(home)
+    else:
+        clear_owner_inbox_manifest(home)
     fixture_port = write_fixture_manifest(home, cues["door_port"] if cues else None,
                                           phone_calls=args.phone_calls)
     config = render_config(home, pid, blk, profile, explicit=bool(args.provider),
                            voice=voice_engine, cues=cues, computers=args.computers,
                            voice_conversation=voice_conversation,
-                           phone_calls=args.phone_calls)
+                           phone_calls=args.phone_calls, owner_inbox_cli=args.owner_inbox_cli)
     if args.extra_config:
         config += read_extra_config(config, args.extra_config)
     with open(os.path.join(home, "config.toml"), "w", encoding="utf-8") as fh:
@@ -1360,6 +1403,9 @@ def main() -> None:
         print(f"phone calls: on, from {PHONE_SEEDED['caller_number']} through an invented "
               f"trunk; the daemon's calls reach the simulated endpoint on 127.0.0.1:"
               f"{fixture_port} only")
+    if args.owner_inbox_cli:
+        print("owner inbox: the local cli chat (the default delivery target); a message to "
+              "the owner is printed by the daemon and recorded where it was sent from")
 
 
 if __name__ == "__main__":

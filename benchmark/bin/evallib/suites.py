@@ -30,8 +30,10 @@ _TOP_KEYS = {
 # and seed_cues.exs; `computers`: with --computers; `coding_signed_out`: with
 # --coding-signed-out (a stub `claude` that fails every run as signed out);
 # `phone_calls`: with --phone-calls (phone calls on, reaching the runners'
-# simulated GPT-Live endpoint; evallib/phone_sim.py).
-REQUIREMENTS = ("cues", "computers", "coding_signed_out", "phone_calls")
+# simulated GPT-Live endpoint; evallib/phone_sim.py); `owner_inbox_cli`: with
+# --owner-inbox-cli (the owner's inbox is the local cli chat, which a message to
+# the owner reaches; evallib/owner_inbox.py).
+REQUIREMENTS = ("cues", "computers", "coding_signed_out", "phone_calls", "owner_inbox_cli")
 # A phone case's turn may instead be the call's own report (`await: call_report`:
 # no query, the out-of-turn turn Fermix starts when the call ends), or wait for
 # every call of the attempt to end before its query (`after: call_end`).
@@ -48,9 +50,12 @@ PLATFORMS = ("linux", "macos")
 _CASE_KEYS = {
     "id", "query", "turns", "expect", "rubric", "judge", "timeout_ms", "drive",
     "image", "images", "score", "checker", "requires_tools", "requires_tools_all",
-    "cross_session", "companion", "watch", "voice", "cue", "requires",
+    "cross_session", "companion", "watch", "voice", "cue", "requires", "state",
 }
 _TURN_KEYS = {"query", "expect", "await", "after"}
+# The one profile a behavioral case's `state:` may run under: the seed deletes every
+# job, reminder and open loop in the home before it writes its own.
+STATE_RISK = "isolated_mutation"
 
 # expect-key -> accepted python type(s). Drives schema validation + is the single
 # source of truth for the vocabulary documented in suites/SCHEMA.md.
@@ -189,6 +194,9 @@ class Case:
     #   beyond its suite's `requires` (REQUIREMENTS); run_eval.py holds it out without.
     phone_calls: bool = False       # its suite or itself requires `phone_calls`: its calls
     #   reach the simulated phone endpoint, which records them for `fixture_state`.
+    state: str | None = None        # behavioral `drive: ask`: the jobs/reminders spec
+    #   (`bin/seed_state.exs`, relative to the suite file, under suites/fixtures/) the
+    #   runner seeds before every attempt; capability cases use `checker.state`.
 
     @property
     def needs_operator(self) -> bool:
@@ -634,6 +642,45 @@ def _refuse_misplaced_workspace_paths(case, suite_name: str, cloc: str,
                         f"drive that reads the workspace around its turn (got {case.drive!r})")
 
 
+def _case_state(cs: dict, where: dict, problems: list[str]) -> str | None:
+    """A behavioral case's `state:`, the spec `bin/seed_state.exs` restores before each
+    of its attempts, as written (relative to the suite file), or None.
+
+    `where` names the case: `suite`, `drive`, `risk`, `path` (the suite file),
+    `fixtures_dir` and `cloc`. The seed deletes every job, reminder and open loop in
+    the home it writes to, so the case must run against a disposable home (its
+    scenario's risk is `isolated_mutation`), and only `run_eval.py`'s `drive: ask`
+    path seeds a case. A capability case seeds with `checker.state`."""
+    if "state" not in cs:
+        return None
+    spec, cloc = cs["state"], where["cloc"]
+    if where["suite"].startswith(CAPABILITY_SUITE_PREFIX):
+        problems.append(f"{cloc}: a capability case seeds its state with `checker.state`, "
+                        "not a case-level `state`")
+        return None
+    if where["drive"] != "ask":
+        problems.append(f"{cloc}: `state` needs `drive: ask`, the one drive that seeds a "
+                        f"case (got {where['drive']!r})")
+        return None
+    if where["risk"] != STATE_RISK:
+        problems.append(f"{cloc}: `state` rewrites the eval home's jobs and reminders, so its "
+                        f"scenario's risk must be {STATE_RISK} (got {where['risk']!r})")
+        return None
+    resolved = (os.path.realpath(os.path.join(os.path.dirname(where["path"]), spec))
+                if _valid_checker_path(spec) and str(spec).endswith(".json") else None)
+    fixture_root = os.path.realpath(where["fixtures_dir"])
+    try:
+        contained = resolved is not None and \
+            os.path.commonpath([resolved, fixture_root]) == fixture_root
+    except ValueError:
+        contained = False
+    if not contained or not os.path.isfile(resolved):
+        problems.append(f"{cloc}: `state` must be a relative .json file under suites/fixtures: "
+                        f"{spec!r}")
+        return None
+    return spec
+
+
 def _companion_spec(cs: dict, drive: str, case_expect: dict, turn_expects: list[dict],
                     cloc: str, problems: list[str]) -> dict:
     """Validate a case's `companion:` map and its `expect.wire` against each other.
@@ -983,6 +1030,9 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
             requires_tools = _validate_tool_list(cs, "requires_tools", cloc, problems)
             requires_all = _validate_tool_list(cs, "requires_tools_all", cloc, problems)
             case_requires = _case_requirements(cs, str(name), cloc, problems)
+            state = _case_state(cs, {"suite": str(name), "drive": drive, "risk": risk,
+                                     "path": path, "fixtures_dir": fixtures_dir,
+                                     "cloc": cloc}, problems)
             # cross_session: every turn but the last runs in one session, the last
             # (the recall) in a fresh one — needs 2+ turns and a scorer for the
             # recall: a `score` block on its reply, or a case-level `fixture_state`
@@ -1061,7 +1111,8 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
                         requires_tools=requires_tools, cross_session=cross_session,
                         requires_tools_all=tuple(requires_all), companion=companion_spec,
                         watch=watch, voice=voice_spec, cue=cue_spec, requires=case_requires,
-                        phone_calls="phone_calls" in (*suite_requires, *case_requires))
+                        phone_calls="phone_calls" in (*suite_requires, *case_requires),
+                        state=state)
             _refuse_misplaced_phone_turns(case, str(name), cloc, problems)
             _refuse_misplaced_fixture_state(case, turn_expects, cloc, problems)
             _refuse_misplaced_workspace_paths(case, str(name), cloc, problems)
@@ -1099,8 +1150,8 @@ def _case_requirements(cs: dict, suite_name: str, where: str,
     """A case's own `requires:`, for a case whose suite runs without that seed.
 
     A capability suite may not declare it: `run_capability.py` holds a task out by
-    its suite's `cues` only, so the case would be driven on a home that cannot
-    measure it."""
+    its suite's `cues` and `owner_inbox_cli` only, so the case would be driven on a
+    home that cannot measure it."""
     if "requires" not in cs:
         return ()
     if suite_name.startswith(CAPABILITY_SUITE_PREFIX):

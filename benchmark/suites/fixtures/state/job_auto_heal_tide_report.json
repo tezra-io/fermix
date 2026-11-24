@@ -1,0 +1,20 @@
+{
+  "jobs": [
+    {
+      "key": "tides",
+      "name": "Kelmscott pier tide report",
+      "description": "The morning low tide at Kelmscott pier",
+      "schedule": "40 5 * * *",
+      "task_prompt": "Fetch today's tide times for Kelmscott pier from tides.kelmscott.example and send me the morning low tide.",
+      "timeout_seconds": 300,
+      "runs": [
+        {
+          "hours_ago": 3,
+          "duration_seconds": 42,
+          "status": "error",
+          "error": "The tide service at tides.kelmscott.example answered 503 Service Unavailable on all four tries."
+        }
+      ]
+    }
+  ]
+}

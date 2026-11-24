@@ -698,7 +698,9 @@ defmodule FermixCore.Jobs.RegistryTest do
       final =
         Map.merge(run, %{status: "ok", completed_at: @released_at, updated_at: @released_at})
 
-      assert {:ok, {_settled, released}} = Repo.settle_job_run(final, server: repo)
+      assert {:ok, {_settled, released, _settlement}} =
+               Repo.settle_job_run(final, :ok, server: repo)
+
       assert released.state == "scheduled"
       assert released.enabled? == true
       assert released.next_run_at == nil

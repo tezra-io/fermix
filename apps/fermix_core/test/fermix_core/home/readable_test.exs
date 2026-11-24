@@ -109,7 +109,17 @@ defmodule FermixCore.Home.ReadableTest do
     # engine at this format never reads; its rows go with their run by
     # cascade. `job_runs`, which that engine reads with `SELECT *`, is left as
     # it was, so every run row keeps the width it reads: the format stays.
-    @migrations Enum.to_list(1..39) ++ [41, 42, 43] ++ Enum.to_list(45..69)
+    # 70 (M106 §5.3, a job's retry) adds one table an engine at this format
+    # never reads; its rows go with their job by cascade. `scheduled_jobs`,
+    # which that engine reads with `SELECT *`, is left as it was. A retry a
+    # newer engine left is never run by that engine, which reads only a job's
+    # next run, so the job waits for it: the format stays.
+    # 71 (M106 §5.4, a job's heal) adds two tables an engine at this format
+    # never reads; a heal goes with its job, and a heal's run with its run, by
+    # cascade. `job_runs` and `scheduled_jobs` are left as they were. A heal a
+    # newer engine opened is never sent by that engine, and its runs end in
+    # their failure line as they always did: the format stays.
+    @migrations Enum.to_list(1..39) ++ [41, 42, 43] ++ Enum.to_list(45..71)
     @manifest_keys ~w(created_at engine_version files format home_format home_root host links
                       primary_epoch)
     @entry_keys ~w(bytes mode path sha256)

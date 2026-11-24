@@ -1,11 +1,14 @@
 defmodule FermixCore.Tools.ListJobs do
   @moduledoc """
-  List durable scheduled jobs.
+  List durable scheduled jobs. Each carries its heal that is not closed (M106
+  §5.4), or nil: what failed, since when, how many runs, and whether the
+  owner was told.
   """
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Jobs.Registry
+  alias FermixCore.Memory.Repo
   alias FermixCore.Tools.JobRegistrySupport, as: Support
 
   @impl true
@@ -58,13 +61,18 @@ defmodule FermixCore.Tools.ListJobs do
           state -> Keyword.put(opts, :state, state)
         end
 
-      case Registry.list_jobs(opts) do
-        {:ok, jobs} ->
-          Support.success_json(%{jobs: Enum.map(jobs, &Support.job_payload(&1, opts[:repo]))})
-
-        {:error, reason} ->
-          Support.error(reason)
+      with {:ok, jobs} <- Registry.list_jobs(opts),
+           {:ok, heals} <- Repo.job_heals_call(:open_by_job, server: opts[:repo]) do
+        Support.success_json(%{jobs: Enum.map(jobs, &listed_job(&1, heals, opts[:repo]))})
+      else
+        {:error, reason} -> Support.error(reason)
       end
     end)
+  end
+
+  defp listed_job(job, heals, repo) do
+    job
+    |> Support.job_payload(repo)
+    |> Map.put(:heal, heals |> Map.get(job.id) |> Support.heal_payload())
   end
 end

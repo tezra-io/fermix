@@ -79,7 +79,7 @@ defmodule FermixCore.Jobs.SchedulerCuesTest do
 
     defp finish(run, _outcome, now, repo) do
       attrs = Map.merge(run, %{status: "ok", completed_at: now, updated_at: now})
-      {:ok, _settled} = Repo.settle_job_run(attrs, server: repo)
+      {:ok, _settled} = Repo.settle_job_run(attrs, :ok, server: repo)
     end
   end
 

@@ -29,7 +29,7 @@ scenarios:                     # required, >= 1
 ### `requires`
 
 What the suite needs the eval home to have been seeded with, beyond the defaults.
-Four values: `cues` — the home was seeded with `seed_capability_home.py
+Five values: `cues` — the home was seeded with `seed_capability_home.py
 --cues` and `seed_cues.exs` (`FERMIX_CAP_SEED_ARGS=--cues capability-daemon.sh up`
 does both), which turns cues on, writes the door, the local-push sources and the
 default filter model, and makes the watchers. It is opt-in because cues add
@@ -74,6 +74,20 @@ EVALUATED** with that reason, never failed or passed, decided in the one place
 the other requirements are (`run_eval.requirement_problem`). Only `run_eval.py`
 reads it; in a capability suite it is a load error.
 
+`owner_inbox_cli` — the home was seeded with `seed_capability_home.py
+--owner-inbox-cli` (`FERMIX_CAP_SEED_ARGS=--owner-inbox-cli capability-daemon.sh
+up`), which makes the local `cli` chat the configured `[fermix_core.jobs]
+default_delivery_target`, so the owner's inbox (`Delivery.OwnerInbox`) is one a
+message reaches: without it the inbox is a Telegram chat with no bot token, and a
+message to the owner (a job heal's, M106) never sends. The CLI adapter needs no
+credentials; the local chat keeps no history row of what it is sent, so a case
+grades the sender's own row (`job_heals`). It moves every owner-inbox message and
+every job's default delivery in the home, so it is opt-in. On a home seeded
+without it both runners hold the case out as **NOT EVALUATED** (they read
+`eval-fixtures/owner_inbox.json` in the home, `bin/evallib/owner_inbox.py`); a
+capability suite may require it, and `run_capability.py` holds its tasks out as it
+does for `cues`.
+
 A **case** may declare `requires:` too, from the same values, when its suite runs
 without that seed (`coding_harness.yaml`'s `claude_code_signed_out_run`): the
 case needs its suite's requirements and its own, and only that case is held out,
@@ -82,8 +96,8 @@ its siblings still run. A held-out case is listed on the console before the run
 never scored and never a failure; a run left with nothing to drive exits 3.
 `--dry-run` does not look at the home, so it plans the case either way. Only
 `run_eval.py` reads a case's `requires`: in a capability suite (`cap_*`) it is a
-load error, since `run_capability.py` holds a task out by its suite's `cues`
-alone.
+load error, since `run_capability.py` holds a task out by its suite's `cues` and
+`owner_inbox_cli` alone.
 
 ### `abort_on_tool_error`
 
@@ -414,6 +428,23 @@ the `query` shorthand; multi-turn uses `turns`.
 - `requires` (list, optional) — what the eval home must be seeded with for this
   case beyond its suite's `requires`; see *`requires`* above. `run_eval.py`
   only.
+- `state` (string, optional; `drive: ask` in a behavioral suite) — a jobs,
+  reminders and open-loops spec in the `checker.state` format (see *`checker.state`*
+  below), relative to the suite file and contained under `suites/fixtures/`
+  (`fixtures/state/<name>.json`). Before EVERY attempt of the case, retries
+  included, `run_eval.py` restores it in the eval home with `bin/seed_state.exs`,
+  the capability runner's own seeding (`run_capability._seed_state`), so the turn
+  is asked of a known record. The seed deletes every job, reminder and open loop in
+  the home, so the case's scenario must be `risk: isolated_mutation`; a case-level
+  `state` anywhere else, on another drive or in a capability suite (which uses
+  `checker.state`) is a load error, and so is a spec file that does not exist. A
+  seeded failed run of the owner's job opens a heal (M106), which the daemon claims
+  on its next pass and sends: the runner then waits, read-only and at most 150 s,
+  until no heal of a seeded job is `open` or `diagnosing`, so the record says the
+  owner was told. A seed that fails ends the run, as a failed reset does (the home
+  holds no known baseline for any later case); a heal not sent in time leaves that
+  attempt **INCOMPLETE**, never driven. `--dry-run` validates the spec path and
+  counts the seeded attempts; it starts no helper.
 
 The loader is allowlist-strict at the top/default/scenario/case/turn/expect
 levels: unknown keys fail validation. `soft`, `judge`, `cross_session`, and
@@ -948,7 +979,11 @@ checker:
 
 The jobs, reminders and open loops a task starts from, restored **before every
 trial** by `bin/seed_state.exs` (run with `mix run --no-start` from the umbrella
-root, beside the eval daemon): it waits for any job run in flight, deletes every
+root, beside the eval daemon): it waits for any job run in flight and any heal run
+holding its lease, deletes every heal with every run's retry and facts
+(`job_heals`, `job_heal_runs`, `job_retries`, `job_run_facts`: a heal of a provider
+has no job to go with, and a closed one keeps the same failure quiet for 7 days, so
+one trial's heal would join or silence the next trial's), deletes every
 scheduled job, cancels every active reminder, closes every live open loop, then
 creates the spec's through `Jobs.Registry`, the scheduler's claim/settle calls (for
 past runs), `Temporal.Registry` and, for open loops, `Memory.Repo` directly. The
@@ -963,10 +998,22 @@ spec:
                 "kind": "appointment", "plan": [{"type": "at_time"}]}]}
 ```
 
+Seeded history is the product's history: a past run settles through the call a live
+run's settle makes, so a seeded failed run of the owner's job (every seeded job is
+the owner's) opens a heal, or joins the one an earlier seeded failure opened, its own
+delivery reads `skipped`, and the daemon's Scheduler claims the heal on its next
+pass, within its 60 s reconcile, and sends its message; a seeded ok run after it
+closes the heal as healed. A spec's failed `runs` therefore seed what the owner was
+told, not only rows. `checkers/job_heal.py` grades that heal (its docstring has the
+gold); it needs a home seeded with `--owner-inbox-cli`, the one eval inbox a send
+reaches.
+
 Reminder dates are absolute: a weekday or "tomorrow" computed from the run date
 means something different on a Friday than on a Monday. The checker reads the
 manifest from the evidence file as `state`: `jobs` (each key's id and seeded
-columns, for "unchanged" and "same id" checks), `reminders` (the seeded ids, so
+columns, for "unchanged" and "same id" checks: name, description, schedule,
+timezone, task, skill, time limit, expiry, delivery mode and target, pin and
+`enabled`), `reminders` (the seeded ids, so
 only what the trial created is graded), `zone` and `today` (the home's local date
 at seed time, for "tomorrow"). `jobs_state.py` and `reminders_state.py` grade
 against it. A seed failure stops the sweep on exit 3 rather than running a trial

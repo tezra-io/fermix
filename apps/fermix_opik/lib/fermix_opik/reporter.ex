@@ -27,6 +27,7 @@ defmodule FermixOpik.Reporter do
     [:fermix, :job, :run_start],
     [:fermix, :job, :run_complete],
     [:fermix, :job, :run_error],
+    [:fermix, :job, :heal],
     [:fermix, :harness, :run_start],
     [:fermix, :harness, :run_complete],
     [:fermix, :harness, :run_error],
