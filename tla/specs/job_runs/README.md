@@ -13,8 +13,11 @@ times out does not stop the Scheduler: it takes that call's error branch.
 Since M106 the settle also decides the job's retry in that transaction, and
 the due scan claims a pending retry through the same claim. A failure no
 retry takes goes to a heal and sends nothing, unless the job was set up by a
-guest. The heal's own rows and its run are left out. Checks 61 to 72 cover
-retries; see "Retries (M106)" below and "Re-read for M106 retries and heals".
+guest. The heal's own rows are left out; its run's one move on the job (a
+pause, a raised time limit or a "run now") takes the owner's own path, which
+the spec models. Checks 61 to 72 cover retries; see "Retries (M106)" below,
+"Re-read for M106 retries and heals" and "Re-read for the heal's diagnosis
+and moves".
 
 With cues on (M60) the Scheduler also admits cue runs, and the one job can be
 a watcher's task: a job that runs on cues, claimed by admission from its
@@ -48,7 +51,7 @@ what is left out and every step folded into another.
   may still land (see late writes).
 - `SchedulerTimeouts`: how many of the Scheduler's Repo calls may time out.
   Every call its process makes passes `Repo.periodic_opts` (`on_timeout:
-  :error`, `repo.ex:1252-1254`, `scheduler.ex:170-173`), so a call the Repo
+  :error`, `repo.ex:1252-1254`, `scheduler.ex:171-174`), so a call the Repo
   does not answer within 5 s returns `{:error, :repo_timeout}`
   (`repo.ex:4455-4463`). The Scheduler takes that call site's error branch and
   keeps its monitors and timers; it does not restart, so no init
@@ -162,8 +165,8 @@ crash or timeout step itself.
 **A Scheduler Repo call that times out**, site by site (`scheduler.ex`):
 - Modelled, because the Scheduler carries on from states a crash and restart
   never left:
-  - The claim (`Repo.claim_due_job`, `:722-724`; `ClaimTimeout`) and "run
-    now"'s claim (`Repo.claim_job_now`, `:758-763`; `ManualRunTimeout`). A
+  - The claim (`Repo.claim_due_job`, `:729-731`; `ClaimTimeout`) and "run
+    now"'s claim (`Repo.claim_job_now`, `:765-770`; `ManualRunTimeout`). A
     claim the Repo had started still lands when it would have (one it turned
     away unrun writes nothing and leaves what a timed-out due scan leaves,
     `ScanTimeout`, or "run now"'s first branch), but no runner starts and
@@ -172,28 +175,28 @@ crash or timeout step itself.
     (daemon or scheduler restart, or a memory store that answered too late)`
     (`:69-73`). That occurrence never runs. A restart would have reaped it in
     init at once. Witness 30 reaches this.
-  - The run lookup in `mark_run_failed` (`Repo.get_job_run`, `:961-964`;
+  - The run lookup in `mark_run_failed` (`Repo.get_job_run`, `:968-971`;
     `ReapLookupTimeout`). After a DOWN the monitor is already gone, so the dead
     runner's run keeps its row: a queued/running row holds the job, and a
     pending delivery stays pending, until the next reconcile pass reaps it with
     the generic text instead of `runner crashed: ...`. In a reconcile pass
     the orphan waits for the next pass. Witness 31 reaches this.
-  - The reconcile scan (`Repo.unsettled_job_runs`, `:496-502`;
+  - The reconcile scan (`Repo.unsettled_job_runs`, `:503-509`;
     `ReconcileRowsTimeout`): the pass reaps and adopts nothing. After a
     restart, a live runner then stays unmonitored until the next pass, so its
     crash sends no DOWN. The run set is unknown until a scan succeeds, so no
     cue run starts meanwhile.
-  - The due scan (`:576-578`; `ScanTimeout`), and the timer lookup
-    (`Repo.next_scheduled_job`, `:1149-1153`; `ArmTimeout`): nothing is written
+  - The due scan (`:583-585`; `ScanTimeout`), and the timer lookup
+    (`Repo.next_scheduled_job`, `:1156-1160`; `ArmTimeout`): nothing is written
     and the due timer is armed at the 5 s backoff. After a timed-out scan or
     claim the tick's outcome is `:error`, so its re-arm floors at the backoff
     whatever its own lookup returns; that re-arm is folded into the timeout
-    step. "Run now"'s lookup (`:733-735`) replies the error and writes nothing.
+    step. "Run now"'s lookup (`:740-742`) replies the error and writes nothing.
 - Folded into an existing step, because the outcome is the same: the reaper's
-  write (`Repo.settle_job_run` or the pending-delivery upsert, `:1027-1043`,
-  `:1066-1079`) lands late, before the Scheduler's next call, and its error
-  branch only logs and skips the memory-source mirror (`:1040-1041`,
-  `:1074-1077`), which the spec does not model. That is `ReapRun`. The
+  write (`Repo.settle_job_run` or the pending-delivery upsert, `:1034-1050`,
+  `:1073-1086`) lands late, before the Scheduler's next call, and its error
+  branch only logs and skips the memory-source mirror (`:1047-1048`,
+  `:1081-1084`), which the spec does not model. That is `ReapRun`. The
   `:run_not_active` re-read is unreachable, as before. Adopting a live runner
   and starting one make no Repo call.
 
@@ -214,30 +217,30 @@ checks listed under it):
   key `job:<run id>` (`runner.ex:1647`). The mobile channel keeps one row per
   key (`mobile_sql.ex:44-46`), so a retry there would not show twice. Check 04.
 - `ReconcilesRuns`: at init and every 60 s the Scheduler reaps unsettled runs
-  with no live runner and adopts live ones (`scheduler.ex:228`, `:263-533`).
+  with no live runner and adopts live ones (`scheduler.ex:235`, `:270-540`).
   Checks 07, 28, 33 and 60.
 - `CrashFailsPendingDelivery`: the crash path marks a dead runner's pending
-  delivery failed, whatever the run's status (`scheduler.ex:1049-1051`,
-  `:1070-1083`). Check 09.
+  delivery failed, whatever the run's status (`scheduler.ex:1056-1058`,
+  `:1077-1090`). Check 09.
 - `DeliveryWatchdog`: the runner stops waiting for a send after
   `delivery_timeout_ms` (`channel_send.ex:219-241`). Check 05.
 - `AtomicSettle`: a run's final row and its job's release are one
   transaction, `Repo.settle_job_run` (`repo.ex:2563-2566`, `:7015-7031`, `:7091-7138`), used by
-  the runner (`runner.ex:344`, `:490`) and the reaper (`scheduler.ex:1031-1047`).
+  the runner (`runner.ex:344`, `:490`) and the reaper (`scheduler.ex:1038-1054`).
   The release is a column-targeted `UPDATE` that turns `running` back into
   `scheduled` and keeps any other state. Switched off, the spec runs the code
   before the fix: the run row alone, then a read and a whole-row upsert of the
   job row, in the runner and in the reaper. Checks 12, 22, 23, 24 and 70.
 - `ReconcilesPending`: the reconcile pass reads every unsettled run, the
   queued/running rows and then the rows whose delivery is still pending
-  (`unsettled_job_runs`, `repo.ex:2602-2655`; `scheduler.ex:489`). Switched
+  (`unsettled_job_runs`, `repo.ex:2602-2655`; `scheduler.ex:496`). Switched
   off, it reads queued/running rows only. Checks 14, 15, 35.
 - `RefusalBacksOff`: a due claim refused as `:already_running` returns
   `{:busy, state}`, so the re-arm floors at the 5 s backoff
-  (`scheduler.ex:714-718`, `:1204-1210`). Switched off, the refusal counts as a
+  (`scheduler.ex:721-725`, `:1211-1217`). Switched off, the refusal counts as a
   clean drain and a past-due job re-arms at 0 ms. Check 19.
 - `OwnerWritesColumns`: pause, resume and `update_job` write only the columns
-  they own, in place (`registry.ex:238-261`;
+  they own, in place (`registry.ex:264-287`;
   `Repo.update_scheduled_job_fields`, `repo.ex:2506-2509`, `:7286-7293`, the owner
   field list `:8096-8134`). Switched off, pause and `update_job` upsert the
   whole row they read. Check 27.
@@ -261,7 +264,7 @@ checks listed under it):
   report the user saw on a run row that says nothing was sent. Check 45.
 - `RearmsOnDown`: every runner's DOWN, a normal exit or a crash, re-arms the
   due timer for the earliest wakeup, a retry's included (`handle_info({:DOWN,
-  ...})`, `scheduler.ex:328-355`). Switched off, the code before M106: a
+  ...})`, `scheduler.ex:335-362`). Switched off, the code before M106: a
   normal DOWN only drops the monitor and a crash's callback ends after its
   reap. Check 67.
 - `StampsToolStart`: a run's first tool start is on its row before the tool
@@ -892,7 +895,9 @@ code on `dev` at `693970b7` (JOB-8 at `35a6acdc`); none has been reproduced
 on a running daemon. The **Code** paragraphs cite that code, before the
 fix. Each fix is proven by a failing-first ExUnit test and by the checks
 named under it. To see a counterexample, run `tla/bin/check.py job_runs` and
-open `tla/out/job_runs/<check>.txt`.
+open `tla/out/job_runs/<check>.txt`. JOB-10 and JOB-11 are the exception:
+they were found by reading the code, lie outside the model and have no
+counterexample. Their fixes rest on the tests named under them.
 
 A violated liveness property has no pinned length: TLC's lasso is not the
 shortest and can change between runs.
@@ -1287,6 +1292,193 @@ shortest and can change between runs.
   a refusal runs no tool and leaves one unexecuted tool event. Each of the
   runner's three failed on the code before the fix.
 
+### JOB-10: a heal run that outlives a Scheduler restart loses its rerun
+- **Severity:** low.
+  - It needs the Scheduler alone to crash during the few minutes a heal
+    run lives.
+  - The owner has then been told that Fermix is running the job again, and
+    no run comes. The heal watches for a next run that may be days away.
+- **Status:** fixed (26f7e7414). Found by reading the stage-3 code in "Re-read for
+  the heal's diagnosis and moves" below, and fixed in the same stage.
+- **Checks:** none. The model has no heal run and no Scheduler name: a
+  rerun that never starts is a "run now" never asked for, which every check
+  already allows. The finding is outside the model, not a counterexample.
+- **What happened:**
+  1. A heal decided `rerun`, and its heal run sends the message.
+  2. The Scheduler alone crashes and restarts. Under `:rest_for_one` the
+     `RunnerSupervisor` before it keeps its children, so the heal run lives
+     on and the new Scheduler adopts it.
+  3. Its concluding write makes the heal `watching`, and then it asks the
+     Scheduler that started it for the rerun. That process is dead: the
+     call exits `:noproc`, which is caught and logged, and no run starts.
+  4. A pause's or an edit's `:job_changed` cast to the same pid was
+     dropped without a word.
+- **Code (before the fix):**
+  - `start_claimed_heal` gave the heal run `scheduler: self()`, and
+    `start_rerun` called `Scheduler.run_now(pid, ...)`. It turned the exit
+    into `{:error, {:scheduler_unavailable, reason}}` and logged "its rerun
+    did not start".
+  - The message sent before that said "Fermix is running it again now".
+  - The owner's `run_job_now` reaches the Scheduler by its registered name,
+    so it never had the gap.
+- **Fix:**
+  - The Scheduler keeps the name it is registered under (`start_link/1`
+    hands it to `init/1` as `state.name`, `scheduler.ex:142-145`, `:195`)
+    and gives heal runs `scheduler: state.name` (`:1355`). A heal run's
+    "run now" and casts therefore reach whichever Scheduler holds the name.
+  - `Scheduler.run_now/3` takes a `:timeout` (`:183-186`); the heal waits
+    5 s, as `run_job_now` does.
+  - The heal records once what came of the call (`heal_run.ex:425-601`;
+    `rerun_outcome`, `job_heals_sql.ex:547-567`). One pure function,
+    `HealRun.rerun_outcome/2` (`classify_rerun/2`, `heal_run.ex:489-539`),
+    reads what came back. `start_rerun` keeps the check apart from the ask
+    (`:446-464`): `check_rerun` runs `Registry.check_run_now/2` with any exit
+    caught, and anything but `:ok` there is `{:not_asked, reason}`, so the
+    Scheduler is never called. `ask_rerun` calls `Scheduler.run_now/3` and
+    keeps an exit as it is. The outcomes:
+    - `started`, for `{:ok, run}`;
+    - `running`, for `:already_running` (a run already held the job, and
+      its settle concludes the heal);
+    - `refused`, only for what proves no run will come of this ask. It
+      moves a heal still `watching` on its first conclusion to `waiting`
+      on the owner:
+      - `{:not_asked, _}`: the Scheduler was never called;
+      - the replies `:expired`, `:not_runnable`, `:not_found` and
+        `:disabled`;
+      - the exit `:noproc`, a call that reached nobody;
+    - `unanswered`, for everything else, and the heal keeps watching:
+      - the replies `:repo_timeout`, `:busy` and any other error;
+      - a timeout, or any other exit.
+
+    Each `refused` reply, read against `manual_run`, `manual_run_job` and
+    `claim_manual_run` (`scheduler.ex:853-889`) and the Repo's claim, is a
+    proof:
+    - `:expired` and `:not_runnable` come from `manual_run_job`'s read,
+      before any claim.
+    - `:not_runnable` from inside the claim comes from
+      `fetch_claimable_job`, the claim's first statement, a `SELECT`. The
+      claim then rolls back before the reply (`transact_claim` →
+      `finish_job_claim`'s error clause → `rollback_job_claim`), and
+      nothing had been written even if that `ROLLBACK` failed (its result
+      is ignored).
+    - `:not_found` comes from `manual_run`'s lookup, a read.
+    - `:disabled` comes from `with_connection` on a store that is off,
+      before any statement.
+    - A `{:not_asked, _}` cannot follow a request that was made: `ask_rerun`
+      runs only after `check_rerun` returned `:ok`, and the check is a read
+      of the job. A check that timed out lands later as a read, which
+      starts nothing.
+  - The message now says "Fermix has asked for it to run again now"
+    (`heal_message.ex:110`).
+- **Residual:**
+  - A call made in the instant the restarting Scheduler's name is not yet
+    registered still exits `:noproc`. It is recorded `refused`, and the
+    heal waits on the owner and says so. A cast lost in that instant loses
+    nothing: the write it announces came first, so the new Scheduler's
+    init reads that write when it arms its timer, since the name is
+    registered before `init/1` runs.
+  - Some calls are still recorded `unanswered` though they started none.
+    The code cannot tell them from the ones that may have, so it keeps
+    the possibility:
+    - `manual_run`'s lookup timed out, or the store failed it with a read
+      error;
+    - `:busy` at the claim's `BEGIN IMMEDIATE`, which opened nothing;
+    - a Scheduler stopped before it read the request.
+
+    This does not matter: a watching heal concludes on the job's next run
+    as it would on a rerun, and it expires after the same seven days as a
+    waiting one. The only difference is that the next failure is told as
+    a verdict.
+  - A Scheduler started with no name (`name: nil`, which only tests do)
+    gives its heal runs `scheduler: nil`. Their rerun exits `:noproc` and
+    is recorded `refused`, and their pause or edit casts nothing.
+  - **Recorded, not modelled: a claim left open by `:busy`.**
+    `transact_claim/2` (`repo.ex:8469-8478`, older than M106) returns
+    `{:error, :busy}` with no `ROLLBACK` when the busy comes from a
+    statement inside the claim or from its `COMMIT`, not from the `BEGIN`.
+    The transaction then stays open on the Repo's one connection:
+    - the Repo's own later reads see the claim;
+    - a later `COMMIT` on that connection commits it;
+    - a later `BEGIN` fails and its caller's `ROLLBACK` undoes it.
+
+    The spec already allows a claim whose outcome the caller cannot know:
+    `ManualRunTimeout` and `ClaimTimeout` "may land", with the caller told
+    an error. It does not have one that lands, is read as landed, and is
+    then undone by another caller's rollback.
+
+    No way is known to reach that busy with the store in WAL mode and
+    `BEGIN IMMEDIATE` held:
+    - the Repo opens the store in WAL mode (`PRAGMA journal_mode=WAL`, with
+      `busy_timeout=5000`, `configure_connection`);
+    - holding `BEGIN IMMEDIATE` excludes every other writer;
+    - in WAL, readers never block a writer;
+    - a WAL `COMMIT` appends to the log and takes no lock beyond the one
+      already held.
+
+    The only path found is a store where the WAL pragma did not take,
+    for example a file system without shared memory.
+    `configure_connection` does not check the mode it got. In rollback-
+    journal mode a `COMMIT` needs an exclusive lock, and another process's
+    read lock held past the 5 s busy timeout returns busy. So it is not
+    modelled.
+- **Tests:**
+  - `scheduler_heal_verdict_test.exs`: "a heal run that outlives a
+    Scheduler restart starts its rerun through the new one".
+  - `heal_run_diagnosis_test.exs`: "a rerun that cannot start leaves the
+    heal waiting, and the record, trace and list say so"; "a run now that
+    does not answer in time is recorded as unanswered, and the heal
+    watches".
+  - `repo_job_heals_moves_test.exs`, "what came of a rerun": it is
+    recorded once; `refused` takes a watching heal to waiting; a heal the
+    job's run already moved stays where the run put it.
+
+### JOB-11: a heal run's diagnosis loop outlives the heal run
+- **Severity:** low.
+  - It needs the heal run to be killed during its diagnosis, for example
+    by a `:rest_for_one` restart of an earlier core child, which restarts
+    the `RunnerSupervisor`.
+  - The stray loop writes nothing modelled.
+- **Status:** fixed (26f7e7414). Found by reading, in the same re-read as JOB-10,
+  and fixed in the same stage.
+- **Checks:** none. The loop's tools only read job and run rows, and its
+  decision is a message, so no modelled step sees it.
+- **What happened:** the heal run is shut down while it waits for its loop.
+  The loop runs on until its six steps are used up: it makes model calls
+  and reads job and run rows, and its decision goes to a dead process. The
+  heal's closing bookend is never sent, since `HealDiagnosis.run/1`'s
+  `finish` runs in the heal run.
+- **Code (before the fix):** `supervise_loop` started the loop with
+  `spawn_monitor`, unlinked, unlike a runner's loop since JOB-8.
+- **Fix:** the loop is spawned linked and monitored in one call
+  (`Process.spawn(..., [:link, :monitor])`, `heal_diagnosis.ex:248-268`),
+  with the runner's JOB-8 pattern mirrored:
+  - `report_loop/2` turns a raise, throw or exit of the loop body into
+    `{:error, {:agent_loop_exit, reason}}` and logs it bounded (`:298-308`).
+    The loop therefore exits `:normal`, and the link carries only heal run
+    to loop.
+  - `release_loop/1` unlinks and drops the monitor when the answer arrives
+    (`:312-315`).
+  - `kill_loop/1` unlinks before the watchdog's `:kill` (`:320-331`).
+
+  Read against every way out of `await_loop`:
+  - while the heal run waits, the loop is linked, and neither it nor its
+    four tools trap exits, so a heal run that is killed or crashes takes
+    the loop with it;
+  - the heal run cannot end normally with the loop alive, since
+    `handle_continue` goes on only after `await_loop` returns: the loop has
+    answered (and is exiting), died, or been killed;
+  - the watchdog's kill cannot reach the heal run, since the link is gone
+    first and the monitor's DOWN is a message.
+- **Residual:** the runner's, mirrored.
+  - A heal run killed in the few instructions between `kill_loop`'s unlink
+    and its kill leaves the loop unlinked and alive.
+  - A process the loop links to itself can kill the loop with an exit
+    signal, and the link then takes the heal run down too. Its lease runs
+    out, and the heal is claimed and diagnosed again.
+- **Tests:** `heal_run_diagnosis_test.exs`, "the diagnosis loop's life":
+  "the loop dies with its heal run, before any further model call"; "the
+  watchdog kills the loop, and the heal run goes on to send the facts".
+
 ## Re-read for M106 retries and heals (2026-11-24)
 
 M106's quiet retry (§5.3) and its heal (§5.4) staled `scheduler.ex`,
@@ -1336,7 +1528,7 @@ re-read against that code, the five changes one by one:
    callbacks modelled here: a timeout there changes nothing modelled, and a
    crash there is `SchedulerCrash`. A heal run is no run for the admission
    ceiling or the cue share: both count runs by the run id each runner
-   publishes (`active_run_count/1`, `scheduler.ex:706-710`), so a live heal
+   publishes (`active_run_count/1`, `scheduler.ex:713-717`), so a live heal
    run takes no run slot. (Before that fix, in the same stage, it was counted
    among the supervisor's active children; the ceiling is never reached by
    one job either way.)
@@ -1395,6 +1587,158 @@ it, 61 also held with a second Scheduler crash, 25,768):
 | 64 | holds, 15,510,220 (702 s) | holds, 3,207,865 | |
 | 66 | holds, 2,054,863 | holds, 857,984 | +1 owner move: holds, 298,755 |
 | 68 | not finished: 21,603,248 states in 15 min, none broken | holds, 4,504,835 | |
+
+## Re-read for the heal's diagnosis and moves (M106, 2026-11-24)
+
+M106's diagnosis (§5.5) and verdict (§5.9) staled `scheduler.ex`,
+`runner.ex`, `registry.ex` and `heal_run.ex`. The spec was re-read against
+that code, point by point. Reading it found two defects outside the model,
+JOB-10 and JOB-11 (see Findings), both fixed in the same stage. The fixes
+staled `scheduler.ex`, `heal_run.ex` and `heal_diagnosis.ex` again, and the
+Scheduler's `init` for `cue_inbox`. The notes below are on the fixed code.
+No modelled step changed:
+
+1. **A heal run's moves are the owner's.** For a job's heal, `Jobs.HealRun`
+   runs one diagnosis (`Jobs.HealDiagnosis`), turns its decision into a plan
+   (`Jobs.HealDecision`, which only reads) and carries it out itself. It
+   writes each move right after a write on `job_heals` that proves its lease
+   still holds (`fenced`, `heal_run.ex:283-290`):
+   - `pause`: `Registry.pause_job` (`heal_run.ex:278-279`), the owner's
+     pause: `Pause`.
+   - `raise_limit`: `Registry.update_job` with `timeout_seconds` alone
+     (`heal_run.ex:270-276`). `prepare_update` reads the job and
+     `apply_job_update` writes that one column through
+     `Repo.update_scheduled_job_fields` (`registry.ex:143-173`, `:279-287`;
+     `timeout_patch`, `:342-354`). No step reads that column: `UpdateRead`,
+     then `UpdateWrite`.
+   - `rerun`: once the concluding write has made the heal `watching`,
+     `Registry.check_run_now` and then `Scheduler.run_now`
+     (`heal_run.ex:425-463`), as the owner's `run_job_now` does
+     (`run_job_now.ex:71-77`): `ManualRun`. Its claim refuses a paused,
+     running or claimed job in its own transaction.
+   - `propose`, `tell` and no decision write only `job_heals`.
+
+   The spec takes these moves at any time, since the owner's steps leave
+   the Scheduler alone. So every heal move it lists is already explored:
+   between a claim and its start (`sPc` "start"), beside a due or retry
+   claim, or against a runner's settle. A heal makes at most one move, so
+   the bounds of one or two owner moves cover a heal's move beside the
+   owner's. A heal's pause is never undone by a run's release, as the
+   owner's is not (`PauseNeverOverwritten`, with `intent` as the last pause
+   or resume any caller made).
+
+   Only the caller differs: a process under the `RunnerSupervisor`, which
+   the Scheduler monitors. Read against the code:
+   - **No deadlock.** The rerun's `Scheduler.run_now` is a `GenServer.call`
+     into a Scheduler that never waits on a heal run. The Scheduler starts
+     the run through `RunnerSupervisor.start_run`, whose `init/1` does no
+     work (`heal_run.ex:132-156`), reads its heal id from its process
+     dictionary (`HealRun.heal_id/1`) and monitors it. So the call waits
+     behind whatever callback is running and is served at `sPc` "idle",
+     where `ManualRun` is.
+   - **A call that times out** (5 s, behind a callback slowed by its own
+     Repo timeouts) is still served later, as the owner's is: the request
+     stays in the Scheduler's mailbox. `Scheduler.run_now/3` now takes the
+     wait as `:timeout` (`scheduler.ex:183-186`), and the heal passes the
+     same 5 s. Since JOB-10's fix the heal records such a call as
+     `unanswered` and keeps watching (`heal_run.ex:425-601`), so the run
+     that may still start is the one it watches.
+   - **A Scheduler that restarted: JOB-10, fixed in this stage.** The heal
+     run used to reach the Scheduler that started it by pid. A heal run
+     survives a Scheduler-only crash under the `RunnerSupervisor` and is
+     adopted, so after such a crash its rerun exited `:noproc` and started
+     nothing. It now reaches the Scheduler by the name it is registered
+     under (`scheduler.ex:195`, `:1355`).
+
+     Neither the old nor the new address changes a modelled step:
+     - A lost `:job_changed` cast after a pause or an edit loses only its
+       re-arm and admission request, and neither move makes the job due
+       or admissible.
+     - A lost "run now" is a request never made.
+   - **Its diagnosis loop: JOB-11, fixed in this stage.** The loop was
+     started with `spawn_monitor`, unlinked. It is now linked and
+     monitored in one call, as a runner's loop has been since JOB-8
+     (`heal_diagnosis.ex:248-268`). Its four tools (`skill_view`,
+     `list_job_runs`, `get_job_run`, `job_heal_respond`) read job and run
+     rows or send a message, so even a stray loop wrote nothing modelled.
+2. **The S2 properties hold with a heal run as a caller.**
+   - Single flight (`OneActiveRun`, `RunningHasRun`): the rerun is a manual
+     claim, `claim_job_now_tx` with `ensure_no_active_job_run`.
+   - `RetryClearedByOwner`: the heal's pause and its raised limit go through
+     `update_scheduled_job_fields_row`, which deletes the job's retry inside
+     the write's own `BEGIN IMMEDIATE`. Its rerun goes through
+     `claim_job_now_tx`, which deletes the retry in the claim
+     (`OwnerClearsRetry`, `OwnerLeavesRetry`).
+   - The timer: the heal run's DOWN clause (`scheduler.ex:321-333`) still
+     arms nothing, and it does not need to. Each move re-arms on its own:
+     the `:job_changed` cast (`scheduler.ex:282-284`), `run_now`'s
+     `handle_call` (`:276-279`), and the rerun's runner's own DOWN.
+3. **The settle's new branch and the wider expiry: not modelled.**
+   - A failure that finds its job's heal `watching` now reopens the heal
+     for a verdict (`verdict`, `job_heals_sql.ex:339-366`) instead of
+     joining it. Both write only `job_heals` and `job_heal_runs`.
+   - An ok run closes a watching heal `healed`, as it closes any other.
+   - The new outcome `{:verdict, id}` takes the runner's branch for a
+     failure a heal took (`finish_failure/4`, `runner.ex:599-602`: the
+     delivery is `skipped`). The reaper's crash settle does not branch on
+     it, so the run is the failed run the spec already has (`GuestJob`
+     FALSE).
+   - The expiry now also closes a heal that has been `watching` for seven
+     days (`expire_waiting`, `job_heals_sql.ex:604`). It is the same Repo
+     call in init and in the reconcile tick.
+   - The diagnosis columns (migration 72) are on `job_heals`.
+4. **What JOB-10's fix added: not modelled.**
+   - The heal records what came of the rerun once, in
+     `job_heals.rerun_outcome` (`rerun_outcome`,
+     `job_heals_sql.ex:547-567`): `started`, `running` (a run already held
+     the job), `refused` or `unanswered`. The write comes after the
+     concluding write has released the lease.
+   - The outcome comes from `HealRun.rerun_outcome/2`. `refused` is only
+     what proves no run will come of the ask: a check that stopped it
+     before the Scheduler was called, `:expired`, `:not_runnable`,
+     `:not_found`, `:disabled`, or `:noproc`. Everything else is
+     `unanswered`, including the `:repo_timeout` of a claim that may land
+     late (`ManualRunTimeout`'s landing branch) and a `:busy`. A run that
+     comes of an `unanswered` ask is one the spec already has, and its
+     settle moves the watching heal as any run's does (see JOB-10).
+   - A refusal moves the heal from `watching` to `waiting`, but only while
+     it is still `watching` on its first conclusion: the `UPDATE`'s `CASE`
+     tests `state = 'watching' AND conclusion = 'first'`.
+   - The only steps that move a watching heal are these: the rerun's own
+     settle (a verdict sets `conclusion = 'verdict'` and `state = 'open'`;
+     an ok run closes the heal) and the expiry (closes it). So a heal the
+     settle has already moved stays where the settle put it. `rerun_outcome
+     IS NULL` in the `WHERE` makes the write happen once.
+   - Every column the write touches is on `job_heals`, and no step reads
+     them.
+   - The message now says "Fermix has asked for it to run again now"
+     (`heal_message.ex:110`), which holds whatever the Scheduler answers.
+
+Citations:
+- The `registry.ex` ones moved with `check_update` and `prepare_update`
+  and were updated.
+- In the spec and in this README's sections on the current code (above
+  "Re-read for M60", the two M106 re-reads and "Assumptions"), the
+  `scheduler.ex`, `heal_run.ex` and `job_heals_sql.ex` ones moved with S3
+  and its fixes (`next_wakeup_at` is now `scheduler.ex:1444-1450`) and
+  were updated. The earlier dated re-reads and the findings cite the code
+  as it was then, and were left as they were.
+- The `repo.ex` line citations were already wrong before this stage and
+  were left as they were: `repo.ex` is pinned by function, so its line
+  numbers drift without anyone noticing.
+
+New `SOURCE` pins:
+- the heal functions that the run's settle, the Scheduler's expiry and the
+  rerun's outcome call
+  (`job_heals_sql.ex#take_failure,not_closed,verdict,join,open_or_quiet,open,link_run,close_healed,close_rows,expire_waiting,expire_rows,rerun_outcome`,
+  beside `settle`). The `settle` pin alone did not go stale when this stage
+  changed `take_failure`.
+- the diagnosis loop's tools, its linked spawn and its watchdog
+  (`heal_diagnosis.ex#@allowed_tools,supervise_loop,await_loop,report_loop,release_loop,kill_loop`).
+
+No check was added or changed. All 72 keep their verdicts and every `holds`
+check its state count from the M106 re-read above; the `needs` checks'
+counts move with the order TLC explores in, as before.
 
 ## Re-read for events drawn as cards (2026-11-13)
 
@@ -1533,7 +1877,7 @@ moved up by two with the code.
   children started before the `RunnerSupervisor`, so a crash of either is the
   daemon crash above.
 - The run-row value `unset` stands for the `"none"` the claim writes before a
-  result exists (`scheduler.ex:904`). The final `"none"` of `delivery_mode
+  result exists (`scheduler.ex:911`). The final `"none"` of `delivery_mode
   "none"` is modelled as `skipped`.
 - The due timer is modelled from the row as it is now. The code arms it at
   the end of a tick, on `:job_changed`, after run now and (since M106) at
@@ -1550,8 +1894,13 @@ moved up by two with the code.
   `:exhausted` fourth and a retry whose time falls at or after the next run
   (no time written) are a free choice of the settle. A retry older than the
   freshness window, dropped by the scan, is left out with the stale-skip.
-- A heal (M106 §5.4) is outside the model: see "Re-read for M106 retries and
-  heals" for why none of it touches a job row, a run row or the claim.
+- A heal's rows (M106 §5.4) are outside the model: see "Re-read for M106
+  retries and heals" for why none of the settle's heal writes touches a job
+  row, a run row or the claim. A heal run's one move on the job is the
+  owner's pause, edit or "run now" (see "Re-read for the heal's diagnosis and
+  moves"), so `intent` is the last pause or resume any caller made, and
+  `OwnerMoves`, `OwnerEdits` and `ManualRuns` bound a heal run's moves with
+  the owner's.
 - The admission ceiling (4 runs) is never reached by one job (two runners).
   A heal run is not counted against it: the ceiling and the cue share count
   runs by the run id each runner publishes (`active_run_count/1`). Expiry,

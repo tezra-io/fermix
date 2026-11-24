@@ -85,7 +85,7 @@ if it was sent, is already in the Repo's mailbox ahead of the reset.
   under weak fairness that timer fires, so the delay is not modelled. A stale
   settle wakes the scheduler (`filters.ex:376-377`): admission is fair here
   anyway. Admission is gated on `cues_running?` (the cue tree alive,
-  `scheduler.ex:213`), always true here, and no longer reads
+  `scheduler.ex:220`), always true here, and no longer reads
   `cue_watchers.enabled` (a paused watcher's passed items still run); watchers
   are always enabled and keep every source. The daily budget read and spent
   inside the accept transaction, the gap marking at a settle, the cap notices
@@ -298,14 +298,14 @@ reconcile scan errors), `LifetimesCanEnd`, `Proposals`, `OwnerCanMistap`,
 | `CueSlotCap` | `free = min(max_active − active, 3 − active_cue)` (`cue_admission.ex:83`) |
 | `AtomicCueSettle` | the run row, the job's release and the delivery's move are one transaction (`repo.ex` `settle_cue_run_in_tx`) |
 | `RunSettleFenced` | a run settle needs the run active (`ensure_job_run_active`) and the delivery claimed by it (`settle_held/5`, `cues_runs_sql.ex:366`) |
-| `ReapsOnlyDeadRuns` | reconciliation reaps a run only when the runner supervisor no longer holds its runner (`scheduler.ex:504`, `:516`) |
-| `ReconcilesRuns` | init and the 60 s tick reconcile unsettled runs (`scheduler.ex:228`, `:268`, `:488`) |
+| `ReapsOnlyDeadRuns` | reconciliation reaps a run only when the runner supervisor no longer holds its runner (`scheduler.ex:511`, `:523`) |
+| `ReconcilesRuns` | init and the 60 s tick reconcile unsettled runs (`scheduler.ex:235`, `:275`, `:495`) |
 | `ExhaustsAfterAction` | a failure once `tools_started_at` is set ends the delivery `exhausted` (`cues_runs_sql.ex:388`) |
 | `ToolsMarkWriteOnce` | the run upsert never clears `tools_started_at` (`repo.ex` `upsert_job_run_row`, `coalesce`) |
 | `ConfirmFenced` | the confirm is one `UPDATE` fenced on state, token, chat and expiry (`cues_mandate_sql.ex` `decide_waiting`) |
 | `AppDecideFenced` | a device's answer is one `UPDATE` fenced on id, state and expiry (`cues_mandate_sql.ex` `decide_by_id`) |
 | `ReclaimsOrphans` | every sweep puts back a `filtering` row whose call the dispatcher does not hold, fence cleared, attempts unchanged, its call finished `aborted` (R3, CUE-1: `reclaim_orphans/1`, `filters.ex:193-216`; `{:reclaim_orphans, …}`, `cues_filter_sql.ex:132`, `reclaim_in_tx/4` `:675`) |
-| `AdmitsAfterScan` | no cue run is admitted while the last reconcile scan failed, since the monitors may then miss runners that survived a restart (R3, CUE-2: `free_cue_slots/1`, `scheduler.ex:363`; `runs_known?` set by `reconcile_active_runs/1`, `:492`, `:500`) |
+| `AdmitsAfterScan` | no cue run is admitted while the last reconcile scan failed, since the monitors may then miss runners that survived a restart (R3, CUE-2: `free_cue_slots/1`, `scheduler.ex:370`; `runs_known?` set by `reconcile_active_runs/1`, `:499`, `:507`) |
 | `TaskLessSettlesAtPass` | a watcher with no task settles its delivery `acked`, outcome `follow_up`, in the transaction that passes it (`CuesFollowUpSql.on_pass` → `settle_taskless`, `cues_follow_up_sql.ex:349-356`, `:460-463`) |
 
 ## Checks
@@ -682,7 +682,7 @@ M106's quiet retry (§5.3) and heal (§5.4) staled the `scheduler.ex` and
 `runner.ex` pins: `init`, `handle_info`, `mark_run_error` and the runner's
 `mark_failed`. Each was re-read for what this spec models:
 - **A cue run's settle is unchanged.** The cue clauses of `mark_failed`
-  (`runner.ex:484-513`) and `mark_run_error` (`scheduler.ex:1127-1145`) still
+  (`runner.ex:484-513`) and `mark_run_error` (`scheduler.ex:1134-1152`) still
   settle through `CueAdmission.settle/3` → `Repo.settle_cue_run`, which never
   calls `JobRetriesSql` or `JobHealsSql`; only the clauses for every other
   run gained the retry and the heal. `settle_cue_run` and the delivery's move
@@ -701,10 +701,28 @@ M106's quiet retry (§5.3) and heal (§5.4) staled the `scheduler.ex` and
   the code's free cue slots could be one fewer than `FreeSlots` says, and a
   cron run and the heal run competed for the slot the share leaves
   (`cue_admission.ex`'s "so a cron run always keeps one"). Fixed in the same
-  stage: `active_run_count/1` (`scheduler.ex:706-710`) now counts the
+  stage: `active_run_count/1` (`scheduler.ex:713-717`) now counts the
   children that published a run id, as the reconcile pass tells runners
   apart, so a heal run takes neither a run slot nor the cue share, and
   `FreeSlots` is again what the code computes. Heal runs keep their own
   bound, one at a time.
+
+No step, variable or check changed.
+
+## Re-read for the heal's diagnosis and moves (M106, 2026-11-24)
+
+M106's diagnosis, with its fixes (`job_runs`' JOB-10), staled the
+Scheduler's `init`, the only function of the `scheduler.ex` pin that
+changed. It now also stores the name the Scheduler is registered under
+(`state.name`, `scheduler.ex:195`), which the Scheduler gives to heal runs
+so that their "run now" and `:job_changed` casts reach whichever Scheduler
+runs. Every step `init` takes is as before: the reconcile pass, the expiry
+of waiting heals, the due and reconcile timers and the admission request.
+A heal run may now pause a watcher's task (`Registry.pause_job`, the
+owner's pause, `job_runs`' scope), and its rerun of one is refused before
+the Scheduler, as the owner's is (`Registry.check_run_now`). It still
+writes no delivery and no run row. The `scheduler.ex` citations above
+"Findings" and in the M106 re-read moved with the stage's other lines
+and were updated; the findings cite the code as it was then.
 
 No step, variable or check changed.
