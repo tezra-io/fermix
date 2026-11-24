@@ -108,6 +108,7 @@ class LlmSpanUsage:
     cache_write_tokens: int | None  # usage.cache_creation_input_tokens
     errored: bool                   # metadata.status == "error"
     under_subagent: bool
+    speed: str | None = None        # metadata.speed: "fast" | "standard" with Fast mode on
 
 
 def _token_count(value) -> int | None:
@@ -139,6 +140,10 @@ def _span_usage(span: dict, under_subagent: bool) -> LlmSpanUsage:
         # failures (codex) routinely have none — reading it would miss them.
         errored=metadata.get("status") == "error",
         under_subagent=under_subagent,
+        # The speed the vendor reported the call ran at, set only on a route with
+        # Fast mode on. Carried as exported: the card refuses a value it does not
+        # know rather than this reader guessing one.
+        speed=metadata.get("speed"),
     )
 
 

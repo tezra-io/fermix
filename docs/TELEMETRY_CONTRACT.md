@@ -290,9 +290,11 @@ reports: OpenAI Responses `service_tier` (`fast`, or `priority` from GPT-5.6
 and older, is `fast`; `default` means OpenAI ran it at standard speed and
 price), Anthropic Messages `usage.speed` (absent is `standard`). A route with
 Fast mode off, and a call that did not complete, carry no `:speed` key at all.
-`FermixOpik.Mapper.llm_span/3` exports it in the span metadata. The rate card
-prices a call by model, not tier, so a `fast` call is under-stated there by
-the fast premium (about 2x).
+`FermixOpik.Mapper.llm_span/3` exports it in the span metadata, and the
+benchmark rate card reads it there: a `fast` call is priced from the fast table
+(`evallib.pricing.FAST_CARD`), every other call from the standard one, and a
+`fast` call on a route the fast table lacks is reported unpriced rather than
+priced at the standard rate.
 
 ## Adding a new "run kind" (something that drives the agent loop)
 

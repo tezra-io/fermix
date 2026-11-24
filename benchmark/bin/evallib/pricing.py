@@ -133,6 +133,29 @@ Vercel AI Gateway block from its public listing on 2026-11-22:
               both Groks) the entry carries its direct entry's, as OpenRouter's
               passthrough slugs do: a cache leg is the vendor's.
 
+THE FAST TIER IS PRICED FROM THE SPAN. A provider call on a route with Fast mode
+on carries `speed`, the speed the vendor reports it ran at (see
+docs/TELEMETRY_CONTRACT.md, `:speed`). A span whose `speed` is "fast" is priced
+from `FAST_CARD`, every other span from `CARD`, so a fast call is billed at the
+fast table and a request the vendor ran at standard speed is billed at the
+standard one. A fast span on a route `FAST_CARD` does not hold is UNPRICED and
+named with a " (fast)" suffix: pricing it at the standard rate would under-state
+it by the fast premium, the silent fallback rule 12 forbids. The fast tables are
+short-context (OpenAI publishes Fast at or under 272K input tokens only, which
+Fermix's GPT-6 compaction calibration stays under); a fast call above that
+inherits the long-context bound below. Sources, read 2026-11-23:
+
+  OpenAI      https://developers.openai.com/api/docs/pricing?latest-pricing=fast
+              (first-party Fast table: input / cached input / output, and the
+              30-minute write column for GPT-5.6 onward, which is 1.25x fast
+              input as on the standard table; gpt-5.5, gpt-5.4 and gpt-5.4-mini
+              publish no write leg there, as on the standard table).
+  Anthropic   https://platform.claude.com/docs/en/build-with-claude/fast-mode
+              (first-party: Opus 5.5 $8/$40, Fable 5.2 $16/$80 per MTok, and
+              "prompt caching multipliers apply on top of fast mode pricing", so
+              each cache leg keeps its standard entry's ratio to input; those
+              two legs are DERIVED from the multipliers, not read as figures).
+
 Two known bounds, both accepted rather than modelled:
 
   * LONG-CONTEXT TIERS ARE NOT APPLIED. OpenAI reprices a request above 272k
@@ -145,10 +168,11 @@ Two known bounds, both accepted rather than modelled:
     offsets the cache-blind overstatement above; both disappear from the
     comparison only if the reporting layer starts carrying tiers.
   * `gpt-5.6-sol` is the card's ONE promotional rate: 4.00 input is published
-    as running at least through 2026-11-21, and its cache-write leg is 1.25x
-    whatever input is, so it becomes 6.25 if input reverts to 5.00. Re-read that
-    source after the date and bump `CARD_VERSION` rather than letting a stale
-    rate ride. No other entry is awaiting a revert; a rate whose promotion the
+    as running until 2026-11-30 (re-read 2026-11-23; it first read "at least
+    through 2026-11-21"), and its cache-write leg is 1.25x whatever input is, so
+    it becomes 6.25 if input reverts to 5.00. Its fast entry (8.00) is the same
+    promotion at twice the rate. Re-read that source after the date and bump
+    `CARD_VERSION` rather than letting a stale rate ride. No other entry is awaiting a revert; a rate whose promotion the
     vendor has ENDED by making it standard is not one, and saying otherwise
     plants the cancelled increase in the next reader's head.
 """
@@ -167,7 +191,7 @@ from typing import Protocol
 # onto a stored row. It is not an ordered sequence and the values in between
 # need not exist: `.1` never did, and renaming `.2` now would make a token that
 # is already on disk mean two different tables.
-CARD_VERSION = "2026-11-22.1"
+CARD_VERSION = "2026-11-23.1"
 
 
 class LlmSpanUsage(Protocol):
@@ -201,6 +225,9 @@ class LlmSpanUsage(Protocol):
     cache_write_tokens: int | None
     errored: bool
     under_subagent: bool
+    # "fast" | "standard" on a route with Fast mode on, the speed the vendor
+    # reported; None everywhere else. Only "fast" selects `FAST_CARD`.
+    speed: str | None
 
 
 class _BillsAtInputRate:
@@ -288,8 +315,8 @@ _OPENAI_RATES: dict[str, Rate] = {
     # Exactly half GPT-6.1 Sol on every leg, 0.05 cached read included.
     "gpt-6.1-terra": Rate(1.00, 5.00, 0.05, 1.25),
     "gpt-6-luna": Rate(0.10, 0.50, 0.01, 0.125),
-    # 4.00 input is promotional through at least 2026-11-21; the write leg is
-    # 1.25x whatever input is, so it becomes 6.25 if input reverts to 5.00.
+    # 4.00 input is promotional until 2026-11-30; the write leg is 1.25x
+    # whatever input is, so it becomes 6.25 if input reverts to 5.00.
     "gpt-5.6-sol": Rate(4.00, 20.00, 0.40, 5.00),
     "gpt-5.6-terra": Rate(2.00, 12.00, 0.20, 2.50),
     "gpt-5.6-luna": Rate(0.20, 1.20, 0.02, 0.25),
@@ -512,6 +539,45 @@ CARD: dict[tuple[str, str], Rate] = {
     **{("vercel", model): rate for model, rate in _VERCEL_RATES.items()},
 }
 
+# The fast tier (OpenAI `service_tier: "fast"`, Anthropic `speed: "fast"`),
+# keyed like `CARD` and read only for a span whose `speed` is "fast". Every
+# model the catalog flags `fast?: true` has an entry here (pinned by a test).
+# No `openai_codex` entries: the ChatGPT plan route refuses the fast tier, so a
+# fast span there is a defect to surface, not a rate to quote.
+_OPENAI_FAST_RATES: dict[str, Rate] = {
+    "gpt-6-astra": Rate(20.00, 100.00, 2.00, 25.00),
+    "gpt-6.2-astra": Rate(16.00, 80.00, 0.80, 20.00),
+    "gpt-6.2-sol": Rate(4.00, 20.00, 0.20, 5.00),
+    "gpt-6-sol": Rate(4.00, 20.00, 0.40, 5.00),
+    "gpt-6.1-sol": Rate(4.00, 20.00, 0.20, 5.00),
+    "gpt-6.1-terra": Rate(2.00, 10.00, 0.10, 2.50),
+    "gpt-6-luna": Rate(0.20, 1.00, 0.02, 0.25),
+    # The standard entry's promotion, doubled; see the module docstring.
+    "gpt-5.6-sol": Rate(8.00, 40.00, 0.80, 10.00),
+    "gpt-5.6-terra": Rate(4.00, 24.00, 0.40, 5.00),
+    "gpt-5.6-luna": Rate(0.40, 2.40, 0.04, 0.50),
+    "gpt-5.5": Rate(12.50, 75.00, 1.25, BILLS_AT_INPUT_RATE),
+    "gpt-5.4": Rate(5.00, 30.00, 0.50, BILLS_AT_INPUT_RATE),
+    "gpt-5.4-mini": Rate(1.50, 9.00, 0.15, BILLS_AT_INPUT_RATE),
+}
+
+# Input and output are the published fast figures; the cache legs are DERIVED,
+# because Anthropic publishes them as its standard multipliers applied on top of
+# fast pricing: Opus 5.5 reads at 0.05x input and Fable 5.2 at 0.025x, and both
+# write at 1.25x, exactly as their standard entries do.
+_ANTHROPIC_FAST_RATES: dict[str, Rate] = {
+    "claude-opus-5-5": Rate(8.00, 40.00, 0.40, 10.00),
+    "claude-fable-5-2": Rate(16.00, 80.00, 0.40, 20.00),
+}
+
+FAST_CARD: dict[tuple[str, str], Rate] = {
+    **{("openai", model): rate for model, rate in _OPENAI_FAST_RATES.items()},
+    **{("anthropic", model): rate for model, rate in _ANTHROPIC_FAST_RATES.items()},
+}
+
+# The span speeds the card accepts. None is a route without Fast mode.
+_SPEEDS = frozenset({None, "fast", "standard"})
+
 # Routes seen in live spans or offered by the product's model catalog for which
 # no honest list price can be quoted — either the published rate could not be
 # established, or the vendor no longer serves that pairing. They are NOT priced:
@@ -638,9 +704,14 @@ def _cache_detailed(span: LlmSpanUsage) -> bool:
     if span.cached_input_tokens is None:
         return False
     # Unpriced routes short-circuit before `price/1` reaches here.
-    rate = CARD[(provider_route(span.provider, span.adapter), span.model)]
+    rate = _rate_card(span)[(provider_route(span.provider, span.adapter), span.model)]
     return (rate.cache_write_per_mtok is BILLS_AT_INPUT_RATE
             or span.cache_write_tokens is not None)
+
+
+def _rate_card(span: LlmSpanUsage) -> dict[tuple[str, str], Rate]:
+    """The table a span is priced from: `FAST_CARD` for a fast span, else `CARD`."""
+    return FAST_CARD if span.speed == "fast" else CARD
 
 
 def _route_of(span: LlmSpanUsage) -> str | None:
@@ -662,8 +733,9 @@ def _unpriced_routes(billable: Sequence[LlmSpanUsage]) -> tuple[str, ...]:
         route = _route_of(span)
         if route is None:
             names.add(f"{span.provider or '(no provider)'}/{span.model or '(no model)'}")
-        elif (route, span.model) not in CARD:
-            names.add(f"{route}/{span.model}")
+        elif (route, span.model) not in _rate_card(span):
+            suffix = " (fast)" if span.speed == "fast" else ""
+            names.add(f"{route}/{span.model}{suffix}")
     return tuple(sorted(names))
 
 
@@ -674,7 +746,7 @@ def _span_cost(span: LlmSpanUsage) -> float:
     are SUBTRACTED out of it rather than added to it.
     """
     route = provider_route(span.provider, span.adapter)
-    rate = CARD[(route, span.model)]  # unpriced routes short-circuit before here
+    rate = _rate_card(span)[(route, span.model)]  # unpriced routes short-circuit before here
     cached = span.cached_input_tokens or 0
     written = span.cache_write_tokens or 0
     uncached = span.prompt_tokens - cached - written
@@ -729,7 +801,8 @@ def _leg_rate(published: CacheRate, input_per_mtok: float, tokens: int,
 
 
 _REQUIRED_ATTRS = ("model", "provider", "adapter", "prompt_tokens", "completion_tokens",
-                   "cached_input_tokens", "cache_write_tokens", "errored", "under_subagent")
+                   "cached_input_tokens", "cache_write_tokens", "errored", "under_subagent",
+                   "speed")
 _TOKEN_ATTRS = ("prompt_tokens", "completion_tokens", "cached_input_tokens", "cache_write_tokens")
 
 
@@ -747,6 +820,9 @@ def _validate_span(span: LlmSpanUsage, index: int) -> None:
     if span.adapter is not None and not isinstance(span.adapter, str):
         raise TypeError(f"pricing: span {index} adapter must be a string or None "
                         f"({span.adapter!r})")
+    if span.speed not in _SPEEDS:
+        raise ValueError(f"pricing: span {index} speed must be \"fast\", \"standard\" or None "
+                         f"({span.speed!r})")
     for name in _TOKEN_ATTRS:
         _validate_count(getattr(span, name), name, index)
 
