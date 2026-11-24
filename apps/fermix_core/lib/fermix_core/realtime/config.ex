@@ -39,10 +39,12 @@ defmodule FermixCore.Realtime.Config do
   # is untouched; new setups pick a model in the dropdown.
   @realtime_models ~w(gpt-realtime-2.1-mini gpt-realtime-2.1 gpt-realtime-2)
 
-  # The Live frontend ships one model. A Live model under the Realtime engine
-  # (or the reverse) is a configuration error with a named remedy, never a
-  # silent substitution.
-  @live_models ~w(gpt-live-1)
+  # The Live frontend's models, newest first for the dropdown. A Live model under
+  # the Realtime engine (or the reverse) is a configuration error with a named
+  # remedy, never a silent substitution. Every Live model bills at
+  # `LiveLedger`'s one rate ($0.05 a session minute, the same for both as read
+  # 2026-11-24); a Live model priced otherwise needs its own rate there.
+  @live_models ~w(gpt-live-1.1 gpt-live-1)
 
   # Grok Voice is pinned to one model (M70 §06).
   @grok_models ~w(grok-voice-3.0)
@@ -496,10 +498,13 @@ defmodule FermixCore.Realtime.Config do
 
     unless model in models do
       raise ArgumentError,
-            "realtime.model must be #{Enum.join(models, ", ")} " <>
+            "realtime.model must be #{expected_models(models)} " <>
               ~s(when engine = "#{engine}", got: #{inspect(model)})
     end
   end
+
+  defp expected_models([model]), do: model
+  defp expected_models(models), do: "one of " <> Enum.join(models, ", ")
 
   # The provider follows from the engine, so a hand-written one that disagrees
   # is two choices that cannot both hold: neither wins, and all three are named.

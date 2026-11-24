@@ -8,6 +8,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **GPT-Live 1.1 is in the voice model menu.** OpenAI's newer Live model sits
+  above GPT-Live 1 under Settings > Voice > Model, at the same price per
+  minute, and hands tasks to the Fermix agent the same way; it transcribes
+  speech more accurately and keeps one accent across languages. A config
+  with no model still takes GPT-Live 1, and phone calls stay on GPT-Live 1.
+
 - **GPT-6.2 Astra and GPT-6.2 Sol are in the model lists.** OpenAI's two new
   models follow GPT-6 Astra for an OpenAI API key and on OpenRouter; no
   provider's default changes. A ChatGPT sign-in offers them whenever the

@@ -600,6 +600,7 @@ defmodule FermixCore.Management.SettingsTest do
                "gpt-realtime-2.1-mini · Realtime, integrated tools",
                "gpt-realtime-2.1 · Realtime, integrated tools",
                "gpt-realtime-2 · Realtime, integrated tools",
+               "gpt-live-1.1 · Live, with your Fermix agent",
                "gpt-live-1 · Live, with your Fermix agent",
                "grok-voice-3.0 · Grok, with your Fermix agent"
              ]
