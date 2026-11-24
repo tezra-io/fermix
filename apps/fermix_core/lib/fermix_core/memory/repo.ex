@@ -5061,14 +5061,48 @@ defmodule FermixCore.Memory.Repo do
 
   defp open_connection(true, database_path, carry) do
     with :ok <- ensure_database_dir(database_path),
+         {:ok, copied?} <- copy_test_template(database_path),
          {:ok, conn} <- Sqlite3.open(database_path, sqlite_open_opts(@sqlite_open_intent)),
          :ok <- configure_connection(conn),
+         :ok <- renew_copied_token(conn, copied?),
          :ok <- run_migrations(conn, carry) do
       :ok = sweep_removed_checklists(conn)
       :ok = sweep_removed_trips(conn)
       {:ok, conn}
     end
   end
+
+  # Tests only. A suite opens about 4,000 stores, and migrating each from
+  # nothing cost more CPU than the tests themselves, so a store on a new path
+  # starts as a copy of the suite's template (FermixTestSupport.RepoTemplate),
+  # migrated through this module once; the migrations then find every version
+  # recorded. Like any stored copy it gets a history identity of its own
+  # (`renew_home_token/1`). Gated on the compile-time env: no release has it.
+  @compiled_env Mix.env()
+
+  defp copy_test_template(database_path) do
+    case test_template() do
+      nil -> {:ok, false}
+      template -> copy_template(template, database_path)
+    end
+  end
+
+  defp test_template do
+    if @compiled_env == :test, do: Application.get_env(:fermix_core, :repo_template)
+  end
+
+  defp copy_template(_template, ":memory:"), do: {:ok, false}
+
+  defp copy_template(template, database_path) do
+    if File.exists?(database_path) do
+      {:ok, false}
+    else
+      with :ok <- File.cp(template, database_path), do: {:ok, true}
+    end
+  end
+
+  defp renew_copied_token(_conn, false), do: :ok
+  defp renew_copied_token(conn, true), do: ComputerHistorySql.renew_home_token(conn)
 
   defp sqlite_open_opts(:readwritecreate) do
     # Exqlite exposes SQLite READWRITE | CREATE as :readwrite.

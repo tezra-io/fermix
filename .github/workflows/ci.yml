@@ -37,25 +37,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # linux-x64 also stresses the change's test files, so it needs the
-          # history to diff against and the time to repeat them. It alone
-          # checks formatting and credo, which read source only.
-          - { os: ubuntu-24.04, leg: linux-x64, timeout: 45, fetch_depth: 0 }
-          - { os: ubuntu-24.04-arm, leg: linux-arm64, timeout: 30, fetch_depth: 1 }
-          - { os: macos-15, leg: macos-arm64, timeout: 45, fetch_depth: 1 }
+          # linux-x64 alone checks formatting and credo, which read source only.
+          - { os: ubuntu-24.04, leg: linux-x64, timeout: 45 }
+          - { os: ubuntu-24.04-arm, leg: linux-arm64, timeout: 30 }
+          - { os: macos-15, leg: macos-arm64, timeout: 45 }
           # The Intel runner is the slowest leg and the least even: the same
           # tree's suites took 38 minutes on one runner and 54 on another
           # (runs 44089094271 and 44117704249), and a full compile adds 7. Its
           # bound leaves room for the slow runner.
-          - { os: macos-15-intel, leg: macos-x64, timeout: 75, fetch_depth: 1 }
+          - { os: macos-15-intel, leg: macos-x64, timeout: 75 }
     env:
       MIX_ENV: test
       ELIXIR_VERSION: "1.19.7"
       OTP_VERSION: "28"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          fetch-depth: ${{ matrix.fetch_depth }}
 
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
 
@@ -145,29 +141,6 @@ jobs:
           --log "${RUNNER_TEMP}/mix-test.log"
           --flaky-json "${RUNNER_TEMP}/flaky-tests.json"
 
-      - name: Stress the change's test files under load
-        # A flaky test usually passes the change that wrote it and fails an
-        # unrelated PR a month later. Repeating the change's own test files
-        # with every core busy makes the change that wrote it the one that
-        # sees it. See AGENTS.md, Tests under load.
-        # No run starts after --budget-s, and a later run starts only when its
-        # app's previous run would still end inside it. 720 s of the 20-minute
-        # timeout leaves 8 minutes for uv's start, the burners' stop and the
-        # overrun of the last run started, which the budget never cuts short:
-        # one run of fermix_web's 6 files took 7 minutes under load (0.18.0's
-        # release pull request). A run takes at most 30 of an app's files, so
-        # that overrun stays one chunk long however large the change. Raise the
-        # two together; test_stress_changed_tests.py reads this timeout.
-        if: matrix.leg == 'linux-x64'
-        timeout-minutes: 20
-        env:
-          STRESS_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: >-
-          uv run scripts/ci/stress_changed_tests.py
-          --base "${STRESS_BASE}"
-          --budget-s 720
-          --log-dir "${RUNNER_TEMP}/stress"
-
       - name: Upload flaky-test evidence
         if: success() && steps.test.outputs.flaky == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -205,7 +178,101 @@ jobs:
           path: |
             ${{ runner.temp }}/ci-evidence.txt
             ${{ runner.temp }}/mix-test*.log
-            ${{ runner.temp }}/stress/*.log
+          retention-days: 14
+          if-no-files-found: warn
+
+  stress:
+    # Its own job, beside the test legs rather than after a leg's suite, so a
+    # change's repeated test files never lengthen the run's critical path.
+    name: stress the change's test files under load
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      actions: read
+    env:
+      MIX_ENV: test
+      ELIXIR_VERSION: "1.19.7"
+      OTP_VERSION: "28"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # The history to diff the change against.
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+
+      - name: Restore deps and _build
+        # linux-x64's cache: the same runner image, toolchain and lock.
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-${{ runner.arch }}-mix-test-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('**/mix.lock', 'config/*.exs') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-mix-test-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-
+
+      - name: Fetch deps
+        run: mix deps.get
+
+      - name: Compile (warnings as errors)
+        run: mix compile --warnings-as-errors
+
+      - name: Name the commit the change starts from
+        # A pull request's base, or a push's previous head. A run started by hand
+        # has neither, so it takes the newest commit of this branch that CI
+        # passed: the change is what that green run never saw.
+        id: base
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          base="${BASE}"
+          if [ -z "$base" ]; then
+            green=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --branch "$REF_NAME" --status success --limit 20 --json headSha --jq '.[].headSha')
+            for sha in $green; do
+              if git merge-base --is-ancestor "$sha" HEAD; then base="$sha"; break; fi
+            done
+          fi
+          echo "base: ${base:-none}"
+          echo "sha=${base}" >> "$GITHUB_OUTPUT"
+
+      - name: Stress the change's test files under load
+        # A flaky test usually passes the change that wrote it and fails an
+        # unrelated PR a month later. Repeating the change's own test files
+        # with every core busy makes the change that wrote it the one that
+        # sees it. See AGENTS.md, Tests under load.
+        # No run starts after --budget-s, and a later run starts only when its
+        # app's previous run would still end inside it. 720 s of the 20-minute
+        # timeout leaves 8 minutes for uv's start, the burners' stop and the
+        # overrun of the last run started, which the budget never cuts short:
+        # one run of fermix_web's 6 files took 7 minutes under load (0.18.0's
+        # release pull request). A run takes at most 30 of an app's files, so
+        # that overrun stays one chunk long however large the change. Raise the
+        # two together; test_stress_changed_tests.py reads this timeout.
+        timeout-minutes: 20
+        env:
+          STRESS_BASE: ${{ steps.base.outputs.sha }}
+        run: >-
+          uv run scripts/ci/stress_changed_tests.py
+          --base "${STRESS_BASE}"
+          --budget-s 720
+          --log-dir "${RUNNER_TEMP}/stress"
+
+      - name: Upload stress evidence
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: stress-evidence-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/stress/*.log
           retention-days: 14
           if-no-files-found: warn
 
@@ -394,23 +461,26 @@ jobs:
   gate:
     name: compile · format · credo · test
     runs-on: ubuntu-24.04
-    needs: [check, checksum-integrity, harness, release-scripts, disclaim-shim]
+    needs: [check, stress, checksum-integrity, harness, release-scripts, disclaim-shim]
     if: always()
     steps:
       - name: Require every matrix leg to have passed
         env:
           CHECK_RESULT: ${{ needs.check.result }}
+          STRESS_RESULT: ${{ needs.stress.result }}
           CHECKSUM_RESULT: ${{ needs.checksum-integrity.result }}
           HARNESS_RESULT: ${{ needs.harness.result }}
           RELEASE_SCRIPTS_RESULT: ${{ needs.release-scripts.result }}
           DISCLAIM_RESULT: ${{ needs.disclaim-shim.result }}
         run: |
           echo "check (matrix) result: $CHECK_RESULT"
+          echo "stress result: $STRESS_RESULT"
           echo "checksum-integrity result: $CHECKSUM_RESULT"
           echo "harness result: $HARNESS_RESULT"
           echo "release-scripts result: $RELEASE_SCRIPTS_RESULT"
           echo "disclaim-shim result: $DISCLAIM_RESULT"
           [ "$CHECK_RESULT" = "success" ] || exit 1
+          [ "$STRESS_RESULT" = "success" ] || exit 1
           [ "$CHECKSUM_RESULT" = "success" ] || exit 1
           [ "$HARNESS_RESULT" = "success" ] || exit 1
           [ "$RELEASE_SCRIPTS_RESULT" = "success" ] || exit 1
