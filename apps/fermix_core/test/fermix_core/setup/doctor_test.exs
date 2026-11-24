@@ -2180,17 +2180,21 @@ defmodule FermixCore.Setup.DoctorTest do
     end
   end
 
-  # A 429's one retry waits out Brave's window: the probe's waits are told to
-  # the test, never slept.
+  # A 429's one retry waits out Brave's window: the probe's pacer runs on a
+  # clock only its waits move, and each wait is told to the test, never slept,
+  # so the window it waits out is the one the 429 set, whatever the runner's load.
   defp full_place_report(id) do
     test_pid = self()
+    clock = start_supervised!(Supervisor.child_spec({Agent, fn -> 0 end}, id: make_ref()))
 
     Doctor.place_search_report(
       full: true,
       host: @linux,
       req_options: [plug: {Req.Test, id}],
       net_resolver: place_resolver(),
+      place_search_now_ms: fn -> Agent.get(clock, & &1) end,
       place_search_sleep: fn ms ->
+        Agent.update(clock, &(&1 + ms))
         send(test_pid, {:probe_slept, ms})
         :ok
       end

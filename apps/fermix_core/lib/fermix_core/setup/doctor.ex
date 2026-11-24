@@ -633,7 +633,8 @@ defmodule FermixCore.Setup.Doctor do
   failure kind keeps its own tag, and no probe ever switches backend. A Mac of
   the home is never asked (M89 D13): nothing is added for it.
   `host:` names the build and `apple_maps:` the helper's options for a test;
-  `req_options`/`net_resolver` stub the Brave probe.
+  `req_options`/`net_resolver` stub the Brave probe, and `place_search_sleep`
+  and `place_search_now_ms` stand in for its waits and its pacer's clock.
 
   Readiness and advertisement are asked of the tool itself so a doctor row and
   the runtime surface cannot drift; the probe never reads the owner's saved
@@ -670,7 +671,7 @@ defmodule FermixCore.Setup.Doctor do
   # turn, and once more after a 429), which stops with the probe.
   defp place_search_probe(:brave, config, opts) do
     context = probe_context(opts)
-    {:ok, pacer} = PlacePacer.start_link(name: nil)
+    {:ok, pacer} = PlacePacer.start_link(probe_pacer_opts(opts))
     probe_opts = Keyword.put(config, :context, Map.put(context, :place_search_pacer, pacer))
 
     try do
@@ -685,6 +686,14 @@ defmodule FermixCore.Setup.Doctor do
 
   # A health check sends nothing to the owner's Mac.
   defp place_search_probe(:computer, _config, _opts), do: %{}
+
+  # The probe pacer runs on the monotonic clock unless a test names its own.
+  defp probe_pacer_opts(opts) do
+    case Keyword.get(opts, :place_search_now_ms) do
+      nil -> [name: nil]
+      now_ms when is_function(now_ms, 0) -> [name: nil, now_ms: now_ms]
+    end
+  end
 
   defp place_probe(backend, backend_opts) do
     request = %{query: @place_probe_query, count: 1}
