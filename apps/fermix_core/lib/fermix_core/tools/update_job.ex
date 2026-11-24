@@ -1,7 +1,7 @@
 defmodule FermixCore.Tools.UpdateJob do
   @moduledoc """
-  Edit an existing scheduled job's task instructions, schedule, or description
-  in place, without removing and recreating it.
+  Edit an existing scheduled job's task instructions, schedule, time limit or
+  description in place, without removing and recreating it.
   """
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
@@ -68,6 +68,12 @@ defmodule FermixCore.Tools.UpdateJob do
           description:
             "Set true to remove any pinned provider/model and return the job to default routing. Mutually exclusive with provider/model (set those to re-pin instead). Omit or false to leave the current pin unchanged."
         },
+        timeout_seconds: %{
+          type: "integer",
+          minimum: 1,
+          description:
+            "Replacement wall-clock limit for each run, in seconds. Omit to leave it unchanged."
+        },
         delivery_mode: %{
           type: "string",
           enum: ["none", "origin", "channel", "local"],
@@ -105,6 +111,7 @@ defmodule FermixCore.Tools.UpdateJob do
       %{tag: "not_found", description: "job id does not exist"},
       %{tag: "empty_update", description: "no editable field provided"},
       %{tag: "invalid_schedule", description: "schedule expression cannot be parsed"},
+      %{tag: "invalid_timeout", description: "timeout_seconds is not a positive whole number"},
       %{tag: "unknown_skill", description: "skill_name does not name an existing skill"},
       %{tag: "invalid_delivery", description: "delivery_mode or delivery_target is invalid"},
       %{
@@ -143,14 +150,30 @@ defmodule FermixCore.Tools.UpdateJob do
     Support.run(name(), context, fn -> do_execute(args, context) end)
   end
 
-  defp do_execute(args, context) do
-    with {:ok, job_id} <- Support.required_string(args, "job_id"),
-         {:ok, skill} <- validate_skill_name(args, context),
+  @doc """
+  An edit's own checks, before any about who may make it: a skill it binds
+  exists, its delivery is valid, a pin names a known provider with a model
+  (or is cleared alone), and a time limit is a positive whole number of
+  seconds, as `schedule_job` takes one. Returns the registry's attributes
+  and the skill the edit binds, or nil. A heal's proposal is checked with it
+  as an owner's edit is (M106 §5.6).
+  """
+  @spec change_attrs(map(), map()) :: {:ok, map(), map() | nil} | {:error, term()}
+  def change_attrs(args, context) when is_map(args) and is_map(context) do
+    with {:ok, skill} <- validate_skill_name(args, context),
          {:ok, delivery} <- resolve_delivery(args, context),
          {:ok, clear_route_pin?} <- validate_clear_route_pin(args),
          {:ok, route_pin} <- Support.validate_route_pin(args),
+         {:ok, timeout} <- Support.optional_positive_integer(args, "timeout_seconds"),
          {:ok, attrs} <-
-           update_attrs(args, skill_name(skill), delivery, route_pin, clear_route_pin?),
+           update_attrs(args, skill_name(skill), delivery, route_pin, {clear_route_pin?, timeout}) do
+      {:ok, attrs, skill}
+    end
+  end
+
+  defp do_execute(args, context) do
+    with {:ok, job_id} <- Support.required_string(args, "job_id"),
+         {:ok, attrs, skill} <- change_attrs(args, context),
          {:ok, job} <- Support.check_job_access(job_id, context),
          :ok <- KeptAccess.check_job_tools(Map.get(job, :allowed_tools) || [], context),
          :ok <- Support.check_change_trust(job, context),
@@ -196,7 +219,7 @@ defmodule FermixCore.Tools.UpdateJob do
     end
   end
 
-  defp update_attrs(args, skill_name, delivery, {provider, model}, clear_route_pin?) do
+  defp update_attrs(args, skill_name, delivery, {provider, model}, {clear_route_pin?, timeout}) do
     attrs =
       %{}
       |> put_present(:task_prompt, Support.optional_string(args, "task"))
@@ -205,12 +228,13 @@ defmodule FermixCore.Tools.UpdateJob do
       |> put_present(:skill_name, skill_name)
       |> put_present(:provider, provider)
       |> put_present(:model, model)
+      |> put_present(:timeout_seconds, timeout)
       |> put_delivery(delivery)
       |> put_route_pin_clear(clear_route_pin?)
 
     if map_size(attrs) == 0 do
       {:error,
-       "Provide at least one of task, schedule, description, skill_name, provider/model, clear_route_pin, or delivery to update."}
+       "Provide at least one of task, schedule, description, skill_name, provider/model, clear_route_pin, timeout_seconds, or delivery to update."}
     else
       {:ok, attrs}
     end

@@ -80,6 +80,7 @@ defmodule FermixCore.Capabilities.UntrustedContent do
           | {:message, String.t()}
           | {:open_loop, String.t()}
           | {:checklist, String.t()}
+          | {:job_failure, String.t()}
 
   # Tool categories whose result relays what a worker read.
   @relaying_categories [:delegation]
@@ -299,6 +300,14 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   """
   @spec checklist_source() :: outside_source()
   def checklist_source, do: {:checklist, "a list row added after outside content"}
+
+  @doc """
+  The outside source a job's heal run starts with (M106 §9): the failure's
+  own sentence and words, which its prompt carries framed, may hold text
+  from a page or a post the failed run read.
+  """
+  @spec job_failure_source() :: outside_source()
+  def job_failure_source, do: {:job_failure, "a failed job run's error"}
 
   @doc """
   The outside source a coding-run continuation turn carries: a finished run

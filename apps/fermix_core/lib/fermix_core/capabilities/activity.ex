@@ -68,6 +68,7 @@ defmodule FermixCore.Capabilities.Activity do
     "run_job_now" => "Running a scheduled task now",
     "list_job_runs" => "Looking at a task's past runs",
     "get_job_run" => "Reading how a task's run went",
+    "job_heal_respond" => "Deciding how to fix a task",
     "browser" => "Working on a website",
     "send_attachment" => "Attaching a file",
     "react" => "Adding a reaction",

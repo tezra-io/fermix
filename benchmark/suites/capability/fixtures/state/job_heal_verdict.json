@@ -1,0 +1,43 @@
+{
+  "jobs": [
+    {
+      "key": "station",
+      "name": "Hollin weather station rainfall",
+      "description": "Yesterday's rainfall total at the Hollin weather station",
+      "schedule": "15 7 * * *",
+      "task_prompt": "Download yesterday's three reading files from hollin-weather.example/export and send me the day's rainfall total.",
+      "timeout_seconds": 300,
+      "runs": [
+        {
+          "hours_ago": 50,
+          "duration_seconds": 60,
+          "status": "timeout",
+          "failure_kind": "time_limit",
+          "error": "wall-clock timeout after 60000ms",
+          "tool_timeline": [
+            {"name": "web_fetch", "duration_ms": 21400, "status": "ok"},
+            {"name": "web_fetch", "duration_ms": 24100, "status": "ok"},
+            {"name": "web_fetch", "duration_ms": 12200, "status": "unfinished"}
+          ],
+          "heal": {
+            "decision": "raise_limit",
+            "note": "Each run was still downloading the station's reading files when its 1 minute limit stopped it; the downloads succeed, they are just slow.",
+            "change": {"timeout_seconds": {"from": 60, "to": 300}},
+            "delivered_hours_ago": 49
+          }
+        },
+        {
+          "hours_ago": 3,
+          "duration_seconds": 300,
+          "status": "timeout",
+          "failure_kind": "time_limit",
+          "error": "wall-clock timeout after 300000ms",
+          "tool_timeline": [
+            {"name": "web_fetch", "duration_ms": 23800, "status": "ok"},
+            {"name": "web_fetch", "duration_ms": 274600, "status": "unfinished"}
+          ]
+        }
+      ]
+    }
+  ]
+}

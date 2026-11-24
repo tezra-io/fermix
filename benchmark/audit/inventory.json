@@ -141,6 +141,10 @@
       "name": "get_job_run",
       "family": "F14"
     },
+    "JobHealRespond": {
+      "name": "job_heal_respond",
+      "family": "F14"
+    },
     "MemorySourcesList": {
       "name": "memory_sources_list",
       "family": "F10"
@@ -698,6 +702,21 @@
         "running",
         "ok",
         "error"
+      ]
+    },
+    "job_heal_respond": {
+      "/properties/decision": [
+        "pause",
+        "propose",
+        "raise_limit",
+        "rerun",
+        "tell"
+      ],
+      "/properties/change/properties/delivery_mode": [
+        "none",
+        "origin",
+        "channel",
+        "local"
       ]
     },
     "model_routing_config": {

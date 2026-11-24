@@ -881,6 +881,7 @@ def test_the_shipped_numbered_rubrics_parse():
                       "site_and_app": 3,
                       # job_auto_heal.yaml
                       "tide_report_never_came_route_sanity": 3, "tide_report_missing": 3,
+                      "holds_digest_anything_done": 3, "holds_digest_sorted_yet": 3,
                       # voice_greeting_goodbye.yaml
                       "greeted_then_asked_if_heard": 4,
                       # phone_reach.yaml

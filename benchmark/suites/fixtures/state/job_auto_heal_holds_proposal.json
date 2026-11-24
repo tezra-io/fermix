@@ -1,0 +1,34 @@
+{
+  "jobs": [
+    {
+      "key": "holds",
+      "name": "Marrowfield library holds digest",
+      "description": "Which of my library holds are ready to collect",
+      "schedule": "20 7 * * *",
+      "task_prompt": "Read my holds list at marrowfield-library.example/holds and tell me which books are ready to collect.",
+      "timeout_seconds": 300,
+      "runs": [
+        {
+          "hours_ago": 4,
+          "duration_seconds": 18,
+          "status": "error",
+          "error": "The holds page at marrowfield-library.example/holds answered 404 Not Found; the library's notice says holds moved to marrowfield-library.example/account/holds.",
+          "tool_timeline": [
+            {"name": "web_fetch", "duration_ms": 2100, "status": "error"}
+          ],
+          "heal": {
+            "decision": "propose",
+            "note": "The holds page moved to marrowfield-library.example/account/holds, so every fetch of the old address fails. Pointing the task at the new address should fix it.",
+            "change": {
+              "task": {
+                "from": "Read my holds list at marrowfield-library.example/holds and tell me which books are ready to collect.",
+                "to": "Read my holds list at marrowfield-library.example/account/holds and tell me which books are ready to collect."
+              }
+            },
+            "delivered_hours_ago": 3
+          }
+        }
+      ]
+    }
+  ]
+}

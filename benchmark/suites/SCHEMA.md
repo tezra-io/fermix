@@ -439,12 +439,15 @@ the `query` shorthand; multi-turn uses `turns`.
   `state` anywhere else, on another drive or in a capability suite (which uses
   `checker.state`) is a load error, and so is a spec file that does not exist. A
   seeded failed run of the owner's job opens a heal (M106), which the daemon claims
-  on its next pass and sends: the runner then waits, read-only and at most 150 s,
-  until no heal of a seeded job is `open` or `diagnosing`, so the record says the
-  owner was told. A seed that fails ends the run, as a failed reset does (the home
-  holds no known baseline for any later case); a heal not sent in time leaves that
-  attempt **INCOMPLETE**, never driven. `--dry-run` validates the spec path and
-  counts the seeded attempts; it starts no helper.
+  on its next pass, diagnoses (one model run on the home's main route) and sends,
+  unless the spec seeded its conclusion (a run's `heal`, see *`checker.state`*): the
+  runner then waits, read-only and at most 240 s, until no heal of a seeded job is
+  `open` or `diagnosing`, so the record says the owner was told. A behavioral spec
+  should seed the conclusion: the case then asks of a record that is the same on every
+  attempt, and no diagnosis spends a model run during it. A seed that fails ends the
+  run, as a failed reset does (the home holds no known baseline for any later case); a
+  heal not sent in time leaves that attempt **INCOMPLETE**, never driven. `--dry-run`
+  validates the spec path and counts the seeded attempts; it starts no helper.
 
 The loader is allowlist-strict at the top/default/scenario/case/turn/expect
 levels: unknown keys fail validation. `soft`, `judge`, `cross_session`, and
@@ -1002,11 +1005,39 @@ Seeded history is the product's history: a past run settles through the call a l
 run's settle makes, so a seeded failed run of the owner's job (every seeded job is
 the owner's) opens a heal, or joins the one an earlier seeded failure opened, its own
 delivery reads `skipped`, and the daemon's Scheduler claims the heal on its next
-pass, within its 60 s reconcile, and sends its message; a seeded ok run after it
-closes the heal as healed. A spec's failed `runs` therefore seed what the owner was
-told, not only rows. `checkers/job_heal.py` grades that heal (its docstring has the
-gold); it needs a home seeded with `--owner-inbox-cli`, the one eval inbox a send
-reaches.
+pass, within its 60 s reconcile; for a kind a model could help with its heal run
+diagnoses it first, one model run on the home's main route, and code carries out the
+decision, then sends its message. A seeded ok run after it closes the heal as healed.
+A spec's failed `runs` therefore seed what the owner was told, not only rows.
+`checkers/job_heal.py` grades that heal (its docstring has the gold); it needs a home
+seeded with `--owner-inbox-cli`, the one eval inbox a send reaches.
+
+A run may also say (M106 §5.1, §5.5):
+
+- `failure_kind` — a `Jobs.Failure` kind for a failed run (`other` when absent);
+- `tool_timeline` — the runner's entries, `{"name", "duration_ms", "status": ok |
+  error | unfinished, "plugin"?}`, oldest first, which a diagnosis reads;
+- `trigger` — `schedule` (the default) or `manual`;
+- `heal` (a failed run only) — the conclusion its heal run would have reached,
+  `{"decision": rerun | raise_limit | propose | tell, "note", "change"?,
+  "read_outside"?, "rerun_outcome"?, "delivered_hours_ago"}`, made through the Repo's
+  own heal calls (the claim, the inbox, the decision, the message `Jobs.HealMessage`
+  builds, the delivered mark, and for a rerun what came of its ask: `started`,
+  `running`, `refused` or `unanswered`, required with `rerun` and refused on any other
+  decision; a `started` one is followed by its run, `trigger: manual`), so the heal
+  lands where its decision puts it (watching after a raised limit or a rerun that was
+  not refused, waiting otherwise) and a later seeded failure joins it or,
+  if it is watching, concludes it a second time in its own settle (the verdict). The
+  seed sends nothing and never touches the job: the spec states the job as the
+  decision left it. A `raise_limit` change is `{"timeout_seconds": {"from", "to"}}`
+  with the job's `timeout_seconds` already `to` (at most the engine's run limit); a
+  `propose` change names `task`, `schedule`, `skill_name` or `timeout_seconds`, each
+  `{"from", "to"}`, with the job still holding `from`; `rerun` and `tell` carry
+  none. A seeded pause is not offered (every seeded job is enabled). The conclusion's
+  time falls after its run ended and before the next run began. A spec that concludes
+  a heal gives only one job failed runs (the claim takes the oldest open heal), and
+  needs the local owner inbox (`--owner-inbox-cli`). All of it is checked before the
+  reset, so a refused spec leaves the home as it was.
 
 Reminder dates are absolute: a weekday or "tomorrow" computed from the run date
 means something different on a Friday than on a Monday. The checker reads the

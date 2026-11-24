@@ -63,11 +63,19 @@ defmodule FermixCore.Tools.GetJobRun do
   defp do_execute(args, context) do
     with {:ok, run_id} <- Support.required_string(args, "run_id") do
       case Repo.get_job_run(run_id, server: Support.repo(context)) do
-        {:ok, run} -> present(run, context)
+        {:ok, run} -> present_own(run, context)
         {:error, reason} -> Support.error(reason)
       end
     else
       {:error, reason} -> {:ok, Tool.error(reason)}
+    end
+  end
+
+  # Inside a heal run, only a run of the heal's own job (M106 §5.5).
+  defp present_own(run, context) do
+    case Support.check_heal_job(run.job_id, context) do
+      :ok -> present(run, context)
+      {:error, sentence} -> {:ok, Tool.error(sentence)}
     end
   end
 

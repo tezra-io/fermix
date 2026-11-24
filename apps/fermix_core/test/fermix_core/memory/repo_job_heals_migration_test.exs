@@ -17,6 +17,9 @@ defmodule FermixCore.Memory.RepoJobHealsMigrationTest do
                    lease_token lease_until message inbox_platform inbox_destination
                    inbox_thread_scope delivery_status delivery_attempts next_delivery_at
                    last_delivery_error delivered_at)
+  # The columns 72 adds after these (`RepoJobHealsDiagnosisMigrationTest`).
+  @diagnosis_columns ~w(conclusion decision note read_outside change_json change_job_version
+                        rerun_at rerun_outcome)
   @scheduled_job_width 36
   @job_run_width 24
 
@@ -41,7 +44,7 @@ defmodule FermixCore.Memory.RepoJobHealsMigrationTest do
   } do
     assert {:ok, versions} = Repo.migration_versions(server: repo)
     assert @version in versions
-    assert columns(db_path, "job_heals") == @heal_columns
+    assert columns(db_path, "job_heals") == @heal_columns ++ @diagnosis_columns
     assert columns(db_path, "job_heal_runs") == ~w(run_id heal_id job_id)
     assert length(columns(db_path, "scheduled_jobs")) == @scheduled_job_width
     assert length(columns(db_path, "job_runs")) == @job_run_width

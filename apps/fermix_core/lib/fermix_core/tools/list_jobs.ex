@@ -2,7 +2,8 @@ defmodule FermixCore.Tools.ListJobs do
   @moduledoc """
   List durable scheduled jobs. Each carries its heal that is not closed (M106
   §5.4), or nil: what failed, since when, how many runs, and whether the
-  owner was told.
+  owner was told, and once diagnosed (§5.5) what Fermix decided, its note,
+  and a proposal's fields with the values they would take.
   """
 
   @behaviour FermixCore.Capabilities.Builtin.Tool

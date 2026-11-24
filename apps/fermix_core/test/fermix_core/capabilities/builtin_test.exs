@@ -180,6 +180,8 @@ defmodule FermixCore.Capabilities.BuiltinTest do
                "get_job_run",
                "git_read",
                "glob_search",
+               # A job's heal run's decision about one of the owner's jobs (M106 §5.5).
+               "job_heal_respond",
                "join_meeting",
                "leave_meeting",
                "list_cues",

@@ -123,6 +123,7 @@ defmodule FermixCore.Jobs.Scheduler do
           due_delay_ms: non_neg_integer() | nil,
           reconciliation_timer: reference() | nil,
           run_monitors: map(),
+          name: GenServer.name(),
           heal_runs: %{reference() => String.t()},
           heal_run_module: module(),
           heal_inbox_opts: keyword(),
@@ -140,7 +141,7 @@ defmodule FermixCore.Jobs.Scheduler do
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     {name, opts} = Keyword.pop(opts, :name, __MODULE__)
-    GenServer.start_link(__MODULE__, opts, name: name)
+    GenServer.start_link(__MODULE__, [{:name, name} | opts], name: name)
   end
 
   @spec tick(GenServer.server(), keyword()) :: :ok
@@ -172,13 +173,16 @@ defmodule FermixCore.Jobs.Scheduler do
   Reuses the same atomic claim, runner dispatch, and monitoring as the timed
   path; only the trigger is `"manual"`. A recurring job's `next_run_at` is left
   untouched (its cadence continues); a one-off run by hand is done and does not
-  fire again at its instant. Returns the created run on success.
+  fire again at its instant. Returns the created run on success. `opts`:
+  `:now`, and `:timeout`, how long the caller waits for the answer (5 s by
+  default, the `GenServer.call/3` default); a caller that stops waiting has
+  not been refused, since the Scheduler may still serve the call.
   """
   @spec run_now(GenServer.server(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()}
   def run_now(server \\ __MODULE__, job_id, opts \\ []) when is_binary(job_id) do
     now = Keyword.get(opts, :now, DateTime.utc_now())
-    GenServer.call(server, {:run_now, job_id, now})
+    GenServer.call(server, {:run_now, job_id, now}, Keyword.get(opts, :timeout, 5_000))
   end
 
   @impl true
@@ -186,6 +190,9 @@ defmodule FermixCore.Jobs.Scheduler do
     repo = Keyword.get(opts, :repo, Repo)
 
     state = %{
+      # The name this Scheduler is registered under, which outlives it: a heal
+      # run reaches the Scheduler running now by it, never by a pid.
+      name: Keyword.fetch!(opts, :name),
       enabled?: Keyword.get(opts, :scheduler_enabled, jobs_config(:scheduler_enabled, true)),
       timer_enabled?: Keyword.get(opts, :timer_enabled, true),
       repo: repo,
@@ -1327,7 +1334,12 @@ defmodule FermixCore.Jobs.Scheduler do
   end
 
   # A heal run that cannot start leaves its heal claimed; the lease runs out
-  # and a later pass claims it again.
+  # and a later pass claims it again. Its diagnosis (M106 §5.5) reads the
+  # registries a run reads, models through the adapter a run is given (none
+  # in production: the main route), and starts a rerun through this
+  # Scheduler's own "run now", reached by this Scheduler's registered name:
+  # a heal run lives under the runner supervisor and outlives a Scheduler
+  # that restarts alone, so it must reach whichever Scheduler runs then.
   defp start_claimed_heal(heal, state) do
     opts = [
       runner_module: state.heal_run_module,
@@ -1337,7 +1349,12 @@ defmodule FermixCore.Jobs.Scheduler do
       delivery_opts: [adapter: state.delivery_adapter, channels: state.delivery_channels],
       inbox_opts: state.heal_inbox_opts,
       clock: state.clock,
-      notify: state.runner_notify
+      notify: state.runner_notify,
+      capability_registry: state.capability_registry,
+      skill_registry: state.skill_registry,
+      scheduler: state.name,
+      adapter: state.adapter,
+      adapter_opts: state.adapter_opts
     ]
 
     case RunnerSupervisor.start_run(state.runner_supervisor, opts) do

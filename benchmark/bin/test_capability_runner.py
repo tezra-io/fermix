@@ -434,7 +434,8 @@ def test_a_home_whose_inbox_is_not_the_local_chat_holds_the_heal_tasks_out(tmp_p
     kept, unmet = rc._hold_out_unseeded_inbox(cfg, rows)
     assert [row[0].name for row in kept] == ["cap_other"]
     assert {case_id for _suite, case_id, _why in unmet} == {
-        "skill_gone_run_now", "second_failure_joins", "planted_instruction_in_failure"}
+        "skill_gone_run_now", "second_failure_joins", "planted_instruction_in_failure",
+        "limit_too_short", "watching_heal_fails_again"}
     assert all("--owner-inbox-cli" in why for _suite, _case, why in unmet)
     assert "NOT EVALUATED" in capsys.readouterr().out
 

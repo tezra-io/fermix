@@ -110,6 +110,7 @@ defmodule FermixCore.Memory.Repo do
   @job_run_facts_migration_version 69
   @job_retries_migration_version 70
   @job_heals_migration_version 71
+  @job_heal_diagnosis_migration_version 72
   @sqlite_open_intent :readwritecreate
 
   # The home's requests about notes from every machine (M97 §8), all served by
@@ -5362,8 +5363,37 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_phone_call_ledger_migration(conn, versions),
          :ok <- apply_job_run_facts_migration(conn, versions),
          :ok <- apply_job_retries_migration(conn, versions),
-         :ok <- apply_job_heals_migration(conn, versions) do
+         :ok <- apply_job_heals_migration(conn, versions),
+         :ok <- apply_job_heal_diagnosis_migration(conn, versions) do
       :ok
+    end
+  end
+
+  # M106 §5.5, §5.9: what a heal's diagnosis decided, its note, its change,
+  # its rerun and which conclusion it is on, as columns on `job_heals`, with
+  # the version in one transaction, after 71. `job_heals` is this milestone's
+  # own table, read by column name, so it widens; `job_runs` and
+  # `scheduled_jobs` are left as they were. No row is rewritten: a heal from
+  # before is on its first conclusion with no decision. Reapplying it changes
+  # nothing: the columns are added only while the table holds 71's, and a
+  # table that holds neither set is refused.
+  defp apply_job_heal_diagnosis_migration(conn, versions) do
+    if Enum.member?(versions, @job_heal_diagnosis_migration_version) do
+      :ok
+    else
+      with :ok <- Sqlite3.execute(conn, "BEGIN;") do
+        conn |> job_heal_diagnosis_step() |> commit_migration(conn)
+      end
+    end
+  end
+
+  defp job_heal_diagnosis_step(conn) do
+    with :ok <- add_columns(conn, "job_heals", JobHealsSql.diagnosis_columns()) do
+      Sqlite3.execute(
+        conn,
+        "INSERT INTO schema_migrations(version) " <>
+          "VALUES (#{@job_heal_diagnosis_migration_version});"
+      )
     end
   end
 
@@ -9854,8 +9884,11 @@ defmodule FermixCore.Memory.Repo do
        when is_map(value) or is_nil(value),
        do: {"delivery_target_json", encode_metadata(value)}
 
-  # A watcher's follow-up changes its tools and its timeout in place
-  # (`Jobs.Registry.update_follow_up_job/3`); no other write sets them.
+  # A watcher's follow-up changes its tools in place
+  # (`Jobs.Registry.update_follow_up_job/3`); no other write sets them. A
+  # job's time limit is set in place by that write, by `update_job`'s edit
+  # (`Jobs.Registry.update_job/3`), and by a heal's raised limit through it
+  # (M106 §5.6).
   defp scheduled_job_field_assignment!({:allowed_tools, [_ | _] = value}),
     do: {"allowed_tools_json", encode_metadata(value)}
 

@@ -380,9 +380,11 @@ defmodule FermixCore.Realtime.LivePrompt do
   defp excluded?(%Capability{metadata: %{category: :phone_call}}),
     do: not PhoneCallsConfig.enabled?()
 
+  # A job's heal run's decision tool is never named either (M106 §5.5).
   defp excluded?(capability),
     do:
-      capability.metadata[:category] == :plugin or RuntimeSections.open_loop_unlisted?(capability)
+      capability.metadata[:category] == :plugin or RuntimeSections.open_loop_unlisted?(capability) or
+        RuntimeSections.heal_run_unlisted?(capability)
 
   defp format_category({category, capabilities}) do
     names =

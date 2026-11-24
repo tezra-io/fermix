@@ -2190,11 +2190,19 @@ defmodule FermixCore.Jobs.Runner do
     |> Keyword.get(:delivery_timeout_ms, @default_delivery_timeout_ms)
   end
 
-  defp default_timeout_ms(opts) do
-    Keyword.get(opts, :default_timeout_ms) ||
-      :fermix_core
-      |> Application.get_env(:jobs, [])
-      |> Keyword.get(:default_timeout_ms, @default_timeout_ms)
+  defp default_timeout_ms(opts),
+    do: Keyword.get(opts, :default_timeout_ms) || default_timeout_ms()
+
+  @doc """
+  The engine's default run limit: where a run of a job with no time limit of
+  its own stops, and the most a heal may raise a job's limit to alone (M106
+  §5.6).
+  """
+  @spec default_timeout_ms() :: pos_integer()
+  def default_timeout_ms do
+    :fermix_core
+    |> Application.get_env(:jobs, [])
+    |> Keyword.get(:default_timeout_ms, @default_timeout_ms)
   end
 
   # Precedence: caller opt > job column > nil (the wall-clock caller adds the

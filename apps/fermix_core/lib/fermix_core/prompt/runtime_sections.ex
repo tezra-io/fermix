@@ -410,6 +410,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
       |> Enum.reject(&call_scoped?/1)
       |> Enum.reject(&phone_call_unlisted?/1)
       |> Enum.reject(&open_loop_unlisted?/1)
+      |> Enum.reject(&heal_run_unlisted?/1)
       |> Enum.reject(&kept_unlisted?/1)
       |> Enum.group_by(&(&1.metadata[:category] || :system))
       |> Enum.sort_by(fn {category, _caps} -> category_index(category) end)
@@ -500,6 +501,16 @@ defmodule FermixCore.Prompt.RuntimeSections do
     do: not OpenLoopsConfig.enabled?()
 
   def open_loop_unlisted?(_capability), do: false
+
+  @doc """
+  Whether a capability is a job's heal run's own decision tool (M106 §5.5),
+  which no prompt may name: it is offered only inside a heal run, which
+  renders no catalog. Public so the Live voice frontend's catalog
+  (`Realtime.LivePrompt`) asks the same question.
+  """
+  @spec heal_run_unlisted?(map()) :: boolean()
+  def heal_run_unlisted?(%{kind: :builtin, name: "job_heal_respond"}), do: true
+  def heal_run_unlisted?(_capability), do: false
 
   # The coding-harness category carries a section-level PREAMBLE line (design
   # §7.4) before its tool list — a new touchpoint, rendered only when the bucket

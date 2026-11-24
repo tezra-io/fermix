@@ -25,7 +25,12 @@ defmodule FermixCore.Jobs.HealMessageTest do
     },
     recent: %{same: 1, of: 8},
     jobs: [],
-    job_count: 1
+    job_count: 1,
+    # Stage S3's: a heal on its first conclusion that no diagnosis decided.
+    conclusion: "first",
+    decision: nil,
+    note: nil,
+    change: nil
   }
 
   @provider_facts %{
@@ -40,7 +45,11 @@ defmodule FermixCore.Jobs.HealMessageTest do
     job: nil,
     recent: nil,
     jobs: [%{name: "Harbour tide table", runs: 3}, %{name: "Morning brief", runs: 1}],
-    job_count: 2
+    job_count: 2,
+    conclusion: "first",
+    decision: nil,
+    note: nil,
+    change: nil
   }
 
   test "a job's failure: its name quoted, what failed and when, and when it runs next" do

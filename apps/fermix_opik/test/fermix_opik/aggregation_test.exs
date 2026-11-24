@@ -1205,6 +1205,115 @@ defmodule FermixOpik.AggregationTest do
            } = trace.metadata
   end
 
+  # M106 §5.5 (stage S3): a heal's decision is a phase of its own, carrying
+  # what the run asked, what code carried out and why it refused.
+  test "a heal's decision is its own point trace, with what was asked and what was done" do
+    {_state, closed} =
+      run([
+        {[:fermix, :job, :heal], %{count: 1},
+         %{
+           agent: "scheduled:job-9",
+           phase: "decided",
+           heal_id: "jhl_0a1b",
+           job_id: "job-9",
+           decision: "propose",
+           requested: "raise_limit",
+           refusal: "over_ceiling",
+           read_outside: true
+         }}
+      ])
+
+    assert [%{trace: trace}] = closed
+    assert trace.name == "job_heal:decided"
+
+    assert %{decision: "propose", requested: "raise_limit", refusal: "over_ceiling"} =
+             trace.metadata
+
+    assert trace.metadata.read_outside == true
+  end
+
+  # M106 §5.5 (stage S3): a heal run is a run kind of its own. Its session is
+  # its own root: the failed run it was spawned for has shipped, so its
+  # session rides as correlation metadata, never as a parent.
+  describe "a job's heal run" do
+    @heal_session "heal_job-9_20310304_073000_a1b2c3"
+
+    defp heal_run_meta(extra) do
+      Map.merge(
+        %{
+          agent: "job_heal:job-9",
+          session_id: @heal_session,
+          parent_session: "cron_job-9_20310304_071000_d4e5f6",
+          heal_id: "jhl_0a1b",
+          job_id: "job-9",
+          run_id: "run-4"
+        },
+        extra
+      )
+    end
+
+    test "the reporter subscribes to its three bookends" do
+      for run <- [:heal_run_start, :heal_run_complete, :heal_run_error] do
+        assert [:fermix, :job, run] in FermixOpik.Reporter.events()
+      end
+    end
+
+    test "is its own root trace nesting its tool spans, the failed run as metadata" do
+      {_state, closed} =
+        run([
+          {[:fermix, :job, :heal_run_start], %{count: 1},
+           heal_run_meta(%{failure_kind: "time_limit", max_duration_ms: 120_000})},
+          {[:fermix, :tool, :exec], %{duration_ms: 9},
+           %{tool: "list_job_runs", success: true, session_id: @heal_session}},
+          {[:fermix, :tool, :exec], %{duration_ms: 4},
+           %{tool: "job_heal_respond", success: true, session_id: @heal_session}},
+          {[:fermix, :job, :heal_run_complete], %{duration_ms: 2_100},
+           heal_run_meta(%{decision: "raise_limit"})}
+        ])
+
+      assert [%{trace: trace, spans: spans}] = closed
+      assert trace.name == "job_heal:job-9"
+      assert trace.tags == ["job_heal_run"]
+      refute Map.has_key?(trace.metadata, :status)
+
+      assert %{
+               heal_id: "jhl_0a1b",
+               job_id: "job-9",
+               run_id: "run-4",
+               parent_session: "cron_job-9_20310304_071000_d4e5f6",
+               failure_kind: "time_limit",
+               decision: "raise_limit"
+             } = trace.metadata
+
+      assert span_named(spans, "list_job_runs")
+      assert span_named(spans, "job_heal_respond")
+    end
+
+    test "a run the watchdog stopped closes with its own status and error" do
+      {_state, closed} =
+        run([
+          {[:fermix, :job, :heal_run_start], %{count: 1}, heal_run_meta(%{})},
+          {[:fermix, :job, :heal_run_error], %{duration_ms: 120_000},
+           heal_run_meta(%{status: "timeout", error: "wall-clock timeout after 120000ms"})}
+        ])
+
+      assert [%{trace: trace}] = closed
+      assert trace.metadata.status == "timeout"
+      assert trace.output == %{text: "wall-clock timeout after 120000ms"}
+    end
+
+    test "a closer whose opener was missed is still a heal run, never a sub-agent" do
+      {_state, closed} =
+        run([
+          {[:fermix, :job, :heal_run_complete], %{duration_ms: 900},
+           heal_run_meta(%{decision: "tell"})}
+        ])
+
+      assert [%{trace: trace}] = closed
+      assert trace.tags == ["job_heal_run"]
+    end
+  end
+
   test "a soul-curation draft is its own trace nesting the bounded provider call" do
     {_state, closed} =
       run([

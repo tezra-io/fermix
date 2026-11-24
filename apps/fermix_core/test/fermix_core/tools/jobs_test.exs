@@ -357,7 +357,7 @@ defmodule FermixCore.Tools.JobsTest do
     assert result.success == false
 
     assert result.error =~
-             "at least one of task, schedule, description, skill_name, provider/model, clear_route_pin, or delivery"
+             "at least one of task, schedule, description, skill_name, provider/model, clear_route_pin, timeout_seconds, or delivery"
   end
 
   test "schedule_job exposes and persists runner timeout controls", %{context: context} do

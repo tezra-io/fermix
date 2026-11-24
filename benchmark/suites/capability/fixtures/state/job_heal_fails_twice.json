@@ -13,6 +13,7 @@
           "hours_ago": 20,
           "duration_seconds": 2,
           "status": "error",
+          "failure_kind": "unknown_skill",
           "error": "The run stopped before it began: the skill brackwater-watering-plan it is bound to was not found."
         }
       ]

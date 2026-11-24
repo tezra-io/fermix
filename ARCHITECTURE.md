@@ -888,6 +888,53 @@ settle transaction, so a run's final row and what became of its failure land
 together. A heal run marks the delivery delivered before it writes the message
 to history, so a run that dies between the two never sends it again.
 
+A job's heal of a kind a model could help with gets one diagnosis inside its
+heal run (M106 §5.5, D1), before its message: `Jobs.HealDiagnosis` runs one
+isolated agent loop on the main route (never the job's pin), linked to the heal
+run and monitored as a job run's loop is (JOB-8), under six steps and a
+watchdog inside the heal's lease, with IDENTITY.md and SOUL.md, the heal
+guidance, the date, the job's definition and its recent runs as Fermix's facts
+(names and numbers), and the failure's own words framed as outside content,
+which the heal records it read. It may call exactly `skill_view`,
+`list_job_runs`, `get_job_run` (both answering for the heal's job only) and
+`job_heal_respond`, whose only effect is to hand one decision and a short note
+to the heal run; the first is kept. A provider's heal, a kind no model can help
+with and a verdict run no model. `Jobs.HealDecision` checks the decision and
+the heal run carries it out after the loop has ended, each job write right
+after a write that proves the lease still its own (D4): `rerun` asks for one
+run through the Scheduler's run now, by the name the Scheduler is registered
+under (a heal run outlives a Scheduler that restarts alone), after the
+concluding write that stamps `rerun_at`, and records what came of it in
+`rerun_outcome` (`started`, `running`, `refused`, which only what proves no
+run will come can be, a reply that the job cannot run now, a call that reached
+no Scheduler or a check before the call that stopped the ask, and which leaves
+the heal `waiting`, or `unanswered`, anything that leaves a run possible, a
+call out of time, a Scheduler stopped while holding it or a reply that cannot
+tell, such as a store timeout under the claim, which keeps it `watching`);
+`raise_limit` raises the time limit through `Jobs.Registry`, only
+upward and at most to the engine's default run limit
+(`Jobs.Runner.default_timeout_ms/0`), and anything past it becomes a proposal;
+`pause` pauses it through `Jobs.Registry`; `propose` is checked as an owner's
+edit is (`Tools.UpdateJob.change_attrs/2`, `Jobs.Registry.check_update/3`) and
+stored on the heal with the job's version, never applied; a job a watcher
+wakes or a mandate names gets no edit, only a rerun, a pause or `tell`; a
+decision a check refuses is traced, logged and goes on as `tell`. The decision,
+the note and the change are recorded on `job_heals`; `Jobs.HealMessage` adds
+the note and one line on what Fermix did or would change under the facts. The
+concluding write leaves a rerun or a raised limit `watching` and anything else
+`waiting`. A failure that joins a `watching` heal concludes it a second time
+(§5.9, D8): open again with its outbox reset, it is claimed, sent with no model
+and closed `still_failing`, whose quiet days keep a third failure silent; an ok
+run closes it `healed` and sends nothing; a heal watching 7 days expires as a
+waiting one does.
+
+Architecture Invariant: a heal run's model can cause only the decisions in
+`job_heal_respond`'s list, and only code carries one out. The run is offered
+no tool that changes, sends, runs a command or reaches the network; its one
+decision is checked by code, every job write it leads to is made by the heal
+run through the paths an owner's edit takes, fenced on the heal's lease, and a
+change to what the job does or where it reports is only ever stored.
+
 ### `FermixCore.Cues`: Cues and Watchers
 
 `Cues` turns push input into agent work. Its tree starts at boot only when

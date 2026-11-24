@@ -890,8 +890,9 @@ run trace's metadata and `mix opik.replay` keep all three retry fields.
 
 A failure that is not retried goes to a heal (M106 §5.4), and the run's
 `run_error` says what became of it: `heal` (`"none"` for a retried failure,
-`"opened"`, `"joined"`, `"quiet"` or `"out_of_scope"`, a guest's job) and, for
-one opened or joined, `heal_id`. A cue run's carries neither.
+`"opened"`, `"joined"`, `"verdict"` for a failure that concludes a watching
+heal a second time (§5.9), `"quiet"` or `"out_of_scope"`, a guest's job) and,
+for one opened, joined or concluded, `heal_id`. A cue run's carries neither.
 
 The heal itself has one point event, `[:fermix, :job, :heal]` (`count: 1`),
 emitted only through `Jobs.Telemetry.heal/2` and `heal_settled/3`, with a
@@ -900,21 +901,66 @@ emitted only through `Jobs.Telemetry.heal/2` and `heal_settled/3`, with a
 | phase | emitted by | when |
 |---|---|---|
 | `opened`, `joined` | the runner or the Scheduler's crash settle (`heal_settled/3`) | the settle took the failure |
+| `verdict` | the same | a failure joined a `watching` heal, which is open again for its second message |
 | `closed` | the same, `outcome: "healed"` | an ok run closed the heal |
-| `closed` | `Jobs.Scheduler`'s reconcile pass, `outcome: "expired"` | the heal waited 7 days |
+| `closed` | `Jobs.Scheduler`'s reconcile pass, `outcome: "expired"` | the heal waited, or watched, 7 days |
+| `decided` | `Jobs.HealRun` | its diagnosis's decision, as code carries it out, was recorded |
 | `delivered` | `Jobs.HealRun` | the one message was sent and marked |
 | `delivery_failed` | `Jobs.HealRun`, `dead_letter` true or false | a send failed, or no inbox |
+| `closed` | `Jobs.HealRun`, `outcome: "still_failing"` | the verdict's message was sent or dead-lettered |
+| `rerun` | `Jobs.HealRun`, `rerun_outcome`, with `run_id` the run started or `error` | the rerun's one run was asked for: `started`, `running` (a run already held the job), `refused` (no run will come: the Scheduler answered that the job cannot run now, no Scheduler was there to ask, or the check before the ask stopped it, its `error` then `{:not_asked, _}`; the heal waits on the owner) or `unanswered` (a run may still come: the call ran out of time, the Scheduler stopped while it held it, or its reply could not tell, such as a store timeout under the claim; the heal keeps watching) |
 
 Every event carries `heal_id` and `agent` (`"scheduled:<job_id>"`, or
 `"job_heal"` for a provider's heal with no run behind the event), and whichever
 of `job_id`, `run_id`, `subject_kind`, `subject_id`, `failure_kind`, `outcome`,
-`attempts`, `dead_letter`, `platform` and `error` (bounded to 500 characters)
-the phase knows. A heal is not a run kind: no model runs and it has no
-`session_id`. The trace stream writes it as the `job_heal` agent event; Opik
+`attempts`, `dead_letter`, `platform`, `error` (bounded to 500 characters),
+`conclusion` (`first` or `verdict`), `decision` (what code carried out:
+`rerun`, `raise_limit`, `pause`, `propose`, `tell` or `none`), `requested`
+(what the heal run asked), `refusal` (why a check did not carry the request
+out as asked: `not_upward`, `past_ceiling`, `not_runnable`, `not_running`,
+`consent_required`, `watcher_unreadable`, `invalid_change` or `move_failed`),
+`read_outside` and `rerun_outcome` the phase knows. A heal's events are points, not a run:
+they have no `session_id`, and its diagnosis is the run kind below. The trace
+stream writes it as the `job_heal` agent event; Opik
 makes each phase its own self-closing trace named `job_heal:<phase>`, tagged
 `job_heal`, correlated by `heal_id` and never nested under the run, and
 `mix opik.replay` reads the row back as the same event. The Opik run trace's
 metadata and the replay keep `heal` and `heal_id` on a run's error.
+
+### Job heal runs
+
+A job's heal of a kind a model could help with is diagnosed by one isolated
+loop inside its heal run (M106 §5.5): a run kind of its own, always a root.
+`Jobs.HealDiagnosis.session_id/2` mints `session_id =
+"heal_<job_id>_<YYYYMMDD_HHMMSS>_<6 hex>"` (UTC) and the loop context takes it
+with `agent: "job_heal:<job_id>"`, so its provider and tool spans correlate
+with the bookends by construction; the failed run's session is its
+`parent_session`, which the loop hands every span. Every emission goes
+through `Jobs.Telemetry`: `[:fermix, :job, :heal_run_start]` (`count: 1`,
+before the loop), then `[:fermix, :job, :heal_run_complete]` (`duration_ms`,
+the loop finished) or `[:fermix, :job, :heal_run_error]` (`count: 1`,
+`duration_ms`; the watchdog stopped it or it failed). All three carry `agent`,
+`session_id`, `parent_session`, `heal_id`, `job_id`, `run_id` (the failed
+run) and `failure_kind`; `start` adds `max_duration_ms` (the watchdog, the
+exporter's sweep floor), `complete` adds `decision` (what the run asked, or
+`none`), `error` adds `status` (`timeout | error`) and `error` (bounded to
+500 characters). What code then made of the decision is the heal's `decided`
+phase above. The run's tools are ordinary `[:fermix, :tool, :exec]` events
+through `Tools.Telemetry.exec/5` and its model calls go through
+`Providers.Telemetry.emit_call/3`; a refused `job_heal_respond` call carries
+`error_code` (its failure-mode tag, or `not_heal_run`) and `error_summary`.
+
+`Trace.TelemetryHandler` registers the three as `agent_event` rows
+`job_heal_run_start`, `_complete` and `_error`, keyed on `agent`. `FermixOpik`
+binds all three: the opener opens a root of kind `:job_heal_run`
+(`infer_kind("heal_" <> _)`, so a closer whose opener was missed is never a
+`:subagent` phantom), named by its agent, threaded by its job and swept by
+`max_duration_ms`; its `parent_session` is correlation metadata and never a
+parent, because the failed run's trace has shipped. `complete` closes it
+`ok`, `error` with its `status` word and the error as its output. The root's
+metadata is `heal_id`, `job_id`, `run_id`, `parent_session`, `failure_kind`
+and `decision`. `mix opik.replay` reads the three rows back as the same
+events.
 
 ## Meeting notetaker runs
 

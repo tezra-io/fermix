@@ -119,7 +119,13 @@ defmodule FermixCore.Home.ReadableTest do
     # cascade. `job_runs` and `scheduled_jobs` are left as they were. A heal a
     # newer engine opened is never sent by that engine, and its runs end in
     # their failure line as they always did: the format stays.
-    @migrations Enum.to_list(1..39) ++ [41, 42, 43] ++ Enum.to_list(45..71)
+    # 72 (M106 §5.5, §5.9, a heal's diagnosis and verdict) adds columns to
+    # `job_heals` only, a table an engine at this format never reads; every
+    # heal row is kept as it was. `job_runs` and `scheduled_jobs` keep their
+    # widths. A newer engine's raised limit or pause is a value in a column
+    # that engine already reads, and a rerun is an ordinary manual run: the
+    # format stays.
+    @migrations Enum.to_list(1..39) ++ [41, 42, 43] ++ Enum.to_list(45..72)
     @manifest_keys ~w(created_at engine_version files format home_format home_root host links
                       primary_epoch)
     @entry_keys ~w(bytes mode path sha256)

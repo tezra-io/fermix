@@ -97,10 +97,12 @@ _STATE_ABORT_WHY = ("The eval home's jobs and reminders could not be seeded, so 
                     "case could start from its seed either: this is the harness, not a "
                     "product failure.")
 # A case's `state:` can seed a failed run, which opens a heal (M106 §5.4) the daemon's
-# Scheduler claims on its next pass, at most its 60 s reconcile, and sends at once.
-# The turn waits until every heal of a seeded job has left `open` and `diagnosing`, so
-# the owner's question is asked of the record the product would have by then.
-_SEEDED_HEAL_WAIT_S = 150
+# Scheduler claims on its next pass, at most its 60 s reconcile; its heal run diagnoses
+# it (§5.5, a watchdog of 120 s) and sends. A spec may instead seed the heal concluded,
+# which leaves nothing to wait for. The turn waits until every heal of a seeded job has
+# left `open` and `diagnosing`, so the owner's question is asked of the record the
+# product would have by then.
+_SEEDED_HEAL_WAIT_S = 240
 _SEEDED_HEAL_POLL_S = 1.0
 
 

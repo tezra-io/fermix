@@ -7,6 +7,7 @@ defmodule FermixCore.Jobs.HealRunTest do
 
   import ExUnit.CaptureLog, only: [with_log: 1]
 
+  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Jobs.HealRun
   alias FermixCore.Jobs.Registry
   alias FermixCore.Memory.ConversationStore
@@ -38,6 +39,43 @@ defmodule FermixCore.Jobs.HealRunTest do
     defp next([head | tail]), do: {head, tail}
   end
 
+  # The model a job's heal is diagnosed with (stage S3), here one that gives
+  # no decision, so every run sends the message from Fermix's facts alone,
+  # as this stage's sends are tested; the decisions have their own tests
+  # (`HealRunDiagnosisTest`). No network.
+  defmodule NoDecisionModel do
+    @moduledoc false
+
+    @behaviour FermixCore.Providers.Adapter
+
+    @impl true
+    def chat(_messages, _capabilities, _opts) do
+      {:ok,
+       %{
+         content: "",
+         tool_calls: [],
+         usage: %{prompt_tokens: 1, completion_tokens: 1, total_tokens: 2},
+         model: "mock",
+         provider_state: %{}
+       }}
+    end
+
+    @impl true
+    def continue(_state, _tool_results, opts), do: chat([], [], opts)
+
+    @impl true
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl true
+    def parse_tool_calls(_response), do: []
+
+    @impl true
+    def parse_response(response), do: response
+
+    @impl true
+    def supports_streaming?, do: false
+  end
+
   # A store that takes the history write and never answers it, so a test can
   # end the heal run between its delivered mark and its history row.
   defmodule HeldStore do
@@ -66,8 +104,11 @@ defmodule FermixCore.Jobs.HealRunTest do
     tasks = :"job_heal_run_tasks_#{unique}"
     channel = :"job_heal_run_channel_#{unique}"
 
+    caps = :"job_heal_run_caps_#{unique}"
+
     start_supervised!({Repo, name: repo, enabled: true, database_path: db_path})
     start_supervised!({Task.Supervisor, name: tasks})
+    start_supervised!({CapabilityRegistry, name: caps})
 
     start_supervised!(
       {ConversationStore, name: store, repo: repo, durable_task_supervisor: tasks}
@@ -75,7 +116,14 @@ defmodule FermixCore.Jobs.HealRunTest do
 
     on_exit(fn -> SafeRm.rm_rf!(dir) end)
 
-    %{repo: repo, store: store, tasks: tasks, channel: channel}
+    %{
+      repo: repo,
+      store: store,
+      tasks: tasks,
+      channel: channel,
+      caps: caps,
+      bootstrap: Path.join(dir, "bootstrap")
+    }
   end
 
   describe "the one send" do
@@ -297,7 +345,11 @@ defmodule FermixCore.Jobs.HealRunTest do
           delivery_opts: [adapter: ScriptedChannel],
           inbox_opts: owners_on("telegram", Atom.to_string(ctx.channel)),
           clock: fn -> @now end,
-          clock_opts: [personalization: [timezone: "Europe/Lisbon"]]
+          clock_opts: [personalization: [timezone: "Europe/Lisbon"]],
+          capability_registry: ctx.caps,
+          adapter: NoDecisionModel,
+          bootstrap_dir: ctx.bootstrap,
+          scheduler: nil
         ],
         overrides
       )

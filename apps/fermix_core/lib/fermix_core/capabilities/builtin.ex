@@ -112,6 +112,14 @@ defmodule FermixCore.Capabilities.Builtin do
     "run_job_now" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: false},
     "list_job_runs" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true},
     "get_job_run" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true},
+    # A job's heal run's one exit (M106 §5.5), as `open_loop_respond` is a
+    # check-in's: owner-only, and its `advertise?/execute` gate (the heal
+    # run's own context key) is the hard barrier.
+    "job_heal_respond" => %{
+      policy_class: :read_write,
+      hidden_from_agent?: false,
+      owner_only?: true
+    },
     "memory_sources_list" => %{
       policy_class: :read_only,
       hidden_from_agent?: false,

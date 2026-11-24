@@ -115,6 +115,9 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.RunJobNow,
     FermixCore.Tools.ListJobRuns,
     FermixCore.Tools.GetJobRun,
+    # Seeded unconditionally; `advertise?/1` offers it only inside a job's
+    # heal run (M106 §5.5), and `execute/2` repeats that gate.
+    FermixCore.Tools.JobHealRespond,
     FermixCore.Tools.MemorySourcesList,
     FermixCore.Tools.Browser,
     FermixCore.Tools.SendAttachment,

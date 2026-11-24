@@ -20,6 +20,23 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
 
   Times are stored fixed-width (`CuesSql.stamp/1`), so a stored time and a
   pass's `now` compare as text.
+
+  A job's heal of a kind a model could help with is diagnosed (M106 §5.5,
+  stage S3): its heal run records, under the lease, the `decision` code
+  carried out (`rerun`, `raise_limit`, `pause`, `propose`, `tell`, or `none`
+  when the run gave none), the run's `note`, whether it `read_outside`
+  content, and the exact `change` (`update_job`'s field names, each with its
+  `from` and `to`) applied or proposed, with the job's version it was drawn
+  for. The heal run's concluding write (`delivered` or `dead_letter`) takes
+  the heal where the decision says: `watching` after a rerun or a raised
+  limit (the rerun's ask is stamped `rerun_at` in the same write, and what
+  came of it, `rerun_outcome`, once the Scheduler answered or did not; a
+  refused rerun leaves the heal `waiting`), `waiting` otherwise. A failure
+  that joins a `watching` heal concludes it a second time (`conclusion`
+  `verdict`, §5.9): the heal is open again with its outbox
+  reset, its failure the new one, and its concluding write closes it
+  `still_failing`. A heal watching seven days closes `expired`, as a waiting
+  one does.
   """
 
   alias FermixCore.Jobs.Failure
@@ -38,14 +55,41 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
   @recent_runs 8
   @named_jobs 5
 
-  @fields ~w(id subject_kind subject_id job_id failure_kind failure_text failure_words state
-             outcome run_count last_run_id last_failed_at opened_at updated_at waiting_since
-             closed_at lease_token lease_until message inbox_platform inbox_destination
-             inbox_thread_scope delivery_status delivery_attempts next_delivery_at
-             last_delivery_error delivered_at)a
-  @select "SELECT #{Enum.map_join(@fields, ", ", &Atom.to_string/1)} FROM job_heals"
+  @note_max 500
+  @decisions ~w(rerun raise_limit pause propose tell none)
+  # What came of a rerun's "run now" (M106 §5.5, `Jobs.HealRun.rerun_outcome/2`):
+  # a run started, one was already running, it was refused (no run will
+  # come), or it gave no clear answer (a run may still come).
+  @rerun_outcomes ~w(started running refused unanswered)
+
+  # The columns 71 made, and the ones 72 adds for the diagnosis (M106 §5.5).
+  @columns_71 ~w(id subject_kind subject_id job_id failure_kind failure_text failure_words state
+                 outcome run_count last_run_id last_failed_at opened_at updated_at waiting_since
+                 closed_at lease_token lease_until message inbox_platform inbox_destination
+                 inbox_thread_scope delivery_status delivery_attempts next_delivery_at
+                 last_delivery_error delivered_at)
+  @diagnosis_columns ~w(conclusion decision note read_outside change_json change_job_version
+                        rerun_at rerun_outcome)
+  @fields Enum.map(@columns_71 ++ @diagnosis_columns, &String.to_atom/1)
+  @select "SELECT #{Enum.join(@columns_71 ++ @diagnosis_columns, ", ")} FROM job_heals"
   @stamped ~w(last_failed_at opened_at updated_at waiting_since closed_at lease_until
-              next_delivery_at delivered_at)a
+              next_delivery_at delivered_at change_job_version rerun_at)a
+
+  @diagnosis_sql """
+  ALTER TABLE job_heals ADD COLUMN conclusion TEXT NOT NULL DEFAULT 'first'
+    CHECK (conclusion IN ('first', 'verdict'));
+  ALTER TABLE job_heals ADD COLUMN decision TEXT
+    CHECK (decision IN ('rerun', 'raise_limit', 'pause', 'propose', 'tell', 'none'));
+  ALTER TABLE job_heals ADD COLUMN note TEXT;
+  ALTER TABLE job_heals ADD COLUMN read_outside INTEGER CHECK (read_outside IN (0, 1));
+  ALTER TABLE job_heals ADD COLUMN change_json TEXT;
+  ALTER TABLE job_heals ADD COLUMN change_job_version TEXT;
+  ALTER TABLE job_heals ADD COLUMN rerun_at TEXT;
+  ALTER TABLE job_heals ADD COLUMN rerun_outcome TEXT
+    CHECK (rerun_outcome IN ('started', 'running', 'refused', 'unanswered'));
+  CREATE INDEX IF NOT EXISTS job_heals_watching
+    ON job_heals(waiting_since) WHERE state = 'watching';
+  """
 
   @schema_sql """
   CREATE TABLE IF NOT EXISTS job_heals (
@@ -103,17 +147,46 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
 
   @typedoc """
   What became of a run's failure: retried (`:none`, the retry has it), taken
-  by a heal it opened or joined, kept quiet by one that closed lately, or out
-  of the heal's scope (a guest's job), which keeps its own failure line.
+  by a heal it opened or joined, concluding a watching heal a second time
+  (`:verdict`, M106 §5.9), kept quiet by one that closed lately, or out of the
+  heal's scope (a guest's job), which keeps its own failure line.
   """
   @type disposition ::
-          :none | :out_of_scope | :quiet | {:opened, String.t()} | {:joined, String.t()}
+          :none
+          | :out_of_scope
+          | :quiet
+          | {:opened, String.t()}
+          | {:joined, String.t()}
+          | {:verdict, String.t()}
 
   @type heal :: %{required(atom()) => term()}
+
+  @typedoc """
+  What a heal run decided, as code carries it out (M106 §5.5): the
+  `decision`, the run's `note`, whether the run `read_outside` content, the
+  exact `change` (each of `update_job`'s fields it touches, with its `from`
+  and `to`) and the job's version it was drawn for.
+  """
+  @type plan :: %{
+          required(:decision) => String.t(),
+          required(:note) => String.t() | nil,
+          required(:read_outside) => boolean() | nil,
+          required(:change) => map() | nil,
+          optional(:change_job_version) => DateTime.t() | nil
+        }
 
   @doc "The two tables and their indexes, for their migration."
   @spec schema_sql() :: String.t()
   def schema_sql, do: @schema_sql
+
+  @doc """
+  The columns migration 72 adds to `job_heals` for the diagnosis (M106 §5.5,
+  §5.9), as `Memory.Repo` adds columns: added while the table holds 71's
+  columns, nothing while it holds both, refused for any other set.
+  """
+  @spec diagnosis_columns() :: %{before: [String.t()], after: [String.t()], sql: String.t()}
+  def diagnosis_columns,
+    do: %{before: @columns_71, after: @columns_71 ++ @diagnosis_columns, sql: @diagnosis_sql}
 
   @doc """
   What `run`'s settle does to the heals, after its retry was decided, on the
@@ -169,16 +242,31 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
   def handle(conn, {:put_message, id, token, text, %DateTime{} = now}) when is_binary(text),
     do: held_write(conn, id, token, [{"message", text}], now)
 
+  # The fence a heal run takes right before it writes the job: the lease
+  # still its own (M106 §5.5).
+  def handle(conn, {:hold, id, token, %DateTime{} = now}),
+    do: held_write(conn, id, token, [], now)
+
+  def handle(conn, {:decided, id, token, %{decision: decision} = plan, %DateTime{} = now})
+      when decision in @decisions,
+      do: held_write(conn, id, token, decided_assignments(plan), now)
+
+  # What came of the rerun, written once after the concluding write released
+  # the lease. A refusal takes a heal still watching on its first conclusion
+  # to waiting: no run is coming. A heal the job's own run moved meanwhile
+  # stays where it is.
+  def handle(conn, {:rerun_outcome, id, outcome, %DateTime{} = now})
+      when is_binary(id) and outcome in @rerun_outcomes,
+      do: rerun_outcome(conn, id, outcome, now)
+
   def handle(conn, {:delivered, id, token, %DateTime{} = now}) do
     assignments = [
-      {"state", "waiting"},
       {"delivery_status", "delivered"},
       {"delivered_at", CuesSql.stamp(now)},
-      {"waiting_since", CuesSql.stamp(now)},
       {"next_delivery_at", nil}
     ]
 
-    held_release(conn, id, token, assignments, now)
+    conclude(conn, id, token, assignments, now)
   end
 
   def handle(conn, {:delivery_failed, id, token, failure, %DateTime{} = now}) do
@@ -199,15 +287,13 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
         {:dead_letter, id, token, %{attempts: attempts, error: error}, %DateTime{} = now}
       ) do
     assignments = [
-      {"state", "waiting"},
       {"delivery_status", "dead_letter"},
       {"delivery_attempts", attempts},
-      {"waiting_since", CuesSql.stamp(now)},
       {"next_delivery_at", nil},
       {"last_delivery_error", bounded(error, @delivery_error_max)}
     ]
 
-    held_release(conn, id, token, assignments, now)
+    conclude(conn, id, token, assignments, now)
   end
 
   def handle(conn, {:expire_waiting, %DateTime{} = now}),
@@ -223,22 +309,59 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
       else: {"job", job_id, job_id}
   end
 
+  # A failure that finds its subject's heal watching a move Fermix made
+  # concludes it a second time (§5.9); any other not closed takes it in.
   defp take_failure(conn, {kind, id, _job_id} = subject, job, run, facts) do
     case not_closed(conn, kind, id) do
       {:ok, nil} -> open_or_quiet(conn, subject, job, run, facts)
-      {:ok, heal_id} -> join(conn, heal_id, job, run)
+      {:ok, {heal_id, "watching"}} -> verdict(conn, heal_id, job, run, facts)
+      {:ok, {heal_id, _state}} -> join(conn, heal_id, job, run)
       {:error, reason} -> {:error, reason}
     end
   end
 
   defp not_closed(conn, kind, id) do
     sql =
-      "SELECT id FROM job_heals WHERE subject_kind = ? AND subject_id = ? AND state <> 'closed'"
+      "SELECT id, state FROM job_heals " <>
+        "WHERE subject_kind = ? AND subject_id = ? AND state <> 'closed'"
 
     case CuesSql.query_all(conn, sql, [kind, id]) do
-      {:ok, [[heal_id]]} -> {:ok, heal_id}
+      {:ok, [[heal_id, state]]} -> {:ok, {heal_id, state}}
       {:ok, []} -> {:ok, nil}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # The fix did not hold: the heal is open again on its second conclusion,
+  # its failure the one that just happened and its outbox as new, so the
+  # same claim, lease and send tell the owner once more. The inbox it chose
+  # stays.
+  defp verdict(conn, heal_id, job, run, facts) do
+    sql = """
+    UPDATE job_heals
+    SET state = 'open', conclusion = 'verdict', failure_kind = ?, failure_text = ?,
+        failure_words = ?, run_count = run_count + 1, last_run_id = ?, last_failed_at = ?,
+        updated_at = ?, waiting_since = NULL, message = NULL, delivery_status = 'pending',
+        delivery_attempts = 0, next_delivery_at = NULL, last_delivery_error = NULL,
+        delivered_at = NULL
+    WHERE id = ? AND state = 'watching'
+    """
+
+    stamp = CuesSql.stamp(run.completed_at)
+
+    params = [
+      run.failure_kind,
+      bounded(facts.failure_text, @failure_text_max),
+      bounded(Map.get(facts, :failure_words), @failure_words_max),
+      run.id,
+      stamp,
+      stamp,
+      heal_id
+    ]
+
+    with :ok <- CuesSql.execute(conn, sql, params),
+         :ok <- link_run(conn, heal_id, job, run) do
+      {:ok, {:verdict, heal_id}}
     end
   end
 
@@ -387,6 +510,82 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
     write_if_held(conn, id, token, assignments ++ released)
   end
 
+  # The concluding write (a send delivered or dead-lettered) takes the heal
+  # where its conclusion and its decision say, read in the same transaction.
+  defp conclude(conn, id, token, assignments, now) when is_binary(id) and is_binary(token) do
+    result =
+      CuesSql.with_immediate_transaction(conn, fn ->
+        with {:ok, heal} <- get(conn, id),
+             :ok <- held_release(conn, id, token, assignments ++ next(heal, now), now),
+             do: {:ok, :concluded}
+      end)
+
+    with {:ok, :concluded} <- result, do: :ok
+  end
+
+  # A verdict closes the heal still failing (§5.9); a move Fermix made has it
+  # watch the job's next run, a rerun's start stamped once; anything else
+  # waits on the owner. Both waits start now, for the seven-day bound.
+  defp next(%{conclusion: "verdict"}, now) do
+    stamp = CuesSql.stamp(now)
+    [{"state", "closed"}, {"outcome", "still_failing"}, {"closed_at", stamp}]
+  end
+
+  defp next(%{decision: "rerun"} = heal, now) do
+    [
+      {"state", "watching"},
+      {"waiting_since", CuesSql.stamp(now)},
+      {"rerun_at", CuesSql.stamp(heal.rerun_at || now)}
+    ]
+  end
+
+  defp next(%{decision: "raise_limit"}, now),
+    do: [{"state", "watching"}, {"waiting_since", CuesSql.stamp(now)}]
+
+  defp next(_heal, now), do: [{"state", "waiting"}, {"waiting_since", CuesSql.stamp(now)}]
+
+  defp rerun_outcome(conn, id, outcome, now) do
+    stamp = CuesSql.stamp(now)
+    refused = outcome == "refused"
+
+    sql = """
+    UPDATE job_heals
+    SET rerun_outcome = ?, updated_at = ?,
+        state = CASE WHEN ? AND state = 'watching' AND conclusion = 'first'
+                     THEN 'waiting' ELSE state END,
+        waiting_since = CASE WHEN ? AND state = 'watching' AND conclusion = 'first'
+                             THEN ? ELSE waiting_since END
+    WHERE id = ? AND decision = 'rerun' AND rerun_outcome IS NULL
+    """
+
+    params = [outcome, stamp, flag(refused), flag(refused), stamp, id]
+
+    with :ok <- CuesSql.execute(conn, sql, params),
+         {:ok, changed} <- CuesSql.changes(conn) do
+      if changed == 1, do: :ok, else: {:error, :not_recorded}
+    end
+  end
+
+  defp decided_assignments(plan) do
+    [
+      {"decision", plan.decision},
+      {"note", bounded(plan.note, @note_max)},
+      {"read_outside", flag(plan.read_outside)},
+      {"change_json", change_json(plan.change)},
+      {"change_job_version", optional_stamp(Map.get(plan, :change_job_version))}
+    ]
+  end
+
+  defp flag(nil), do: nil
+  defp flag(true), do: 1
+  defp flag(false), do: 0
+
+  defp change_json(nil), do: nil
+  defp change_json(change) when is_map(change) and map_size(change) > 0, do: Jason.encode!(change)
+
+  defp optional_stamp(nil), do: nil
+  defp optional_stamp(%DateTime{} = at), do: CuesSql.stamp(at)
+
   defp write_if_held(conn, id, token, assignments) do
     {columns, values} = Enum.unzip(assignments)
     set_sql = Enum.map_join(columns, ", ", &"#{&1} = ?")
@@ -400,12 +599,14 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
     end
   end
 
+  # A heal waiting on the owner, or watching a job that never runs again (a
+  # job paused meanwhile), closes after the same seven days.
   defp expire_waiting(conn, now) do
     cutoff = CuesSql.stamp(DateTime.add(now, -@waiting_days * 86_400, :second))
 
     sql = """
     #{@select}
-    WHERE state = 'waiting' AND waiting_since <= ?
+    WHERE state IN ('waiting', 'watching') AND waiting_since <= ?
     ORDER BY waiting_since, id
     LIMIT #{@expire_limit}
     """
@@ -421,7 +622,7 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
 
   defp expire_rows(conn, heals, now) do
     ids = Enum.map(heals, & &1.id)
-    where = "state = 'waiting' AND id IN (#{placeholders(ids)})"
+    where = "state IN ('waiting', 'watching') AND id IN (#{placeholders(ids)})"
     close_rows(conn, where, ids, "expired", now, ids)
   end
 
@@ -450,7 +651,8 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
   defp open_by_job(conn) do
     sql = """
     SELECT DISTINCT r.job_id, h.id, h.state, h.subject_kind, h.subject_id, h.failure_kind,
-           h.opened_at, h.run_count, h.delivery_status
+           h.opened_at, h.run_count, h.delivery_status, h.decision, h.note, h.change_json,
+           h.rerun_outcome
     FROM job_heals h JOIN job_heal_runs r ON r.heal_id = h.id
     WHERE h.state <> 'closed'
     ORDER BY h.opened_at DESC, h.id
@@ -461,7 +663,10 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
     end
   end
 
-  defp put_job_heal([job_id, id, state, kind, subject, failure, opened, count, delivery], acc) do
+  defp put_job_heal([job_id | row], acc) do
+    [id, state, kind, subject, failure, opened, count, delivery, decision, note, change, rerun] =
+      row
+
     summary = %{
       id: id,
       state: state,
@@ -470,14 +675,19 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
       failure_kind: failure,
       opened_at: CuesSql.parse_stamp(opened),
       run_count: count,
-      delivery_status: delivery
+      delivery_status: delivery,
+      decision: decision,
+      note: note,
+      change: decode_change(change),
+      rerun_outcome: rerun
     }
 
     Map.put_new(acc, job_id, summary)
   end
 
-  # Fermix's own facts about a heal, for `Jobs.HealMessage`: nothing a run's
-  # model wrote and no tool's output.
+  # Fermix's own facts about a heal, for `Jobs.HealMessage`: no tool's output,
+  # and of what a model wrote only the heal run's note, which the message
+  # shows as Fermix's reading under the facts (§5.8, §9).
   defp message_facts(conn, id) do
     with {:ok, heal} <- get(conn, id),
          {:ok, job} <- message_job(conn, heal.job_id),
@@ -496,7 +706,11 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
          job: job,
          recent: recent,
          jobs: jobs,
-         job_count: job_count
+         job_count: job_count,
+         conclusion: heal.conclusion,
+         decision: heal.decision,
+         note: heal.note,
+         change: heal.change
        }}
     end
   end
@@ -562,14 +776,30 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
 
   # --- rows --------------------------------------------------------------------
 
+  # The stored change is read back decoded, as `change`, and what the run
+  # read as a boolean (nil before any diagnosis).
   defp heal_row(row) do
-    @fields
-    |> Enum.zip(row)
-    |> Map.new(fn
-      {field, value} when field in @stamped -> {field, CuesSql.parse_stamp(value)}
-      {field, value} -> {field, value}
-    end)
+    heal =
+      @fields
+      |> Enum.zip(row)
+      |> Map.new(fn
+        {field, value} when field in @stamped -> {field, CuesSql.parse_stamp(value)}
+        {field, value} -> {field, value}
+      end)
+
+    {change_json, heal} = Map.pop(heal, :change_json)
+
+    heal
+    |> Map.put(:change, decode_change(change_json))
+    |> Map.update!(:read_outside, &read_flag/1)
   end
+
+  defp decode_change(nil), do: nil
+  defp decode_change(json) when is_binary(json), do: Jason.decode!(json)
+
+  defp read_flag(nil), do: nil
+  defp read_flag(1), do: true
+  defp read_flag(0), do: false
 
   # `scheduled_jobs` keeps its times as ISO 8601 of any width.
   defp parse_time(nil), do: nil

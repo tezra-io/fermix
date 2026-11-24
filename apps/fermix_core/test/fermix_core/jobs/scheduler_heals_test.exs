@@ -7,6 +7,7 @@ defmodule FermixCore.Jobs.SchedulerHealsTest do
 
   import ExUnit.CaptureLog, only: [with_log: 1]
 
+  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Jobs.Failure
   alias FermixCore.Jobs.HealRun
   alias FermixCore.Jobs.Registry
@@ -131,6 +132,41 @@ defmodule FermixCore.Jobs.SchedulerHealsTest do
     end
   end
 
+  # The model a real heal run's diagnosis (stage S3) is given here: it gives no
+  # decision, so the message goes from Fermix's facts alone. No network.
+  defmodule NoDecisionModel do
+    @moduledoc false
+
+    @behaviour FermixCore.Providers.Adapter
+
+    @impl true
+    def chat(_messages, _capabilities, _opts) do
+      {:ok,
+       %{
+         content: "",
+         tool_calls: [],
+         usage: %{prompt_tokens: 1, completion_tokens: 1, total_tokens: 2},
+         model: "mock",
+         provider_state: %{}
+       }}
+    end
+
+    @impl true
+    def continue(_state, _tool_results, opts), do: chat([], [], opts)
+
+    @impl true
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl true
+    def parse_tool_calls(_response), do: []
+
+    @impl true
+    def parse_response(response), do: response
+
+    @impl true
+    def supports_streaming?, do: false
+  end
+
   setup do
     unique = System.unique_integer([:positive])
     dir = SafeRm.make_tmp_dir!("job-scheduler-heals")
@@ -209,10 +245,14 @@ defmodule FermixCore.Jobs.SchedulerHealsTest do
     })
 
     store = start_store!(ctx)
+    caps = :"scheduler_heals_caps_#{System.unique_integer([:positive])}"
+    start_supervised!({CapabilityRegistry, name: caps})
 
     scheduler =
       start_scheduler(ctx,
         heal_run_module: HealRun,
+        adapter: NoDecisionModel,
+        capability_registry: caps,
         delivery_adapter: ScriptedChannel,
         conversation_store: store,
         heal_inbox_opts: [
@@ -302,6 +342,8 @@ defmodule FermixCore.Jobs.SchedulerHealsTest do
        ] ++
          Keyword.take(opts, [
            :clock,
+           :adapter,
+           :capability_registry,
            :delivery_adapter,
            :conversation_store,
            :heal_inbox_opts,

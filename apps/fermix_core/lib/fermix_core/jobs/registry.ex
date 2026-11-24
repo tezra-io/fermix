@@ -145,10 +145,30 @@ defmodule FermixCore.Jobs.Registry do
   def update_job(id, attrs, opts \\ []) when is_binary(id) and is_map(attrs) and is_list(opts) do
     now = Keyword.get(opts, :now, DateTime.utc_now())
 
+    with {:ok, job, job_patch, source_patch} <- prepare_update(id, attrs, now, opts) do
+      apply_job_update(job, job_patch, source_patch, now, opts)
+    end
+  end
+
+  @doc """
+  The checks `update_job/3` applies to an edit, without writing it: the
+  patch it would write to the job, or its refusal. A heal's proposal is
+  checked with it as an owner's edit is (M106 §5.6).
+  """
+  @spec check_update(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def check_update(id, attrs, opts \\ [])
+      when is_binary(id) and is_map(attrs) and is_list(opts) do
+    now = Keyword.get(opts, :now, DateTime.utc_now())
+
+    with {:ok, _job, job_patch, _source_patch} <- prepare_update(id, attrs, now, opts),
+         do: {:ok, job_patch}
+  end
+
+  defp prepare_update(id, attrs, now, opts) do
     with {:ok, job} <- Repo.get_scheduled_job(id, repo_opts(opts)),
          :ok <- check_cue_update(job, attrs),
          {:ok, job_patch, source_patch} <- normalize_update_attrs(job, attrs, now) do
-      apply_job_update(job, job_patch, source_patch, now, opts)
+      {:ok, job, job_patch, source_patch}
     end
   end
 
@@ -220,6 +240,9 @@ defmodule FermixCore.Jobs.Registry do
       given?(attrs, :delivery_mode) and not reaches_owner?(attrs) ->
         {:error, kind_sentence(kind, @cue_must_report, @follow_up_must_report)}
 
+      over_cue_cap?(fetch_field(attrs, :timeout_seconds)) ->
+        {:error, @cue_timeout_cap}
+
       true ->
         :ok
     end
@@ -229,6 +252,9 @@ defmodule FermixCore.Jobs.Registry do
 
   defp kind_sentence(@cue_kind, cue, _follow_up), do: cue
   defp kind_sentence(@follow_up_kind, _cue, follow_up), do: follow_up
+
+  # An edit's time limit keeps a watcher's job under the cap it was made with.
+  defp over_cue_cap?(seconds), do: is_integer(seconds) and seconds > @cue_max_timeout_seconds
 
   defp given?(attrs, key), do: fetch_field(attrs, key) not in [nil, ""]
 
@@ -275,6 +301,7 @@ defmodule FermixCore.Jobs.Registry do
         |> put_present(:model, optional_update_string(attrs, :model))
         |> Map.merge(route_pin_patch(attrs))
         |> Map.merge(delivery_patch(attrs))
+        |> Map.merge(timeout_patch(attrs))
         |> Map.merge(schedule_job_patch)
 
       source_patch =
@@ -309,6 +336,22 @@ defmodule FermixCore.Jobs.Registry do
   end
 
   defp delivery_patch(_attrs), do: %{}
+
+  # A time limit is a positive whole number of seconds, as on creation; an
+  # absent one leaves the job's as it is.
+  defp timeout_patch(attrs) do
+    case fetch_field(attrs, :timeout_seconds) do
+      nil ->
+        %{}
+
+      seconds when is_integer(seconds) and seconds > 0 ->
+        %{timeout_seconds: seconds}
+
+      other ->
+        raise ArgumentError,
+              "expected :timeout_seconds to be a positive integer, got: #{inspect(other)}"
+    end
+  end
 
   defp schedule_patch(_job, nil, _now), do: {:ok, %{}, %{}}
 
