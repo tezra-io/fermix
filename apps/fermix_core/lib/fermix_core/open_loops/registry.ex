@@ -12,9 +12,10 @@ defmodule FermixCore.OpenLoops.Registry do
     * **provenance** — a loop noted on a turn that had read outside content
       (`OpenLoops.Access.read_outside?/1`) is stamped
       `noted_after_outside_content`, so its words are framed wherever they come
-      back, unless they are found in what the owner typed on that turn
-      (`:owner_text`): those are the owner's, whatever else the turn read. On
-      such a turn an answer's `owner_words` must be found there too;
+      back, unless they and the loop's date are found in what the owner typed
+      on that turn (`:owner_text`): those are the owner's, whatever else the
+      turn read. On such a turn an answer's `owner_words` must be found there
+      too;
     * **the clock and the zone** — the tagged date form is resolved as
       `Temporal.Registry` resolves an event's `when`, in the owner-named zone or
       `[fermix_core.personalization] timezone`; a loop is dated, so the timer
@@ -60,6 +61,8 @@ defmodule FermixCore.OpenLoops.Registry do
   alias FermixCore.OpenLoops.Telemetry
   alias FermixCore.Temporal.Planner
 
+  @month_names ~w(january february march april may june july august september october
+                  november december)
   @notification_platform Notifications.platform()
   @note_keys [
     :intention,
@@ -259,23 +262,45 @@ defmodule FermixCore.OpenLoops.Registry do
   end
 
   # A loop noted on a turn that read outside content may carry someone else's
-  # words. Words found in what the owner typed on that turn are the owner's,
-  # the rule an answer's are held to (`owners_own_words/3`), so a loop whose
-  # every word field is found there is not stamped. A voice call types nothing,
-  # and a turn that carries no typed text has nothing to check against.
+  # words or date. What is found in what the owner typed on that turn is the
+  # owner's, the rule an answer's words are held to (`owners_own_words/3`), so
+  # a loop is not stamped when every word field and its date are found there.
+  # A voice call types nothing, and a turn that carries no typed text has
+  # nothing to check against.
   defp words_may_be_others?(spec, context) do
     Access.read_outside?(context) and not owner_typed?(spec, context)
   end
 
   defp owner_typed?(spec, %{owner_text: owner_text} = context) when is_binary(owner_text) do
     not Access.voice_call?(context) and
-      Enum.all?(word_fields(spec), &typed?(&1, owner_text))
+      Enum.all?(word_fields(spec), &typed?(&1, owner_text)) and
+      date_typed?(spec.date, owner_text)
   end
 
   defp owner_typed?(_spec, _context), do: false
 
   defp word_fields(%{intention: intention, why_it_matters: nil}), do: [intention]
   defp word_fields(%{intention: intention, why_it_matters: why}), do: [intention, why]
+
+  # The loop's calendar day as the owner typed it: its month, by name or by the
+  # name's short form, beside its day of the month, in either order ("november
+  # 9", "9th of nov"). The date the model resolved is otherwise unchecked, and
+  # a page read on that turn could have supplied it. A relative date
+  # ("tomorrow", "Friday") names no calendar day, so it cannot be checked here
+  # and such a loop stays stamped.
+  defp date_typed?(%Date{month: month, day: day}, owner_text) do
+    months = month |> month_name() |> month_words()
+    day_words = "#{day}(?:st|nd|rd|th)?"
+
+    "\\b(?:(?:#{months}) (?:the )?#{day_words}|#{day_words} (?:of )?(?:#{months}))\\b"
+    |> Regex.compile!()
+    |> Regex.match?(normalized(owner_text))
+  end
+
+  defp month_name(month), do: Enum.at(@month_names, month - 1)
+
+  defp month_words("september"), do: "september|sept|sep"
+  defp month_words(name), do: "#{name}|#{String.slice(name, 0, 3)}"
 
   defp new_id, do: "loop_" <> Base.url_encode64(:crypto.strong_rand_bytes(8), padding: false)
 

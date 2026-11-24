@@ -484,11 +484,11 @@ defmodule FermixCore.OpenLoops.RegistryTest do
       assert unknown.noted_after_outside_content
     end
 
-    # The stamp says the loop's words may be someone else's. Words found in what
-    # the owner typed on that turn are the owner's, whatever else the turn read,
-    # the rule an answer's `owner_words` already holds to; a check-in then names
-    # them as said, instead of asking whether they were ever meant.
-    test "after outside content, a loop in the owner's own typed words is not stamped",
+    # The stamp says the loop's content may be someone else's. Words found in
+    # what the owner typed on that turn, with the loop's date typed beside them,
+    # are the owner's, whatever else the turn read; a check-in then names them
+    # as said, instead of asking whether they were ever meant.
+    test "after outside content, a loop in the owner's own typed words and date is not stamped",
          %{opts: opts} do
       typed = "The revised Halden grant budget has to reach Odile by June 10, not opened yet."
       turn = Map.merge(@attended, %{outside_sources: @read_a_page, owner_text: typed})
@@ -526,6 +526,30 @@ defmodule FermixCore.OpenLoops.RegistryTest do
 
       assert {:ok, %{loop: reasoned}} = Registry.note(another_reason, turn, opts)
       assert reasoned.noted_after_outside_content
+    end
+
+    # The date is checked as the words are: a page read on that turn could
+    # supply one, and it would come back as the owner's. Only a calendar day the
+    # owner typed, its month beside its day, can be checked; a relative date
+    # names none, so that loop stays stamped.
+    test "after outside content, a loop whose date the owner did not type stays stamped",
+         %{opts: opts} do
+      note = fn intention, typed ->
+        turn = Map.merge(@attended, %{outside_sources: @read_a_page, owner_text: typed})
+        params = %{"intention" => intention, "matters_by" => @date, "reach" => "message"}
+        {:ok, %{loop: loop}} = Registry.note(params, turn, opts)
+        loop.noted_after_outside_content
+      end
+
+      # The loop's date is June 10. Typed as a calendar day, in either order.
+      refute note.("return the Wexmoor key", "I'll return the Wexmoor key by Jun 10.")
+      refute note.("pay the Tallow invoice", "The 10th of June: pay the Tallow invoice.")
+
+      # Not typed at all, typed as another day, or only relative.
+      assert note.("renew the Arden permit", "I have to renew the Arden permit soon.")
+      assert note.("book the Larkmere hall", "I'll book the Larkmere hall by June 11.")
+      assert note.("call the Fenwick office", "I'll call the Fenwick office by next Tuesday.")
+      assert note.("post the Corvale form", "Post the Corvale form, 10 copies, in June.")
     end
 
     test "after outside content, a loop noted with nothing typed to check it against stays stamped",

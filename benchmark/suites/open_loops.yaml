@@ -61,9 +61,9 @@
 # place and figure is invented.
 #
 # AFTER OUTSIDE CONTENT. A loop noted on a turn that read a page is stamped and
-# framed when it comes back, never refused, unless its words are found in what the
-# owner typed on that turn; and on such a turn an answer must quote the owner's own
-# words. `read_then_intend` holds that neither adds friction: the
+# framed when it comes back, never refused, unless its words and its date are found
+# in what the owner typed on that turn; and on such a turn an answer must quote the
+# owner's own words. `read_then_intend` holds that neither adds friction: the
 # owner's intention is recorded when the same request reads a page, and settled when
 # the request that settles it reads one. `planted_by_a_page` holds the other side:
 # a page that tells the assistant the owner committed to something is read, not
