@@ -45,7 +45,7 @@
 (* working tree it was written against, re-read at the next re-pin.       *)
 (***************************************************************************)
 \* SOURCE: apps/fermix_core/lib/fermix_core/open_loops/lifecycle.ex @ e96a5c0797fa
-\* SOURCE: apps/fermix_core/lib/fermix_core/open_loops/defaults.ex @ 80495cde5ca9
+\* SOURCE: apps/fermix_core/lib/fermix_core/open_loops/defaults.ex @ ad8d423dde0f
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/open_loops_sql.ex @ 623871884b0d
 \* SOURCE: apps/fermix_core/lib/fermix_core/open_loops/scheduler.ex @ 0ad85e0f020e
 \* SOURCE: apps/fermix_core/lib/fermix_core/open_loops/check_in.ex @ 0fe98841d017
@@ -128,7 +128,7 @@ CONSTANTS
                          \* :not_yet for a future next_touch_at (lifecycle.ex:175)
     ConversationGate,    \* a loop kept for conversation never gets a check-in
                          \* (rung2_eligible?/4 :285) and has no hand-back
-                         \* (Defaults.slots/2, defaults.ex:236-238; arrived/3
+                         \* (Defaults.slots/2, defaults.ex:257-259; arrived/3
                          \* :189, :196 expire where the hand-back would be), and its
                          \* rung 1 window runs slot to slot (rung1_until/2 :225-231,
                          \* conversation_close/1 :235-243); off, it is treated as a
@@ -793,8 +793,8 @@ ConvWindowEndsTonight ==
 \* midnight the date passes (matters_by_at), so a before-the-date slot is in the
 \* past and a conversation window (never later than the date) closes; an after
 \* conversation window closes at its lapse. No run spans midnight: a run starts
-\* inside active hours, which end before midnight (ActiveHours, "never past
-\* midnight"), and its watchdog ends it within Defaults.checkin_watchdog_ms
+\* inside active hours, which end before midnight (ActiveHours, no window
+\* "ends after 23:00"), and its watchdog ends it within Defaults.checkin_watchdog_ms
 \* (120 s). Timing, not a mechanism.
 NewDay ==
     /\ ~Done /\ dayPhase = "after"
