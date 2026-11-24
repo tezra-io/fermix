@@ -397,9 +397,8 @@ defmodule FermixCore.Management.SettingsTest do
     end
 
     # Fast mode is a per-provider toggle, off until turned on, published only by
-    # the providers whose requests can carry it. Copy carries no version
-    # numbers, so its note says where it applies, from the catalog's flags.
-    test "OpenAI and Anthropic publish a fast mode toggle, off by default, and no other provider does" do
+    # the providers whose requests can carry it, with no note under it.
+    test "OpenAI and Anthropic publish a fast mode toggle with no note, off by default, and no other provider does" do
       Application.put_env(:fermix_core, :providers, [])
 
       for id <- [:openai, :anthropic] do
@@ -409,6 +408,7 @@ defmodule FermixCore.Management.SettingsTest do
         fast = row("providers.#{id}", "fast")
         assert fast["kind"] == "toggle"
         assert fast["label"] == "Fast mode"
+        assert fast["footer"] == nil
         assert fast["value"] == false
         assert fast["restart"] == true
       end
@@ -417,17 +417,6 @@ defmodule FermixCore.Management.SettingsTest do
         keys = Enum.map(rows("providers.#{descriptor.id}"), & &1["key"])
         refute "fast" in keys, "providers.#{descriptor.id}: #{inspect(keys)}"
       end
-    end
-
-    test "the fast mode note says where it applies" do
-      Application.put_env(:fermix_core, :providers, [])
-
-      anthropic = row("providers.anthropic", "fast")["footer"]
-      assert anthropic =~ "the models in the list that offer it"
-      assert anthropic =~ "API key"
-      assert anthropic =~ "sign-in, run at standard speed"
-
-      assert row("providers.openai", "fast")["footer"] =~ "every model in the list"
     end
 
     # OpenAI Codex lists the signed-in account's models live: its model row
