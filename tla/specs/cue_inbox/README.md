@@ -675,3 +675,36 @@ cue tree among them, which the model takes as `FiltersRestart`, and leaves
 for at most twelve seconds, before the tree stops; the cue tree stops with
 the tree after it, as before. Nothing the spec models changed, and it cites
 no `application.ex` line.
+
+## Re-read for M106 retries and heals (2026-11-24)
+
+M106's quiet retry (§5.3) and heal (§5.4) staled the `scheduler.ex` and
+`runner.ex` pins: `init`, `handle_info`, `mark_run_error` and the runner's
+`mark_failed`. Each was re-read for what this spec models:
+- **A cue run's settle is unchanged.** The cue clauses of `mark_failed`
+  (`runner.ex:484-513`) and `mark_run_error` (`scheduler.ex:1127-1145`) still
+  settle through `CueAdmission.settle/3` → `Repo.settle_cue_run`, which never
+  calls `JobRetriesSql` or `JobHealsSql`; only the clauses for every other
+  run gained the retry and the heal. `settle_cue_run` and the delivery's move
+  are untouched, and a cue run is still never stamped by the runner
+  (`tools_started_stamp/1`), so `acted` is still the mandate gate's alone.
+- **The Scheduler's new steps touch nothing modelled.** Both DOWN clauses
+  now re-arm the due timer (a Repo read) and may start a heal run, a heal
+  run's own DOWN clause comes first, `init` and the reconcile tick expire
+  waiting heals, and the due and reconcile ticks start a heal run after their
+  due scan: Repo calls on `job_heals`, the due timer (cron runs, `job_runs`'
+  scope) and a process that writes no delivery or run row. `live_runner_pids`
+  skips a heal run (`Runner.run_id/1` reads nil for it), so reconciliation
+  adopts and reaps runners as before.
+- **A heal run is no run.** A live heal run is a child of the runner
+  supervisor, which `active_run_count/1` used to count, so while one lived
+  the code's free cue slots could be one fewer than `FreeSlots` says, and a
+  cron run and the heal run competed for the slot the share leaves
+  (`cue_admission.ex`'s "so a cron run always keeps one"). Fixed in the same
+  stage: `active_run_count/1` (`scheduler.ex:706-710`) now counts the
+  children that published a run id, as the reconcile pass tells runners
+  apart, so a heal run takes neither a run slot nor the cue share, and
+  `FreeSlots` is again what the code computes. Heal runs keep their own
+  bound, one at a time.
+
+No step, variable or check changed.

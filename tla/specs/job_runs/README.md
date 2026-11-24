@@ -10,6 +10,12 @@ job, then the memory write, the send, and `mark_delivery`. The Scheduler's
 reaper settles a dead runner's run the same way. A Scheduler Repo call that
 times out does not stop the Scheduler: it takes that call's error branch.
 
+Since M106 the settle also decides the job's retry in that transaction, and
+the due scan claims a pending retry through the same claim. A failure no
+retry takes goes to a heal and sends nothing, unless the job was set up by a
+guest. The heal's own rows and its run are left out. Checks 61 to 72 cover
+retries; see "Retries (M106)" below and "Re-read for M106 retries and heals".
+
 With cues on (M60) the Scheduler also admits cue runs, and the one job can be
 a watcher's task: a job that runs on cues, claimed by admission from its
 passed deliveries instead of by the due tick. Checks 36 to 52 cover it; see
@@ -56,6 +62,19 @@ what is left out and every step folded into another.
 - `ResponsesCanStall`: the platform takes a message and its answer never
   arrives in time. With `DeliveryWatchdog` off, the model waits forever,
   because the adapters' own HTTP timeouts are outside the sources.
+- `ToolsCanStart`: a run's AgentLoop may start a tool before it ends
+  (`ToolStarts`). The tool runs in the loop's process, whose gate first
+  stores its start on the run row, in the same step (JOB-9's fix; without
+  `StampsToolStart` the runner stores it later, `StampsTool`). `FALSE`:
+  every run ends before any tool, which is what checks 01 to 60 assume.
+- `ProviderCanFail`: a loop error may be one waiting can clear, the
+  provider's (`failure_settle_by`), which the runner's settle may retry.
+  `FALSE` (checks 01 to 60): no loop error is the provider's, so only the
+  reaper's settle retries.
+- `StampCanFail`: the store refuses a run's first tool start (an error, or no
+  answer within the Repo's bound). The gate then runs no tool and the loop
+  ends in `{:tool_start_unrecorded, _}`, a failure no retry takes. `FALSE`:
+  the store always records it. Checks 61, 62, 63 and 72 set it `TRUE`.
 
 **Configuration** (set per check):
 - `CuesOn`: the cue tree runs (`Cues.running?/0`, which the Scheduler reads
@@ -110,6 +129,11 @@ what is left out and every step folded into another.
   waits behind a run. The claimed runs start once every trigger the scan read
   is done. A follow-up run then runs, settles and delivers as a cron run
   does. Checks before 54 set it `FALSE`.
+- `GuestJob`: the job was set up at guest trust, so a failure no retry takes
+  sends its failure text as before (`finish_failure`'s `:out_of_scope`
+  clause). `FALSE`: the owner's job, whose failure a heal takes: the run only
+  marks its delivery `skipped`. Checks 01 to 60 set it `TRUE`, so their
+  failure text is sent as it was before M106; checks 61 to 72 set it `FALSE`.
 
 **Late writes.** `Memory.Repo` serves one request at a time. A call it does
 not answer within 5 s (`Timeouts.repo_call`, `timeouts.ex:225-229`) times out,
@@ -181,8 +205,9 @@ code, 2 in the checks), `OwnerMoves` (pause/resume requests), `OwnerEdits`
 checks listed under it):
 - `AtomicRaceStop`: the claim transaction refuses while a run is queued or
   running (`ensure_no_active_job_run`, `repo.ex:7006`, `:7059-7077`), the due,
-  manual and follow-up claims alike (`claim_in_tx`, `repo.ex:7798-7805`).
-  Checks 02 and 55.
+  manual and follow-up claims alike (`claim_in_tx`, `repo.ex:7798-7805`), and
+  the retry's claim (`claim_retry_job_tx`, `repo.ex:8314-8323`). Checks 02,
+  55 and 69.
 - `RetriesOnlyUnsent`: a send is retried only when it never reached the
   platform (`channel_send.ex:140-143`, `:194-202`). This is the mechanism for
   platforms that do not dedupe. The runner tags its send with the proactive
@@ -202,7 +227,7 @@ checks listed under it):
   The release is a column-targeted `UPDATE` that turns `running` back into
   `scheduled` and keeps any other state. Switched off, the spec runs the code
   before the fix: the run row alone, then a read and a whole-row upsert of the
-  job row, in the runner and in the reaper. Checks 12, 22, 23, 24.
+  job row, in the runner and in the reaper. Checks 12, 22, 23, 24 and 70.
 - `ReconcilesPending`: the reconcile pass reads every unsettled run, the
   queued/running rows and then the rows whose delivery is still pending
   (`unsettled_job_runs`, `repo.ex:2602-2655`; `scheduler.ex:489`). Switched
@@ -234,6 +259,25 @@ checks listed under it):
   reconcile pass finishes. Switched off, the code before the fix: the task
   sent first and wrote the result after, so a crash between the two left a
   report the user saw on a run row that says nothing was sent. Check 45.
+- `RearmsOnDown`: every runner's DOWN, a normal exit or a crash, re-arms the
+  due timer for the earliest wakeup, a retry's included (`handle_info({:DOWN,
+  ...})`, `scheduler.ex:328-355`). Switched off, the code before M106: a
+  normal DOWN only drops the monitor and a crash's callback ends after its
+  reap. Check 67.
+- `StampsToolStart`: a run's first tool start is on its row before the tool
+  runs. AgentLoop calls the runner's gate in the loop's own process ahead of
+  each call (`gate_tool`, `agent_loop.ex:1388-1423`), and the gate stores the
+  start in one Repo call (`put_tool_start_store`, `runner.ex:1683-1722`); a
+  start it cannot store runs no tool. Switched off, the order before JOB-9's
+  fix: the tool runs, and the runner stores its start when it handles the
+  loop's message. Check 62.
+- `RetryNeedsNoTool`: `Retry.decide` retries only a run in which no tool had
+  started (`retried?`, `retry.ex:88-89`), from what the runner knows in its
+  own settle and from the row in the reaper's. Check 72.
+- `OwnerClearsRetry`: pause, resume and `update_job`
+  (`update_scheduled_job_fields_row`, `repo.ex:8820-8834`) and run now
+  (`claim_job_now_tx`, `:8303-8312`) delete the job's retry in their own
+  transaction. Check 65.
 
 **What holds.** Every property below is also broken by its `needs` check.
 - **At most one active run per job** (check 01). An active run is a
@@ -384,6 +428,59 @@ A follow-up run settles and delivers as a cron run does, so the delivery
 properties (03, 08, 13, 34) are not repeated for it. Checks 57 and 59 keep
 the owner out: with an owner move each holds but runs past the runner's
 two-minute limit (see the hand runs below); check 54 has one.
+
+**Retries (M106).** A failed run of an interval or cron job is retried
+quietly when it failed before its first tool, on the provider or with no
+runner left (§5.3). The settle decides it (`Retry.decide`) in its own
+transaction, from the run row as written and the job as released, and keeps
+it in `job_retries`: a pending retry is `retryAt`. The model takes a pending
+retry as due at once (its time is always before the job's next fire time,
+which the clock counts), and the attempt count, the ladder of delays and a
+retry at or after the next run (no time) are a free choice of the settle.
+The scan claims it by the retry when the job is not due by its next run
+(`sBy`), through the claim every run takes, with `next_run_at` unmoved; the
+due claim clears it too. Every property below is broken by its `needs`
+check.
+- **No retry is set for a run in which a tool had started**
+  (`RetryOnlyBeforeTool`), with tools, a start the store refuses, provider and
+  other loop errors, runner crashes (late writes included) and a Scheduler
+  restart (check 61), and with a daemon crash added (check 63, JOB-9's
+  setting). The runner's own settle knows whether a tool started; the
+  reaper's settle reads the row, which holds the start before the tool can
+  run. The first rests on the decision reading the start
+  (`RetryNeedsNoTool`, check 72: a provider failure after a tool is
+  retried); the second, across a daemon crash, on the start being stored
+  before the tool runs (`StampsToolStart`, check 62: JOB-9's counterexample,
+  the daemon dying between a tool's start and its stamp).
+- **No pending retry outlives the owner's pause, resume, edit or run now**
+  (check 64, `RetryClearedByOwner`), with provider and other loop errors,
+  runner crashes, a pause or resume, an edit and a run by hand. This rests
+  on `OwnerClearsRetry` (check 65: a run that fails and is retried, then a
+  pause that leaves the retry pending).
+- **A pending retry has its timer armed** (check 66, `RetryTimerArmed`):
+  once no runner is left and the idle Scheduler has handled every DOWN, a
+  pending retry of a claimable job has its due timer at 0 ms or the backoff.
+  With provider and other loop errors, runner crashes (late writes
+  included), a daemon crash, a Scheduler restart and a mid-run resume, and
+  without Scheduler timeouts: after a reconcile scan that timed out, a
+  runner the restarted Scheduler never adopted dies with no DOWN, and its
+  retry waits for the 60 s tick. This rests on `RearmsOnDown` (check 67: a
+  runner dies at its start, the reap sets a retry, and the Scheduler goes
+  idle with the timer it armed while the job ran, none).
+- **One active run, and a running job always has its run** (check 68,
+  `OneActiveRun` and `RunningHasRun`), with retries from provider errors and
+  crashes, tools, a mid-run resume, a run by hand, a daemon crash and a
+  timed-out Scheduler Repo call. These rest on `AtomicRaceStop` (check 69)
+  and `AtomicSettle` (check 70: the split finish leaves the job `running`
+  once its run row is final).
+- Witness 71 shows a retry claim is reached: the scan finds the job due by
+  its retry alone, and the claim will take it.
+
+"A retry never moves `next_run_at`" is not a check. In this clock a job
+that is not due always has `next_run_at` at the next fire time (`now + 1`),
+which is also what a claim's patch writes, so a retry claim that moved it
+could not be told from one that did not. `Claim` keeps it as it is, as
+`claim_and_start_retry`'s patch, which carries no `next_run_at`, does.
 
 **Deadlock checking finds nothing here.** The Scheduler's 60 s reconcile timer
 is always armed, so an idle Scheduler always has a next step and no state is a
@@ -1126,6 +1223,179 @@ shortest and can change between runs.
   exits normally"; the watchdog tests, which kill a linked loop and still
   expect the runner to exit `:normal`).
 
+### JOB-9: a crash between a tool's start and its stamp lets the reaper retry the run
+- **Severity:** low. It needs the daemon, or the job subtree under
+  `:rest_for_one`, to die in the moment between a tool's start and the
+  runner storing it (one message and one Repo write), but then it breaks
+  the rule the retry rests on: the retried run repeats what the tool did (a
+  post, a message, a file written).
+- **Status:** fixed (393cae162). Found by the M106 re-read below against the
+  stage-2 code before it was pushed, and fixed in the same stage.
+- **Checks:** 63 holds (it was `violated JOB-9 len=12`); 62 (`needs
+  StampsToolStart`) breaks with the fix switched off, and its 12-state
+  counterexample is the one below.
+- **Counterexample (check 62, 12 states):** the due tick claims a run and
+  starts its runner, which marks it running and enters its AgentLoop. A tool
+  starts (`ToolStarts`): the loop's process has sent the runner its
+  tool-start message and runs the tool. The daemon dies before the runner
+  handles that message (`DaemonCrash`), so the row's `tools_started_at` is
+  still empty. At boot the Scheduler's init reconciles: the run is
+  `running` with no runner, so the reaper settles it `:scheduler`
+  (`ReapRun`). `Retry.decide` reads `tools_started_at` from the row, finds
+  none, and the job runs again, so the settle sets a retry: a pending retry
+  for a run whose tool had started (`RetryOnlyBeforeTool` broken). The due
+  scan then claims it with `trigger: "retry"`, and its loop runs the same
+  task again.
+- **Code (before the fix):** the loop's activity callback is a plain `send`
+  from the loop's process, which then runs the tool (`run_agent_loop`,
+  `runner.ex:1635-1642`); the runner stored the start only when it handled
+  that message (`watch_loop`, `:1714-1724` → `stamp_tools_started`,
+  `:1863-1882`, a Repo call). A daemon
+  crash in between, a `:rest_for_one` restart of the job subtree, or the
+  runner dying through a link its loop made (JOB-8's residual) leaves the run
+  row with `tools_started_at` NULL. The reaper's settle (`mark_run_error`,
+  `scheduler.ex:1153-1174` → `settle_job_run(_, :scheduler)` →
+  `JobRetriesSql.settle/4`, `job_retries_sql.ex:43-57`) passes
+  `tools_started?: not is_nil(run.tools_started_at)`, false, to
+  `Retry.decide` (`retry.ex:72-92`), which retries a `:scheduler` settle of a
+  job that runs again.
+- **Fix:** the first tool start is stored before the tool runs, in the loop's
+  own process. AgentLoop gained one opt-in option, `before_tool`: a gate it
+  calls ahead of each tool call, before the call's `:tool_start` activity;
+  `{:error, reason}` runs nothing, traces the call as the model's one
+  unexecuted call, and ends the run with `{:error, reason}` (`gate_tool`,
+  `run/1`'s catch, `agent_loop.ex:182-192`, `:1388-1423`). The runner's gate
+  stores the run's first start with the existing compare-and-set
+  (`Repo.mark_job_run_tools_started/3`, the Repo's ordinary bound) and
+  returns `:ok`, or `{:tool_start_unrecorded, reason}` when the store did not
+  record it: the tool never runs, and the run fails with a kind of its own,
+  `tool_start_unrecorded`, which is no provider's failure, so it is never
+  retried and goes to a heal (`put_tool_start_store`, `runner.ex:1683-1722`).
+  The watchdog no longer stores anything; it keeps the timeline and the
+  in-flight calls. A cue run has no gate: its marker is its mandate gate's,
+  written in the mandate call's own transaction before the call acts
+  (`tools_started_stamp`, `:1675-1681`). In the model `ToolStarts` is the
+  start and its stamp as one step, or the store's refusal, which ends the
+  loop with no tool (`StampCanFail`).
+- **Tests:** `runner_tool_start_test.exs`: the stamp is on the row when the
+  tool's executor is entered, with the runner's mailbox held (the runner
+  process suspended); a run killed in its first tool, its runner's mailbox
+  never drained, is settled by the Scheduler with the start and not retried;
+  a start the store refuses ends the run before the tool, which is never
+  entered, is not retried and opens a heal. `agent_loop_test.exs` ("run/1
+  before_tool gate"): the gate runs ahead of the call's start and the tool;
+  a refusal runs no tool and leaves one unexecuted tool event. Each of the
+  runner's three failed on the code before the fix.
+
+## Re-read for M106 retries and heals (2026-11-24)
+
+M106's quiet retry (§5.3) and its heal (§5.4) staled `scheduler.ex`,
+`runner.ex` and the claim and settle functions of `repo.ex`. The spec was
+re-read against that code, the five changes one by one:
+
+1. **A new claim source, the retry: modelled.** The settle, the runner's
+   (`Settle`, `RunnerCrashLate`) and the reaper's (`ReapWrite`), decides the
+   job's retry in its own transaction from the run row as written and the
+   job as released (`RunnerRetries`, `ReapRetries`, `SettledRetry`), and
+   keeps it as `retryAt`. The due scan (`Scan`) finds a job due by its next
+   run or by its retry and records which (`sBy`); `Claim` and `ClaimTimeout`
+   take it through the claim every run takes, the retry's with
+   `next_run_at` unmoved, and both clear the retry. `Arm` counts a pending
+   retry as due. Pause, resume, edit and run now delete it
+   (`OwnerLeavesRetry`, `OwnerClearsRetry`). Whether a tool had started is
+   now state (`tool`): the tool's start inside the loop and its stamp
+   (`ToolStarts`, one step since JOB-9's fix, or the store's refusal), with
+   `ToolsCanStart`, `ProviderCanFail` and `StampCanFail` as switches. The attempt count, the
+   delays and a retry with no time are a free choice, and the drop of a
+   stale retry is left out with the stale-skip.
+2. **The due timer is re-armed on every runner's DOWN: modelled.** A normal
+   exit's DOWN now waits in the mailbox (`exits`, `HandleExit`) instead of
+   being folded into `MarkDelivery`, since its handler makes a Repo call (the
+   timer lookup); a crash's callback ends in the re-arm (`reapReturn` "arm").
+   `RearmsOnDown` switches both off. One strongly fair action per run serves
+   both handlers, since a run's DOWN is one or the other; with two, the
+   liveness checks took about four times as long.
+3. **A failed run may deliver nothing: modelled.** A retried failure, and a
+   failure a heal takes, only mark the run's delivery `skipped`; only a
+   guest's job sends its failure text (`GuestJob`). Checks 01 to 60 set
+   `GuestJob`, so their failure text is sent as before.
+4. **The Scheduler's crash settle decides a retry: modelled** (`ReapRetries`,
+   from the row, so an unstamped tool start counts as none: JOB-9). Its new
+   `run_error` bookend and the heal's sentence for a crash are telemetry and
+   heal rows, which no step reads.
+5. **Heals: not modelled.** The settle opens, joins or closes a heal in its
+   own transaction, but writes only `job_heals` and `job_heal_runs`, which no
+   step reads; a heal write that fails rolls the settle back like any SQLite
+   error, which the spec leaves out. `Jobs.HealRun` reads the job's name and
+   writes no job or run row; it runs under the `RunnerSupervisor`, where
+   `live_runner_pids` skips it (`Runner.run_id/1` reads nil for it), and the
+   Scheduler monitors it in a map of its own (`heal_runs`), whose DOWN clause
+   comes first and starts the next heal run. Its claim, its start after each
+   due scan and DOWN, its adoption after a restart, and the expiry of waiting
+   heals in init and the reconcile tick are Repo calls on those tables inside
+   callbacks modelled here: a timeout there changes nothing modelled, and a
+   crash there is `SchedulerCrash`. A heal run is no run for the admission
+   ceiling or the cue share: both count runs by the run id each runner
+   publishes (`active_run_count/1`, `scheduler.ex:706-710`), so a live heal
+   run takes no run slot. (Before that fix, in the same stage, it was counted
+   among the supervisor's active children; the ceiling is never reached by
+   one job either way.)
+
+New `SOURCE` pins: `retry.ex`, `job_retries_sql.ex`, the heal settle
+(`job_heals_sql.ex#settle`), `heal_run.ex`, and the retry claim's functions
+in `repo.ex` (`claim_retry_job`, `claim_retry_job_tx`,
+`fetch_claimable_retry_job`, `then_in_claim`, `scheduled_job_with_retry`,
+`@earliest_wakeup_sql`), and, for JOB-9's fix, AgentLoop's gate
+(`agent_loop.ex#run,run_tool_call,gate_tool,trace_unexecuted`) and
+`failure.ex#provider_failure?`. New checks 61 to 72 (see "Retries (M106)"),
+and finding JOB-9, found and fixed in the same stage.
+
+Checks 01 to 60 keep every verdict, and every recorded counterexample its
+length. Their state counts grew with the new steps (the DOWN handlers, the
+reaper's retry, the retry's claim), most for the checks with crashes; the
+`needs` checks' counts move with the order TLC explores in:
+
+| Check | Before | After | Check | Before | After | Check | Before | After |
+|---|---|---|---|---|---|---|---|---|
+| 01 | 445,432 | 984,295 | 21 | 734 | 821 | 41 | 29,420 | 39,252 |
+| 02 | 3,537 | 3,579 | 22 | 18,193 | 18,876 | 42 | 258 | 255 |
+| 03 | 24,410 | 43,387 | 23 | 1,039 | 1,039 | 43 | 1,463,439 | 1,680,556 |
+| 04 | 255 | 259 | 24 | 2,384 | 2,384 | 44 | 31,396 | 31,652 |
+| 05 | 9,268 | 9,489 | 25 | 1,527 | 1,539 | 45 | 306 | 302 |
+| 06 | 85,945 | 119,905 | 26 | 16,411 | 22,009 | 46 | 478,785 | 930,619 |
+| 07 | 16,199 | 15,564 | 27 | 18,173 | 18,479 | 47 | 5,672 | 5,687 |
+| 08 | 55,317 | 97,805 | 28 | 18,725 | 16,899 | 48 | 8,496 | 8,560 |
+| 09 | 10,372 | 9,613 | 29 | 28,834 | 25,330 | 49 | 3,530 | 4,089 |
+| 10 | 384 | 399 | 30 | 22 | 22 | 50 | 14,074 | 13,774 |
+| 11 | 66,266 | 125,546 | 31 | 259 | 424 | 51 | 5,248 | 5,234 |
+| 12 | 16,235 | 16,752 | 32 | 76,984 | 142,133 | 52 | 11,734 | 13,136 |
+| 13 | 45,430 | 84,128 | 33 | 17,856 | 17,131 | 53 | 45,671 | 77,252 |
+| 14 | 6,563 | 9,969 | 34 | 40,009 | 76,380 | 54 | 1,648,338 | 2,102,964 |
+| 15 | 5,644 | 10,679 | 35 | 12,708 | 10,441 | 55 | 3,989 | 3,965 |
+| 16 | 12,039 | 15,921 | 36 | 91,342 | 154,504 | 56 | 2,229 | 2,226 |
+| 17 | 22,979 | 30,339 | 37 | 13,358 | 16,498 | 57 | 47,502 | 77,490 |
+| 18 | 121,906 | 211,650 | 38 | 13,084 | 13,133 | 58 | 17,061 | 17,945 |
+| 19 | 2,409 | 2,453 | 39 | 21,228 | 28,308 | 59 | 47,502 | 77,490 |
+| 20 | 279 | 280 | 40 | 11,613 | 9,630 | 60 | 13,442 | 16,518 |
+
+The new checks' counts: 61: 16,822; 62: 429; 63: 34,603; 64: 968,160; 65:
+756; 66: 160,853; 67: 732; 68: 1,487,631; 69: 962; 70: 667; 71: 117; 72: 123.
+JOB-9's fix took 68 from 1,529,003 (the start and its stamp were two steps);
+61 had 16,484 before it explored the store's refusal, and 63 was the
+violated JOB-9 (429 states, the 12-state path now check 62's).
+
+The new `holds` checks were run by hand with one more of an entity, one at a
+time, each bounded at 15 minutes (61 and 63 again after JOB-9's fix; before
+it, 61 also held with a second Scheduler crash, 25,768):
+
+| Check | +1 run id | +1 fire time | other |
+|---|---|---|---|
+| 61 | holds, 214,907 | holds, 89,580 | +1 owner move: holds, 93,429 |
+| 63 | holds, 443,016 | holds, 182,793 | +1 owner move: holds, 191,883 |
+| 64 | holds, 15,510,220 (702 s) | holds, 3,207,865 | |
+| 66 | holds, 2,054,863 | holds, 857,984 | +1 owner move: holds, 298,755 |
+| 68 | not finished: 21,603,248 states in 15 min, none broken | holds, 4,504,835 | |
+
 ## Re-read for events drawn as cards (2026-11-13)
 
 `reply_delivery_opts` now keeps the run's events and trips blocks beside its lists (M89): it
@@ -1265,15 +1535,26 @@ moved up by two with the code.
 - The run-row value `unset` stands for the `"none"` the claim writes before a
   result exists (`scheduler.ex:904`). The final `"none"` of `delivery_mode
   "none"` is modelled as `skipped`.
-- The due timer is modelled from the row as it is now. The code arms it once
-  and re-arms it on `:job_changed`, not when a settle releases the job. So the
+- The due timer is modelled from the row as it is now. The code arms it at
+  the end of a tick, on `:job_changed`, after run now and (since M106) at
+  every runner's DOWN, not at the moment a settle releases the job. So the
   model's `DueTimerFires` can tick earlier than the code. The verdicts
   survive: the 60 s reconcile tick runs the same scan, may fire at any point
   and is strongly fair. A backoff timer fires whether or not the job is due,
   which is also only earlier than the code.
 - With both run ids in use, a claim or "run now" is treated as not due. This
   is the model's bound, not code behaviour.
-- The admission ceiling (4 runs) is never reached by one job. Expiry,
+- A pending retry is due at once: its time is always before the job's next
+  fire time, so the clock never separates the two, and the model can only
+  claim it earlier than the code. The attempt count, the delays, the
+  `:exhausted` fourth and a retry whose time falls at or after the next run
+  (no time written) are a free choice of the settle. A retry older than the
+  freshness window, dropped by the scan, is left out with the stale-skip.
+- A heal (M106 §5.4) is outside the model: see "Re-read for M106 retries and
+  heals" for why none of it touches a job row, a run row or the claim.
+- The admission ceiling (4 runs) is never reached by one job (two runners).
+  A heal run is not counted against it: the ceiling and the cue share count
+  runs by the run id each runner publishes (`active_run_count/1`). Expiry,
   one-shot jobs, an unparseable schedule and the stale-skip are not modelled.
   The Scheduler's own whole-row writers on those paths (`advance_stale_job`,
   `expire_scheduled_job`, `disable_job`) are therefore not modelled either.
