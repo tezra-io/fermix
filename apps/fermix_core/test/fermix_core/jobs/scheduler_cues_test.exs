@@ -564,6 +564,7 @@ defmodule FermixCore.Jobs.SchedulerCuesTest do
       assert_receive {:telemetry, _event, _m, %{phase: :retry} = meta}, @arrives_ms
       assert meta.session_id == run.session_id
       assert meta.attempt == 1
+      assert {:ok, %{failure_kind: "crashed"}} = Repo.get_job_run(run.id, server: ctx.repo)
 
       assert %{state: "passed", task_attempts: 1, ready_at: ready_at} =
                delivery_state(ctx.conn, id)
@@ -601,6 +602,7 @@ defmodule FermixCore.Jobs.SchedulerCuesTest do
         {:ok, [run]} = Repo.list_job_runs(%{job_id: w.job_id}, server: ctx.repo)
         assert run.status == "error"
         assert run.error =~ "no live runner"
+        assert run.failure_kind == "reaped"
         {:ok, job} = Repo.get_scheduled_job(w.job_id, server: ctx.repo)
         assert job.state == "scheduled"
       end

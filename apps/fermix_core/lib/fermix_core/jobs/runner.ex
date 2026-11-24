@@ -30,6 +30,7 @@ defmodule FermixCore.Jobs.Runner do
   alias FermixCore.Jobs.CueRun
   alias FermixCore.Jobs.CueSurface
   alias FermixCore.Jobs.Delivery
+  alias FermixCore.Jobs.Failure
   alias FermixCore.Jobs.MediaBridge
   alias FermixCore.Jobs.Telemetry, as: JobTelemetry
   alias FermixCore.Memory.Config, as: MemoryConfig
@@ -62,6 +63,13 @@ defmodule FermixCore.Jobs.Runner do
   # exception and its top frames, bounded like every other raw-payload log.
   @crash_log_max 2_000
 
+  # A run's tool timeline (M106 §5.1) keeps its newest calls.
+  @timeline_max 40
+
+  # The stamp of a run's first tool start is one Repo call from the watchdog
+  # loop, bounded so a slow store delays the watchdog by at most this much.
+  @tool_stamp_timeout_ms 1_000
+
   @type state :: %{
           repo: GenServer.server(),
           capability_registry: GenServer.server(),
@@ -78,6 +86,7 @@ defmodule FermixCore.Jobs.Runner do
           output_base_dir: String.t(),
           timeout_ms: pos_integer() | nil,
           inactivity_timeout_ms: pos_integer() | nil,
+          monotonic_ms: (-> integer()),
           delay_fn: (non_neg_integer() -> any()),
           max_transient_attempts: non_neg_integer(),
           transient_backoff_ms: pos_integer(),
@@ -166,6 +175,9 @@ defmodule FermixCore.Jobs.Runner do
           :inactivity_timeout_ms,
           :inactivity_timeout_seconds
         ),
+      # The watchdog's clock and its tool timeline's: a test seam, the
+      # monotonic clock in production.
+      monotonic_ms: Keyword.get(opts, :monotonic_ms, &monotonic_ms/0),
       delay_fn: Keyword.get(opts, :delay_fn, &Process.sleep/1),
       start_delay_ms: Keyword.get(opts, :start_delay_ms, 0),
       max_transient_attempts:
@@ -217,7 +229,10 @@ defmodule FermixCore.Jobs.Runner do
 
       {:error, reason} ->
         run = mark_running(state, fallback_loop_input(state, reason))
-        failed_run = mark_failed(%{state | run: run}, "error", reason)
+        # A run that never reached its loop called no tool.
+        failed_run =
+          mark_failed(%{state | run: Map.put(run, :tool_timeline, [])}, "error", reason)
+
         notify(state.notify, {:job_runner, :completed, failed_run.id, state.job.id})
         {:stop, :normal, %{state | run: failed_run}}
     end
@@ -227,13 +242,14 @@ defmodule FermixCore.Jobs.Runner do
     stagger_start(state)
     await_network_ready(loop_input.loop_opts, state)
 
-    result = run_agent_loop_with_retry(loop_input.loop_opts, state)
+    {result, watch} = run_agent_loop_with_retry(loop_input.loop_opts, state)
 
     # The media closure dies with the run, not with the runner process: a leaked
     # copy (a straggling task, a subagent that somehow kept it) must not be able
     # to send after the loop returned — so the flag drops BEFORE the run is
     # marked and its final text delivered.
     deactivate_media(loop_input)
+    state = put_run_facts(state, watch, loop_input.tool_plugins)
 
     case result do
       {:ok, result} ->
@@ -479,6 +495,7 @@ defmodule FermixCore.Jobs.Runner do
         completed_at: now,
         output_ref: output_ref,
         error: error,
+        failure_kind: Failure.stored(Failure.kind(reason)),
         delivery_status: Delivery.initial_status(state.job, text),
         updated_at: now
       })
@@ -506,6 +523,7 @@ defmodule FermixCore.Jobs.Runner do
         completed_at: now,
         output_ref: output_ref,
         error: error,
+        failure_kind: Failure.stored(Failure.kind(reason)),
         delivery_status: Delivery.initial_status(state.job, text),
         updated_at: now
       })
@@ -570,10 +588,11 @@ defmodule FermixCore.Jobs.Runner do
   end
 
   # The ledger's machine-readable reason (run row, job row, telemetry): a
-  # watchdog timeout's reason is already its own sentence; an error keeps the
-  # inspected term. A run with no route keeps the text it had before the
-  # reason was tagged.
-  defp persisted_error("timeout", reason) when is_binary(reason), do: reason
+  # watchdog timeout's reason is tagged, and its sentence is rendered from the
+  # tag; an error keeps the inspected term. A run with no route keeps the text
+  # it had before the reason was tagged.
+  defp persisted_error("timeout", {:time_limit, ms}), do: "wall-clock timeout after #{ms}ms"
+  defp persisted_error("timeout", {:idle_limit, ms}), do: "inactivity timeout after #{ms}ms"
   defp persisted_error("error", {:no_route, message}), do: inspect(message)
   defp persisted_error("error", {:skill_grants_nothing, sentence}), do: inspect(sentence)
   defp persisted_error("error", {:cue_history_lost, sentence}), do: inspect(sentence)
@@ -650,7 +669,7 @@ defmodule FermixCore.Jobs.Runner do
     media = {:unavailable, :cue_run}
 
     with {:ok, skill} <- load_skill(state),
-         {:ok, loop_opts, _media} <- loop_opts(state, skill, media) do
+         {:ok, loop_opts, _media, tool_plugins} <- loop_opts(state, skill, media) do
       messages = cue_prompt_messages(state.job, skill, cue)
 
       {:ok,
@@ -659,7 +678,8 @@ defmodule FermixCore.Jobs.Runner do
          prompt_snapshot: prompt_snapshot(messages),
          route_used: resolved_route_used(loop_opts, state.job),
          loop_opts: Keyword.put(loop_opts, :messages, messages),
-         media_active: nil
+         media_active: nil,
+         tool_plugins: tool_plugins
        }}
     end
   end
@@ -668,7 +688,7 @@ defmodule FermixCore.Jobs.Runner do
     media = build_media_bridge(state)
 
     with {:ok, skill} <- load_skill(state),
-         {:ok, loop_opts, media} <- loop_opts(state, skill, media) do
+         {:ok, loop_opts, media, tool_plugins} <- loop_opts(state, skill, media) do
       messages = prompt_messages(state.job, skill, media, run_text(state))
 
       {:ok,
@@ -677,7 +697,8 @@ defmodule FermixCore.Jobs.Runner do
          prompt_snapshot: prompt_snapshot(messages),
          route_used: resolved_route_used(loop_opts, state.job),
          loop_opts: Keyword.put(loop_opts, :messages, messages),
-         media_active: media_active_ref(media)
+         media_active: media_active_ref(media),
+         tool_plugins: tool_plugins
        }}
     end
   end
@@ -866,7 +887,8 @@ defmodule FermixCore.Jobs.Runner do
   # narrowed by trust for any job it sets up or changes.
   #
   # Every registry read sits inside this rescue, so a failing registry is a run
-  # error, recorded, never a runner crash.
+  # error, recorded, never a runner crash. The plugin each tool on the surface
+  # comes from rides beside the options, for the run's tool timeline.
   defp loop_opts(state, skill, media) do
     job_trust = effective_trust(state.job)
     trust = loop_trust(job_trust, skill)
@@ -889,10 +911,19 @@ defmodule FermixCore.Jobs.Runner do
         max_iterations: state.job.max_iterations
       ]
 
-      {:ok, base ++ routing_opts, media}
+      {:ok, base ++ routing_opts, media, tool_plugins(surface)}
     end
   rescue
     error -> {:error, Exception.message(error)}
+  end
+
+  # A plugin's tool names its plugin (`metadata.plugin`, as both plugin rails
+  # register it); every other tool has none.
+  defp tool_plugins(surface) do
+    for %Capability{name: name, metadata: %{plugin: plugin}} <- surface,
+        is_binary(plugin),
+        into: %{},
+        do: {name, plugin}
   end
 
   # The registry list the run's loop resolves from the same options (`AgentLoop`).
@@ -1432,29 +1463,35 @@ defmodule FermixCore.Jobs.Runner do
   # network — so the time-delayed retry lives here, in the cron-specific path
   # where "the host just woke" is the expected condition. A live user turn,
   # by contrast, just surfaces the one error and the user retries.
+  #
+  # Returns the last attempt's result and its watchdog record. A retried
+  # attempt started no tool (the gate below), so the record of the attempt
+  # that ended the run holds every tool call of the run.
   defp run_agent_loop_with_retry(loop_opts, state) do
     run_agent_loop_with_retry(loop_opts, state, 0, 0)
   end
 
   defp run_agent_loop_with_retry(loop_opts, state, attempt, elapsed_ms) do
     case run_agent_loop(loop_opts, state) do
-      {{:error, reason}, tools_started?} ->
-        retry_or_fail(reason, tools_started?, loop_opts, state, attempt, elapsed_ms)
+      {{:error, reason}, watch} ->
+        retry_or_fail(reason, watch, loop_opts, state, attempt, elapsed_ms)
 
-      {other, _tools_started?} ->
-        other
+      finished ->
+        finished
     end
   end
 
-  defp retry_or_fail(reason, tools_started?, loop_opts, state, attempt, elapsed_ms) do
+  defp retry_or_fail(reason, watch, loop_opts, state, attempt, elapsed_ms) do
+    failed = {{:error, reason}, watch}
+
     cond do
       # Idempotency gate: the whole-loop retry replays every completed tool call
       # (and its side effects). Once any tool has executed this attempt, a
       # connection loss is a mid-run failure like any other and fails loudly —
       # the retry only exists for the wake-from-sleep race that kills the FIRST
       # LLM call, before any tool ran.
-      tools_started? ->
-        {:error, reason}
+      watch.tools_started? ->
+        failed
 
       # Cron retries ONLY the fast wake-from-sleep pool-checkout race, NOT the
       # broader transient set the interactive route-retry uses. A provider
@@ -1462,15 +1499,15 @@ defmodule FermixCore.Jobs.Runner do
       # is recreated per attempt with only backoff counted against the budget, so
       # retrying slow failures would let a run exceed its configured job timeout.
       not Transient.connection_unavailable?(reason) ->
-        {:error, reason}
+        failed
 
       attempt >= state.max_transient_attempts ->
         log_retry_exhausted(state, :attempts, reason)
-        {:error, reason}
+        failed
 
       transient_budget_exceeded?(state, attempt, elapsed_ms) ->
         log_retry_exhausted(state, :budget, reason)
-        {:error, reason}
+        failed
 
       true ->
         retry_after_backoff(reason, loop_opts, state, attempt, elapsed_ms)
@@ -1549,15 +1586,30 @@ defmodule FermixCore.Jobs.Runner do
         [:link, :monitor]
       )
 
+    now = state.monotonic_ms.()
+
     watch_loop(pid, monitor_ref, activity_ref, %{
-      started_at: monotonic_ms(),
-      last_activity_at: monotonic_ms(),
+      started_at: now,
+      last_activity_at: now,
       timeout_ms: state.timeout_ms,
       inactivity_timeout_ms: state.inactivity_timeout_ms,
-      active_tools: 0,
-      tools_started?: false
+      monotonic_ms: state.monotonic_ms,
+      # Calls started and not finished, newest first, and finished calls,
+      # newest first, kept to the timeline's cap.
+      in_flight: [],
+      timeline: [],
+      tools_started?: false,
+      first_tool_at: nil,
+      stamp: tools_started_stamp(state)
     })
   end
+
+  # Where the first tool start is stored. A cue run's `tools_started_at` is its
+  # mandate gate's marker (M60 §9.4): its first allowed or proposed mandate
+  # call, which decides whether its delivery is tried again, so the runner
+  # neither stamps nor settles one for it.
+  defp tools_started_stamp(%{run: %{trigger: "cue"}}), do: nil
+  defp tools_started_stamp(state), do: %{repo: state.repo, run_id: state.run.id}
 
   # Runs inside the loop process. A crash is logged here, bounded because it
   # can carry a response body, since the loop's :normal exit leaves no crash
@@ -1585,20 +1637,23 @@ defmodule FermixCore.Jobs.Runner do
     Process.demonitor(monitor_ref, [:flush])
   end
 
-  # Returns `{result, tools_started?}`: the loop result plus whether any tool
-  # executed this attempt, which gates the whole-loop transient retry (a retry
-  # after a tool ran would replay its side effects).
+  # Returns `{result, watchdog}`: the loop result and what the watchdog saw,
+  # whether any tool executed this attempt (which gates the whole-loop
+  # transient retry: a retry after a tool ran would replay its side effects)
+  # and the attempt's tool calls.
   defp watch_loop(pid, monitor_ref, activity_ref, watchdog) do
     case receive_watchdog_message(next_watchdog_wait(watchdog)) do
       {:job_loop_result, ^activity_ref, result} ->
         release_loop(pid, monitor_ref)
-        {result, watchdog.tools_started?}
+        {result, watchdog}
 
       {:job_loop_activity, ^activity_ref, event} ->
-        watch_loop(pid, monitor_ref, activity_ref, update_watchdog_activity(watchdog, event))
+        next = update_watchdog_activity(watchdog, event)
+        :ok = stamp_tools_started(watchdog, next)
+        watch_loop(pid, monitor_ref, activity_ref, next)
 
       {:DOWN, ^monitor_ref, :process, _pid, reason} ->
-        {{:error, {:agent_loop_exit, reason}}, watchdog.tools_started?}
+        {{:error, {:agent_loop_exit, reason}}, watchdog}
 
       :watchdog_timeout ->
         handle_watchdog_timeout(pid, monitor_ref, activity_ref, watchdog)
@@ -1622,19 +1677,19 @@ defmodule FermixCore.Jobs.Runner do
     end
   end
 
+  # The reason is a term (`Jobs.Failure`); its sentence is rendered at the
+  # settle (`persisted_error/2`).
   defp handle_watchdog_timeout(pid, monitor_ref, activity_ref, watchdog) do
-    now = monotonic_ms()
+    now = watchdog.monotonic_ms.()
 
     cond do
       timeout_due?(watchdog, now) ->
         kill_loop(pid, monitor_ref)
-        {{:timeout, "wall-clock timeout after #{watchdog.timeout_ms}ms"}, watchdog.tools_started?}
+        {{:timeout, {:time_limit, watchdog.timeout_ms}}, watchdog}
 
       inactivity_due?(watchdog, now) ->
         kill_loop(pid, monitor_ref)
-
-        {{:timeout, "inactivity timeout after #{watchdog.inactivity_timeout_ms}ms"},
-         watchdog.tools_started?}
+        {{:timeout, {:idle_limit, watchdog.inactivity_timeout_ms}}, watchdog}
 
       true ->
         watch_loop(pid, monitor_ref, activity_ref, watchdog)
@@ -1656,7 +1711,7 @@ defmodule FermixCore.Jobs.Runner do
   end
 
   defp next_watchdog_wait(watchdog) do
-    now = monotonic_ms()
+    now = watchdog.monotonic_ms.()
 
     [
       deadline_wait(watchdog.started_at, watchdog.timeout_ms, now),
@@ -1669,7 +1724,7 @@ defmodule FermixCore.Jobs.Runner do
     end
   end
 
-  defp inactivity_wait(%{active_tools: active_tools}, _now) when active_tools > 0, do: nil
+  defp inactivity_wait(%{in_flight: [_ | _]}, _now), do: nil
 
   defp inactivity_wait(watchdog, now) do
     deadline_wait(watchdog.last_activity_at, watchdog.inactivity_timeout_ms, now)
@@ -1682,31 +1737,121 @@ defmodule FermixCore.Jobs.Runner do
   defp timeout_due?(watchdog, now), do: now - watchdog.started_at >= watchdog.timeout_ms
 
   defp inactivity_due?(%{inactivity_timeout_ms: nil}, _now), do: false
-  defp inactivity_due?(%{active_tools: active_tools}, _now) when active_tools > 0, do: false
+  defp inactivity_due?(%{in_flight: [_ | _]}, _now), do: false
 
   defp inactivity_due?(watchdog, now) do
     now - watchdog.last_activity_at >= watchdog.inactivity_timeout_ms
   end
 
-  defp update_watchdog_activity(watchdog, {:tool_start, _name}) do
+  defp update_watchdog_activity(watchdog, {:tool_start, name}) do
+    now = watchdog.monotonic_ms.()
+
     %{
       watchdog
-      | last_activity_at: monotonic_ms(),
-        active_tools: watchdog.active_tools + 1,
-        tools_started?: true
+      | last_activity_at: now,
+        in_flight: [%{name: name, started_at: now} | watchdog.in_flight],
+        tools_started?: true,
+        first_tool_at: first_tool_at(watchdog)
     }
   end
 
-  defp update_watchdog_activity(watchdog, {:tool_finish, _name, _outcome}) do
-    %{
-      watchdog
-      | last_activity_at: monotonic_ms(),
-        active_tools: max(watchdog.active_tools - 1, 0)
-    }
+  defp update_watchdog_activity(watchdog, {:tool_finish, name, %{status: status}})
+       when status in [:ok, :error] do
+    now = watchdog.monotonic_ms.()
+    %{finish_call(watchdog, name, status, now) | last_activity_at: now}
   end
 
   defp update_watchdog_activity(watchdog, _event) do
-    %{watchdog | last_activity_at: monotonic_ms()}
+    %{watchdog | last_activity_at: watchdog.monotonic_ms.()}
+  end
+
+  # The moment the run's first tool started, kept only where it is stored.
+  defp first_tool_at(%{stamp: nil}), do: nil
+  defp first_tool_at(%{first_tool_at: nil}), do: DateTime.utc_now()
+  defp first_tool_at(%{first_tool_at: at}), do: at
+
+  # A finished call leaves the calls in flight (the newest start of its name)
+  # and joins the timeline. The loop emits each call's start and finish in
+  # order from one process, so a finish with no start in flight never comes;
+  # one would change nothing but the activity time.
+  defp finish_call(watchdog, name, status, now) do
+    case Enum.split_while(watchdog.in_flight, &(&1.name != name)) do
+      {_in_flight, []} ->
+        watchdog
+
+      {newer, [call | older]} ->
+        entry = %{name: name, duration_ms: now - call.started_at, status: status}
+
+        %{
+          watchdog
+          | in_flight: newer ++ older,
+            timeline: Enum.take([entry | watchdog.timeline], @timeline_max)
+        }
+    end
+  end
+
+  # The first tool start is stored at once (M106 §5.1), so a run the Scheduler
+  # settles after a crash still has it. One bounded call: a stamp that fails is
+  # logged and the run goes on, and the run's own settle carries the moment
+  # (`put_run_facts/3`).
+  defp stamp_tools_started(%{first_tool_at: nil}, %{first_tool_at: %DateTime{} = at} = next) do
+    opts = [server: next.stamp.repo, timeout: @tool_stamp_timeout_ms, on_timeout: :error]
+
+    case Repo.mark_job_run_tools_started(next.stamp.run_id, at, opts) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "Scheduled job run #{next.stamp.run_id}: its first tool start was not stored: " <>
+            inspect(reason)
+        )
+    end
+  end
+
+  defp stamp_tools_started(_watchdog, _next), do: :ok
+
+  # What the watchdog saw, on the run row the settle writes (M106 §5.1): the
+  # first tool start (none for a cue run, `tools_started_stamp/1`) and the tool
+  # timeline.
+  defp put_run_facts(state, watch, tool_plugins) do
+    facts = %{
+      tools_started_at: watch.first_tool_at,
+      tool_timeline: tool_timeline(watch, tool_plugins)
+    }
+
+    %{state | run: Map.merge(state.run, facts)}
+  end
+
+  # The run's calls, oldest first, the newest `@timeline_max` kept: each
+  # finished call, then any still running when the loop ended (the watchdog
+  # stopped it, or the loop died), marked unfinished. Names and numbers only:
+  # nothing a tool returned, no arguments, nothing the model wrote.
+  defp tool_timeline(watch, tool_plugins) do
+    now = watch.monotonic_ms.()
+
+    unfinished =
+      Enum.map(
+        watch.in_flight,
+        &%{name: &1.name, duration_ms: now - &1.started_at, status: :unfinished}
+      )
+
+    (Enum.reverse(watch.timeline) ++ Enum.reverse(unfinished))
+    |> Enum.take(-@timeline_max)
+    |> Enum.map(&timeline_entry(&1, tool_plugins))
+  end
+
+  defp timeline_entry(call, tool_plugins) do
+    entry = %{
+      "name" => call.name,
+      "duration_ms" => call.duration_ms,
+      "status" => Atom.to_string(call.status)
+    }
+
+    case Map.fetch(tool_plugins, call.name) do
+      {:ok, plugin} -> Map.put(entry, "plugin", plugin)
+      :error -> entry
+    end
   end
 
   defp write_run_artifact(state, filename, content) do

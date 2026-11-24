@@ -451,7 +451,14 @@ defmodule FermixCore.Memory.Repo.CuesMandateSql do
     end
   end
 
-  defp mark_tools_started(conn, run_id, stamp) do
+  @doc """
+  Sets `job_runs.tools_started_at` to `stamp` unless it is set: the run's
+  first allowed or proposed mandate call, in that call's transaction, and the
+  runner's stamp at a scheduled run's first tool start
+  (`Memory.Repo.mark_job_run_tools_started/3`). The first writer wins.
+  """
+  @spec mark_tools_started(CuesSql.conn(), String.t(), String.t()) :: :ok | {:error, term()}
+  def mark_tools_started(conn, run_id, stamp) when is_binary(run_id) and is_binary(stamp) do
     sql = "UPDATE job_runs SET tools_started_at = ? WHERE id = ? AND tools_started_at IS NULL"
     CuesSql.execute(conn, sql, [stamp, run_id])
   end

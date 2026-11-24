@@ -458,6 +458,74 @@ defmodule FermixCore.Jobs.SchedulerTest do
     def send_message(_target, _text, _opts), do: {:error, :chat_not_found}
   end
 
+  defmodule ToolCallAdapter do
+    @moduledoc false
+    # The model asks for one tool, then answers: a run that starts a tool.
+    @behaviour FermixCore.Providers.Adapter
+
+    @impl true
+    def chat(_messages, _capabilities, _opts) do
+      {:ok,
+       %{
+         content: "",
+         tool_calls: [%{id: "fc_1", call_id: "call_1", name: "harbour_fetch", arguments: "{}"}],
+         provider_state: %{},
+         usage: %{prompt_tokens: 1, completion_tokens: 0, total_tokens: 1},
+         model: "mock"
+       }}
+    end
+
+    @impl true
+    def continue(_provider_state, _tool_results, _opts) do
+      {:ok,
+       %{
+         content: "Fetched.",
+         tool_calls: [],
+         provider_state: %{},
+         usage: %{prompt_tokens: 1, completion_tokens: 1, total_tokens: 2},
+         model: "mock"
+       }}
+    end
+
+    @impl true
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl true
+    def parse_tool_calls(_response), do: []
+
+    @impl true
+    def parse_response(response), do: response
+
+    @impl true
+    def supports_streaming?, do: false
+  end
+
+  defmodule KillAfterToolStampRepo do
+    @moduledoc false
+    # A transparent proxy in front of the real Repo. It forwards the stamp of a
+    # run's first tool start, reports {:killed_after_tool_stamp, caller} to the
+    # test, and kills the caller before replying: the stamp has landed and the
+    # runner dies mid-run. Every other request is forwarded.
+    use GenServer
+
+    def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+    @impl true
+    def init(opts),
+      do: {:ok, %{real: Keyword.fetch!(opts, :real), notify: Keyword.fetch!(opts, :notify)}}
+
+    @impl true
+    def handle_call({:mark_job_run_tools_started, _run_id, _at} = request, {caller, _tag}, state) do
+      reply = GenServer.call(state.real, request)
+      send(state.notify, {:killed_after_tool_stamp, caller})
+      Process.exit(caller, :kill)
+      {:reply, reply, state}
+    end
+
+    def handle_call(request, _from, state),
+      do: {:reply, GenServer.call(state.real, request), state}
+  end
+
   setup do
     unique = System.unique_integer([:positive])
     db_path = Path.join(System.tmp_dir!(), "fermix-jobs-scheduler-#{unique}.db")
@@ -667,6 +735,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
     assert {:ok, [first_run]} = Repo.list_job_runs(%{job_id: job.id}, server: repo)
     assert first_run.status == "error"
     assert first_run.error =~ "runner crashed"
+    assert first_run.failure_kind == "crashed"
 
     assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:30:00Z])
 
@@ -1321,6 +1390,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
       assert {:ok, reaped} = Repo.get_job_run(stuck.id, server: repo)
       assert reaped.status == "error"
       assert reaped.error =~ "no live runner"
+      assert reaped.failure_kind == "reaped"
 
       assert {:ok, recovered} = Registry.get_job(job.id, repo: repo)
       assert recovered.state == "scheduled"
@@ -1467,6 +1537,35 @@ defmodule FermixCore.Jobs.SchedulerTest do
       assert_receive {:job_runner, :started, next_run_id, ^job_id}, @run_completes_ms
       assert next_run_id != run_id
       assert_receive {:job_runner, :completed, ^next_run_id, ^job_id}, @run_completes_ms
+    end
+
+    # M106 §5.1: the runner stores its first tool start at once, so the crash
+    # settle, which has no runner to ask, finds it on the row.
+    test "a runner that dies after its first tool started is settled with that moment", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      {:ok, job} = seed_recurring_job(repo, "Harbour tide table")
+      job_id = job.id
+      proxy = start_supervised!({KillAfterToolStampRepo, real: repo, notify: self()})
+      scheduler = start_scheduler(proxy, runner_supervisor, adapter: ToolCallAdapter)
+
+      assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
+      assert_receive {:job_runner, :started, run_id, ^job_id}, @run_completes_ms
+      assert_receive {:killed_after_tool_stamp, runner}, @run_completes_ms
+      await_reaped(runner, scheduler)
+
+      assert {:ok, crashed} = Repo.get_job_run(run_id, server: repo)
+      assert crashed.status == "error"
+      assert crashed.error == "runner crashed: :killed"
+      assert crashed.failure_kind == "crashed"
+      assert %DateTime{} = crashed.tools_started_at
+      assert DateTime.compare(crashed.tools_started_at, crashed.started_at) != :lt
+      # The timeline lived in the runner that died; nothing settled one.
+      assert crashed.tool_timeline == nil
+
+      assert {:ok, %{state: "scheduled", last_status: "error"}} =
+               Registry.get_job(job_id, repo: repo)
     end
 
     test "a scheduler killed right after its reap write leaves the job claimable", %{

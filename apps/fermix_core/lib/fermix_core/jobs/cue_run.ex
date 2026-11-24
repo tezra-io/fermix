@@ -31,10 +31,10 @@ defmodule FermixCore.Jobs.CueRun do
   alias FermixCore.Cues.Mandates
   alias FermixCore.Cues.Pins
   alias FermixCore.Jobs.Delivery
+  alias FermixCore.Jobs.Failure
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesMandateSql
   alias FermixCore.Memory.Repo.CuesRunsSql
-  alias FermixCore.Providers.Transient
   alias FermixCore.Temporal.Access
 
   # The cue's payload text in the prompt, in characters (the payload itself is
@@ -51,12 +51,6 @@ defmodule FermixCore.Jobs.CueRun do
   # (`companion`, which draws only the previews the engine fetches) are told to.
   # iMessage and Signal stay refused until checked.
   @report_platforms ~w(telegram slack discord whatsapp mobile companion)
-
-  # Provider error kinds that end a cue run as a provider failure (design §9.4:
-  # no route, a transport error, a rate limit, a 5xx). An exhausted account
-  # (`:quota`) clears the same way a rate limit does. Every transport error
-  # counts, whatever its kind.
-  @provider_api_kinds [:rate_limit, :quota, :provider_unavailable, :timeout]
 
   # A cue run's fields that can carry text the model wrote from the cue (§9.3).
   @withheld_run_fields [:final_response, :error, :prompt_snapshot, :output_ref]
@@ -293,26 +287,8 @@ defmodule FermixCore.Jobs.CueRun do
   def outcome({:timeout, _reason}, _job, calls) when is_list(calls), do: {:failed, :other}
 
   def outcome({:error, reason}, _job, calls) when is_list(calls) do
-    if provider_failure?(reason), do: {:failed, :provider}, else: {:failed, :other}
+    if Failure.provider_failure?(reason), do: {:failed, :provider}, else: {:failed, :other}
   end
-
-  @doc "Whether a run's error reason is a provider failure (design §9.4)."
-  @spec provider_failure?(term()) :: boolean()
-  def provider_failure?({:provider_transport_error, %{kind: kind}}) when is_atom(kind), do: true
-
-  def provider_failure?({:provider_error, %{kind: kind} = error}) when is_atom(kind),
-    do: kind in @provider_api_kinds or server_error?(Map.get(error, :status))
-
-  def provider_failure?({:all_routes_failed, [_ | _] = attempts}),
-    do: Enum.all?(attempts, fn {_provider, reason} -> provider_failure?(reason) end)
-
-  def provider_failure?({:context_recovery_failed, reason}), do: provider_failure?(reason)
-  def provider_failure?({:no_route, message}) when is_binary(message), do: true
-  def provider_failure?(:no_routes), do: true
-  def provider_failure?(%RuntimeError{} = error), do: Transient.connection_unavailable?(error)
-  def provider_failure?(_reason), do: false
-
-  defp server_error?(status), do: is_integer(status) and status >= 500
 
   # --- what the owner receives ---------------------------------------------------------------
 

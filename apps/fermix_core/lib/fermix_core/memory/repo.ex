@@ -104,6 +104,7 @@ defmodule FermixCore.Memory.Repo do
   @trip_towns_migration_version 66
   @phone_calls_migration_version 67
   @phone_call_ledger_migration_version 68
+  @job_run_facts_migration_version 69
   @sqlite_open_intent :readwritecreate
 
   # The home's requests about notes from every machine (M97 §8), all served by
@@ -389,6 +390,29 @@ defmodule FermixCore.Memory.Repo do
   # met a recoverable tool error. NULL on rows written before the column existed.
   @job_run_tool_failures_schema_sql """
   ALTER TABLE job_runs ADD COLUMN tool_failures INTEGER;
+  """
+
+  # M106 §5.1: a failed run's kind (`Jobs.Failure`) and its tool timeline (each
+  # call's name, plugin, duration and outcome, as JSON), one row per run that
+  # has either. A table of its own and not columns on `job_runs`: an engine at
+  # the current home format reads `job_runs` with `SELECT *` into a fixed
+  # number of fields, so the run row keeps its width. A row goes with its run
+  # by cascade.
+  @job_run_facts_schema_sql """
+  CREATE TABLE IF NOT EXISTS job_run_facts (
+    run_id TEXT PRIMARY KEY REFERENCES job_runs(id) ON DELETE CASCADE,
+    failure_kind TEXT,
+    tool_timeline_json TEXT
+  );
+  """
+
+  # A run row and its facts: `job_runs` by its own columns, in the order
+  # `job_run_row/1` reads them, then the facts by name, so a column a later
+  # migration adds to `job_run_facts` is read past.
+  @job_run_select """
+  SELECT r.*, f.failure_kind, f.tool_timeline_json
+  FROM job_runs r
+  LEFT JOIN job_run_facts f ON f.run_id = r.id
   """
 
   # The Scheduler's reconcile pass reads every run whose delivery is still
@@ -2634,6 +2658,19 @@ defmodule FermixCore.Memory.Repo do
     call({:upsert_job_run, attrs}, opts)
   end
 
+  @doc """
+  Stamps `job_runs.tools_started_at` with `at`, the moment the run's first tool
+  started, unless it is already set: the compare-and-set a cue run's mandate
+  gate uses (`CuesMandateSql.mark_tools_started/3`), so a second stamp, the
+  gate and the run's own settle keep whichever came first. `:ok` whether or
+  not it wrote; a run id with no row writes nothing.
+  """
+  @spec mark_job_run_tools_started(String.t(), DateTime.t(), keyword()) :: :ok | {:error, term()}
+  def mark_job_run_tools_started(run_id, %DateTime{} = at, opts \\ [])
+      when is_binary(run_id) and is_list(opts) do
+    call({:mark_job_run_tools_started, run_id, at}, opts)
+  end
+
   @spec get_job_run(String.t(), keyword()) :: {:ok, job_run_row()} | {:error, :not_found | term()}
   def get_job_run(id, opts \\ []) when is_binary(id) do
     call({:get_job_run, id}, opts)
@@ -2698,9 +2735,10 @@ defmodule FermixCore.Memory.Repo do
   # Two index reads, each bounded by the limit: the active rows through
   # idx_job_runs_status_created, the pending deliveries through the partial
   # idx_job_runs_pending_delivery. The outer sort orders at most twice the
-  # limit, active rows first, so a pass never reads the run history.
+  # limit, active rows first, so a pass never reads the run history. Each
+  # row's facts are read by name (`@job_run_select`).
   @unsettled_job_runs_sql """
-  SELECT *
+  SELECT runs.*, f.failure_kind, f.tool_timeline_json
   FROM (
     SELECT * FROM (
       SELECT * FROM job_runs
@@ -2715,8 +2753,10 @@ defmodule FermixCore.Memory.Repo do
       ORDER BY created_at ASC, id ASC
       LIMIT ?
     )
-  )
-  ORDER BY CASE WHEN status IN ('queued', 'running') THEN 0 ELSE 1 END, created_at ASC, id ASC
+  ) AS runs
+  LEFT JOIN job_run_facts f ON f.run_id = runs.id
+  ORDER BY CASE WHEN runs.status IN ('queued', 'running') THEN 0 ELSE 1 END,
+    runs.created_at ASC, runs.id ASC
   LIMIT ?
   """
 
@@ -4783,7 +4823,14 @@ defmodule FermixCore.Memory.Repo do
   end
 
   def handle_call({:upsert_job_run, attrs}, _from, state) do
-    reply = with_connection(state, &upsert_job_run_row(&1, attrs))
+    reply = with_connection(state, &upsert_job_run_tx(&1, attrs))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:mark_job_run_tools_started, run_id, at}, _from, state) do
+    reply =
+      with_connection(state, &CuesMandateSql.mark_tools_started(&1, run_id, CuesSql.stamp(at)))
+
     {:reply, reply, state}
   end
 
@@ -5195,8 +5242,30 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_trip_waits_migration(conn, versions),
          :ok <- apply_trip_towns_migration(conn, versions),
          :ok <- apply_phone_calls_migration(conn, versions),
-         :ok <- apply_phone_call_ledger_migration(conn, versions) do
+         :ok <- apply_phone_call_ledger_migration(conn, versions),
+         :ok <- apply_job_run_facts_migration(conn, versions) do
       :ok
+    end
+  end
+
+  # M106 §5.1: a run's failure kind and its tool timeline, in a table of their
+  # own beside `job_runs`, with the version in one transaction, after 68.
+  # `job_runs` is left as it was, and no row is rewritten: a run written
+  # before has no facts. Reapplying it changes nothing: the table is made only
+  # if missing.
+  defp apply_job_run_facts_migration(conn, versions) do
+    if Enum.member?(versions, @job_run_facts_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{@job_run_facts_schema_sql}
+        INSERT INTO schema_migrations(version) VALUES (#{@job_run_facts_migration_version});
+        COMMIT;
+        """
+      )
     end
   end
 
@@ -8629,13 +8698,45 @@ defmodule FermixCore.Memory.Repo do
              """,
              job_run_upsert_params(run)
            ),
+         :ok <- upsert_job_run_facts(conn, run),
          {:ok, row} <- fetch_job_run(conn, run.id) do
       {:ok, row}
     end
   end
 
+  # A run's facts (M106 §5.1) are written with its row, in the caller's
+  # transaction, and once: a stored kind or timeline is never replaced or
+  # cleared by a later whole-row write. A run with neither writes no row.
+  defp upsert_job_run_facts(_conn, %{failure_kind: nil, tool_timeline: nil}), do: :ok
+
+  defp upsert_job_run_facts(conn, run) do
+    execute(
+      conn,
+      """
+      INSERT INTO job_run_facts (run_id, failure_kind, tool_timeline_json)
+      VALUES (?, ?, ?)
+      ON CONFLICT(run_id)
+      DO UPDATE SET
+        failure_kind = coalesce(job_run_facts.failure_kind, excluded.failure_kind),
+        tool_timeline_json = coalesce(job_run_facts.tool_timeline_json, excluded.tool_timeline_json)
+      """,
+      [run.id, run.failure_kind, encode_metadata(run.tool_timeline)]
+    )
+  end
+
+  # A bare run write and its facts in one transaction, as a settle writes
+  # them. A BEGIN that fails (`:busy`) never opened the transaction, so it
+  # returns as is; every failure inside it rolls both writes back.
+  defp upsert_job_run_tx(conn, attrs) do
+    with :ok <- execute(conn, "BEGIN IMMEDIATE", []) do
+      conn
+      |> upsert_job_run_row(attrs)
+      |> finish_job_settle(conn)
+    end
+  end
+
   defp fetch_job_run(conn, id) do
-    with {:ok, rows} <- query_all(conn, "SELECT * FROM job_runs WHERE id = ? LIMIT 1", [id]) do
+    with {:ok, rows} <- query_all(conn, "#{@job_run_select} WHERE r.id = ? LIMIT 1", [id]) do
       case rows do
         [row] -> {:ok, job_run_row(row)}
         [] -> {:error, :not_found}
@@ -8650,10 +8751,9 @@ defmodule FermixCore.Memory.Repo do
            query_all(
              conn,
              """
-             SELECT *
-             FROM job_runs
+             #{@job_run_select}
              WHERE #{where_sql}
-             ORDER BY created_at DESC, id ASC
+             ORDER BY r.created_at DESC, r.id ASC
              LIMIT ?
              """,
              params ++ [limit]
@@ -9272,9 +9372,13 @@ defmodule FermixCore.Memory.Repo do
       updated_at: timestamp_string(Map.get(attrs, :updated_at, DateTime.utc_now())),
       # Write-once (the upsert keeps a stored value): the cue claim sets the
       # delivery, the mandate gate sets the marker in its own Repo call, and a
-      # runner's later whole-row write never clears either.
+      # runner's later whole-row write never clears either. A run's failure
+      # kind and tool timeline go to `job_run_facts`, kept the same way
+      # (`upsert_job_run_facts/2`).
       tools_started_at: optional_timestamp_string(Map.get(attrs, :tools_started_at)),
-      cue_delivery_id: optional_non_negative_integer!(attrs, :cue_delivery_id)
+      cue_delivery_id: optional_non_negative_integer!(attrs, :cue_delivery_id),
+      failure_kind: optional_string!(attrs, :failure_kind),
+      tool_timeline: optional_list!(attrs, :tool_timeline)
     }
   end
 
@@ -9776,12 +9880,13 @@ defmodule FermixCore.Memory.Repo do
     |> join_where_clause()
   end
 
+  # Named on the run row (`r`, `@job_run_select`), never on its facts.
   defp job_run_where_clause(selector) do
     selector
     |> Enum.filter(fn {_key, value} -> not is_nil(value) end)
     |> Enum.sort_by(fn {key, _value} -> key end)
     |> Enum.map_reduce([], fn {key, value}, params ->
-      {"#{job_run_column_name(key)} = ?", params ++ [value]}
+      {"r.#{job_run_column_name(key)} = ?", params ++ [value]}
     end)
     |> join_where_clause()
   end
@@ -10437,7 +10542,9 @@ defmodule FermixCore.Memory.Repo do
          updated_at,
          tool_failures,
          tools_started_at,
-         cue_delivery_id
+         cue_delivery_id,
+         failure_kind,
+         tool_timeline_json
        ]) do
     %{
       id: id,
@@ -10446,6 +10553,8 @@ defmodule FermixCore.Memory.Repo do
       trigger: trigger,
       tools_started_at: parse_optional_timestamp(tools_started_at),
       cue_delivery_id: cue_delivery_id,
+      failure_kind: failure_kind,
+      tool_timeline: decode_metadata(tool_timeline_json),
       status: status,
       claimed_at: parse_optional_timestamp(claimed_at),
       started_at: parse_optional_timestamp(started_at),
@@ -10633,6 +10742,14 @@ defmodule FermixCore.Memory.Repo do
     case Map.get(attrs, key) do
       nil -> nil
       value -> fetch_string_value!(key, value)
+    end
+  end
+
+  defp optional_list!(attrs, key) do
+    case Map.get(attrs, key) do
+      nil -> nil
+      value when is_list(value) -> value
+      value -> raise ArgumentError, "#{key} must be a list, got: #{inspect(value)}"
     end
   end
 

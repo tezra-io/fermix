@@ -28,6 +28,7 @@ defmodule FermixCore.Jobs.Scheduler do
   alias FermixCore.Cues.Notices
   alias FermixCore.Jobs.CueAdmission
   alias FermixCore.Jobs.CueRun
+  alias FermixCore.Jobs.Failure
   alias FermixCore.Jobs.Runner
   alias FermixCore.Jobs.RunnerSupervisor
   alias FermixCore.Jobs.Schedule
@@ -529,7 +530,7 @@ defmodule FermixCore.Jobs.Scheduler do
 
   defp reap_orphaned_run(run, state) do
     Logger.warning("Scheduled job #{run.job_id} run #{run.id} #{@reap_error}")
-    mark_run_failed(run.id, run.job_id, @reap_error, state)
+    mark_run_failed(run.id, run.job_id, {:reaped, @reap_error}, state)
   end
 
   # Run ids of every process the runner supervisor still holds. The id is read
@@ -946,18 +947,20 @@ defmodule FermixCore.Jobs.Scheduler do
   end
 
   defp mark_run_crashed(run_id, job_id, reason, state) do
-    mark_run_failed(run_id, job_id, "runner crashed: #{inspect(reason)}", state)
+    mark_run_failed(run_id, job_id, {:crashed, "runner crashed: #{inspect(reason)}"}, state)
   end
 
   # Shared terminal write for a run that ended without settling itself, whether
   # the scheduler watched it die (monitor) or found it abandoned (reconciliation).
-  # The caller supplies the operator-facing cause; everything after is identical.
-  defp mark_run_failed(run_id, job_id, error, state) when is_binary(error) do
+  # The caller supplies the failure's kind (`Jobs.Failure`: `:crashed` or
+  # `:reaped`) and the operator-facing cause; everything after is identical.
+  defp mark_run_failed(run_id, job_id, {kind, error} = failure, state)
+       when kind in [:crashed, :reaped] and is_binary(error) do
     now = state.clock.()
 
     case Repo.get_job_run(run_id, state.repo_opts) do
       {:ok, run} ->
-        run |> mark_run_error(error, now, state.repo_opts) |> report_cue_failure(state)
+        run |> mark_run_error(failure, now, state.repo_opts) |> report_cue_failure(state)
 
       {:error, :not_found} ->
         :ok
@@ -1008,9 +1011,12 @@ defmodule FermixCore.Jobs.Scheduler do
   # by the run row (M60 §9.4). Only its final failure marks the memory source,
   # as the runner's own `mark_failed` does: a retried attempt writes nothing
   # the owner reads.
-  defp mark_run_error(%{status: status, trigger: "cue"} = run, error, now, repo_opts)
+  #
+  # The settle writes the failure's kind beside its error; the run row read
+  # back keeps the first tool start its runner stored (M106 §5.1).
+  defp mark_run_error(%{status: status, trigger: "cue"} = run, {kind, error}, now, repo_opts)
        when status in ["queued", "running"] do
-    attrs = Map.merge(run, %{status: "error", completed_at: now, error: error, updated_at: now})
+    attrs = Map.merge(run, crash_settle_fields(kind, error, now))
 
     case CueAdmission.settle(attrs, :scheduler, repo_opts) do
       {:ok, {settled, job, %{disposition: :exhausted}}} ->
@@ -1028,9 +1034,9 @@ defmodule FermixCore.Jobs.Scheduler do
     end
   end
 
-  defp mark_run_error(%{status: status} = run, error, now, repo_opts)
+  defp mark_run_error(%{status: status} = run, {kind, error}, now, repo_opts)
        when status in ["queued", "running"] do
-    attrs = Map.merge(run, %{status: "error", completed_at: now, error: error, updated_at: now})
+    attrs = Map.merge(run, crash_settle_fields(kind, error, now))
 
     case Repo.settle_job_run(attrs, repo_opts) do
       {:ok, {_run, job}} ->
@@ -1046,11 +1052,21 @@ defmodule FermixCore.Jobs.Scheduler do
     end
   end
 
-  defp mark_run_error(%{delivery_status: "pending"} = run, error, now, repo_opts) do
+  defp mark_run_error(%{delivery_status: "pending"} = run, {_kind, error}, now, repo_opts) do
     mark_pending_delivery_failed(run, error, now, repo_opts)
   end
 
-  defp mark_run_error(_final_run, _error, _now, _repo), do: :ok
+  defp mark_run_error(_final_run, _failure, _now, _repo), do: :ok
+
+  defp crash_settle_fields(kind, error, now) do
+    %{
+      status: "error",
+      completed_at: now,
+      error: error,
+      failure_kind: Failure.stored(kind),
+      updated_at: now
+    }
+  end
 
   defp fail_delivery_after_settle(run_id, error, now, repo_opts) do
     case Repo.get_job_run(run_id, repo_opts) do

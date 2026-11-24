@@ -105,7 +105,11 @@ defmodule FermixCore.Home.ReadableTest do
     # four nullable columns, a wider unique key and one more release reason,
     # every row kept, and an engine at this format never reads it: the format
     # stays.
-    @migrations Enum.to_list(1..39) ++ [41, 42, 43] ++ Enum.to_list(45..68)
+    # 69 (M106 §5.1, a run's failure kind and tool timeline) adds one table an
+    # engine at this format never reads; its rows go with their run by
+    # cascade. `job_runs`, which that engine reads with `SELECT *`, is left as
+    # it was, so every run row keeps the width it reads: the format stays.
+    @migrations Enum.to_list(1..39) ++ [41, 42, 43] ++ Enum.to_list(45..69)
     @manifest_keys ~w(created_at engine_version files format home_format home_root host links
                       primary_epoch)
     @entry_keys ~w(bytes mode path sha256)
