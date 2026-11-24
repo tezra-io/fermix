@@ -978,7 +978,7 @@ defmodule FermixCore.Management.PluginsTest do
       assert {:ok, view} = Plugins.check_start(@bundled, jobs: jobs(), check: check)
 
       assert view["kind"] == "plugin_check"
-      assert_received {:checked, @bundled, [full?: true]}
+      assert_receive {:checked, @bundled, [full?: true]}
       assert %{"result" => result} = await(view, jobs())
       assert result == %{"name" => @bundled, "status" => "ready", "live_probe" => true}
     end
