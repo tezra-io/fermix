@@ -561,15 +561,18 @@ defmodule FermixCore.Agents.TurnRunner do
 
     emit_runtime_context_cache_telemetry(state, cache_status, profile)
 
-    {history, history_duration_us} =
+    # A snapshot, so a preflight compaction commits only over this same read.
+    {history_snapshot, history_duration_us} =
       Telemetry.timed_us(fn ->
-        ConversationStore.get_history(conversation_key, server: state.conversation_store)
+        ConversationStore.get_history_snapshot(conversation_key,
+          server: state.conversation_store
+        )
       end)
 
     user_message = build_user_message(msg, parts)
 
     {history, preflight_compaction} =
-      maybe_preflight_auto_compact(conversation_key, state, history)
+      maybe_preflight_auto_compact(conversation_key, state, history_snapshot)
 
     maybe_notify_preflight_compacted(preflight_compaction, deliver, voice_call)
     emit_history_telemetry(msg, conversation_key, history, history_duration_us)
@@ -1654,7 +1657,7 @@ defmodule FermixCore.Agents.TurnRunner do
     Code.ensure_loaded?(mod) and function_exported?(mod, :chat, 3)
   end
 
-  defp maybe_preflight_auto_compact(conversation_key, state, history) do
+  defp maybe_preflight_auto_compact(conversation_key, state, %{messages: history} = snapshot) do
     config = Application.get_env(:fermix_core, :compaction, [])
 
     cond do
@@ -1666,7 +1669,7 @@ defmodule FermixCore.Agents.TurnRunner do
         {history, :ok}
 
       true ->
-        preflight_auto_compact_now(conversation_key, state, history, config)
+        preflight_auto_compact_now(conversation_key, state, snapshot, config)
     end
   end
 
@@ -1676,7 +1679,12 @@ defmodule FermixCore.Agents.TurnRunner do
   # means no prior measurement exists (cold/first turn, or first turn after a
   # daemon restart): skip cleanly — there is NO byte-estimate fallback on the
   # trigger path. Post-delivery still catches an over-budget turn this turn.
-  defp preflight_auto_compact_now(conversation_key, state, history, config) do
+  defp preflight_auto_compact_now(
+         conversation_key,
+         state,
+         %{messages: history} = snapshot,
+         config
+       ) do
     context_tokens = Map.get(state, :last_context_tokens, 0)
 
     if context_tokens <= 0 do
@@ -1686,7 +1694,7 @@ defmodule FermixCore.Agents.TurnRunner do
       preflight_compact_if_over_threshold(
         conversation_key,
         state,
-        history,
+        snapshot,
         config,
         context_tokens
       )
@@ -1696,7 +1704,7 @@ defmodule FermixCore.Agents.TurnRunner do
   defp preflight_compact_if_over_threshold(
          conversation_key,
          state,
-         history,
+         %{messages: history} = snapshot,
          config,
          context_tokens
        ) do
@@ -1705,15 +1713,21 @@ defmodule FermixCore.Agents.TurnRunner do
 
     if context_tokens >=
          ModelCatalog.compact_at_tokens_for(lead_key.provider, lead_key.model, threshold) do
-      compact_preflight_history(conversation_key, history, state, target, config)
+      compact_preflight_history(conversation_key, snapshot, state, target, config)
     else
       emit_auto_compaction_skipped(conversation_key, :under_threshold)
       {history, :ok}
     end
   end
 
-  defp compact_preflight_history(conversation_key, history, state, target, config) do
-    result = run_auto_compaction(conversation_key, history, target, config, state)
+  defp compact_preflight_history(
+         conversation_key,
+         %{messages: history} = snapshot,
+         state,
+         target,
+         config
+       ) do
+    result = run_auto_compaction(conversation_key, snapshot, target, config, state)
 
     case result do
       :compacted -> reload_compacted_history(conversation_key, state, history)
@@ -1723,7 +1737,7 @@ defmodule FermixCore.Agents.TurnRunner do
 
   defp reload_compacted_history(conversation_key, state, fallback_history) do
     case conversation_history(conversation_key, state) do
-      {:ok, history} ->
+      {:ok, %{messages: history}} ->
         {history, :compacted}
 
       {:error, reason} ->
@@ -1790,8 +1804,8 @@ defmodule FermixCore.Agents.TurnRunner do
   end
 
   defp compact_when_over_threshold(conversation_key, state, target, config) do
-    with {:ok, history} <- conversation_history(conversation_key, state) do
-      run_auto_compaction(conversation_key, history, target, config, state)
+    with {:ok, snapshot} <- conversation_history(conversation_key, state) do
+      run_auto_compaction(conversation_key, snapshot, target, config, state)
     else
       {:error, reason} -> emit_auto_compaction_skipped(conversation_key, reason)
     end
@@ -1805,8 +1819,10 @@ defmodule FermixCore.Agents.TurnRunner do
     Keyword.put(adapter_opts, :reasoning_effort, CompactionConfig.reasoning_effort(config))
   end
 
+  # A snapshot: the history and the version a compaction of it commits over.
   defp conversation_history(conversation_key, state) do
-    {:ok, ConversationStore.get_history(conversation_key, server: state.conversation_store)}
+    {:ok,
+     ConversationStore.get_history_snapshot(conversation_key, server: state.conversation_store)}
   catch
     :exit, reason -> {:error, {:conversation_history_unavailable, reason}}
   end
@@ -1823,11 +1839,11 @@ defmodule FermixCore.Agents.TurnRunner do
   # Compaction failover runs through the same shared executor as the agent
   # loop's initial chat — no second retry loop. Compactor itself stays
   # single-route; the chain lives here.
-  defp run_auto_compaction(conversation_key, history, {adapter, routes}, config, state) do
+  defp run_auto_compaction(conversation_key, snapshot, {adapter, routes}, config, state) do
     # Strict taint (MILESTONE_32 §13.6): mask any activity-derived assistant turn
     # before it is summarized on an ungranted-remote compaction chain. Both the
     # preflight and post-delivery compaction paths funnel through here.
-    history = Taint.mask_for_chain(history, routes, history_gate_opts(state))
+    history = Taint.mask_for_chain(snapshot.messages, routes, history_gate_opts(state))
     before_tokens = Compactor.estimate_tokens(history)
     attempt = compaction_attempt(history, adapter, config, conversation_key, state)
 
@@ -1843,7 +1859,7 @@ defmodule FermixCore.Agents.TurnRunner do
         commit_compacted_history(
           conversation_key,
           state,
-          compacted,
+          %{messages: compacted, version: snapshot.version},
           route_key,
           {before_tokens, duration_us}
         )
@@ -1896,16 +1912,40 @@ defmodule FermixCore.Agents.TurnRunner do
     ]
   end
 
+  # A compaction replaces exactly the history it read, as `/compact` does: a
+  # message written meanwhile (outside the turn, M106 §5.8) makes its read
+  # stale, and a stale compaction is never committed. It is dropped and said,
+  # with no retry and no failure backoff; the next reply's check reads afresh
+  # and compacts again.
   defp commit_compacted_history(conversation_key, state, compacted, route_key, timing) do
+    case ConversationStore.replace_history(conversation_key, compacted.messages,
+           server: state.conversation_store,
+           agent_id: state.memory_agent_id,
+           owner_id: state.memory_owner_id,
+           expected_version: compacted.version
+         ) do
+      :ok ->
+        compacted_history_committed(
+          conversation_key,
+          state,
+          compacted.messages,
+          route_key,
+          timing
+        )
+
+      {:error, :stale_history} ->
+        Logger.warning(
+          "auto-compaction was not committed for #{inspect(conversation_key)}: the " <>
+            "conversation changed while it ran; the next reply's check compacts it again"
+        )
+
+        emit_auto_compaction_skipped(conversation_key, :stale_history)
+    end
+  end
+
+  defp compacted_history_committed(conversation_key, state, compacted, route_key, timing) do
     {before_tokens, duration_us} = timing
     after_tokens = Compactor.estimate_tokens(compacted)
-
-    :ok =
-      ConversationStore.replace_history(conversation_key, compacted,
-        server: state.conversation_store,
-        agent_id: state.memory_agent_id,
-        owner_id: state.memory_owner_id
-      )
 
     :telemetry.execute(
       [:fermix, :compaction, :auto],

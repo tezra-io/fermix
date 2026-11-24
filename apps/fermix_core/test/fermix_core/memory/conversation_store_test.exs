@@ -25,6 +25,11 @@ defmodule FermixCore.Memory.ConversationStoreTest do
     @impl true
     def handle_call(:enabled?, _from, state), do: {:reply, true, state}
 
+    # It holds no stored rows; the store reads a conversation before its first
+    # write to it.
+    def handle_call({:get_messages, _selector, _limit}, _from, state),
+      do: {:reply, {:ok, []}, state}
+
     def handle_call({:insert_message, attrs}, _from, state) do
       send(state.test_pid, {:insert_attempt, attrs.role, attrs.content})
 
