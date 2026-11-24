@@ -183,6 +183,7 @@ class PlanTest(unittest.TestCase):
     def test_counts_tests_across_every_repeat(self):
         self.assertEqual(stress.tests_ran(REPEATED_GREEN), 6)
         self.assertEqual(stress.tests_ran("==> fermix_core\nThere are no tests to run\n"), 0)
+        self.assertEqual(stress.tests_ran("1 test, 0 failures, 1 skipped (16 excluded)\n"), 0)
 
 
 class FitsTest(unittest.TestCase):

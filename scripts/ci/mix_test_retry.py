@@ -6,17 +6,18 @@
 """Run the umbrella suite; rerun a few failed tests once and flag them as flaky.
 
 The first run is the ordinary `mix test --warnings-as-errors`. When it fails
-with at most `--max-flaky` failed tests and nothing else wrong, each app that
-had failures reruns only those tests, named by the `path:line` ExUnit printed
-for each. If every rerun passes and ran at least as many tests as failed, the
-failures are flaky: each one becomes a `::warning` annotation titled "Flaky
-test", a row in the job summary and an entry in the flaky JSON, and the step
-passes.
+with at most `--max-flaky` failed tests and nothing else wrong, each failed test
+reruns once on its own, selected in its file by its exact name. A `path:line`
+cannot prove this: ExUnit resolves a line to the nearest test above it, which
+can be a different test, and one line can generate several. If every rerun
+executed its test and passed, the failures are flaky: each one becomes a
+`::warning` annotation titled "Flaky test", a row in the job summary and an
+entry in the flaky JSON, and the step passes.
 
 Everything else stays red: a suite that aborted (warnings, compile errors), an
 app whose suite never printed its summary, more failures than the cap, a
 failure ExUnit did not name with a test location, a rerun that fails again,
-and a rerun that ran fewer tests than failed.
+and a rerun that skipped its test or selected none.
 
 `mix test --failed` cannot do the rerun. From the umbrella root it runs zero
 tests and exits 0, and one umbrella run records every app's failures in the
@@ -43,7 +44,7 @@ _PREFIX = re.compile(r"^(\d{4}-\d\d-\d\dT[\d:.]+Z )?(##\[(error|warning)\])?")
 _SECTION = re.compile(r"^==> (\w+)\s*$")
 _SEED = re.compile(r"Running ExUnit with seed: (\d+)")
 _SUMMARY = re.compile(r"\b\d+ (?:doctests?|propert(?:y|ies)|tests?), .*\b\d+ failures?\b")
-_COUNT = re.compile(r"(\d+) (doctests?|properties|property|tests?|failures?|invalid)\b")
+_COUNT = re.compile(r"(\d+) (doctests?|properties|property|tests?|failures?|invalid|skipped)\b")
 _HEADER = re.compile(r"^\s+\d+\) (test|doctest|property) (.+) \(([\w.]+)\)\s*$")
 _LOCATION = re.compile(r"^\s+((?:apps/\w+/)?test/\S+\.exs):(\d+)\s*$")
 _ABORTED = (
@@ -93,14 +94,19 @@ def clean(line: str) -> str:
 
 
 def parse_summary(line: str) -> tuple[int, int]:
-    """Tests that ran and tests that failed, from one ExUnit summary line."""
-    ran = failed = 0
+    """Tests that executed and tests that failed, from one ExUnit summary line.
+
+    ExUnit's total includes skipped tests and leaves out excluded ones.
+    """
+    total = failed = skipped = 0
     for number, word in _COUNT.findall(line):
         if word.startswith(("failure", "invalid")):
             failed += int(number)
+        elif word == "skipped":
+            skipped += int(number)
         else:
-            ran += int(number)
-    return ran, failed
+            total += int(number)
+    return total - skipped, failed
 
 
 def parse_run(text: str, app: str = "") -> Run:
@@ -148,41 +154,44 @@ def _read_failure(run: Run, line: str, current: str, pending: Failure | None):
     return pending
 
 
-def plan_retry(run: Run, max_flaky: int) -> tuple[dict[str, list[str]], str]:
-    """Each app's failed tests as `path:line`, or a reason the failure stays red."""
+def retry_refusal(run: Run, max_flaky: int) -> str:
+    """Why this run's failures stay red, or empty when each can be rerun by name."""
     if run.aborted:
-        return {}, f"the suite aborted: {run.aborted}"
+        return f"the suite aborted: {run.aborted}"
     unfinished = sorted(app for app, a in run.apps.items() if a.started and a.ran is None)
     if unfinished:
-        return {}, f"no ExUnit summary for {', '.join(unfinished)}: the suite did not finish"
-    failed = {app: a.failed for app, a in run.apps.items() if a.failed > 0}
-    total = sum(failed.values())
+        return f"no ExUnit summary for {', '.join(unfinished)}: the suite did not finish"
+    total = sum(a.failed for a in run.apps.values())
     if total == 0:
-        return {}, "mix test failed with no failed tests, so there is nothing to rerun"
+        return "mix test failed with no failed tests, so there is nothing to rerun"
     if total > max_flaky:
-        return {}, f"{total} tests failed; more than {max_flaky} is not treated as flaky"
+        return f"{total} tests failed; more than {max_flaky} is not treated as flaky"
     if len(run.failures) != total:
-        return {}, f"ExUnit named {len(run.failures)} of {total} failures; only a named test can be rerun"
+        return f"ExUnit named {len(run.failures)} of {total} failures; only a named test can be rerun"
     unplaced = [f"{f.module} {f.name}" for f in run.failures if not f.path]
     if unplaced:
-        return {}, f"no test location for {', '.join(unplaced)}"
-    targets: dict[str, list[str]] = {}
-    for failure in run.failures:
-        targets.setdefault(failure.app, []).append(f"{failure.path}:{failure.line}")
-    return targets, ""
+        return f"no test location for {', '.join(unplaced)}"
+    return ""
 
 
-def check_rerun(app: str, expected: int, rerun: Run, code: int) -> str:
-    """Empty when the rerun proves the failures flaky, else why it does not."""
-    app_run = rerun.apps.get(app)
+def rerun_command(failure: Failure) -> list[str]:
+    """`mix test` of exactly this test: ExUnit tags every test with its full name."""
+    selector = f"test:{failure.kind} {failure.name}"
+    return ["mix", "test", "--warnings-as-errors", failure.path, "--only", selector]
+
+
+def check_rerun(failure: Failure, rerun: Run, code: int) -> str:
+    """Empty when the rerun executed this test and it passed, else why it proves nothing."""
+    test = f'{failure.module} {failure.kind} "{failure.name}"'
+    app_run = rerun.apps.get(failure.app)
     if code != 0:
-        return f"{app}: the rerun failed again (exit {code})"
+        return f"{test}: the rerun failed again (exit {code})"
     if app_run is None or app_run.ran is None:
-        return f"{app}: the rerun printed no ExUnit summary"
+        return f"{test}: the rerun printed no ExUnit summary"
     if app_run.failed:
-        return f"{app}: {app_run.failed} tests failed on the rerun"
-    if app_run.ran < expected:
-        return f"{app}: the rerun ran {app_run.ran} tests for {expected} failures"
+        return f"{test}: failed again on the rerun"
+    if app_run.ran == 0:
+        return f"{test}: did not run on the rerun (skipped, or no test has that name)"
     return ""
 
 
@@ -245,12 +254,12 @@ def run_teed(command: list[str], log: Path, on_line: Callable[[str], None] | Non
         return proc.wait()
 
 
-def retry_failures(targets: dict[str, list[str]], log: Path, runner: Runner) -> str:
-    for app, locations in sorted(targets.items()):
-        rerun_log = log.with_name(f"{log.stem}-rerun-{app}{log.suffix}")
-        print(f"\n== Rerunning the {len(locations)} failed test(s) in {app} once ==", flush=True)
-        code = runner(["mix", "test", "--warnings-as-errors", *locations], rerun_log)
-        reason = check_rerun(app, len(locations), parse_run(rerun_log.read_text(errors="replace"), app), code)
+def retry_failures(failures: list[Failure], log: Path, runner: Runner) -> str:
+    for number, failure in enumerate(failures, start=1):
+        rerun_log = log.with_name(f"{log.stem}-rerun-{number}{log.suffix}")
+        print(f"\n== Rerunning {failure.module} {failure.kind} \"{failure.name}\" once ==", flush=True)
+        code = runner(rerun_command(failure), rerun_log)
+        reason = check_rerun(failure, parse_run(rerun_log.read_text(errors="replace"), failure.app), code)
         if reason:
             return reason
     return ""
@@ -278,11 +287,11 @@ def main(argv: list[str], runner: Runner = run_teed) -> int:
     if code == 0:
         return 0
     first = parse_run(args.log.read_text(errors="replace"))
-    targets, refusal = plan_retry(first, args.max_flaky)
+    refusal = retry_refusal(first, args.max_flaky)
     if refusal:
         print(f"\nNot retried: {refusal}.", flush=True)
         return code
-    reason = retry_failures(targets, args.log, runner)
+    reason = retry_failures(first.failures, args.log, runner)
     if reason:
         print(f"\nNot flaky: {reason}.", flush=True)
         return 1

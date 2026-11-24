@@ -24,9 +24,10 @@ test LLM behaviour or single-call rules; ExUnit covers those.
 ## Run
 
 ```sh
-make -C tla check                       # every spec
+make -C tla check                       # every spec, reusing saved passes
 make -C tla check SPECS="turn_queue"    # one or more specs by name
-make -C tla report                      # check, then write tla/out/report.md for fixing findings
+make -C tla check-fresh                 # every check in TLC, ignoring saved passes
+make -C tla report                      # run in TLC, then write tla/out/report.md for fixing findings
 make -C tla list                        # every check, its expectation, stale specs (no Java)
 make -C tla repin SPECS="turn_queue"    # after committing and re-reading a stale spec (see below)
 make -C tla tests                       # the runner's own tests
@@ -35,6 +36,14 @@ make -C tla tests                       # the runner's own tests
 `tla/bin/check.py` takes the same arguments directly. Each check runs in
 under a minute. The exit status is 0 when everything is ok and nothing is stale, and 1
 otherwise.
+
+`make -C tla check` saves each passing verdict under
+`~/.cache/fermix/tla-verdicts/` and reuses it while the pinned tools, the runner,
+the spec and the check's config are unchanged. Editing a spec reruns its checks;
+editing a config reruns that check. A re-pin reruns nothing, because `SOURCE`
+lines are not part of what TLC explores, and staleness is still computed on every
+run. Only a passing result is saved. The `tla-nightly` workflow runs
+`check-fresh` on `dev` and opens an issue when it fails.
 
 ## Reading the results
 

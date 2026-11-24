@@ -3,16 +3,19 @@
 UV := uv run
 SPECS ?=
 
-.PHONY: help tests check report list repin
+.PHONY: help tests check check-fresh report list repin
 
 help:
-	@echo "targets: tests check report list repin   (SPECS=\"turn_queue ...\" to select)"
+	@echo "targets: tests check check-fresh report list repin   (SPECS=\"turn_queue ...\" to select)"
 
 tests:        ## the runner's own tests (no Java, no TLC)
 	$(UV) bin/test_check.py
 
-check:        ## run the specs; exit 1 on a FAIL or a stale spec
+check:        ## run the specs, reusing a saved pass where the spec and config are unchanged; exit 1 on a FAIL or a stale spec
 	$(UV) bin/check.py $(SPECS)
+
+check-fresh:  ## run every check in TLC, ignoring saved passes; a hosted runner gets a longer bound per check
+	$(UV) bin/check.py --fresh --timeout 600 $(SPECS)
 
 report:       ## check, then write out/report.md + out/report.json: each finding as code-referenced steps
 	$(UV) bin/check.py --report $(SPECS)

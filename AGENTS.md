@@ -20,7 +20,7 @@ Umbrella project; one BEAM VM, no HTTP bridge, everything OTP-supervised. Persis
 
 ## Execution Contract
 - Behavior change → write or update a failing test first.
-- Gates before done: build, tests, lint; say which don't apply. Never mark work done without proof.
+- Gates before done: build, tests, lint; say which don't apply. Never mark work done without proof. While working, run the tests you touched; before a push, run `scripts/dev/gate.py` once on the final tree. It runs every tree check CI runs, keeps the pass for that exact tree and names any flaky test, so never rerun the whole suite to reconfirm it.
 - A new gate, eval or check counts only once you have seen it fail on the broken case, in the world the work runs in.
 - Before you trust or report a measured number (an eval score, an error count, a latency), name what limits it and rule out that it counted something else: another run, a refusal or gate, skipped or cached work, code that never ran.
 - A break with the source unchanged (after a restart, rebuild or upgrade) is stale persisted state until shown otherwise: find the manifest, cache, config, keychain item or stored row before you read code.
@@ -36,9 +36,8 @@ Umbrella project; one BEAM VM, no HTTP bridge, everything OTP-supervised. Persis
 
 ```sh
 mix deps.get && mix compile
-mix test
-mix credo --strict
-mix format --check-formatted
+mix test <the test files you touched>  # while working
+scripts/dev/gate.py                    # once, on the final tree, before a push
 ```
 
 ## Code Rules (Non-Negotiable)

@@ -33,11 +33,18 @@ Every property a `holds` check proves must be covered by a `mechanism` check, so
 pass is vacuous. A check whose verdict matches prints `ok`; anything else prints
 `FAIL`. Full TLC output (counterexamples included) goes to `tla/out/<spec>/`.
 
+A passing verdict is saved under the cache directory, keyed on everything TLC's
+answer depends on: the pinned tools, this runner, the spec without its SOURCE
+pins, and the check's config. A later run reuses it while that key holds, so only
+an edited spec or config goes back through TLC. Only an `ok` is saved. Staleness
+never comes from a saved verdict: every run compares every pin.
+
 Usage:
     tla/bin/check.py [SPEC ...]         run every spec, or the named ones
+    tla/bin/check.py --fresh [SPEC ...] run every check in TLC, ignoring saved verdicts
     tla/bin/check.py --list [SPEC ...]  list checks and staleness (no Java)
     tla/bin/check.py --repin SPEC ...   re-pin SOURCE hashes after re-reading the code
-    tla/bin/check.py --report [SPEC ...] run, then write tla/out/report.md and report.json:
+    tla/bin/check.py --report [SPEC ...] run in TLC, then write tla/out/report.md and report.json:
                                         each finding's counterexample as code-referenced
                                         steps, for whoever fixes it
 
@@ -59,7 +66,7 @@ import sys
 import tempfile
 import time
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -73,7 +80,8 @@ DEFAULT_TIMEOUT_S = 120
 PIN_LENGTH = 12
 FINGERPRINT_INDEX = 0
 
-TLA_DIR = Path(__file__).resolve().parent.parent
+RUNNER = Path(__file__).resolve()
+TLA_DIR = RUNNER.parent.parent
 REPO_ROOT = TLA_DIR.parent
 SPECS_DIR = TLA_DIR / "specs"
 OUT_DIR = TLA_DIR / "out"
@@ -510,6 +518,58 @@ def require_java() -> str:
     return java
 
 
+def tlc_tools() -> tuple[str, Path]:
+    """The verified jar first, then Java: a tampered jar is refused before Java runs."""
+    jar = tools_jar()
+    return require_java(), jar
+
+
+def check_key(spec: Spec, check: Check) -> str:
+    """Everything a verdict depends on. SOURCE pins are left out: a re-pin records
+    that the spec was re-read and changes nothing TLC explores."""
+    digest = hashlib.sha256()
+    for part in (TOOLS_SHA256, RUNNER.read_text(), SOURCE_LINE.sub("", spec.tla.read_text()), check.cfg.read_text()):
+        digest.update(part.encode())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def verdict_path(check: Check) -> Path:
+    """One slot per check, so the cache never holds more files than there are checks."""
+    return cache_dir() / "tla-verdicts" / check.spec / f"{check.name}.json"
+
+
+def saved_verdict(spec: Spec, check: Check) -> Verdict | None:
+    """The passing verdict saved for exactly this spec text and config, if any."""
+    path = verdict_path(check)
+    if not path.exists():
+        return None
+    try:
+        saved = json.loads(path.read_text())
+        verdict = Verdict(**saved["verdict"])
+        key = saved["key"]
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise CheckError(f"{path} is unreadable ({error}); delete it and re-run") from error
+    return verdict if key == check_key(spec, check) else None
+
+
+def record_verdict(spec: Spec, check: Check, verdict: Verdict, ok: bool) -> None:
+    """Save a passing verdict atomically; a result that is not ok clears the slot."""
+    path = verdict_path(check)
+    if not ok:
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".part")
+    try:
+        with os.fdopen(fd, "w") as out:
+            json.dump({"key": check_key(spec, check), "verdict": asdict(verdict)}, out)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
 def run_tlc(java: str, jar: Path, spec: Spec, check: Check, timeout_s: int) -> tuple[Verdict, float]:
     """One TLC run in its own temporary directory: its metadir, and its own
     java.io.tmpdir, because TLC extracts its standard modules there and parallel
@@ -564,30 +624,47 @@ def list_checks(specs: list[Spec]) -> int:
     return 0
 
 
-def run_specs(specs: list[Spec], timeout_s: int, report: bool = False) -> int:
-    jar = tools_jar()
-    java = require_java()
+def run_specs(specs: list[Spec], timeout_s: int, report: bool = False, fresh: bool = False) -> int:
+    saved = {} if fresh else saved_verdicts(specs)
+    needs_tlc = any(check.cfg not in saved for spec in specs for check in spec.checks)
+    tools = tlc_tools() if needs_tlc else None
     runs = []
     for spec in specs:
         print(spec.name)
         stale = spec.stale()
         if stale:
             print_stale(spec, stale)
-        results = []
-        for check in spec.checks:
-            verdict, elapsed = run_tlc(java, jar, spec, check, timeout_s)
-            ok, message = judge(check, verdict)
-            results.append((check, verdict, ok, message))
-            print_result(spec, check, verdict, elapsed, ok, message)
+        results = [run_check(tools, spec, check, timeout_s, saved.get(check.cfg)) for check in spec.checks]
         runs.append((spec, stale, results))
     totals = run_totals(runs)
     print(
         f"\n{totals['checks']} checks: {totals['ok']} ok, {totals['fail']} FAIL; "
-        f"{totals['stale']} stale spec(s). Output: {OUT_DIR}"
+        f"{len(saved)} from saved verdicts; {totals['stale']} stale spec(s). Output: {OUT_DIR}"
     )
     if report:
         write_report(runs, totals)
     return 1 if totals["fail"] or totals["stale"] else 0
+
+
+def saved_verdicts(specs: list[Spec]) -> dict[Path, Verdict]:
+    found = ((check.cfg, saved_verdict(spec, check)) for spec in specs for check in spec.checks)
+    return {cfg: verdict for cfg, verdict in found if verdict is not None}
+
+
+def run_check(
+    tools: tuple[str, Path] | None, spec: Spec, check: Check, timeout_s: int, saved: Verdict | None
+) -> tuple[Check, Verdict, bool, str]:
+    """One check's result, from its saved verdict or from TLC."""
+    if saved is not None:
+        ok, message = judge(check, saved)
+        print_result(spec, check, saved, None, ok, message)
+        return check, saved, ok, message
+    assert tools is not None, check.name
+    verdict, elapsed = run_tlc(tools[0], tools[1], spec, check, timeout_s)
+    ok, message = judge(check, verdict)
+    record_verdict(spec, check, verdict, ok)
+    print_result(spec, check, verdict, elapsed, ok, message)
+    return check, verdict, ok, message
 
 
 def run_totals(runs: list) -> dict:
@@ -639,10 +716,11 @@ def check_report(spec: Spec, check: Check, verdict: Verdict, ok: bool, message: 
     }
 
 
-def print_result(spec: Spec, check: Check, verdict: Verdict, elapsed: float, ok: bool, message: str) -> None:
+def print_result(spec: Spec, check: Check, verdict: Verdict, elapsed: float | None, ok: bool, message: str) -> None:
     status = "ok  " if ok else "FAIL"
     states = f"{verdict.states} states" if verdict.states else ""
-    print(f"  {status} {check.name:<40} {label(check):<32} {states:>16} {elapsed:6.1f}s")
+    took = "saved" if elapsed is None else f"{elapsed:.1f}s"
+    print(f"  {status} {check.name:<40} {label(check):<32} {states:>16} {took:>7}")
     if not ok:
         print(f"       {message}")
         print(f"       output: {OUT_DIR / spec.name / (check.name + '.txt')}")
@@ -680,7 +758,8 @@ def main(argv: list[str]) -> int:
     mode.add_argument("--list", action="store_true", help="list checks and staleness without running")
     mode.add_argument("--repin", action="store_true", help="re-pin the named specs' SOURCE hashes")
     mode.add_argument("--report", action="store_true",
-                      help="run, then write tla/out/report.md and report.json for whoever fixes a finding")
+                      help="run in TLC, then write tla/out/report.md and report.json for whoever fixes a finding")
+    mode.add_argument("--fresh", action="store_true", help="run every check in TLC, ignoring saved verdicts")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_S, help="seconds per check")
     args = parser.parse_args(argv)
     try:
@@ -691,7 +770,7 @@ def main(argv: list[str]) -> int:
             return list_checks(specs)
         if args.repin:
             return repin(specs)
-        return run_specs(specs, args.timeout, report=args.report)
+        return run_specs(specs, args.timeout, report=args.report, fresh=args.report or args.fresh)
     except CheckError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2

@@ -151,7 +151,10 @@ class VerifyStandaloneTest(unittest.TestCase):
         result = self._run("macos_aarch64")
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("closed working directory: fermix: Fermix cannot start in ", result.stdout)
+        # macOS's /bin/sh reports the unreadable directory before the stand-in's first line.
+        self.assertRegex(
+            result.stdout, r"closed working directory: (?:shell-init: [^\n]*\n)?fermix: Fermix cannot start in "
+        )
 
     def test_rejects_unknown_target_before_running_artifact(self):
         marker = self.base / "ran"
@@ -1428,7 +1431,7 @@ class VerifyStandaloneTest(unittest.TestCase):
                 "  echo 'Crash dump is being written to: erl_crash.dump...' >&2\n"
                 "  exit 1\n"
             ),
-            "starts": "  :\n",
+            "starts": "  exit 0\n",
         }[closed_cwd]
         return f"if [ ! -x . ]; then\n{answer}fi\n"
 
