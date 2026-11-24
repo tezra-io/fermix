@@ -63,6 +63,11 @@
 (* at once); memory-source rows, telemetry, the start-up stagger and the   *)
 (* network-readiness wait. An owner edit is modelled as one that touches   *)
 (* none of the modelled columns (a task or delivery edit).                 *)
+(* Nor are a run's facts (M106 5.1): the runner's stamp of its first tool  *)
+(* start, one bounded Repo call from the watchdog loop inside the one loop *)
+(* step, and the row with the failure's kind and the tool timeline that    *)
+(* the settle writes beside the run row in its own transaction. Neither    *)
+(* moves a job or a run between the states here.                           *)
 (* The access gate is not modelled either. A run's access-sensitive tool   *)
 (* call that its job row does not name is refused inside the one loop      *)
 (* step, since a scheduled run never parks a call for the owner            *)
@@ -162,13 +167,13 @@
 (* reapReturn is where the Scheduler goes once its reaping is done: "arm"  *)
 (* after init, "scan" in the 60 s tick, "idle" after a DOWN.               *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/scheduler.ex @ 20d10b3192c1
-\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/runner.ex @ 6efd8ed2d84a
+\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/scheduler.ex @ 322f3855c9d8
+\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/runner.ex @ 339fd82ab17c
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/runner_supervisor.ex @ 6a21dfe6cfad
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/delivery.ex @ b1dd0422b409
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/registry.ex @ 09431e45a0f5
 \* SOURCE: apps/fermix_core/lib/fermix_core/delivery/channel_send.ex @ 9b06289e25ae
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,request_message,deadline_after,deadline_passed?,call_or_timeout_error,request_name,periodic_opts,claim_due_job,claim_job_now,claim_due_job_tx,claim_in_tx,claim_job_now_tx,transact_claim,fetch_claimable_due_job,finish_job_claim,rollback_job_claim,upsert_scheduled_job_row,upsert_job_run_row,ensure_no_active_job_run,fetch_claimable_job,settle_job_run,settle_job_run_tx,settle_job_run_in_tx,ensure_job_run_active,release_settled_job,finish_job_settle,rollback_job_settle,unsettled_job_runs,fetch_unsettled_job_runs,@unsettled_job_runs_sql,update_scheduled_job_fields,update_scheduled_job_fields_row,scheduled_job_field_assignments!,scheduled_job_field_assignment!,@owner_text_fields,due_scheduled_jobs,fetch_due_scheduled_jobs,next_scheduled_job,fetch_next_scheduled_job,upsert_job_run,upsert_scheduled_job,get_job_run,get_scheduled_job,upsert_memory @ 535d2ab5e652
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,request_message,deadline_after,deadline_passed?,call_or_timeout_error,request_name,periodic_opts,claim_due_job,claim_job_now,claim_due_job_tx,claim_in_tx,claim_job_now_tx,transact_claim,fetch_claimable_due_job,finish_job_claim,rollback_job_claim,upsert_scheduled_job_row,upsert_job_run_row,ensure_no_active_job_run,fetch_claimable_job,settle_job_run,settle_job_run_tx,settle_job_run_in_tx,ensure_job_run_active,release_settled_job,finish_job_settle,rollback_job_settle,unsettled_job_runs,fetch_unsettled_job_runs,@unsettled_job_runs_sql,update_scheduled_job_fields,update_scheduled_job_fields_row,scheduled_job_field_assignments!,scheduled_job_field_assignment!,@owner_text_fields,due_scheduled_jobs,fetch_due_scheduled_jobs,next_scheduled_job,fetch_next_scheduled_job,upsert_job_run,upsert_scheduled_job,get_job_run,get_scheduled_job,upsert_memory @ 1fa4e81a7d6a
 \* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,supervision_children,jobs_scheduler_opts @ 55d9a796413f
 \* SOURCE: apps/fermix_core/lib/fermix_core/timeouts.ex#expired,repo_call,@repo_call_ms @ 05d3e6ea2142
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/cue_admission.ex @ b98563b66ad5

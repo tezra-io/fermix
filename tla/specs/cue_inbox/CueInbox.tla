@@ -63,11 +63,11 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_sql.ex @ 5a1008301ef3
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_filter_sql.ex @ 319f777956cf
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_runs_sql.ex#@open_sql,@cap_room_sql,@eligible_sql,@candidates_sql,@eligible_delivery_sql,@settle_facts_sql,eligible_delivery,settle_delivery,settle_facts,settle_held,settle_move,unspent_retry,spent_retry,move_patch,untouched @ 03becc353f97
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_mandate_sql.ex#mark_tools_started,decide_propose,store_proposal,point_at_existing,decide_waiting,decided_or_why,decide_by_id,decided_by_id,end_denied,settle_proposal,expire_proposals @ 029c6975cee1
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_mandate_sql.ex#mark_tools_started,decide_propose,store_proposal,point_at_existing,decide_waiting,decided_or_why,decide_by_id,decided_by_id,end_denied,settle_proposal,expire_proposals @ 3cde2fd13edc
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/cue_admission.ex @ b98563b66ad5
-\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/scheduler.ex#init,handle_info,handle_cast,maybe_request_admission,request_admission,admit_cue_runs,free_cue_slots,cue_run_attrs,start_cue_run,reconcile_active_runs,reconcile_active_run,adopt_live_run,monitored_run?,reap_orphaned_run,live_runner_pids,put_live_runner,active_run_count,start_or_mark_failed,monitor_entry,mark_run_crashed,mark_run_failed,mark_run_error,fail_delivery_after_settle @ a7d895b46845
-\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/runner.ex#complete_run,mark_cue_completed,mark_failed @ 81415352eea2
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,request_message,deadline_after,deadline_passed?,call_or_timeout_error,periodic_opts,claim_cue_run,claim_cue_run_tx,claim_cue_run_in_tx,claim_delivery,claim_in_tx,fetch_claimable_job,ensure_no_active_job_run,settle_cue_run,settle_cue_run_tx,settle_cue_run_in_tx,active_run_trigger,release_cue_job,ensure_job_run_active,finish_job_settle,rollback_job_settle,upsert_job_run_row @ eada092e9175
+\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/scheduler.ex#init,handle_info,handle_cast,maybe_request_admission,request_admission,admit_cue_runs,free_cue_slots,cue_run_attrs,start_cue_run,reconcile_active_runs,reconcile_active_run,adopt_live_run,monitored_run?,reap_orphaned_run,live_runner_pids,put_live_runner,active_run_count,start_or_mark_failed,monitor_entry,mark_run_crashed,mark_run_failed,mark_run_error,fail_delivery_after_settle @ d57127259ecc
+\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/runner.ex#complete_run,mark_cue_completed,mark_failed @ cf06f66e4686
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,request_message,deadline_after,deadline_passed?,call_or_timeout_error,periodic_opts,claim_cue_run,claim_cue_run_tx,claim_cue_run_in_tx,claim_delivery,claim_in_tx,fetch_claimable_job,ensure_no_active_job_run,settle_cue_run,settle_cue_run_tx,settle_cue_run_in_tx,active_run_trigger,release_cue_job,ensure_job_run_active,finish_job_settle,rollback_job_settle,upsert_job_run_row @ 81e81369930e
 \* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,supervision_children,maybe_cues_supervisor @ 50220a45fd6a
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_follow_up_sql.ex#on_pass,trigger_pass,settle_taskless @ dccbfed103ed
 EXTENDS Naturals, Sequences, FiniteSets
@@ -235,6 +235,8 @@ VARIABLES
     rdel,       \* job_runs.cue_delivery_id
     nextRun,    \* the next run id
     acted,      \* job_runs.tools_started_at as the mandate gate wrote it
+                \* (the runner stamps a first tool start for every other
+                \* run, never for a cue run: runner.ex tools_started_stamp/1)
     prop,       \* cue_proposals.state ("none" before the proposal)
     propLive,   \* now < cue_proposals.expires_at
     \* Processes.
