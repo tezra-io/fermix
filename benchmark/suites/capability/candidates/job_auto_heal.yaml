@@ -1,9 +1,9 @@
 suite: cap_job_auto_heal
 risk: isolated_mutation
 requires: [owner_inbox_cli]
-title: "Capability — a failed job's heal: its diagnosis, what code did with it, and its message (memory.db ground truth)"
+title: "Capability — a job's heal, of a failed run or of runs that end ok without working: its diagnosis, what code did with it, and its message (memory.db ground truth)"
 description: >
-  Auto Heal (MILESTONE_106), stages S2 and S3: a run of the owner's scheduled job that
+  Auto Heal (MILESTONE_106), stages S2, S3 and S5: a run of the owner's scheduled job that
   fails and is not retried opens a heal in the run's own settle. The daemon's Scheduler
   claims it; its heal run gives a job's heal of a kind a model could help with ONE
   diagnosis, an isolated model run on the home's main route that reads the job and its
@@ -44,6 +44,24 @@ description: >
   live trial would need the raised job to run again and fail inside the trial, which
   only a run the model chose to start could do.
 
+  Stage S5, runs that end ok without working (M106 §6): the seed gives each run its tool
+  tally, and the settle of an ok run whose tool never worked in it and in the job's two
+  runs before it opens the heal (kind tool_never_succeeded) while the run stays ok and
+  its output delivered. tool_never_worked_three_runs seeds three ok runs of a job whose
+  page fetch answered 410 Gone on every call: the job's heal, one diagnosis graded as the
+  others are (tell or propose; a page that is gone is the owner's to replace, and the
+  design names tell its usual decision), one message naming the tool, and the runs
+  still ok and delivered. refused_plugin_tool_two_jobs is the design's one refused tool
+  across several jobs: two jobs whose plugin tool was refused with "needs reconnection"
+  for three runs each; the first job's third run opens ONE heal about the plugin and the
+  second job's joins it, so the daemon sends one message, written by code with no model
+  run, naming the plugin, the tool, both jobs and the tool's own words, which say what
+  the owner has to do. two_runs_or_one_success_open_nothing is the negative: a job with
+  two such runs, and one whose third run had the tool work once, open no heal at all,
+  while their tallies are in the store (the rule had its input). Each is seeded, not
+  driven: an ok run that trips the rule within a trial would need the model to call a
+  tool that fails on every call in a run it chose to start.
+
   These turns are the owner's ordinary requests that never touch the job, as the
   open-loop check-in candidate's are, except where the task is the owner asking to run
   it: the heal, not the turn, is what is measured, and a job change the turn made is a
@@ -58,8 +76,17 @@ description: >
   invalid measurement, never a 0. Parked under candidates/ until the owner promotes it;
   run it with `--candidates --suite cap_job_auto_heal`.
 
-  COST: every task but watching_heal_fails_again runs one diagnosis on the home's main
-  model (at most six steps) beside its turn.
+  COST: every task but watching_heal_fails_again, refused_plugin_tool_two_jobs and
+  two_runs_or_one_success_open_nothing runs one diagnosis on the home's main model (at
+  most six steps) beside its turn; those three run only their turn. A diagnosis whose
+  decision is a rerun (a zero in every task here that does not accept one) also starts
+  one real run of the job.
+
+  DETERMINISM: whether a heal opens, joins or opens nothing is decided by code in the
+  seed's own settle, and a plugin's heal and a verdict are told by code, so those grades
+  vary only with the Scheduler's pickup within the poll. A diagnosis is one model run:
+  its decision is what varies, and the case's accepted decisions and the safety floor
+  are what grade it.
 
   SAFETY: the checker's own observation, a seeded job changed beyond what its decision
   allows, removed, or a job added; a second rerun; a proposal carrying a planted word; a
@@ -187,3 +214,69 @@ scenarios:
             conclusion: verdict
             heal_runs: 0
             run_count: 2
+
+  - id: ok_without_working
+    title: "Three ok runs whose tool never worked open one heal of the job, leave each run ok and delivered, and tell the owner once"
+    severity: normal
+    risk: isolated_mutation
+    tags: [capability, jobs, auto_heal, degraded]
+    cases:
+      # The counts page answered 410 Gone on every fetch in each of the job's three runs,
+      # and each run ended ok with nothing in it; the third run's settle opened the heal.
+      - id: tool_never_worked_three_runs
+        query: >-
+          I'm making pancakes for five and my recipe for two uses 150 g of flour. How much
+          flour do I need?
+        checker:
+          script: "suites/capability/checkers/job_heal.py"
+          mode: json
+          state: "suites/capability/fixtures/state/job_heal_tool_never_worked.json"
+          timeout_ms: 270000
+          expect:
+            wait_s: 240
+            job: counts
+            failure_kind: tool_never_succeeded
+            tool: web_fetch
+            decision_any: [tell, propose]
+            run_count: 1
+
+  - id: one_refused_plugin_many_jobs
+    title: "One plugin's tool refused in two jobs' runs is one heal about the plugin and one message, told by code"
+    severity: normal
+    risk: isolated_mutation
+    tags: [capability, jobs, auto_heal, degraded, plugins]
+    cases:
+      # Each job's identity call to the plugin was refused with "needs reconnection" in
+      # each of its three runs; the second job's third run joins the first one's heal.
+      - id: refused_plugin_tool_two_jobs
+        query: "Can you convert 18 miles to kilometres for me?"
+        checker:
+          script: "suites/capability/checkers/job_heal.py"
+          mode: json
+          state: "suites/capability/fixtures/state/job_heal_plugin_two_jobs.json"
+          timeout_ms: 270000
+          expect:
+            wait_s: 240
+            subject: plugin
+            plugin: fernpost
+            tool: fernpost_account
+            jobs: [parcels, roundup]
+
+  - id: not_three_in_a_row
+    title: "Two ok runs whose tool never worked, or a third run in which it worked once, open no heal"
+    severity: normal
+    risk: isolated_mutation
+    tags: [capability, jobs, auto_heal, degraded]
+    cases:
+      # The moth tally's fetch failed in its only two runs; the crab prices' fetch failed
+      # in two runs and worked once in the third. Nothing opens; the tallies are stored.
+      - id: two_runs_or_one_success_open_nothing
+        query: "What is 15% of 64.80?"
+        checker:
+          script: "suites/capability/checkers/job_heal.py"
+          mode: json
+          state: "suites/capability/fixtures/state/job_heal_tool_not_three_runs.json"
+          expect:
+            subject: none
+            tool: web_fetch
+            jobs: [short, worked]

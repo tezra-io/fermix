@@ -3,11 +3,12 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
   The store's half of a heal (M106 §5.4): what Fermix keeps about a failure
   it took from a job's run, and the one message that tells the owner.
 
-  `job_heals` holds one heal per subject that is not closed (a job, or the
-  provider the failure lies with), and `job_heal_runs` the runs it took, which
-  "how often" and "which jobs" are counted from. Both are new tables read by
-  column name, never `SELECT *`; `job_runs`, `scheduled_jobs` and the facts
-  and retry tables are left as they were (`Home.Readable`).
+  `job_heals` holds one heal per subject that is not closed (a job, the
+  provider the failure lies with, or the plugin whose tool never worked), and
+  `job_heal_runs` the runs it took, which "how often" and "which jobs" are
+  counted from. Both are new tables read by column name, never `SELECT *`;
+  `job_runs`, `scheduled_jobs` and the facts and retry tables are left as
+  they were (`Home.Readable`).
 
   A heal is opened, joined or closed only inside a run's settle
   (`settle/5`, in `Memory.Repo`'s transaction), so a run's final row and what
@@ -37,8 +38,29 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
   reset, its failure the new one, and its concluding write closes it
   `still_failing`. A heal watching seven days closes `expired`, as a waiting
   one does.
+
+  A run that ended ok without working (M106 §6, stage S5) is taken at its
+  settle as a failure that is not retried is: a tool it called never once
+  succeeded in it, as in each of the job's two runs before it, read from the
+  runs' tool tallies (`Jobs.Degraded`). The heal's kind is
+  `tool_never_succeeded`, its words the tool's last error, and its `tool` (a
+  column migration 73 adds) the tool's name, its plugin and its failed calls
+  in each of the three runs. A plugin's tool makes the plugin the subject, so
+  every job one plugin refuses joins one heal. What an ok run proves: any
+  closes its provider's heal, since the model worked; one that does not trip
+  closes its job's heal, unless that heal is about a tool, which only that
+  tool succeeding closes; and any closes a plugin's heal whose own tool
+  succeeded in it. A run that never calls the tool proves nothing of such a
+  heal, which then ends by the seven-day expiry.
+
+  A stored tally or tool this engine cannot read (`Jobs.Degraded.readable_tally/1`)
+  reads as none and is logged by its row's id, never by its content: the
+  store, whose process runs the settle, never raises on one.
   """
 
+  require Logger
+
+  alias FermixCore.Jobs.Degraded
   alias FermixCore.Jobs.Failure
   alias FermixCore.Memory.Repo.CuesSql
 
@@ -61,8 +83,12 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
   # a run started, one was already running, it was refused (no run will
   # come), or it gave no clear answer (a run may still come).
   @rerun_outcomes ~w(started running refused unanswered)
+  # The kind of a heal about one tool that never worked (M106 §6), which only
+  # that tool succeeding in an ok run closes.
+  @degraded "tool_never_succeeded"
 
-  # The columns 71 made, and the ones 72 adds for the diagnosis (M106 §5.5).
+  # The columns 71 made, the ones 72 adds for the diagnosis (M106 §5.5), and
+  # the one 73 adds for a run that ended ok without working (§6).
   @columns_71 ~w(id subject_kind subject_id job_id failure_kind failure_text failure_words state
                  outcome run_count last_run_id last_failed_at opened_at updated_at waiting_since
                  closed_at lease_token lease_until message inbox_platform inbox_destination
@@ -70,8 +96,10 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
                  last_delivery_error delivered_at)
   @diagnosis_columns ~w(conclusion decision note read_outside change_json change_job_version
                         rerun_at rerun_outcome)
-  @fields Enum.map(@columns_71 ++ @diagnosis_columns, &String.to_atom/1)
-  @select "SELECT #{Enum.join(@columns_71 ++ @diagnosis_columns, ", ")} FROM job_heals"
+  @tool_columns ~w(tool_json)
+  @columns @columns_71 ++ @diagnosis_columns ++ @tool_columns
+  @fields Enum.map(@columns, &String.to_atom/1)
+  @select "SELECT #{Enum.join(@columns, ", ")} FROM job_heals"
   @stamped ~w(last_failed_at opened_at updated_at waiting_since closed_at lease_until
               next_delivery_at delivered_at change_job_version rerun_at)a
 
@@ -180,26 +208,57 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
   def schema_sql, do: @schema_sql
 
   @doc """
+  The column migration 73 adds to `job_heals` for the tool a heal of a run
+  that ended ok without working is about (M106 §6), as `diagnosis_columns/0`
+  adds 72's: added while the table holds 72's columns, nothing while it holds
+  them and it, refused for any other set.
+  """
+  @spec tool_columns() :: %{before: [String.t()], after: [String.t()], sql: String.t()}
+  def tool_columns,
+    do: %{
+      before: @columns_71 ++ @diagnosis_columns,
+      after: @columns,
+      sql: "ALTER TABLE job_heals ADD COLUMN tool_json TEXT;"
+    }
+
+  @doc """
   The columns migration 72 adds to `job_heals` for the diagnosis (M106 §5.5,
   §5.9), as `Memory.Repo` adds columns: added while the table holds 71's
-  columns, nothing while it holds both, refused for any other set.
+  columns, nothing while it holds both or what 73 made of them, refused for
+  any other set.
   """
-  @spec diagnosis_columns() :: %{before: [String.t()], after: [String.t()], sql: String.t()}
+  @spec diagnosis_columns() :: %{
+          before: [String.t()],
+          after: [String.t()],
+          later: [[String.t()]],
+          sql: String.t()
+        }
   def diagnosis_columns,
-    do: %{before: @columns_71, after: @columns_71 ++ @diagnosis_columns, sql: @diagnosis_sql}
+    do: %{
+      before: @columns_71,
+      after: @columns_71 ++ @diagnosis_columns,
+      later: [@columns],
+      sql: @diagnosis_sql
+    }
 
   @doc """
   What `run`'s settle does to the heals, after its retry was decided, on the
-  settle's connection and inside its transaction. An ok run closes its job's
-  heal and the heal of the provider it ran on (`facts.provider`) as healed.
-  A failed run that is not retried opens a heal for its subject, joins the
-  one not closed, or is quiet; a guest's job is out of scope. Returns the
-  settlement with `heal` and `healed` (the ids an ok run closed) added.
+  settle's connection and inside its transaction. An ok run of an operator's
+  job is first read for the trigger of a run that ended ok without working
+  (`Jobs.Degraded`, M106 §6). One that does not trip it closes as healed its
+  job's heal, the heal of the provider it ran on (`facts.provider`) and the
+  heal of each plugin a tool of which succeeded in it. One that trips it
+  closes the provider's heal only, and is taken as a failed run that is not
+  retried is: it opens a heal for its subject, joins the one not closed,
+  concludes a watching one, or is quiet. A guest's job is out of scope.
+  Returns the settlement with `heal` and `healed` (the ids an ok run closed)
+  added, and for a failure taken its `failure_kind`, `subject_kind` and
+  `subject_id`.
   """
   @spec settle(conn(), map(), map(), map(), map()) :: {:ok, map()} | {:error, term()}
   def settle(conn, job, %{status: "ok"} = run, settlement, facts) do
-    with {:ok, healed} <- close_healed(conn, job.id, Map.get(facts, :provider), run.completed_at) do
-      {:ok, Map.merge(settlement, %{heal: :none, healed: healed})}
+    with {:ok, trip} <- degraded(conn, job, run) do
+      settle_ok(conn, job, run, settlement, Map.get(facts, :provider), trip)
     end
   end
 
@@ -213,8 +272,36 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
   def settle(conn, job, run, settlement, facts) do
     subject = subject(run.failure_kind, Map.get(facts, :provider), job.id)
 
-    with {:ok, heal} <- take_failure(conn, subject, job, run, facts) do
-      {:ok, Map.merge(settlement, %{heal: heal, healed: []})}
+    failure = %{
+      kind: run.failure_kind,
+      text: facts.failure_text,
+      words: Map.get(facts, :failure_words),
+      tool: nil
+    }
+
+    with {:ok, heal} <- take_failure(conn, subject, job, run, failure) do
+      {:ok, Map.merge(settlement, taken(heal, [], failure, subject))}
+    end
+  end
+
+  @doc """
+  A run's stored tool tally as the store reads it (M106 §6): the tally, or
+  nil for none or for one this engine cannot read
+  (`Jobs.Degraded.readable_tally/1`), which is logged by the run's id and
+  never by its content, and breaks the trigger's streak.
+  """
+  @spec run_tally(String.t(), String.t() | nil) :: [Degraded.entry()] | nil
+  def run_tally(run_id, json) when is_binary(run_id) do
+    case Degraded.readable_tally(json) do
+      {:ok, tally} ->
+        tally
+
+      :unreadable ->
+        Logger.warning(
+          "Job run #{run_id}: its tool tally could not be read, so it counts as none"
+        )
+
+        nil
     end
   end
 
@@ -301,6 +388,115 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
 
   # --- the settle ------------------------------------------------------------
 
+  # A guest's job is out of the heal's scope: its ok run is never read for the
+  # trigger, and closes heals as any ok run that does not trip it does.
+  defp degraded(_conn, %{created_by_trust: trust}, _run) when trust != "operator",
+    do: {:ok, :none}
+
+  defp degraded(conn, job, run) do
+    with {:ok, earlier} <- earlier_tallies(conn, job.id, run.id) do
+      {:ok, Degraded.decide([run.tool_tally | earlier])}
+    end
+  end
+
+  # The tallies of the job's runs settled before this one, newest first, as
+  # many as the trigger reads with this one: any trigger and any final status,
+  # a cue run never (§13). A run with no facts row, or one written before
+  # tallies were kept, reads as nil, which breaks the streak.
+  defp earlier_tallies(conn, job_id, run_id) do
+    sql = """
+    SELECT r.id, f.tool_tally_json
+    FROM job_runs r LEFT JOIN job_run_facts f ON f.run_id = r.id
+    WHERE r.job_id = ? AND r.id <> ? AND r.trigger <> 'cue'
+      AND r.status IN ('ok', 'error', 'timeout')
+    ORDER BY r.created_at DESC, r.id DESC
+    LIMIT ?
+    """
+
+    with {:ok, rows} <- CuesSql.query_all(conn, sql, [job_id, run_id, Degraded.runs() - 1]) do
+      {:ok, Enum.map(rows, fn [id, json] -> run_tally(id, json) end)}
+    end
+  end
+
+  # A run that does not trip the trigger may prove its job's heal.
+  defp settle_ok(conn, job, run, settlement, provider, :none) do
+    with {:ok, healed} <- close_proven(conn, job.id, provider, run) do
+      {:ok, Map.merge(settlement, %{heal: :none, healed: healed})}
+    end
+  end
+
+  # One that trips it never proves its job's, and its tool's failure is taken.
+  defp settle_ok(conn, job, run, settlement, provider, {:tool, tool}) do
+    subject = tool_subject(tool, job.id)
+    failure = tool_failure(tool)
+
+    with {:ok, healed} <- close_proven(conn, nil, provider, run),
+         {:ok, heal} <- take_failure(conn, subject, job, run, failure) do
+      {:ok, Map.merge(settlement, taken(heal, healed, failure, subject))}
+    end
+  end
+
+  # The heals not closed that an ok run proves, closed as healed: its
+  # provider's; its job's (when it may prove it), but one about a tool only if
+  # that tool worked in it; each plugin's whose own tool worked in it.
+  defp close_proven(conn, job_id, provider, run) do
+    subjects = [{"job", job_id}, {"provider", provider}] ++ plugins_worked(run.tool_tally)
+
+    with {:ok, heals} <- open_for(conn, subjects) do
+      proven = for heal <- heals, proves?(heal, run.tool_tally), do: heal.id
+      close_ids(conn, proven, run.completed_at)
+    end
+  end
+
+  # The plugins a tool of which worked in the run: only their heals can be
+  # about a tool that did.
+  defp plugins_worked(nil), do: []
+
+  defp plugins_worked(tally) when is_list(tally) do
+    for %{"plugin" => plugin, "ok" => ok} <- tally,
+        is_binary(plugin) and ok > 0,
+        uniq: true,
+        do: {"plugin", plugin}
+  end
+
+  defp proves?(%{subject_kind: "provider"}, _tally), do: true
+
+  defp proves?(%{subject_kind: "job", failure_kind: kind}, _tally) when kind != @degraded,
+    do: true
+
+  defp proves?(%{tool: %{"name" => name}}, tally), do: Degraded.worked?(tally, name)
+  defp proves?(_heal_with_no_readable_tool, _tally), do: false
+
+  # A plugin's tool makes the plugin the subject (§5.4); any other, the job.
+  defp tool_subject(%{plugin: plugin}, _job_id) when is_binary(plugin) and plugin != "",
+    do: {"plugin", plugin, nil}
+
+  defp tool_subject(_tool, job_id), do: {"job", job_id, job_id}
+
+  # Fermix's sentence for the kind, the tool's own last words, and the tool:
+  # its name, its plugin and its failed calls in each run, newest first.
+  defp tool_failure(tool) do
+    fact = %{"name" => tool.name, "failed_calls" => tool.failed_calls}
+    fact = if tool.plugin, do: Map.put(fact, "plugin", tool.plugin), else: fact
+
+    %{
+      kind: Failure.stored(:tool_never_succeeded),
+      text: Failure.sentence(:tool_never_succeeded),
+      words: tool.last_error,
+      tool: fact
+    }
+  end
+
+  defp taken(heal, healed, failure, {subject_kind, subject_id, _job_id}) do
+    %{
+      heal: heal,
+      healed: healed,
+      failure_kind: failure.kind,
+      subject_kind: subject_kind,
+      subject_id: subject_id
+    }
+  end
+
   # A failure no model run can help with is its provider's, when one is named;
   # every other failure, and a provider's with no provider to name, is its job's.
   defp subject(kind, provider, job_id) when is_binary(kind) do
@@ -311,10 +507,10 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
 
   # A failure that finds its subject's heal watching a move Fermix made
   # concludes it a second time (§5.9); any other not closed takes it in.
-  defp take_failure(conn, {kind, id, _job_id} = subject, job, run, facts) do
+  defp take_failure(conn, {kind, id, _job_id} = subject, job, run, failure) do
     case not_closed(conn, kind, id) do
-      {:ok, nil} -> open_or_quiet(conn, subject, job, run, facts)
-      {:ok, {heal_id, "watching"}} -> verdict(conn, heal_id, job, run, facts)
+      {:ok, nil} -> open_or_quiet(conn, subject, job, run, failure)
+      {:ok, {heal_id, "watching"}} -> verdict(conn, heal_id, job, run, failure)
       {:ok, {heal_id, _state}} -> join(conn, heal_id, job, run)
       {:error, reason} -> {:error, reason}
     end
@@ -336,23 +532,24 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
   # its failure the one that just happened and its outbox as new, so the
   # same claim, lease and send tell the owner once more. The inbox it chose
   # stays.
-  defp verdict(conn, heal_id, job, run, facts) do
+  defp verdict(conn, heal_id, job, run, failure) do
     sql = """
     UPDATE job_heals
     SET state = 'open', conclusion = 'verdict', failure_kind = ?, failure_text = ?,
-        failure_words = ?, run_count = run_count + 1, last_run_id = ?, last_failed_at = ?,
-        updated_at = ?, waiting_since = NULL, message = NULL, delivery_status = 'pending',
-        delivery_attempts = 0, next_delivery_at = NULL, last_delivery_error = NULL,
-        delivered_at = NULL
+        failure_words = ?, tool_json = ?, run_count = run_count + 1, last_run_id = ?,
+        last_failed_at = ?, updated_at = ?, waiting_since = NULL, message = NULL,
+        delivery_status = 'pending', delivery_attempts = 0, next_delivery_at = NULL,
+        last_delivery_error = NULL, delivered_at = NULL
     WHERE id = ? AND state = 'watching'
     """
 
     stamp = CuesSql.stamp(run.completed_at)
 
     params = [
-      run.failure_kind,
-      bounded(facts.failure_text, @failure_text_max),
-      bounded(Map.get(facts, :failure_words), @failure_words_max),
+      failure.kind,
+      bounded(failure.text, @failure_text_max),
+      bounded(failure.words, @failure_words_max),
+      encode_json(failure.tool),
       run.id,
       stamp,
       stamp,
@@ -380,10 +577,10 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
     end
   end
 
-  defp open_or_quiet(conn, {kind, id, _job_id} = subject, job, run, facts) do
-    case quiet?(conn, kind, id, run.failure_kind, run.completed_at) do
+  defp open_or_quiet(conn, {kind, id, _job_id} = subject, job, run, failure) do
+    case quiet?(conn, kind, id, failure.kind, run.completed_at) do
       {:ok, true} -> {:ok, :quiet}
-      {:ok, false} -> open(conn, subject, job, run, facts)
+      {:ok, false} -> open(conn, subject, job, run, failure)
       {:error, reason} -> {:error, reason}
     end
   end
@@ -403,16 +600,16 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
     with {:ok, rows} <- CuesSql.query_all(conn, sql, params), do: {:ok, rows != []}
   end
 
-  defp open(conn, {kind, id, job_id}, job, run, facts) do
+  defp open(conn, {kind, id, job_id}, job, run, failure) do
     heal_id = "jhl_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
     stamp = CuesSql.stamp(run.completed_at)
 
     sql = """
     INSERT INTO job_heals (
-      id, subject_kind, subject_id, job_id, failure_kind, failure_text, failure_words, state,
-      run_count, last_run_id, last_failed_at, opened_at, updated_at, delivery_status,
-      delivery_attempts
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', 1, ?, ?, ?, ?, 'pending', 0)
+      id, subject_kind, subject_id, job_id, failure_kind, failure_text, failure_words,
+      tool_json, state, run_count, last_run_id, last_failed_at, opened_at, updated_at,
+      delivery_status, delivery_attempts
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', 1, ?, ?, ?, ?, 'pending', 0)
     """
 
     params = [
@@ -420,9 +617,10 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
       kind,
       id,
       job_id,
-      run.failure_kind,
-      bounded(facts.failure_text, @failure_text_max),
-      bounded(Map.get(facts, :failure_words), @failure_words_max),
+      failure.kind,
+      bounded(failure.text, @failure_text_max),
+      bounded(failure.words, @failure_words_max),
+      encode_json(failure.tool),
       run.id,
       stamp,
       stamp,
@@ -440,18 +638,43 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
     CuesSql.execute(conn, sql, [run.id, heal_id, job.id])
   end
 
-  defp close_healed(conn, job_id, provider, %DateTime{} = at) do
-    where = """
-    state <> 'closed'
-      AND ((subject_kind = 'job' AND subject_id = ?) OR (subject_kind = 'provider' AND subject_id = ?))
-    """
-
-    params = [job_id, provider || ""]
-
-    with {:ok, rows} <- CuesSql.query_all(conn, "SELECT id FROM job_heals WHERE #{where}", params),
-         :ok <- close_rows(conn, where, params, "healed", at, rows) do
-      {:ok, List.flatten(rows)}
+  # The heals not closed of these subjects, with their kind and tool. A
+  # subject with no id (a run that named no provider) has none.
+  defp open_for(conn, subjects) do
+    case for({kind, id} <- subjects, is_binary(id) and id != "", do: {kind, id}) do
+      [] -> {:ok, []}
+      named -> query_open_for(conn, named)
     end
+  end
+
+  defp query_open_for(conn, subjects) do
+    any =
+      Enum.map_join(subjects, " OR ", fn _subject -> "(subject_kind = ? AND subject_id = ?)" end)
+
+    sql =
+      "SELECT id, subject_kind, failure_kind, tool_json FROM job_heals " <>
+        "WHERE state <> 'closed' AND (#{any})"
+
+    params = Enum.flat_map(subjects, fn {kind, id} -> [kind, id] end)
+
+    with {:ok, rows} <- CuesSql.query_all(conn, sql, params) do
+      {:ok,
+       Enum.map(rows, fn [id, kind, failure_kind, tool_json] ->
+         %{
+           id: id,
+           subject_kind: kind,
+           failure_kind: failure_kind,
+           tool: decode_tool(id, tool_json)
+         }
+       end)}
+    end
+  end
+
+  defp close_ids(_conn, [], _at), do: {:ok, []}
+
+  defp close_ids(conn, ids, %DateTime{} = at) do
+    where = "state <> 'closed' AND id IN (#{placeholders(ids)})"
+    with :ok <- close_rows(conn, where, ids, "healed", at, ids), do: {:ok, ids}
   end
 
   defp close_rows(_conn, _where, _params, _outcome, _at, []), do: :ok
@@ -652,7 +875,7 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
     sql = """
     SELECT DISTINCT r.job_id, h.id, h.state, h.subject_kind, h.subject_id, h.failure_kind,
            h.opened_at, h.run_count, h.delivery_status, h.decision, h.note, h.change_json,
-           h.rerun_outcome
+           h.rerun_outcome, h.tool_json
     FROM job_heals h JOIN job_heal_runs r ON r.heal_id = h.id
     WHERE h.state <> 'closed'
     ORDER BY h.opened_at DESC, h.id
@@ -664,8 +887,8 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
   end
 
   defp put_job_heal([job_id | row], acc) do
-    [id, state, kind, subject, failure, opened, count, delivery, decision, note, change, rerun] =
-      row
+    [id, state, kind, subject, failure, opened, count, delivery | diagnosis] = row
+    [decision, note, change, rerun, tool] = diagnosis
 
     summary = %{
       id: id,
@@ -679,7 +902,8 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
       decision: decision,
       note: note,
       change: decode_change(change),
-      rerun_outcome: rerun
+      rerun_outcome: rerun,
+      tool: decode_tool(id, tool)
     }
 
     Map.put_new(acc, job_id, summary)
@@ -710,7 +934,8 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
          conclusion: heal.conclusion,
          decision: heal.decision,
          note: heal.note,
-         change: heal.change
+         change: heal.change,
+         tool: heal.tool
        }}
     end
   end
@@ -733,7 +958,8 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
     end
   end
 
-  # How many of the job's last runs ended as the heal's did.
+  # How many of the job's last runs ended as the heal's did. A run that ended
+  # ok without working has no kind on its row, so it is never counted here.
   defp recent(_conn, %{job_id: nil}), do: {:ok, nil}
 
   defp recent(conn, heal) do
@@ -751,8 +977,8 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
     end
   end
 
-  # The jobs whose runs a provider's heal took, most runs first, and how many
-  # jobs that is in all.
+  # The jobs whose runs a provider's or a plugin's heal took, most runs first,
+  # and how many jobs that is in all.
   defp heal_jobs(_conn, %{subject_kind: "job"}), do: {:ok, [], 1}
 
   defp heal_jobs(conn, heal) do
@@ -776,8 +1002,8 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
 
   # --- rows --------------------------------------------------------------------
 
-  # The stored change is read back decoded, as `change`, and what the run
-  # read as a boolean (nil before any diagnosis).
+  # The stored change and tool are read back decoded, as `change` and `tool`,
+  # and what the run read as a boolean (nil before any diagnosis).
   defp heal_row(row) do
     heal =
       @fields
@@ -788,14 +1014,36 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
       end)
 
     {change_json, heal} = Map.pop(heal, :change_json)
+    {tool_json, heal} = Map.pop(heal, :tool_json)
 
     heal
     |> Map.put(:change, decode_change(change_json))
+    |> Map.put(:tool, decode_tool(heal.id, tool_json))
     |> Map.update!(:read_outside, &read_flag/1)
   end
 
   defp decode_change(nil), do: nil
   defp decode_change(json) when is_binary(json), do: Jason.decode!(json)
+
+  # The tool a heal is about, as `tool_failure/1` wrote it: its name, its
+  # failed calls per run and any plugin. One this engine cannot read (a later
+  # engine's shape, a damaged row) reads as none, logged by the heal's id.
+  defp decode_tool(_heal_id, nil), do: nil
+
+  defp decode_tool(heal_id, json) when is_binary(json) do
+    case Jason.decode(json) do
+      {:ok, %{"name" => name, "failed_calls" => calls} = tool}
+      when is_binary(name) and is_list(calls) ->
+        tool
+
+      _unreadable ->
+        Logger.warning("Job heal #{heal_id}: its tool could not be read, so it names none")
+        nil
+    end
+  end
+
+  defp encode_json(nil), do: nil
+  defp encode_json(value) when is_map(value), do: Jason.encode!(value)
 
   defp read_flag(nil), do: nil
   defp read_flag(1), do: true

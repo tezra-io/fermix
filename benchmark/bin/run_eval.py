@@ -2392,14 +2392,18 @@ def seed_case_state(cfg, suite, case) -> tuple[dict | None, str | None]:
 
 def unsent_seeded_heals(db_path: str, job_ids: list[str]) -> list[str]:
     """The heals of the seeded jobs still `open` or `diagnosing`: their message is not
-    sent yet. Read-only: the runner never writes the store it grades."""
+    sent yet. A job's own heal, and a plugin's (M106 §6), which has no job of its own and
+    is found by the seeded runs it took. Read-only: the runner never writes the store it
+    grades."""
     if not job_ids:
         return []
     marks = ", ".join("?" for _id in job_ids)
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
     try:
-        rows = conn.execute(f"SELECT id FROM job_heals WHERE job_id IN ({marks}) "
-                            "AND state IN ('open', 'diagnosing') ORDER BY id", job_ids)
+        rows = conn.execute(f"SELECT id FROM job_heals WHERE state IN ('open', 'diagnosing') "
+                            f"AND (job_id IN ({marks}) OR id IN (SELECT heal_id FROM "
+                            f"job_heal_runs WHERE job_id IN ({marks}))) ORDER BY id",
+                            [*job_ids, *job_ids])
         return [row[0] for row in rows]
     finally:
         conn.close()

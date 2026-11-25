@@ -441,7 +441,8 @@ the `query` shorthand; multi-turn uses `turns`.
   seeded failed run of the owner's job opens a heal (M106), which the daemon claims
   on its next pass, diagnoses (one model run on the home's main route) and sends,
   unless the spec seeded its conclusion (a run's `heal`, see *`checker.state`*): the
-  runner then waits, read-only and at most 240 s, until no heal of a seeded job is
+  runner then waits, read-only and at most 240 s, until no heal of a seeded job (its
+  own, or a plugin's that took one of its runs) is
   `open` or `diagnosing`, so the record says the owner was told. A behavioral spec
   should seed the conclusion: the case then asks of a record that is the same on every
   attempt, and no diagnosis spends a model run during it. A seed that fails ends the
@@ -1017,8 +1018,17 @@ A run may also say (M106 §5.1, §5.5):
 - `failure_kind` — a `Jobs.Failure` kind for a failed run (`other` when absent);
 - `tool_timeline` — the runner's entries, `{"name", "duration_ms", "status": ok |
   error | unfinished, "plugin"?}`, oldest first, which a diagnosis reads;
+- `tool_tally` (M106 §6) — the runner's whole-run tally, one entry per tool,
+  `{"name", "ok", "error", "unfinished", "plugin"?, "last_error"?}` with whole-number
+  counts that are not all 0, which goes through the same settle: an ok run whose tool
+  never worked in it (no `ok`, some `error`) nor in the job's two runs before it opens
+  a heal of kind `tool_never_succeeded` and stays ok, its delivery `delivered`; a
+  plugin's tool makes it the plugin's heal, with no job of its own, which another job's
+  tripping run joins. A tally the engine could not read would count as none and trip
+  nothing, so a malformed one is refused;
 - `trigger` — `schedule` (the default) or `manual`;
-- `heal` (a failed run only) — the conclusion its heal run would have reached,
+- `heal` (a failed run, or an ok run that opens its job's heal by its tally) — the
+  conclusion its heal run would have reached,
   `{"decision": rerun | raise_limit | propose | tell, "note", "change"?,
   "read_outside"?, "rerun_outcome"?, "delivered_hours_ago"}`, made through the Repo's
   own heal calls (the claim, the inbox, the decision, the message `Jobs.HealMessage`
@@ -1033,11 +1043,15 @@ A run may also say (M106 §5.1, §5.5):
   with the job's `timeout_seconds` already `to` (at most the engine's run limit); a
   `propose` change names `task`, `schedule`, `skill_name` or `timeout_seconds`, each
   `{"from", "to"}`, with the job still holding `from`; `rerun` and `tell` carry
-  none. A seeded pause is not offered (every seeded job is enabled). The conclusion's
+  none. A seeded pause is not offered (every seeded job is enabled), nor is a plugin's
+  heal concluded (code tells it, with no decision). The conclusion's
   time falls after its run ended and before the next run began. A spec that concludes
-  a heal gives only one job failed runs (the claim takes the oldest open heal), and
-  needs the local owner inbox (`--owner-inbox-cli`). All of it is checked before the
-  reset, so a refused spec leaves the home as it was.
+  a heal gives only one job runs that open one, failed or ending ok without working
+  (the claim takes the oldest open heal), and needs the local owner inbox
+  (`--owner-inbox-cli`). A job's runs are listed oldest first, `hours_ago` and
+  `duration_seconds` whole numbers, so the runs before one in the spec are the runs its
+  settle reads. All of it is checked before the reset, so a refused spec leaves the
+  home as it was.
 
 Reminder dates are absolute: a weekday or "tomorrow" computed from the run date
 means something different on a Friday than on a Monday. The checker reads the

@@ -1,0 +1,85 @@
+{
+  "jobs": [
+    {
+      "key": "river",
+      "name": "Coldharbour river level digest",
+      "description": "This morning's river level at the Coldharbour gauge",
+      "schedule": "15 6 * * *",
+      "task_prompt": "Fetch today's reading for the Coldharbour gauge from rivers.coldharbour.example/gauge/14 and send me the river level and whether it is rising.",
+      "timeout_seconds": 300,
+      "runs": [
+        {
+          "hours_ago": 99,
+          "duration_seconds": 24,
+          "status": "ok",
+          "final_response": "Coldharbour gauge this morning: 1.42 m, rising slowly.",
+          "tool_timeline": [
+            {"name": "web_fetch", "duration_ms": 1700, "status": "ok"}
+          ],
+          "tool_tally": [
+            {"name": "web_fetch", "ok": 1, "error": 0, "unfinished": 0}
+          ]
+        },
+        {
+          "hours_ago": 75,
+          "duration_seconds": 22,
+          "status": "ok",
+          "final_response": "Coldharbour gauge this morning: 1.38 m, steady.",
+          "tool_timeline": [
+            {"name": "web_fetch", "duration_ms": 1600, "status": "ok"}
+          ],
+          "tool_tally": [
+            {"name": "web_fetch", "ok": 1, "error": 0, "unfinished": 0}
+          ]
+        },
+        {
+          "hours_ago": 51,
+          "duration_seconds": 29,
+          "status": "ok",
+          "final_response": "Coldharbour river level: no reading available today.",
+          "tool_timeline": [
+            {"name": "web_fetch", "duration_ms": 1400, "status": "error"},
+            {"name": "web_fetch", "duration_ms": 1300, "status": "error"}
+          ],
+          "tool_tally": [
+            {"name": "web_fetch", "ok": 0, "error": 2, "unfinished": 0,
+             "last_error": "HTTP 404 Not Found: rivers.coldharbour.example/gauge/14"}
+          ]
+        },
+        {
+          "hours_ago": 27,
+          "duration_seconds": 27,
+          "status": "ok",
+          "final_response": "Coldharbour river level: no reading available today.",
+          "tool_timeline": [
+            {"name": "web_fetch", "duration_ms": 1500, "status": "error"},
+            {"name": "web_fetch", "duration_ms": 1200, "status": "error"}
+          ],
+          "tool_tally": [
+            {"name": "web_fetch", "ok": 0, "error": 2, "unfinished": 0,
+             "last_error": "HTTP 404 Not Found: rivers.coldharbour.example/gauge/14"}
+          ]
+        },
+        {
+          "hours_ago": 3,
+          "duration_seconds": 28,
+          "status": "ok",
+          "final_response": "Coldharbour river level: no reading available today.",
+          "tool_timeline": [
+            {"name": "web_fetch", "duration_ms": 1400, "status": "error"},
+            {"name": "web_fetch", "duration_ms": 1300, "status": "error"}
+          ],
+          "tool_tally": [
+            {"name": "web_fetch", "ok": 0, "error": 2, "unfinished": 0,
+             "last_error": "HTTP 404 Not Found: rivers.coldharbour.example/gauge/14"}
+          ],
+          "heal": {
+            "decision": "tell",
+            "note": "The gauge page answers 404 Not Found on every fetch, so each run finishes without a reading; the page has likely moved, and only the owner can say where it went.",
+            "delivered_hours_ago": 2
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -870,8 +870,9 @@ one, otherwise the job. It joins the subject's heal that is not closed, or opens
 none when one for the same subject and kind closed still failing, skipped or
 expired within 7 days; `job_heal_runs` links every run a heal took. An ok run
 closes its job's heal and the heal of the provider that answered it (the loop
-result's `provider`). A guest's job and a cue run keep their failure line; for
-every other failure the runner sends nothing and marks the delivery `skipped`.
+result's `provider`), unless it ended without working (below). A guest's job
+and a cue run keep their failure line; for every other failure the runner
+sends nothing and marks the delivery `skipped`.
 `Jobs.HealRun` tells the owner: the Scheduler claims the oldest due heal under a
 lease after its due scan on every due and reconcile tick and when a run or a
 heal run ends, and starts its run under `Jobs.RunnerSupervisor`, one at a time,
@@ -881,6 +882,34 @@ monitored and never waited on. The run resolves the owner's inbox once
 `job_heal:<id>`, and on a failed send backs off by the harness ladder, a dead
 letter after 20 attempts, a day, or an error no wait clears. The reconcile pass
 closes a heal waiting 7 days as `expired`, and removing a job takes its heal.
+
+A run that ends ok without working is taken the same way (M106 §6). The
+runner's watchdog keeps a tool tally for the whole run, stored with the run's
+facts (`job_run_facts.tool_tally_json`): each tool the run was offered and
+called (at most 64), its calls that succeeded, failed or never finished, its
+plugin, and its last error's own words, which AgentLoop puts on a failed
+call's `:tool_finish`, unframed and cut to 500 characters, only because the
+runner sets `activity_error_chars`, which it never does for a cue run. A call
+to a name the run was not offered is the model's words: the timeline records
+it as `(no such tool)` and the tally never counts it. A stored tally this
+engine cannot read (`Jobs.Degraded.readable_tally/1`) reads as none and is
+logged by its run's id, so the store never raises on one. At the settle of an
+ok run of an operator's job, the pure `Jobs.Degraded.decide/1` reads the
+tallies of that run and of the job's two runs settled before it, whatever
+their trigger or status and never a cue run: a tool called in each that never
+succeeded and failed at least once in each trips it, a plugin's tool chosen
+first, then the most failed calls, then the name. The run's own row stays ok
+with no kind. Its heal gets the kind `tool_never_succeeded`, the tool's last
+error as its words and the tool in `job_heals.tool_json`, with the tool's
+plugin as its subject when it has one and the job otherwise, and opens, joins,
+concludes a watching heal or stays quiet as a failure would. Such a run closes
+its provider's heal and never its job's. A heal of this kind is about one
+tool, so only that tool succeeding in an ok run, of any operator's or guest's
+job and tripping or not, closes it; a run that does not call it proves
+nothing, and the heal ends by the seven-day expiry. A plugin's heal runs no
+model and sends one message naming the plugin, the tool and its jobs; a job's
+is diagnosed with the tool's name and failed calls per run among Fermix's
+facts and its last error inside the frame.
 
 Architecture Invariant: one heal per subject is not closed (a partial unique
 index), and a heal is opened, joined or closed by a run only in that run's
@@ -898,10 +927,11 @@ guidance, the date, the job's definition and its recent runs as Fermix's facts
 which the heal records it read. It may call exactly `skill_view`,
 `list_job_runs`, `get_job_run` (both answering for the heal's job only) and
 `job_heal_respond`, whose only effect is to hand one decision and a short note
-to the heal run; the first is kept. A provider's heal, a kind no model can help
-with and a verdict run no model. `Jobs.HealDecision` checks the decision and
-the heal run carries it out after the loop has ended, each job write right
-after a write that proves the lease still its own (D4): `rerun` asks for one
+to the heal run; the first is kept. A provider's heal, a plugin's, a kind no
+model can help with and a verdict run no model. `Jobs.HealDecision` checks the
+decision and the heal run carries it out after the loop has ended, each
+job write right after a write that proves the lease still its own (D4):
+`rerun` asks for one
 run through the Scheduler's run now, by the name the Scheduler is registered
 under (a heal run outlives a Scheduler that restarts alone), after the
 concluding write that stamps `rerun_at`, and records what came of it in

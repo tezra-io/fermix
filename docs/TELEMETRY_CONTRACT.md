@@ -900,8 +900,8 @@ emitted only through `Jobs.Telemetry.heal/2` and `heal_settled/3`, with a
 
 | phase | emitted by | when |
 |---|---|---|
-| `opened`, `joined` | the runner or the Scheduler's crash settle (`heal_settled/3`) | the settle took the failure |
-| `verdict` | the same | a failure joined a `watching` heal, which is open again for its second message |
+| `opened`, `joined` | the runner or the Scheduler's crash settle (`heal_settled/3`) | the settle took the failure, or an ok run whose tool never succeeded in it nor in the job's two runs before it (M106 §6, `failure_kind: "tool_never_succeeded"`) |
+| `verdict` | the same | a failure, or such an ok run, joined a `watching` heal, which is open again for its second message |
 | `closed` | the same, `outcome: "healed"` | an ok run closed the heal |
 | `closed` | `Jobs.Scheduler`'s reconcile pass, `outcome: "expired"` | the heal waited, or watched, 7 days |
 | `decided` | `Jobs.HealRun` | its diagnosis's decision, as code carries it out, was recorded |
@@ -911,7 +911,7 @@ emitted only through `Jobs.Telemetry.heal/2` and `heal_settled/3`, with a
 | `rerun` | `Jobs.HealRun`, `rerun_outcome`, with `run_id` the run started or `error` | the rerun's one run was asked for: `started`, `running` (a run already held the job), `refused` (no run will come: the Scheduler answered that the job cannot run now, no Scheduler was there to ask, or the check before the ask stopped it, its `error` then `{:not_asked, _}`; the heal waits on the owner) or `unanswered` (a run may still come: the call ran out of time, the Scheduler stopped while it held it, or its reply could not tell, such as a store timeout under the claim; the heal keeps watching) |
 
 Every event carries `heal_id` and `agent` (`"scheduled:<job_id>"`, or
-`"job_heal"` for a provider's heal with no run behind the event), and whichever
+`"job_heal"` for a provider's or a plugin's heal with no run behind the event), and whichever
 of `job_id`, `run_id`, `subject_kind`, `subject_id`, `failure_kind`, `outcome`,
 `attempts`, `dead_letter`, `platform`, `error` (bounded to 500 characters),
 `conclusion` (`first` or `verdict`), `decision` (what code carried out:
@@ -919,7 +919,9 @@ of `job_id`, `run_id`, `subject_kind`, `subject_id`, `failure_kind`, `outcome`,
 (what the heal run asked), `refusal` (why a check did not carry the request
 out as asked: `not_upward`, `past_ceiling`, `not_runnable`, `not_running`,
 `consent_required`, `watcher_unreadable`, `invalid_change` or `move_failed`),
-`read_outside` and `rerun_outcome` the phase knows. A heal's events are points, not a run:
+`read_outside` and `rerun_outcome` the phase knows. A settle's `opened`, `joined` and
+`verdict` always carry `failure_kind`, `subject_kind` (`job`, `provider` or
+`plugin`) and `subject_id`. A heal's events are points, not a run:
 they have no `session_id`, and its diagnosis is the run kind below. The trace
 stream writes it as the `job_heal` agent event; Opik
 makes each phase its own self-closing trace named `job_heal:<phase>`, tagged

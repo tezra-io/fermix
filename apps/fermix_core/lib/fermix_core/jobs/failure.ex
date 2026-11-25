@@ -21,6 +21,10 @@ defmodule FermixCore.Jobs.Failure do
     * `:tool_start_unrecorded`: the run stopped before a tool because its
       first tool start could not be stored, and a tool never runs unrecorded
       (M106 §5.1). It is never the provider's, so it is never retried;
+    * `:tool_never_succeeded`: no reason maps to it. A run that ended ok, in
+      which a tool never once succeeded as in the job's runs before it
+      (`Jobs.Degraded`, M106 §6), keeps its own row ok with no kind, and its
+      settle gives this kind to the heal it opens. A model could help with it;
     * `:other`, any reason the list does not name. The run's `error` keeps its
       text.
 
@@ -38,10 +42,12 @@ defmodule FermixCore.Jobs.Failure do
   included, and it makes a heal's subject the provider (M106 §5.4).
 
   `sentence/1` is the owner-facing sentence of a kind no other sentence says:
-  a run the Scheduler settled (`:crashed`, `:reaped`), and a run that stopped
-  before a tool it could not record (`:tool_start_unrecorded`).
+  a run the Scheduler settled (`:crashed`, `:reaped`), a run that stopped
+  before a tool it could not record (`:tool_start_unrecorded`), and runs that
+  ended ok with a tool that never worked (`:tool_never_succeeded`).
   """
 
+  alias FermixCore.Jobs.Degraded
   alias FermixCore.Providers.Transient
 
   @kinds [
@@ -61,6 +67,7 @@ defmodule FermixCore.Jobs.Failure do
     :crashed,
     :reaped,
     :tool_start_unrecorded,
+    :tool_never_succeeded,
     :other
   ]
 
@@ -108,9 +115,13 @@ defmodule FermixCore.Jobs.Failure do
           | :crashed
           | :reaped
           | :tool_start_unrecorded
+          | :tool_never_succeeded
           | :other
 
-  @doc "Every kind `kind/1` can return, and the Scheduler's `:reaped`."
+  @doc """
+  Every kind `kind/1` can return, the Scheduler's `:reaped`, and
+  `:tool_never_succeeded`, which an ok run's settle gives its heal.
+  """
   @spec kinds() :: [kind()]
   def kinds, do: @kinds
 
@@ -162,10 +173,13 @@ defmodule FermixCore.Jobs.Failure do
   @doc """
   The owner-facing sentence of a kind no other sentence says: a run the
   Scheduler settled, which no runner lived to write for (its runner died,
-  `:crashed`, or none was found holding it, `:reaped`), and a run that stopped
-  before a tool whose start could not be stored (`:tool_start_unrecorded`).
+  `:crashed`, or none was found holding it, `:reaped`), a run that stopped
+  before a tool whose start could not be stored (`:tool_start_unrecorded`),
+  and runs that ended ok while a tool they called never worked
+  (`:tool_never_succeeded`).
   """
-  @spec sentence(:crashed | :reaped | :tool_start_unrecorded) :: String.t()
+  @spec sentence(:crashed | :reaped | :tool_start_unrecorded | :tool_never_succeeded) ::
+          String.t()
   def sentence(:crashed), do: "The run stopped before it finished: the process running it ended."
 
   def sentence(:reaped),
@@ -176,6 +190,11 @@ defmodule FermixCore.Jobs.Failure do
     do:
       "The run stopped before its next tool ran: Fermix could not record that the tool was " <>
         "starting, so it did not start it."
+
+  def sentence(:tool_never_succeeded),
+    do:
+      "A tool the job calls failed on every call in each of its last #{Degraded.runs()} runs, " <>
+        "though each of those runs ended without an error."
 
   @doc "Whether a run's error reason is a provider failure (M60 §9.4)."
   @spec provider_failure?(term()) :: boolean()

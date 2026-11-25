@@ -180,13 +180,42 @@ defmodule FermixCore.Jobs.TelemetryTest do
     run: run
   } do
     run = Map.put(run, :failure_kind, "time_limit")
-    JobTelemetry.heal_settled(job, run, %{heal: {:joined, "jhl_2"}, healed: []})
+
+    JobTelemetry.heal_settled(job, run, %{
+      heal: {:joined, "jhl_2"},
+      healed: [],
+      failure_kind: "time_limit",
+      subject_kind: "job",
+      subject_id: "job-7"
+    })
 
     assert_receive {:job_event, [:fermix, :job, :heal], %{count: 1}, joined}
 
     assert %{phase: "joined", heal_id: "jhl_2", job_id: "job-7", run_id: "run_abc"} = joined
-    assert joined.failure_kind == "time_limit"
+    assert %{failure_kind: "time_limit", subject_kind: "job", subject_id: "job-7"} = joined
     assert joined.agent == "scheduled:job-7"
+
+    # An ok run that never got a plugin's tool to work (M106 §6): the kind and
+    # the subject are the heal's, read from the settlement, never the run row's.
+    ok_run = Map.put(run, :failure_kind, nil)
+
+    JobTelemetry.heal_settled(job, ok_run, %{
+      heal: {:opened, "jhl_6"},
+      healed: [],
+      failure_kind: "tool_never_succeeded",
+      subject_kind: "plugin",
+      subject_id: "harbour_id"
+    })
+
+    assert_receive {:job_event, [:fermix, :job, :heal], _measurements, opened}
+
+    assert %{
+             phase: "opened",
+             heal_id: "jhl_6",
+             failure_kind: "tool_never_succeeded",
+             subject_kind: "plugin",
+             subject_id: "harbour_id"
+           } = opened
 
     JobTelemetry.heal_settled(job, run, %{heal: :none, healed: ["jhl_3", "jhl_4"]})
 

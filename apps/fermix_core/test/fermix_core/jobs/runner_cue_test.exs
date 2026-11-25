@@ -429,6 +429,20 @@ defmodule FermixCore.Jobs.RunnerCueTest do
     assert [%{"name" => "cue_history"}] = run.tool_timeline
   end
 
+  # M106 §6: a cue run's text is an outsider's from the first token (M60), so
+  # its tool tally keeps names and counts and never a failed call's words.
+  test "a cue run's tool tally keeps no error words", ctx do
+    claim = claim_cue(ctx, %{})
+    bad_call = %{call("c1", "cue_history") | arguments: "words-marker-4N {"}
+
+    run_cue(ctx, claim, script: [%{tool_calls: [bad_call]}, %{content: "[SILENT]"}])
+
+    {:ok, run} = Repo.get_job_run(claim.run.id, server: ctx.repo)
+    assert [%{"name" => "cue_history", "ok" => 0, "error" => 1} = entry] = run.tool_tally
+    refute Map.has_key?(entry, "last_error")
+    refute Jason.encode!(run.tool_tally) =~ "JSON"
+  end
+
   test "the delivery's final failure sends the failure text once, prefixed", ctx do
     claim = claim_cue(ctx, %{task_attempts: 2})
 

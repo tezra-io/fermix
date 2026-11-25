@@ -58,7 +58,7 @@ Durable memory is SQLite at `~/.fermix/memory.db`; ETS is cache. `memory_recall`
 
 ## Jobs
 
-`schedule_job` schedules future work that must reason or act; a date that only notifies the owner is an `event_store` event. `schedule` is `every N minutes|hours|days`, a 5-field cron (`0 9 * * 1`), or an ISO8601 instant with an offset (`2035-09-10T16:00:00Z`); free-form English ("daily at 8am") is rejected. Cron fires on the job's `timezone`, the owner's zone unless you pass another IANA zone. `task` is the whole brief: the run cannot see this chat, so bake in every value it needs and no timing. Delivery is silent unless asked: an omitted `delivery_mode` takes the configured default, else `none`; `"origin"` reports into this chat, `"channel"` needs a `delivery_target`; a reply of exactly `[SILENT]` sends nothing. Fields, refusals, retries and the verbs: skill_view(name: "self-knowledge", file: "jobs").
+`schedule_job` schedules future work that must reason or act; a date that only notifies the owner is an `event_store` event. `schedule` is `every N minutes|hours|days`, a 5-field cron (`0 9 * * 1`), or an ISO8601 instant with an offset (`2035-09-10T16:00:00Z`); free-form English ("daily at 8am") is rejected. Cron fires on the job's `timezone`, the owner's zone unless you pass another IANA zone. `task` is the whole brief: the run cannot see this chat, so bake in every value it needs and no timing. Delivery is silent unless asked: an omitted `delivery_mode` takes the configured default, else `none`; `"origin"` reports into this chat, `"channel"` needs a `delivery_target`; a reply of exactly `[SILENT]` sends nothing. Fields, refusals, retries, heals, verbs: skill_view(name: "self-knowledge", file: "jobs").
 
 ## Events & reminders
 

@@ -210,5 +210,18 @@ defmodule FermixCore.Jobs.FailureTest do
         refute sentence =~ "reaped"
       end
     end
+
+    # M106 §6 (stage S5): no reason maps to it; the settle of an ok run gives
+    # it to the heal its trigger opens, and a model could help with it.
+    test "a run that ended ok without working has a kind and a sentence of its own" do
+      assert :tool_never_succeeded in Failure.kinds()
+      assert Failure.stored(:tool_never_succeeded) == "tool_never_succeeded"
+      refute Failure.model_cannot_help?(:tool_never_succeeded)
+
+      sentence = Failure.sentence(:tool_never_succeeded)
+      assert sentence =~ "every call"
+      assert sentence =~ "last 3 runs"
+      assert sentence =~ ~r/without an error\.$/
+    end
   end
 end

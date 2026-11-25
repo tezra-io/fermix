@@ -17,6 +17,10 @@ defmodule FermixCore.Memory.RepoJobRunFactsMigrationTest do
     %{"name" => "tide_lookup", "plugin" => "harbour", "duration_ms" => 40, "status" => "error"}
   ]
 
+  # The table as 69 makes it, and the tally 73 adds after it
+  # (`RepoJobRunTallyMigrationTest`).
+  @facts_columns ~w(run_id failure_kind tool_timeline_json tool_tally_json)
+
   # `job_runs` as an engine at home format 1 reads it, in order.
   @job_run_columns ~w(id job_id session_id trigger status claimed_at started_at completed_at
                       prompt_snapshot job_config_snapshot_json capability_policy_snapshot_json
@@ -45,7 +49,7 @@ defmodule FermixCore.Memory.RepoJobRunFactsMigrationTest do
   } do
     assert {:ok, versions} = Repo.migration_versions(server: repo)
     assert @version in versions
-    assert columns(db_path, "job_run_facts") == ~w(run_id failure_kind tool_timeline_json)
+    assert columns(db_path, "job_run_facts") == @facts_columns
     assert columns(db_path, "job_runs") == @job_run_columns
 
     facts = [failure_kind: "time_limit", tool_timeline: @timeline]
@@ -166,9 +170,11 @@ defmodule FermixCore.Memory.RepoJobRunFactsMigrationTest do
 
     stop_supervised!(:first)
 
+    # A store from before 69 has none of the versions that widen its table.
     raw(db_path, """
     DROP TABLE job_run_facts;
-    DELETE FROM schema_migrations WHERE version = #{@version};
+    ALTER TABLE job_heals DROP COLUMN tool_json;
+    DELETE FROM schema_migrations WHERE version IN (#{@version}, 73);
     """)
 
     assert columns(db_path, "job_run_facts") == []
@@ -176,7 +182,7 @@ defmodule FermixCore.Memory.RepoJobRunFactsMigrationTest do
 
     assert {:ok, versions} = Repo.migration_versions(server: repo)
     assert @version in versions
-    assert columns(db_path, "job_run_facts") == ~w(run_id failure_kind tool_timeline_json)
+    assert columns(db_path, "job_run_facts") == @facts_columns
     assert columns(db_path, "job_runs") == @job_run_columns
 
     assert {:ok, run} = Repo.get_job_run("run_old", server: repo)

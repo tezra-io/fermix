@@ -66,6 +66,15 @@ defmodule FermixCore.Jobs.Runner do
   # A run's tool timeline (M106 §5.1) keeps its newest calls.
   @timeline_max 40
 
+  # A run's tool tally (M106 §6) counts every call of the run, by tool: at
+  # most this many tools, and of each failed call's error only this many
+  # characters, the last one kept.
+  @tally_max 64
+  @tool_error_chars 500
+  # A call to a name the run was not offered is the model's words, never a
+  # fact: its facts name it only by this label, chosen by code.
+  @no_tool "(no such tool)"
+
   @type state :: %{
           repo: GenServer.server(),
           capability_registry: GenServer.server(),
@@ -95,7 +104,8 @@ defmodule FermixCore.Jobs.Runner do
           follow_up:
             nil | {:ok, %{trigger: map(), watcher_name: String.t() | nil}} | {:error, term()},
           cue_mandate: Mandates.t() | nil,
-          cue_mandate_opts: keyword()
+          cue_mandate_opts: keyword(),
+          offered_tools: %{optional(String.t()) => String.t() | nil}
         }
 
   # A runner spends its whole run inside `handle_continue/2`, so it cannot answer
@@ -198,7 +208,10 @@ defmodule FermixCore.Jobs.Runner do
       follow_up: nil,
       # Test seams for that read and for the run's mandate gate, one set for
       # both (the gate's `cue_mandate_opts`); none in production.
-      cue_mandate_opts: Keyword.get(opts, :cue_mandate_opts, [])
+      cue_mandate_opts: Keyword.get(opts, :cue_mandate_opts, []),
+      # The tools the run's loop is offered, each with its plugin or nil, set
+      # once its options are built: the run's facts name only these (M106 §6).
+      offered_tools: %{}
     }
 
     :ok = put_run_id(state.run.id)
@@ -227,7 +240,11 @@ defmodule FermixCore.Jobs.Runner do
         run = mark_running(state, fallback_loop_input(state, reason))
         # A run that never reached its loop called no tool.
         failed_run =
-          mark_failed(%{state | run: Map.put(run, :tool_timeline, [])}, "error", reason)
+          mark_failed(
+            %{state | run: Map.merge(run, %{tool_timeline: [], tool_tally: []})},
+            "error",
+            reason
+          )
 
         notify(state.notify, {:job_runner, :completed, failed_run.id, state.job.id})
         {:stop, :normal, %{state | run: failed_run}}
@@ -235,6 +252,7 @@ defmodule FermixCore.Jobs.Runner do
   end
 
   defp execute_and_finalize(state, loop_input) do
+    state = %{state | offered_tools: loop_input.offered_tools}
     stagger_start(state)
     await_network_ready(loop_input.loop_opts, state)
 
@@ -245,7 +263,7 @@ defmodule FermixCore.Jobs.Runner do
     # to send after the loop returned — so the flag drops BEFORE the run is
     # marked and its final text delivered.
     deactivate_media(loop_input)
-    state = put_run_facts(state, watch, loop_input.tool_plugins)
+    state = put_run_facts(state, watch)
 
     case result do
       {:ok, result} ->
@@ -735,7 +753,7 @@ defmodule FermixCore.Jobs.Runner do
     media = {:unavailable, :cue_run}
 
     with {:ok, skill} <- load_skill(state),
-         {:ok, loop_opts, _media, tool_plugins} <- loop_opts(state, skill, media) do
+         {:ok, loop_opts, _media, offered_tools} <- loop_opts(state, skill, media) do
       messages = cue_prompt_messages(state.job, skill, cue)
 
       {:ok,
@@ -745,7 +763,7 @@ defmodule FermixCore.Jobs.Runner do
          route_used: resolved_route_used(loop_opts, state.job),
          loop_opts: Keyword.put(loop_opts, :messages, messages),
          media_active: nil,
-         tool_plugins: tool_plugins
+         offered_tools: offered_tools
        }}
     end
   end
@@ -754,7 +772,7 @@ defmodule FermixCore.Jobs.Runner do
     media = build_media_bridge(state)
 
     with {:ok, skill} <- load_skill(state),
-         {:ok, loop_opts, media, tool_plugins} <- loop_opts(state, skill, media) do
+         {:ok, loop_opts, media, offered_tools} <- loop_opts(state, skill, media) do
       messages = prompt_messages(state.job, skill, media, run_text(state))
 
       {:ok,
@@ -764,7 +782,7 @@ defmodule FermixCore.Jobs.Runner do
          route_used: resolved_route_used(loop_opts, state.job),
          loop_opts: Keyword.put(loop_opts, :messages, messages),
          media_active: media_active_ref(media),
-         tool_plugins: tool_plugins
+         offered_tools: offered_tools
        }}
     end
   end
@@ -953,8 +971,8 @@ defmodule FermixCore.Jobs.Runner do
   # narrowed by trust for any job it sets up or changes.
   #
   # Every registry read sits inside this rescue, so a failing registry is a run
-  # error, recorded, never a runner crash. The plugin each tool on the surface
-  # comes from rides beside the options, for the run's tool timeline.
+  # error, recorded, never a runner crash. The tools on the surface, each with
+  # the plugin it comes from, ride beside the options, for the run's facts.
   defp loop_opts(state, skill, media) do
     job_trust = effective_trust(state.job)
     trust = loop_trust(job_trust, skill)
@@ -977,20 +995,22 @@ defmodule FermixCore.Jobs.Runner do
         max_iterations: state.job.max_iterations
       ]
 
-      {:ok, base ++ routing_opts, media, tool_plugins(surface)}
+      {:ok, base ++ routing_opts, media, offered_tools(surface)}
     end
   rescue
     error -> {:error, Exception.message(error)}
   end
 
-  # A plugin's tool names its plugin (`metadata.plugin`, as both plugin rails
-  # register it); every other tool has none.
-  defp tool_plugins(surface) do
-    for %Capability{name: name, metadata: %{plugin: plugin}} <- surface,
-        is_binary(plugin),
-        into: %{},
-        do: {name, plugin}
-  end
+  # The tools the run's loop is offered (it resolves the same list,
+  # `surface/5`), each with its plugin: a plugin's tool names it
+  # (`metadata.plugin`, as both plugin rails register it), every other tool
+  # nil.
+  defp offered_tools(surface), do: Map.new(surface, &{&1.name, capability_plugin(&1)})
+
+  defp capability_plugin(%Capability{metadata: %{plugin: plugin}}) when is_binary(plugin),
+    do: plugin
+
+  defp capability_plugin(%Capability{}), do: nil
 
   # The registry list the run's loop resolves from the same options (`AgentLoop`).
   defp surface(registry, trust, policy, allowed_tools, own_plugin) do
@@ -1637,6 +1657,7 @@ defmodule FermixCore.Jobs.Runner do
       |> Keyword.put(:activity_callback, fn event ->
         send(parent, {:job_loop_activity, activity_ref, event})
       end)
+      |> maybe_put(:activity_error_chars, tool_error_chars(state))
       |> put_tool_start_store(tools_started_stamp(state))
 
     # Linked AND monitored in one atomic call (ChannelSend's monitored_call
@@ -1663,14 +1684,21 @@ defmodule FermixCore.Jobs.Runner do
       inactivity_timeout_ms: state.inactivity_timeout_ms,
       monotonic_ms: state.monotonic_ms,
       # Calls started and not finished, newest first, and finished calls,
-      # newest first, kept to the timeline's cap.
+      # newest first, kept to the timeline's cap; and every call, by tool.
       in_flight: [],
       timeline: [],
+      tally: %{},
+      offered: state.offered_tools,
       tools_started?: false,
       first_tool_at: nil,
       stamp: tools_started_stamp(state)
     })
   end
+
+  # A failed call's words, kept for the run's tally (M106 §6). A cue run's
+  # text is an outsider's from its first token (M60), so it asks for none.
+  defp tool_error_chars(%{run: %{trigger: "cue"}}), do: nil
+  defp tool_error_chars(_state), do: @tool_error_chars
 
   # Where the first tool start is stored. A cue run's `tools_started_at` is its
   # mandate gate's marker (M60 §9.4): its first allowed or proposed mandate
@@ -1851,21 +1879,25 @@ defmodule FermixCore.Jobs.Runner do
     now - watchdog.last_activity_at >= watchdog.inactivity_timeout_ms
   end
 
-  defp update_watchdog_activity(watchdog, {:tool_start, name}) do
+  defp update_watchdog_activity(watchdog, {:tool_start, called}) do
     now = watchdog.monotonic_ms.()
+    name = recorded_name(watchdog, called)
 
     %{
       watchdog
       | last_activity_at: now,
         in_flight: [%{name: name, started_at: now} | watchdog.in_flight],
+        tally: count_start(watchdog.tally, name),
         tools_started?: true,
         first_tool_at: first_tool_at(watchdog)
     }
   end
 
-  defp update_watchdog_activity(watchdog, {:tool_finish, name, %{status: status}})
+  defp update_watchdog_activity(watchdog, {:tool_finish, called, %{status: status} = detail})
        when status in [:ok, :error] do
     now = watchdog.monotonic_ms.()
+    name = recorded_name(watchdog, called)
+    watchdog = %{watchdog | tally: count_finish(watchdog.tally, name, status, detail)}
     %{finish_call(watchdog, name, status, now) | last_activity_at: now}
   end
 
@@ -1898,24 +1930,89 @@ defmodule FermixCore.Jobs.Runner do
     end
   end
 
-  # What the watchdog saw, on the run row the settle writes (M106 §5.1): the
-  # first tool start (none for a cue run, `tools_started_stamp/1`), which the
-  # gate already stored before that tool ran and the row keeps (the upsert's
-  # coalesce), and the tool timeline.
-  defp put_run_facts(state, watch, tool_plugins) do
+  # The one place a called name enters the run's facts (M106 §6): a name the
+  # run was offered as it is, any other under `@no_tool`, so neither the
+  # timeline nor the tally keeps the model's words.
+  defp recorded_name(%{offered: offered}, called) do
+    if Map.has_key?(offered, called), do: called, else: @no_tool
+  end
+
+  # A run's calls by tool, the whole run (M106 §6). A tool's first start adds
+  # it, up to `@tally_max` tools: a tool past the cap is not counted, so the
+  # trigger at the settle reads it as not called and it opens no heal. A call
+  # to a name the run was not offered is never counted.
+  defp count_start(tally, @no_tool), do: tally
+
+  defp count_start(tally, name) do
+    cond do
+      Map.has_key?(tally, name) -> Map.update!(tally, name, &%{&1 | started: &1.started + 1})
+      map_size(tally) < @tally_max -> Map.put(tally, name, new_count())
+      true -> tally
+    end
+  end
+
+  defp new_count, do: %{started: 1, ok: 0, error: 0, last_error: nil}
+
+  # The loop sets a failed call's error on its finish (`activity_error_chars`),
+  # already cut to `@tool_error_chars`, and the last one is kept as data; a
+  # cue run asks for none, so its failed calls are counted with no words.
+  defp count_finish(tally, name, status, detail) do
+    case Map.fetch(tally, name) do
+      {:ok, counts} -> Map.put(tally, name, finished(counts, status, detail))
+      :error -> tally
+    end
+  end
+
+  defp finished(counts, :ok, _detail), do: %{counts | ok: counts.ok + 1}
+
+  defp finished(counts, :error, %{error: error}) when is_binary(error),
+    do: %{counts | error: counts.error + 1, last_error: error}
+
+  defp finished(counts, :error, _no_words), do: %{counts | error: counts.error + 1}
+
+  # What the watchdog saw, on the run row the settle writes (M106 §5.1, §6):
+  # the first tool start (none for a cue run, `tools_started_stamp/1`), which
+  # the gate already stored before that tool ran and the row keeps (the
+  # upsert's coalesce), the tool timeline, and the tool tally.
+  defp put_run_facts(state, watch) do
     facts = %{
       tools_started_at: watch.first_tool_at,
-      tool_timeline: tool_timeline(watch, tool_plugins)
+      tool_timeline: tool_timeline(watch),
+      tool_tally: tool_tally(watch)
     }
 
     %{state | run: Map.merge(state.run, facts)}
   end
 
+  # Each tool the run called, by name: its calls that succeeded, failed or
+  # were still running when the loop ended, its plugin, and its last error's
+  # own words, which someone else could have written: kept as data, shown to a
+  # model only framed (`Jobs.HealDiagnosis`).
+  defp tool_tally(watch) do
+    watch.tally
+    |> Enum.sort_by(fn {name, _counts} -> name end)
+    |> Enum.map(fn {name, counts} -> tally_entry(name, counts, Map.get(watch.offered, name)) end)
+  end
+
+  defp tally_entry(name, counts, plugin) do
+    %{
+      "name" => name,
+      "ok" => counts.ok,
+      "error" => counts.error,
+      "unfinished" => counts.started - counts.ok - counts.error
+    }
+    |> put_known("plugin", plugin)
+    |> put_known("last_error", counts.last_error)
+  end
+
+  defp put_known(entry, _key, nil), do: entry
+  defp put_known(entry, key, value), do: Map.put(entry, key, value)
+
   # The run's calls, oldest first, the newest `@timeline_max` kept: each
   # finished call, then any still running when the loop ended (the watchdog
   # stopped it, or the loop died), marked unfinished. Names and numbers only:
   # nothing a tool returned, no arguments, nothing the model wrote.
-  defp tool_timeline(watch, tool_plugins) do
+  defp tool_timeline(watch) do
     now = watch.monotonic_ms.()
 
     unfinished =
@@ -1926,20 +2023,16 @@ defmodule FermixCore.Jobs.Runner do
 
     (Enum.reverse(watch.timeline) ++ Enum.reverse(unfinished))
     |> Enum.take(-@timeline_max)
-    |> Enum.map(&timeline_entry(&1, tool_plugins))
+    |> Enum.map(&timeline_entry(&1, watch.offered))
   end
 
-  defp timeline_entry(call, tool_plugins) do
-    entry = %{
+  defp timeline_entry(call, offered) do
+    %{
       "name" => call.name,
       "duration_ms" => call.duration_ms,
       "status" => Atom.to_string(call.status)
     }
-
-    case Map.fetch(tool_plugins, call.name) do
-      {:ok, plugin} -> Map.put(entry, "plugin", plugin)
-      :error -> entry
-    end
+    |> put_known("plugin", Map.get(offered, call.name))
   end
 
   defp write_run_artifact(state, filename, content) do

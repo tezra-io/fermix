@@ -130,7 +130,7 @@ defmodule FermixCore.Jobs.HealMessageTest do
 
   test "facts that are not a heal's are refused" do
     assert_raise FunctionClauseError, fn ->
-      HealMessage.build(%{@job_facts | subject_kind: "plugin"}, [])
+      HealMessage.build(%{@job_facts | subject_kind: "channel"}, [])
     end
   end
 end

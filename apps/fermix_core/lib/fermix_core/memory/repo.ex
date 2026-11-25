@@ -111,6 +111,7 @@ defmodule FermixCore.Memory.Repo do
   @job_retries_migration_version 70
   @job_heals_migration_version 71
   @job_heal_diagnosis_migration_version 72
+  @job_run_tally_migration_version 73
   @sqlite_open_intent :readwritecreate
 
   # The home's requests about notes from every machine (M97 §8), all served by
@@ -412,6 +413,16 @@ defmodule FermixCore.Memory.Repo do
   );
   """
 
+  # M106 §6: a run's tool tally (each tool it called, its calls that succeeded,
+  # failed or never finished, its plugin and its last error's words, as JSON),
+  # a whole-run fact the trigger for a run that ended ok without working reads,
+  # added to `job_run_facts` after 72. NULL on a run written before it.
+  @job_run_tally_columns %{
+    before: ~w(run_id failure_kind tool_timeline_json),
+    after: ~w(run_id failure_kind tool_timeline_json tool_tally_json),
+    sql: "ALTER TABLE job_run_facts ADD COLUMN tool_tally_json TEXT;"
+  }
+
   # The earliest of a job's next run, expiry and retry (M106 §5.3), for the due
   # scan's and the timer's order; `~` sorts after every timestamp.
   @earliest_wakeup_sql "min(coalesce(j.next_run_at, '~'), coalesce(j.expires_at, '~'), " <>
@@ -421,7 +432,7 @@ defmodule FermixCore.Memory.Repo do
   # `job_run_row/1` reads them, then the facts by name, so a column a later
   # migration adds to `job_run_facts` is read past.
   @job_run_select """
-  SELECT r.*, f.failure_kind, f.tool_timeline_json
+  SELECT r.*, f.failure_kind, f.tool_timeline_json, f.tool_tally_json
   FROM job_runs r
   LEFT JOIN job_run_facts f ON f.run_id = r.id
   """
@@ -2715,13 +2726,17 @@ defmodule FermixCore.Memory.Repo do
   `JobHealsSql.settle/5`). The settlement says what became of the run:
   `disposition` `:none`, `:retry` or `:exhausted`, with `attempts` and
   `retry_at`; `heal`, for a failure, `:none` (retried), `{:opened, id}`,
-  `{:joined, id}`, `:quiet` or `:out_of_scope`; and `healed`, the heals an ok
-  run closed.
+  `{:joined, id}`, `{:verdict, id}`, `:quiet` or `:out_of_scope`, with the
+  `failure_kind`, `subject_kind` and `subject_id` it took; and `healed`, the
+  heals an ok run closed. An ok run whose tool never once succeeded, as in
+  the job's two runs before it (M106 §6, `Jobs.Degraded`), keeps its own row
+  ok and gives its heal the kind `tool_never_succeeded`.
 
   A failed run carries its `failure_kind` and its `heal_facts`: the
   owner-facing `failure_text`, the provider's own `failure_words` when it gave
   any, and the `provider` the failure names, or nil. An ok run may carry
-  `heal_facts` with the `provider` it ran on.
+  `heal_facts` with the `provider` it ran on. Any run may carry its
+  `tool_tally` (M106 §6), stored with its facts.
   """
   @spec settle_job_run(job_run_attrs(), Retry.settle_by(), keyword()) ::
           {:ok, {job_run_row(), scheduled_job_row(), map()}}
@@ -2837,7 +2852,7 @@ defmodule FermixCore.Memory.Repo do
   # limit, active rows first, so a pass never reads the run history. Each
   # row's facts are read by name (`@job_run_select`).
   @unsettled_job_runs_sql """
-  SELECT runs.*, f.failure_kind, f.tool_timeline_json
+  SELECT runs.*, f.failure_kind, f.tool_timeline_json, f.tool_tally_json
   FROM (
     SELECT * FROM (
       SELECT * FROM job_runs
@@ -5364,8 +5379,37 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_job_run_facts_migration(conn, versions),
          :ok <- apply_job_retries_migration(conn, versions),
          :ok <- apply_job_heals_migration(conn, versions),
-         :ok <- apply_job_heal_diagnosis_migration(conn, versions) do
+         :ok <- apply_job_heal_diagnosis_migration(conn, versions),
+         :ok <- apply_job_run_tally_migration(conn, versions) do
       :ok
+    end
+  end
+
+  # M106 §6: a run's tool tally as a column on `job_run_facts`, and the tool a
+  # heal of a run that ended ok without working is about as a column on
+  # `job_heals`, with the version in one transaction, after 72. Both tables
+  # are this milestone's own, read by column name, so they widen; `job_runs`
+  # and `scheduled_jobs` are left as they were. No row is rewritten: a run
+  # from before has no tally, a heal from before no tool. Reapplying it changes
+  # nothing: each column is added only while its table holds the columns
+  # before it, and a table that holds neither set is refused.
+  defp apply_job_run_tally_migration(conn, versions) do
+    if Enum.member?(versions, @job_run_tally_migration_version) do
+      :ok
+    else
+      with :ok <- Sqlite3.execute(conn, "BEGIN;") do
+        conn |> job_run_tally_step() |> commit_migration(conn)
+      end
+    end
+  end
+
+  defp job_run_tally_step(conn) do
+    with :ok <- add_columns(conn, "job_run_facts", @job_run_tally_columns),
+         :ok <- add_columns(conn, "job_heals", JobHealsSql.tool_columns()) do
+      Sqlite3.execute(
+        conn,
+        "INSERT INTO schema_migrations(version) VALUES (#{@job_run_tally_migration_version});"
+      )
     end
   end
 
@@ -6063,11 +6107,15 @@ defmodule FermixCore.Memory.Repo do
   end
 
   # Columns a migration adds with ALTER: added while the table holds `before`,
-  # nothing while it holds `after`, refused for any other set.
-  defp add_columns(conn, table, %{before: before, after: added, sql: sql}) do
+  # nothing while it holds `after` or a set a later migration made of it
+  # (`later`, so a version row lost after a later migration ran reapplies to
+  # nothing), refused for any other set.
+  defp add_columns(conn, table, %{before: before, after: added, sql: sql} = spec) do
+    done = Enum.map([added | Map.get(spec, :later, [])], &MapSet.new/1)
+
     with {:ok, columns} <- table_columns(conn, table) do
       cond do
-        MapSet.new(columns) == MapSet.new(added) -> :ok
+        MapSet.new(columns) in done -> :ok
         MapSet.new(columns) == MapSet.new(before) -> Sqlite3.execute(conn, sql)
         true -> {:error, {:unexpected_columns, table, columns}}
       end
@@ -8953,23 +9001,30 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
-  # A run's facts (M106 §5.1) are written with its row, in the caller's
-  # transaction, and once: a stored kind or timeline is never replaced or
-  # cleared by a later whole-row write. A run with neither writes no row.
-  defp upsert_job_run_facts(_conn, %{failure_kind: nil, tool_timeline: nil}), do: :ok
+  # A run's facts (M106 §5.1, §6) are written with its row, in the caller's
+  # transaction, and once: a stored kind, timeline or tally is never replaced
+  # or cleared by a later whole-row write. A run with none writes no row.
+  defp upsert_job_run_facts(_conn, %{failure_kind: nil, tool_timeline: nil, tool_tally: nil}),
+    do: :ok
 
   defp upsert_job_run_facts(conn, run) do
     execute(
       conn,
       """
-      INSERT INTO job_run_facts (run_id, failure_kind, tool_timeline_json)
-      VALUES (?, ?, ?)
+      INSERT INTO job_run_facts (run_id, failure_kind, tool_timeline_json, tool_tally_json)
+      VALUES (?, ?, ?, ?)
       ON CONFLICT(run_id)
       DO UPDATE SET
         failure_kind = coalesce(job_run_facts.failure_kind, excluded.failure_kind),
-        tool_timeline_json = coalesce(job_run_facts.tool_timeline_json, excluded.tool_timeline_json)
+        tool_timeline_json = coalesce(job_run_facts.tool_timeline_json, excluded.tool_timeline_json),
+        tool_tally_json = coalesce(job_run_facts.tool_tally_json, excluded.tool_tally_json)
       """,
-      [run.id, run.failure_kind, encode_metadata(run.tool_timeline)]
+      [
+        run.id,
+        run.failure_kind,
+        encode_metadata(run.tool_timeline),
+        encode_metadata(run.tool_tally)
+      ]
     )
   end
 
@@ -9622,12 +9677,13 @@ defmodule FermixCore.Memory.Repo do
       # Write-once (the upsert keeps a stored value): the cue claim sets the
       # delivery, the mandate gate sets the marker in its own Repo call, and a
       # runner's later whole-row write never clears either. A run's failure
-      # kind and tool timeline go to `job_run_facts`, kept the same way
-      # (`upsert_job_run_facts/2`).
+      # kind, tool timeline and tool tally go to `job_run_facts`, kept the
+      # same way (`upsert_job_run_facts/2`).
       tools_started_at: optional_timestamp_string(Map.get(attrs, :tools_started_at)),
       cue_delivery_id: optional_non_negative_integer!(attrs, :cue_delivery_id),
       failure_kind: optional_string!(attrs, :failure_kind),
-      tool_timeline: optional_list!(attrs, :tool_timeline)
+      tool_timeline: optional_list!(attrs, :tool_timeline),
+      tool_tally: optional_list!(attrs, :tool_tally)
     }
   end
 
@@ -10796,7 +10852,8 @@ defmodule FermixCore.Memory.Repo do
          tools_started_at,
          cue_delivery_id,
          failure_kind,
-         tool_timeline_json
+         tool_timeline_json,
+         tool_tally_json
        ]) do
     %{
       id: id,
@@ -10807,6 +10864,7 @@ defmodule FermixCore.Memory.Repo do
       cue_delivery_id: cue_delivery_id,
       failure_kind: failure_kind,
       tool_timeline: decode_metadata(tool_timeline_json),
+      tool_tally: JobHealsSql.run_tally(id, tool_tally_json),
       status: status,
       claimed_at: parse_optional_timestamp(claimed_at),
       started_at: parse_optional_timestamp(started_at),

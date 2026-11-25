@@ -5,6 +5,12 @@ defmodule FermixCore.Jobs.HealMessage do
   what failed and when, how often, and when the job runs next; for a
   provider, which one, its own words, and which jobs since when.
 
+  Runs that ended ok without working (M106 §6, kind `tool_never_succeeded`)
+  get code's own sentence for the kind: for a job, which tool never worked
+  in its last runs though each ended without an error (and for its verdict,
+  that it still does not); for a plugin, which plugin and tool, and which
+  jobs since when. The tool's last words are quoted as its own.
+
   A diagnosed heal's message (stage S3) adds, after those facts, the heal
   run's note as Fermix's reading of the failure (newlines flattened, cut to a
   bound), then one line saying what Fermix did (it asked for the job to run
@@ -25,6 +31,7 @@ defmodule FermixCore.Jobs.HealMessage do
   """
 
   alias FermixCore.Clock
+  alias FermixCore.Jobs.Degraded
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.Error, as: ProviderError
 
@@ -34,6 +41,7 @@ defmodule FermixCore.Jobs.HealMessage do
   @words_max 200
   @note_max 500
   @value_max 160
+  @degraded "tool_never_succeeded"
 
   @doc "The longest text `build/2` returns."
   @spec max_length() :: pos_integer()
@@ -42,13 +50,38 @@ defmodule FermixCore.Jobs.HealMessage do
   @doc "The message for a heal's facts."
   @spec build(map(), keyword()) :: String.t()
   def build(%{subject_kind: kind, conclusion: conclusion} = facts, clock_opts)
-      when kind in ["job", "provider"] and conclusion in ["first", "verdict"] and
+      when kind in ["job", "provider", "plugin"] and conclusion in ["first", "verdict"] and
              is_list(clock_opts) do
     facts
     |> lines(clock_opts)
     |> Enum.reject(&is_nil/1)
     |> Enum.join("\n")
     |> String.slice(0, @max_length)
+  end
+
+  defp lines(
+         %{subject_kind: "job", conclusion: "verdict", failure_kind: @degraded, job: job} = facts,
+         opts
+       ) do
+    [
+      "Job #{quoted(job.name, @name_max)} is still not working after Fermix #{done(facts)}: " <>
+        "on #{Clock.stated_instant(facts.failed_at, opts)} #{tool_phrase(facts)} " <>
+        "failed on every call again, though the run ended without an error.",
+      tool_words_line(facts),
+      next_run(job, opts)
+    ]
+  end
+
+  defp lines(%{subject_kind: "job", failure_kind: @degraded, job: job} = facts, opts) do
+    [
+      "Job #{quoted(job.name, @name_max)} ran without #{tool_phrase(facts)} working: " <>
+        "every call to it failed in each of its last #{Degraded.runs()} runs, though each run " <>
+        "ended without an error. The last ended on #{Clock.stated_instant(facts.failed_at, opts)}.",
+      tool_words_line(facts),
+      note_line(facts.note),
+      move_line(facts.decision, facts.change),
+      unless(facts.decision == "pause", do: next_run(job, opts))
+    ]
   end
 
   defp lines(%{subject_kind: "job", conclusion: "verdict", job: job} = facts, opts) do
@@ -82,6 +115,29 @@ defmodule FermixCore.Jobs.HealMessage do
         "#{Clock.stated_instant(facts.opened_at, opts)}: #{jobs_list(facts.jobs, facts.job_count)}."
     ]
   end
+
+  # A plugin's tool that never worked, across the jobs that call it (§5.4).
+  defp lines(%{subject_kind: "plugin"} = facts, opts) do
+    [
+      "Scheduled jobs cannot use the plugin #{quoted(facts.subject_id, @name_max)}: every call " <>
+        "to #{tool_phrase(facts)} failed in each of #{Degraded.runs()} runs in a row, " <>
+        "though each run ended without an error.",
+      tool_words_line(facts),
+      "#{runs_ended(facts.run_count)} this way since " <>
+        "#{Clock.stated_instant(facts.opened_at, opts)}: #{jobs_list(facts.jobs, facts.job_count)}."
+    ]
+  end
+
+  # The tool by its name, or, when its stored record could not be read, as
+  # one of the job's tools.
+  defp tool_phrase(%{tool: %{"name" => name}}), do: "its tool #{quoted(name, @name_max)}"
+  defp tool_phrase(%{tool: nil}), do: "one of its tools"
+
+  # The tool's own last words, someone else's: quoted as data.
+  defp tool_words_line(%{failure_words: words}) when is_binary(words) and words != "",
+    do: "The tool said: #{quoted(words, @words_max)}"
+
+  defp tool_words_line(_facts), do: nil
 
   # The provider's own words, when the failure's sentence does not already
   # quote them.
@@ -235,6 +291,9 @@ defmodule FermixCore.Jobs.HealMessage do
 
   defp runs_failed(1), do: "1 run has failed"
   defp runs_failed(count), do: "#{count} runs have failed"
+
+  defp runs_ended(1), do: "1 run has ended"
+  defp runs_ended(count), do: "#{count} runs have ended"
 
   defp jobs_list(jobs, job_count) do
     named = Enum.map_join(jobs, ", ", &"#{quoted(&1.name, @name_max)} (#{&1.runs})")

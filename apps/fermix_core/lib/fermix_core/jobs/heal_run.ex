@@ -23,8 +23,8 @@ defmodule FermixCore.Jobs.HealRun do
        `Jobs.Registry`, the path an owner's edit takes, right after a write
        that proves the lease still held; then the decision, its note, what
        the run read and the exact change are recorded on the heal. A
-       provider's heal, a kind no model can help with, and a verdict run no
-       model;
+       provider's heal, a plugin's (M106 §6), a kind no model can help with,
+       and a verdict run no model;
     3. builds the message once with `Jobs.HealMessage` from the store's facts
        and stores it, so every later attempt sends the same text;
     4. sends it once through `Delivery.ChannelSend` under the key
@@ -209,8 +209,9 @@ defmodule FermixCore.Jobs.HealRun do
   end
 
   # A provider's heal is told without a model: the provider that failed is
-  # the one that would be asked. So is a kind no model run can help with, a
-  # verdict, and a heal decided by a run before this one.
+  # the one that would be asked. So is a plugin's, which has no job of its
+  # own to diagnose, a kind no model run can help with, a verdict, and a heal
+  # decided by a run before this one.
   defp diagnosable?(%{conclusion: "first", decision: nil, subject_kind: "job"} = heal),
     do: not Failure.model_cannot_help?(heal.failure_kind)
 
@@ -359,8 +360,8 @@ defmodule FermixCore.Jobs.HealRun do
     |> Error.normalize()
   end
 
-  # The origin a job's message carries names the job; a provider's heal has
-  # no one job to name.
+  # The origin a job's message carries names the job; a provider's or a
+  # plugin's heal has no one job to name.
   defp job_name(%{heal: %{subject_kind: "job", job_id: job_id}} = state) do
     case Repo.get_scheduled_job(job_id, server: state.repo) do
       {:ok, job} ->

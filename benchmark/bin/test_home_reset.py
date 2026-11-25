@@ -704,11 +704,13 @@ def test_a_seeded_heal_never_sent_leaves_only_that_attempt_incomplete(tmp_path, 
     assert "seeded" not in events and "bare" in events      # never driven; the next one is
 
 
-def _heals_db(home, rows):
+def _heals_db(home, rows, links=()):
     import sqlite3
     conn = sqlite3.connect(str(home / "memory.db"))
     conn.execute("CREATE TABLE job_heals (id, job_id, state)")
+    conn.execute("CREATE TABLE job_heal_runs (run_id, heal_id, job_id)")
     conn.executemany("INSERT INTO job_heals VALUES (?,?,?)", rows)
+    conn.executemany("INSERT INTO job_heal_runs VALUES (?,?,?)", links)
     conn.commit()
     conn.close()
 
@@ -747,6 +749,15 @@ def test_the_turn_waits_for_a_seeded_heal_and_gives_up_naming_it(tmp_path):
     assert sum(clock.sleeps) == 3
 
 
+def test_the_turn_waits_for_a_plugins_heal_a_seeded_run_opened(tmp_path):
+    # A plugin's heal (M106 §6) has no job of its own: it is found by the run it took.
+    _heals_db(tmp_path, [("jhl_1", None, "open"), ("jhl_2", None, "open")],
+              links=[("run_1", "jhl_1", "tides_1"), ("run_2", "jhl_2", "other_job")])
+    clock = _Clock()
+    why = run_eval.await_seeded_heals(str(tmp_path), MANIFEST, 3, clock, clock.sleep)
+    assert "jhl_1" in why and "jhl_2" not in why
+
+
 def test_a_seed_with_no_jobs_waits_for_nothing(tmp_path):
     clock = _Clock()
     assert run_eval.await_seeded_heals(str(tmp_path), {"jobs": {}}, 150, clock,
@@ -765,7 +776,7 @@ def test_dry_run_counts_the_attempts_seeded_with_state(capsys):
     code = run_eval.main(["--suite", "job_auto_heal", "--profile", "isolated_mutation",
                           "--judge", "--dry-run"])
     assert code == 0
-    assert "state: 4 case trial(s) would each seed" in capsys.readouterr().out
+    assert "state: 6 case trial(s) would each seed" in capsys.readouterr().out
 
 
 def test_dry_run_counts_the_attempts_that_start_from_the_snapshot(capsys):

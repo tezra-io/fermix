@@ -125,7 +125,13 @@ defmodule FermixCore.Home.ReadableTest do
     # widths. A newer engine's raised limit or pause is a value in a column
     # that engine already reads, and a rerun is an ordinary manual run: the
     # format stays.
-    @migrations Enum.to_list(1..39) ++ [41, 42, 43] ++ Enum.to_list(45..72)
+    # 73 (M106 §6, a run's tool tally and the tool a heal is about) adds a
+    # column to `job_run_facts` and one to `job_heals`, tables that engine
+    # reads by column name or not at all: its run read names the two facts it
+    # knows, so it reads past the tally. `job_runs` and `scheduled_jobs` keep
+    # their widths, and a run it writes has no tally, which only breaks a
+    # newer engine's streak: the format stays.
+    @migrations Enum.to_list(1..39) ++ [41, 42, 43] ++ Enum.to_list(45..73)
     @manifest_keys ~w(created_at engine_version files format home_format home_root host links
                       primary_epoch)
     @entry_keys ~w(bytes mode path sha256)

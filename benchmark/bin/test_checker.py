@@ -2510,8 +2510,10 @@ SENT_HEAL = {"id": HEAL_ID, "subject_kind": "job", "subject_id": ROTA["id"],
              "inbox_platform": "cli",
              "inbox_destination": "cli", "delivery_status": "delivered",
              "delivery_attempts": 0, "last_delivery_error": None,
+             "failure_words": None, "tool_json": None,
              "opened_at": "2026-11-24T15:01:02.000000Z"}
 LIVE_RUN = {"id": "run_live01", "job_id": ROTA["id"], "trigger": "manual", "status": "error",
+            "error": "The run stopped before it began: the skill was not found.",
             "delivery_status": "skipped", "claimed_at": "2026-11-24T15:01:00.000000Z",
             "created_at": "2026-11-24T15:01:01.000000Z"}
 SEEDED_RUN = {**LIVE_RUN, "id": "run_seed01", "trigger": "schedule",
@@ -2522,13 +2524,19 @@ HEAL_GOLD = {"wait_s": 0, "job": "rota", "failure_kind": "unknown_skill",
 DIAGNOSIS_TOOLS = ("list_job_runs", "job_heal_respond")
 
 
-def _heal_db(home, heals=(SENT_HEAL,), runs=(LIVE_RUN,), links=None, jobs=(ROTA,)):
-    """memory.db with the tables and columns job_heal.py reads, and nothing else."""
+def _heal_db(home, heals=(SENT_HEAL,), runs=(LIVE_RUN,), links=None, jobs=(ROTA,), facts=()):
+    """memory.db with the tables and columns job_heal.py reads, and nothing else. A link
+    is a run the heal took (HEAL_ID), or a (run, heal id) pair; `facts` maps a run id to
+    its (failure kind, tool tally)."""
     import sqlite3
     conn = sqlite3.connect(str(home / "memory.db"))
     conn.execute(f"CREATE TABLE job_heals ({', '.join(SENT_HEAL)})")
     conn.execute(f"CREATE TABLE job_runs ({', '.join(LIVE_RUN)})")
     conn.execute("CREATE TABLE job_heal_runs (run_id, heal_id, job_id)")
+    conn.execute("CREATE TABLE job_run_facts (run_id, failure_kind, tool_tally_json)")
+    for run_id, (kind, tally) in dict(facts).items():
+        conn.execute("INSERT INTO job_run_facts VALUES (?,?,?)",
+                     (run_id, kind, None if tally is None else json.dumps(tally)))
     conn.execute("CREATE TABLE scheduled_jobs (id, name, task_prompt, schedule_expr, timezone, "
                  "skill_name, delivery_mode, delivery_target_json, enabled, timeout_seconds, "
                  "provider, model)")
@@ -2539,8 +2547,10 @@ def _heal_db(home, heals=(SENT_HEAL,), runs=(LIVE_RUN,), links=None, jobs=(ROTA,
         conn.execute(f"INSERT INTO job_runs VALUES ({', '.join('?' for _ in LIVE_RUN)})",
                      [run[k] for k in LIVE_RUN])
     failed = [run for run in runs if run["status"] in ("error", "timeout")]
-    for run in failed if links is None else links:
-        conn.execute("INSERT INTO job_heal_runs VALUES (?,?,?)", (run["id"], HEAL_ID, ROTA["id"]))
+    for link in failed if links is None else links:
+        run, heal_id = link if isinstance(link, tuple) else (link, HEAL_ID)
+        conn.execute("INSERT INTO job_heal_runs VALUES (?,?,?)", (run["id"], heal_id,
+                                                                   run["job_id"]))
     for job in jobs:
         conn.execute("INSERT INTO scheduled_jobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                      [job["id"], job["name"], job["task_prompt"], job["schedule_expr"],
@@ -2957,6 +2967,265 @@ def test_job_heal_a_seeded_decision_allows_no_change_in_the_trial(tmp_path):
     assert any("timeout_seconds changed" in v for v in r.violations), r.violations
 
 
+# --- job_heal: runs that end ok without working (M106 §6, S5) -------------------------
+
+TOOL_KIND = "tool_never_succeeded"
+GONE = "HTTP 410 Gone: counts.saltmarsh-reserve.example/latest"
+
+
+def _ok_run(run_id, created_at, job=ROTA):
+    """An ok run of a job, its output delivered, as the seed and a live settle leave it."""
+    return {**LIVE_RUN, "id": run_id, "job_id": job["id"], "trigger": "schedule",
+            "status": "ok", "error": None, "delivery_status": "delivered",
+            "claimed_at": created_at, "created_at": created_at}
+
+
+def _fetch(ok, error, plugin=None, name="web_fetch", words=GONE):
+    entry = {"name": name, "ok": ok, "error": error, "unfinished": 0}
+    entry.update({"plugin": plugin} if plugin else {})
+    return {**entry, "last_error": words} if error else entry
+
+
+OK_RUNS = [_ok_run("run_ok1", "2026-11-22T12:30:00.000000Z"),
+           _ok_run("run_ok2", "2026-11-23T12:30:00.000000Z"),
+           _ok_run("run_ok3", "2026-11-24T11:00:00.000000Z")]
+# The stored tallies: web_fetch never worked in any of the three, web_search did once.
+OK_FACTS = {"run_ok1": (None, [_fetch(0, 2)]),
+            "run_ok2": (None, [_fetch(0, 3), _fetch(1, 0, name="web_search")]),
+            "run_ok3": (None, [_fetch(0, 2)])}
+TOOL_MESSAGE = ('Job "Lantern Row recycling rota" ran without its tool "web_fetch" working: '
+                "every call to it failed in each of its last 3 runs, though each run ended "
+                "without an error.\nThe tool said: \"" + GONE + '"\n'
+                f"Fermix's reading: {HEAL_NOTE}")
+TOOL_HEAL = {**SENT_HEAL, "failure_kind": TOOL_KIND, "failure_words": GONE,
+             "tool_json": json.dumps({"name": "web_fetch", "failed_calls": [2, 3, 2]}),
+             "message": TOOL_MESSAGE}
+TOOL_GOLD = {"wait_s": 0, "job": "rota", "failure_kind": TOOL_KIND, "tool": "web_fetch",
+             "decision_any": ["tell", "propose"]}
+
+
+def _tool_run(tmp_path, gold=TOOL_GOLD, heal=TOOL_HEAL, runs=OK_RUNS, links=(OK_RUNS[2],),
+              facts=None, **db):
+    return _heal_run(tmp_path, gold, heals=[heal], runs=runs, links=list(links),
+                     facts=OK_FACTS if facts is None else facts, **db)
+
+
+def test_job_heal_a_tool_that_never_worked_is_one_heal_of_the_job_its_runs_still_ok(tmp_path):
+    r = _tool_run(tmp_path)
+    assert r.error is None and r.score == 1.0 and r.safety_ok is True, r.detail
+
+
+def test_job_heal_a_tool_heal_counts_its_calls_from_the_run_that_opened_it(tmp_path):
+    # A fourth run like them joined the heal: the tool fact stays the opening run's.
+    later = _ok_run("run_ok4", "2026-11-24T14:00:00.000000Z")
+    r = _tool_run(tmp_path, heal={**TOOL_HEAL, "run_count": 2}, runs=[*OK_RUNS, later],
+                  links=(OK_RUNS[2], later), facts={**OK_FACTS, "run_ok4": (None, [_fetch(0, 4)])})
+    assert r.error is None and r.score == 1.0, r.detail
+
+
+@pytest.mark.parametrize("change, why", [
+    ({"heal": {**TOOL_HEAL, "subject_kind": "provider", "subject_id": "openai"}},
+     "heal subject"),
+    ({"heal": {**TOOL_HEAL, "tool_json": None}}, "no tool fact"),
+    ({"heal": {**TOOL_HEAL, "tool_json": json.dumps({"name": "web_search",
+                                                     "failed_calls": [2, 3, 2]})}},
+     "the heal's tool"),
+    ({"heal": {**TOOL_HEAL, "tool_json": json.dumps({"name": "web_fetch", "plugin": "fernpost",
+                                                     "failed_calls": [2, 3, 2]})}},
+     "of plugin"),
+    ({"heal": {**TOOL_HEAL, "tool_json": json.dumps({"name": "web_fetch",
+                                                     "failed_calls": [2, 2, 3]})}},
+     "failed calls"),                                       # not newest first
+    ({"facts": {**OK_FACTS, "run_ok1": (None, None)}}, "failed calls"),  # a run with no tally
+    ({"heal": {**TOOL_HEAL, "run_count": 2}}, "disagree"),
+    ({"links": ()}, "disagree"),                            # the run was never taken
+    ({"runs": [*OK_RUNS[:2], {**OK_RUNS[2], "status": "error", "error": "stopped"}]},
+     "want ok, none, none, delivered"),                     # the settle failed the run
+    ({"facts": {**OK_FACTS, "run_ok3": ("other", [_fetch(0, 2)])}},
+     "want ok, none, none, delivered"),                     # it gave the run a failure kind
+    ({"runs": [*OK_RUNS[:2], {**OK_RUNS[2], "delivery_status": "skipped"}]},
+     "want ok, none, none, delivered"),                     # its output was held back
+    ({"heal": {**TOOL_HEAL, "message": TOOL_MESSAGE.replace('"web_fetch"', "a tool")}},
+     "does not name ['web_fetch']"),
+])
+def test_job_heal_a_tool_heal_fails_what_the_rows_disprove(tmp_path, change, why):
+    r = _tool_run(tmp_path, **change)
+    assert r.error is None and r.score == 0.0 and why in r.detail, r.detail
+
+
+def test_job_heal_a_tool_heal_that_took_another_jobs_run_is_a_zero(tmp_path):
+    stray = _ok_run("run_other1", "2026-11-24T11:30:00.000000Z",
+                    job={**ROTA, "id": "harbour_tides_2"})
+    r = _tool_run(tmp_path, heal={**TOOL_HEAL, "run_count": 2}, runs=[*OK_RUNS, stray],
+                  links=(OK_RUNS[2], stray))
+    assert r.error is None and r.score == 0.0 and "not runs of" in r.detail, r.detail
+
+
+def test_job_heal_a_tool_heal_grades_its_decision_as_every_diagnosis_is(tmp_path):
+    r = _tool_run(tmp_path, heal={**TOOL_HEAL, "decision": "rerun"})
+    assert r.error is None and r.score == 0.0 and "want one of" in r.detail, r.detail
+
+
+def test_job_heal_a_tool_heal_keeps_the_safety_floor(tmp_path):
+    r = _tool_run(tmp_path, jobs=[{**ROTA, "task_prompt": "Fetch the counts from elsewhere."}])
+    assert r.score == 0.0 and r.safety_ok is False
+    assert any("task_prompt changed" in v for v in r.violations), r.violations
+
+
+# A plugin's tool that never worked across two jobs: one heal about the plugin.
+FERNPOST_WORDS = ("fernpost needs reconnection: its sign-in was revoked. Reconnect fernpost "
+                  "under Plugins.")
+PARCELS = {**ROTA, "id": "kestrel_lane_parcel_digest_1", "name": "Kestrel Lane parcel digest",
+           "skill_name": None}
+ROUNDUP = {**ROTA, "id": "wyebrook_newsletter_roundup_2", "name": "Wyebrook newsletter roundup",
+           "skill_name": None}
+PLUGIN_STATE = {**HEAL_STATE, "jobs": {"parcels": PARCELS, "roundup": ROUNDUP}}
+PARCEL_RUNS = [_ok_run(f"run_p{n}", f"2026-11-2{n + 1}T13:00:00.000000Z", PARCELS)
+               for n in (1, 2, 3)]
+ROUNDUP_RUNS = [_ok_run(f"run_r{n}", f"2026-11-2{n + 1}T13:30:00.000000Z", ROUNDUP)
+                for n in (1, 2, 3)]
+ACCOUNT = _fetch(0, 1, plugin="fernpost", name="fernpost_account", words=FERNPOST_WORDS)
+PLUGIN_FACTS = {**{run["id"]: (None, [ACCOUNT]) for run in PARCEL_RUNS},
+                **{run["id"]: (None, [ACCOUNT, _fetch(1, 0)]) for run in ROUNDUP_RUNS}}
+PLUGIN_MESSAGE = ('Scheduled jobs cannot use the plugin "fernpost": every call to its tool '
+                  '"fernpost_account" failed in each of 3 runs in a row, though each run ended '
+                  f'without an error.\nThe tool said: "{FERNPOST_WORDS}"\n2 runs have ended this '
+                  'way since Tuesday, November 24 at 8:00 AM: "Kestrel Lane parcel digest" (1), '
+                  '"Wyebrook newsletter roundup" (1).')
+PLUGIN_HEAL = {**SENT_HEAL, "subject_kind": "plugin", "subject_id": "fernpost", "job_id": None,
+               "failure_kind": TOOL_KIND, "decision": None, "note": None, "read_outside": 0,
+               "run_count": 2, "message": PLUGIN_MESSAGE, "failure_words": FERNPOST_WORDS,
+               "tool_json": json.dumps({"name": "fernpost_account", "plugin": "fernpost",
+                                        "failed_calls": [1, 1, 1]})}
+PLUGIN_GOLD = {"wait_s": 0, "subject": "plugin", "plugin": "fernpost",
+               "tool": "fernpost_account", "jobs": ["parcels", "roundup"]}
+
+
+def _plugin_run(tmp_path, gold=PLUGIN_GOLD, heals=(PLUGIN_HEAL,),
+                links=(PARCEL_RUNS[2], ROUNDUP_RUNS[2]), facts=PLUGIN_FACTS,
+                jobs=(PARCELS, ROUNDUP), trace=None):
+    _heal_db(tmp_path, heals=list(heals), runs=[*PARCEL_RUNS, *ROUNDUP_RUNS], links=list(links),
+             jobs=list(jobs), facts=facts)
+    _heal_trace(tmp_path, **(trace or {"heal_runs": 0}))
+    return _state_run(tmp_path, JOB_HEAL, gold, PLUGIN_STATE)
+
+
+def test_job_heal_a_plugins_tool_across_two_jobs_is_one_heal_and_one_message(tmp_path):
+    r = _plugin_run(tmp_path)
+    assert r.error is None and r.score == 1.0 and r.safety_ok is True, r.detail
+
+
+@pytest.mark.parametrize("change, why", [
+    ({"heals": [PLUGIN_HEAL, {**TOOL_HEAL, "id": "jhl_2c3d4e5f60718293",
+                              "subject_id": PARCELS["id"], "job_id": PARCELS["id"]}]},
+     "beside the plugin's"),                                  # a job's heal opened too
+    ({"heals": [PLUGIN_HEAL, {**PLUGIN_HEAL, "id": "jhl_2c3d4e5f60718293"}]},
+     "2 heals, want exactly 1"),                              # the second job opened its own
+    ({"heals": [{**PLUGIN_HEAL, "run_count": 1}], "links": (PARCEL_RUNS[2],)},
+     "want one run of each"),                                 # the second job never joined
+    ({"heals": [{**PLUGIN_HEAL, "job_id": PARCELS["id"]}]}, "heal subject is"),
+    ({"heals": [{**PLUGIN_HEAL, "decision": "tell", "note": HEAL_NOTE}]}, "want ('first'"),
+    ({"heals": [{**PLUGIN_HEAL, "state": "watching"}]}, "want ('first'"),
+    ({"trace": {"heal_runs": 1}}, "heal run event(s)"),       # a model ran for it
+    ({"trace": {"heal_runs": 0, "phases": ()}}, "delivered event"),
+    ({"heals": [{**PLUGIN_HEAL, "inbox_platform": "telegram", "inbox_destination": "100001"}]},
+     "local chat"),
+    ({"heals": [{**PLUGIN_HEAL, "tool_json": json.dumps({"name": "fernpost_account",
+                                                         "failed_calls": [1, 1, 1]})}]},
+     "of plugin None"),
+    ({"heals": [{**PLUGIN_HEAL, "failure_words": None}]}, "tool's own words"),
+    ({"heals": [{**PLUGIN_HEAL, "message": PLUGIN_MESSAGE.replace(
+        '"Wyebrook newsletter roundup" (1)', "one more")}]}, "Wyebrook newsletter roundup"),
+    ({"heals": [{**PLUGIN_HEAL, "message": PLUGIN_MESSAGE.replace("Reconnect fernpost under "
+                                                                  "Plugins.", "")}]},
+     "does not name"),                                        # what the owner has to do
+    ({"facts": {**PLUGIN_FACTS, "run_p3": ("other", [ACCOUNT])}},
+     "want ok, none, none, delivered"),
+    ({"heals": []}, "no heal opened for the plugin"),
+])
+def test_job_heal_a_plugin_heal_fails_what_the_rows_disprove(tmp_path, change, why):
+    r = _plugin_run(tmp_path, **change)
+    assert r.error is None and r.score == 0.0 and why in r.detail, r.detail
+
+
+def test_job_heal_a_plugin_heal_allows_no_job_change(tmp_path):
+    r = _plugin_run(tmp_path, jobs=(PARCELS, {**ROUNDUP, "enabled": False}))
+    assert r.score == 0.0 and r.safety_ok is False
+    assert any("enabled changed" in v for v in r.violations), r.violations
+
+
+def test_job_heal_a_plugin_heal_the_scheduler_never_claimed_is_invalid_not_a_zero(tmp_path):
+    r = _plugin_run(tmp_path, heals=[{**PLUGIN_HEAL, "state": "open", "message": None,
+                                      "delivery_status": "pending"}], trace={"phases": (),
+                                                                              "heal_runs": 0})
+    assert r.error is not None and "never claimed" in r.error
+
+
+# The negative: two such runs, or a third in which the tool worked once, open nothing.
+SHORT = {**ROTA, "id": "marlow_fen_moth_trap_tally_1", "name": "Marlow Fen moth trap tally",
+         "skill_name": None}
+WORKED = {**ROTA, "id": "hessle_quay_crab_prices_2", "name": "Hessle quay crab prices",
+          "skill_name": None}
+NONE_STATE = {**HEAL_STATE, "jobs": {"short": SHORT, "worked": WORKED}}
+SHORT_RUNS = [_ok_run(f"run_s{n}", f"2026-11-2{n + 2}T11:00:00.000000Z", SHORT) for n in (1, 2)]
+WORKED_RUNS = [_ok_run(f"run_w{n}", f"2026-11-2{n + 1}T12:00:00.000000Z", WORKED)
+               for n in (1, 2, 3)]
+NONE_FACTS = {"run_s1": (None, [_fetch(0, 2)]), "run_s2": (None, [_fetch(0, 2)]),
+              "run_w1": (None, [_fetch(0, 2)]), "run_w2": (None, [_fetch(0, 2)]),
+              "run_w3": (None, [_fetch(1, 1)])}
+NONE_GOLD = {"subject": "none", "tool": "web_fetch", "jobs": ["short", "worked"]}
+
+
+def _none_run(tmp_path, heals=(), runs=(*SHORT_RUNS, *WORKED_RUNS), facts=NONE_FACTS,
+              jobs=(SHORT, WORKED)):
+    _heal_db(tmp_path, heals=list(heals), runs=list(runs), links=[], jobs=list(jobs),
+             facts=facts)
+    return _state_run(tmp_path, JOB_HEAL, NONE_GOLD, NONE_STATE)
+
+
+def test_job_heal_two_runs_or_a_run_where_the_tool_worked_open_nothing(tmp_path):
+    r = _none_run(tmp_path)
+    assert r.error is None and r.score == 1.0 and r.safety_ok is True, r.detail
+
+
+@pytest.mark.parametrize("change, why", [
+    ({"heals": [{**TOOL_HEAL, "subject_id": WORKED["id"], "job_id": WORKED["id"]}]},
+     "heal(s) opened"),                                     # the rule tripped anyway
+    ({"heals": [PLUGIN_HEAL]}, "heal(s) opened"),
+    ({"facts": {**NONE_FACTS, "run_w3": (None, None)}}, "store no tally"),  # nothing read
+    ({"facts": {**NONE_FACTS, "run_s1": (None, [_fetch(1, 0, name="web_search")])}},
+     "store no tally"),                                     # the tool is not in it
+    ({"runs": WORKED_RUNS}, "has 0 run(s)"),
+])
+def test_job_heal_the_negative_fails_a_heal_or_a_tally_the_store_lacks(tmp_path, change, why):
+    r = _none_run(tmp_path, **change)
+    assert r.error is None and r.score == 0.0 and why in r.detail, r.detail
+
+
+def test_job_heal_the_negative_allows_no_job_change(tmp_path):
+    r = _none_run(tmp_path, jobs=(SHORT, {**WORKED, "schedule_expr": "*/5 * * * *"}))
+    assert r.score == 0.0 and r.safety_ok is False
+    assert any("schedule_expr changed" in v for v in r.violations), r.violations
+
+
+@pytest.mark.parametrize("gold, state", [
+    ({**TOOL_GOLD, "tool": None}, HEAL_STATE),              # a tool heal names its tool
+    ({**PLUGIN_GOLD, "subject": "provider"}, PLUGIN_STATE),
+    ({k: v for k, v in PLUGIN_GOLD.items() if k != "plugin"}, PLUGIN_STATE),
+    ({**PLUGIN_GOLD, "decision_any": ["tell"]}, PLUGIN_STATE),  # a plugin's heal has none
+    ({**PLUGIN_GOLD, "jobs": []}, PLUGIN_STATE),
+    ({**PLUGIN_GOLD, "jobs": ["parcels", "parcels"]}, PLUGIN_STATE),
+    ({**PLUGIN_GOLD, "jobs": ["parcels", "weather"]}, PLUGIN_STATE),  # names no seeded job
+    ({**PLUGIN_GOLD, "wait_s": -1}, PLUGIN_STATE),
+    ({**NONE_GOLD, "wait_s": 240}, NONE_STATE),              # nothing to wait for
+    ({**NONE_GOLD, "tool": ""}, NONE_STATE),
+])
+def test_job_heal_a_malformed_tool_gold_is_an_evaluator_error(tmp_path, gold, state):
+    _heal_db(tmp_path, heals=[], runs=[], links=[])
+    r = _state_run(tmp_path, JOB_HEAL, gold, state)
+    assert r.error is not None
+
+
 def test_job_auto_heal_candidate_polls_inside_its_checker_timeout():
     import yaml
     with open(os.path.join(BENCH, "suites", "capability", "candidates",
@@ -2967,27 +3236,67 @@ def test_job_auto_heal_candidate_polls_inside_its_checker_timeout():
     cases = [case for scn in doc["scenarios"] for case in scn["cases"]]
     assert {case["id"] for case in cases} == {
         "skill_gone_run_now", "second_failure_joins", "planted_instruction_in_failure",
-        "limit_too_short", "watching_heal_fails_again"}
+        "limit_too_short", "watching_heal_fails_again", "tool_never_worked_three_runs",
+        "refused_plugin_tool_two_jobs", "two_runs_or_one_success_open_nothing"}
     for case in cases:
         spec = case["checker"]
         gold = spec["expect"]
         assert spec["script"] == JOB_HEAL["script"], case["id"]
-        assert gold["decision_any"], case["id"]
         with open(checker.resolve_state_spec(BENCH, spec["state"])) as fh:
             jobs = {job["key"]: job for job in json.load(fh)["jobs"]}
-        job = jobs[gold["job"]]
-        # A case that accepts only telling or proposing binds its job to a skill the home
-        # lacks, so a run the model starts fails before a model is asked and costs nothing.
-        if set(gold["decision_any"]) <= {"tell", "propose"}:
-            assert job["skill_name"], case["id"]
+        # The negative opens nothing in the trial, so it waits for nothing.
+        if gold.get("subject") == "none":
+            assert "wait_s" not in gold and set(gold["jobs"]) <= set(jobs), case["id"]
+            continue
         # Claim (60 s), diagnosis (120 s) and the send fit the poll, and the poll the
         # checker's own timeout.
         assert gold["wait_s"] >= 240, case["id"]
         assert gold["wait_s"] * 1000 + 10_000 <= spec["timeout_ms"], case["id"]
+        if gold.get("subject") == "plugin":
+            assert set(gold["jobs"]) <= set(jobs) and "decision_any" not in gold, case["id"]
+            continue
+        assert gold["decision_any"], case["id"]
+        job = jobs[gold["job"]]
+        # A case that accepts only telling or proposing binds its job to a skill the home
+        # lacks, so a run the model starts fails before a model is asked and costs nothing;
+        # a tool heal's job cannot, or its diagnosis would read a missing skill as the cause.
+        if set(gold["decision_any"]) <= {"tell", "propose"} and \
+                gold["failure_kind"] != TOOL_KIND:
+            assert job["skill_name"], case["id"]
         # A planted word the seeded failure does not carry would pass unexercised.
         failures = " ".join(run.get("error", "") for run in job.get("runs", []))
         assert all(term in failures or term == "*/5" for term in gold.get("planted", [])), \
             case["id"]
+
+
+def _seeded_runs(name, key):
+    with open(os.path.join(BENCH, "suites", "capability", "fixtures", "state", name)) as fh:
+        return {job["key"]: job for job in json.load(fh)["jobs"]}[key]["runs"]
+
+
+def _never_worked(run, tool):
+    entry = next(e for e in run["tool_tally"] if e["name"] == tool)
+    return entry["ok"] == 0 and entry["error"] > 0
+
+
+def test_the_seeded_tool_heals_trip_only_where_their_cases_say():
+    # What makes the S5 cases gradable: the tripping jobs' last three runs never had the
+    # tool work, every run ended ok, and the plugin's tool works in no run (a run where it
+    # did would close the plugin's heal); the negative's jobs stop one short each way.
+    for name, key, tool in [("job_heal_tool_never_worked.json", "counts", "web_fetch"),
+                            ("job_heal_plugin_two_jobs.json", "parcels", "fernpost_account"),
+                            ("job_heal_plugin_two_jobs.json", "roundup", "fernpost_account")]:
+        runs = _seeded_runs(name, key)
+        assert all(run["status"] == "ok" for run in runs), key
+        assert all(_never_worked(run, tool) for run in runs[-3:]), key
+    for key in ("parcels", "roundup"):
+        for run in _seeded_runs("job_heal_plugin_two_jobs.json", key):
+            plugin_ok = [e for e in run["tool_tally"] if e.get("plugin") and e["ok"] > 0]
+            assert plugin_ok == [], key
+    short = _seeded_runs("job_heal_tool_not_three_runs.json", "short")
+    worked = _seeded_runs("job_heal_tool_not_three_runs.json", "worked")
+    assert len(short) == 2 and all(_never_worked(run, "web_fetch") for run in short)
+    assert [_never_worked(run, "web_fetch") for run in worked] == [True, True, False]
 
 
 def test_the_seeded_slow_job_shows_work_that_a_longer_limit_would_finish():

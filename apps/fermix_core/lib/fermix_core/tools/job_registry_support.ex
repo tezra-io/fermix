@@ -512,8 +512,10 @@ defmodule FermixCore.Tools.JobRegistrySupport do
 
   @doc """
   A job's heal that is not closed (M106 §5.4), as `list_jobs` shows it: its
-  state, whose it is (`job` or `provider`, with the provider), the failure's
-  kind, since when, how many runs it took, and whether the owner was told;
+  state, whose it is (`job`, `provider` with the provider, or `plugin` with
+  the plugin), the failure's kind (with the tool, for a run that ended ok
+  without working, §6), since when, how many runs it took, and whether the
+  owner was told;
   once diagnosed (§5.5), what Fermix decided and the diagnosis's note, for a
   proposal each field it would change with the value it would take, and for
   a rerun what came of it.
@@ -532,13 +534,21 @@ defmodule FermixCore.Tools.JobRegistrySupport do
       owner_told: heal.delivery_status == "delivered"
     }
     |> put_heal_provider(heal)
+    |> put_heal_tool(Map.get(heal, :tool))
     |> put_heal_decision(heal)
   end
 
   defp put_heal_provider(payload, %{subject_kind: "provider", subject_id: provider}),
     do: Map.put(payload, :provider, provider)
 
+  defp put_heal_provider(payload, %{subject_kind: "plugin", subject_id: plugin}),
+    do: Map.put(payload, :plugin, plugin)
+
   defp put_heal_provider(payload, _heal), do: payload
+
+  # The tool's name only: its last words reach a model only framed (§9).
+  defp put_heal_tool(payload, %{"name" => name}), do: Map.put(payload, :tool, name)
+  defp put_heal_tool(payload, nil), do: payload
 
   defp put_heal_decision(payload, %{decision: decision} = heal) when is_binary(decision) do
     payload
@@ -632,8 +642,27 @@ defmodule FermixCore.Tools.JobRegistrySupport do
       output_ref: run.output_ref,
       token_usage: run.token_usage,
       latency: run.latency,
-      updated_at: timestamp(run.updated_at)
+      updated_at: timestamp(run.updated_at),
+      tools: tally_payload(Map.get(run, :tool_tally))
     })
+  end
+
+  # The run's tool tally (M106 §6) as names and numbers: each tool's calls that
+  # succeeded, failed or never finished, and its plugin. Never the last
+  # error's words, which someone else could have written; nil for a run
+  # settled before tallies were kept.
+  defp tally_payload(nil), do: nil
+
+  defp tally_payload(tally) when is_list(tally) do
+    for entry <- tally do
+      %{
+        name: entry["name"],
+        plugin: entry["plugin"],
+        succeeded: entry["ok"],
+        failed: entry["error"],
+        unfinished: entry["unfinished"]
+      }
+    end
   end
 
   def source_payload(source) do

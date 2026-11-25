@@ -590,21 +590,27 @@ defmodule FermixCore.Jobs.CueRun do
   payload, with a cue run's reply, error, prompt and output reference held back
   outside an attended operator turn, and its reply, error and prompt framed on
   one (the output reference is a path Fermix wrote, and the artifact holds no
-  reply). A cue run's payload also carries its delivery's outcome. Every other
-  run passes through unchanged.
+  reply). A cue run's payload also carries its delivery's outcome. Inside a
+  job's heal run (its context carries `job_heal`, M106 §9), every other run's
+  reply, error and prompt are framed as text someone else could have written,
+  as the failure's words are; for any other caller every other run passes
+  through unchanged.
   """
   @spec present_runs([{map(), map()}], map(), keyword()) :: {:ok, [map()]} | {:error, term()}
   def present_runs(pairs, context, opts) when is_list(pairs) and is_map(context) do
     ids = for {_payload, %{trigger: "cue", cue_delivery_id: id}} <- pairs, is_integer(id), do: id
     attended? = Access.attended_operator_turn?(context)
+    heal_run? = Map.has_key?(context, :job_heal)
 
     with {:ok, outcomes} <- delivery_outcomes(Enum.uniq(ids), opts) do
       {:ok,
-       Enum.map(pairs, fn {payload, run} -> present_run(payload, run, outcomes, attended?) end)}
+       Enum.map(pairs, fn {payload, run} ->
+         present_run(payload, run, outcomes, attended?, heal_run?)
+       end)}
     end
   end
 
-  defp present_run(payload, %{trigger: "cue"} = run, outcomes, attended?) do
+  defp present_run(payload, %{trigger: "cue"} = run, outcomes, attended?, _heal_run?) do
     delivery = Map.get(outcomes, Map.get(run, :cue_delivery_id))
 
     payload
@@ -612,20 +618,26 @@ defmodule FermixCore.Jobs.CueRun do
     |> cue_run_fields(delivery, attended?)
   end
 
-  defp present_run(payload, _run, _outcomes, _attended?), do: payload
+  defp present_run(payload, _run, _outcomes, _attended?, true),
+    do: frame_run_fields(payload, "job_run")
+
+  defp present_run(payload, _run, _outcomes, _attended?, false), do: payload
 
   defp cue_run_fields(payload, delivery, true) do
     label = if delivery, do: "cue:" <> delivery.source_ref, else: "cue run"
-
-    Enum.reduce(@framed_run_fields, payload, fn key, acc ->
-      Map.replace_lazy(acc, key, &UntrustedContent.frame(label, &1))
-    end)
+    frame_run_fields(payload, label)
   end
 
   defp cue_run_fields(payload, _delivery, false) do
     payload
     |> Map.drop(@withheld_run_fields)
     |> Map.put(:cue_run_note, @withheld_note)
+  end
+
+  defp frame_run_fields(payload, label) do
+    Enum.reduce(@framed_run_fields, payload, fn key, acc ->
+      Map.replace_lazy(acc, key, &UntrustedContent.frame(label, &1))
+    end)
   end
 
   # --- helpers ------------------------------------------------------------------------------

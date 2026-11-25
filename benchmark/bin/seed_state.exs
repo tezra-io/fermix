@@ -28,8 +28,15 @@
 # Its run's own delivery reads `skipped`, as a healed failure's does; an ok run
 # after it closes the heal as healed. A run may name its `failure_kind` (a
 # `Jobs.Failure` kind, `other` by default), its `tool_timeline` (the runner's
-# entries: name, duration_ms, status ok|error|unfinished, optional plugin) and its
-# `trigger` (schedule or manual). A failed run may also carry a `heal`: the
+# entries: name, duration_ms, status ok|error|unfinished, optional plugin), its
+# `tool_tally` (the runner's whole-run tally, M106 §6: name, ok, error and unfinished
+# counts, optional plugin and last_error) and its `trigger` (schedule or manual). The
+# tally goes through the same settle, so an ok run whose tool never worked in it nor
+# in its job's two runs before it opens a heal of kind `tool_never_succeeded` and
+# stays ok; a plugin's tool makes it the plugin's heal, which a later job's tripping
+# run joins. A tally the engine could not read would trip nothing, so a malformed one
+# is refused. A failed run, or an ok run that opens a heal of its job, may also carry
+# a `heal`: the
 # conclusion its heal run would have reached (M106 §5.5), made through the Repo's
 # own heal calls (claim, inbox, decision, message, delivered) at
 # `delivered_hours_ago`, so a later failed run joins a waiting heal or concludes a
@@ -45,6 +52,7 @@
 defmodule SeedState do
   alias Exqlite.Sqlite3
   alias FermixCore.Delivery.OwnerInbox
+  alias FermixCore.Jobs.Degraded
   alias FermixCore.Jobs.Failure
   alias FermixCore.Jobs.HealMessage
   alias FermixCore.Jobs.Registry, as: Jobs
@@ -81,6 +89,11 @@ defmodule SeedState do
   # every job enabled.
   @run_triggers ~w(schedule manual)
   @timeline_statuses ~w(ok error unfinished)
+  # A tool tally entry as the runner writes it (`Jobs.Runner`), and the run statuses
+  # the settle reads a job's earlier tallies from (`Memory.Repo.JobHealsSql`).
+  @tally_keys ~w(name ok error unfinished plugin last_error)
+  @tally_counts ~w(ok error unfinished)
+  @tally_read_statuses ~w(ok error timeout)
   @heal_decisions ~w(rerun raise_limit propose tell)
   @rerun_outcomes ~w(started running refused unanswered)
   # The job field each change field names, as a spec states the job.
@@ -390,6 +403,7 @@ defmodule SeedState do
           error: Map.get(spec, "error"),
           final_response: Map.get(spec, "final_response"),
           tool_timeline: Map.get(spec, "tool_timeline"),
+          tool_tally: Map.get(spec, "tool_tally"),
           updated_at: completed
         })
         |> Map.merge(seeded_failure(status, spec)),
@@ -484,11 +498,12 @@ defmodule SeedState do
   defp check_jobs!(specs, config) when is_list(specs) do
     Enum.each(specs, &check_job_runs!/1)
     concluding = Enum.filter(specs, &Enum.any?(runs(&1), fn run -> Map.has_key?(run, "heal") end))
-    failing = Enum.filter(specs, &Enum.any?(runs(&1), fn run -> failed?(run) end))
+    opening = Enum.filter(specs, &opens_heal?/1)
 
-    if concluding != [] and length(failing) > 1 do
-      raise "jobs: a spec that concludes a seeded heal may give only one job failed runs " <>
-              "(the claim takes the oldest open heal), got #{length(failing)}"
+    if concluding != [] and length(opening) > 1 do
+      raise "jobs: a spec that concludes a seeded heal may give only one job runs that open " <>
+              "a heal, failed or ending ok without working (the claim takes the oldest open " <>
+              "heal), got #{length(opening)}"
     end
 
     if concluding != [], do: owner_inbox!(config)
@@ -497,6 +512,32 @@ defmodule SeedState do
 
   defp runs(spec), do: Map.get(spec, "runs", [])
   defp failed?(run), do: Map.get(run, "status") != "ok"
+
+  # A failed run opens a heal (or joins one); so does an ok run that trips the rule of
+  # runs that end ok without working (M106 §6).
+  defp opens_heal?(spec) do
+    runs = runs(spec)
+
+    runs
+    |> Enum.with_index()
+    |> Enum.any?(fn {run, index} -> failed?(run) or tripped(runs, index) != :none end)
+  end
+
+  # What the seed's own settle of the ok run at `index` makes of the tallies, by the
+  # engine's rule (`Jobs.Degraded`): the run's tally, then those of the runs settled
+  # before it that the settle reads, newest first. `check_order!/2` keeps the spec's
+  # order the settle's.
+  defp tripped(runs, index) do
+    {before, [run | _after]} = Enum.split(runs, index)
+
+    earlier =
+      before
+      |> Enum.filter(&(Map.get(&1, "status") in @tally_read_statuses))
+      |> Enum.take(-(Degraded.runs() - 1))
+      |> Enum.reverse()
+
+    Degraded.decide(Enum.map([run | earlier], &Map.get(&1, "tool_tally")))
+  end
 
   defp owner_inbox!(config) do
     case OwnerInbox.for_approval(jobs_config: config.jobs, configured_owners: %{}) do
@@ -511,6 +552,7 @@ defmodule SeedState do
   defp check_job_runs!(spec) do
     key = Map.get(spec, "key")
     runs = runs(spec)
+    check_order!(key, runs)
 
     runs
     |> Enum.with_index()
@@ -519,9 +561,23 @@ defmodule SeedState do
 
       case Map.get(run, "heal") do
         nil -> :ok
-        heal -> check_heal!(key, spec, run, Enum.at(runs, index + 1), heal)
+        heal -> check_heal!(key, spec, runs, index, heal)
       end
     end)
+  end
+
+  # Oldest first, as the seed settles them, so the runs before one in the spec are the
+  # runs its settle reads before it; whole hours and seconds, as the back-dating adds.
+  defp check_order!(key, runs) do
+    hours = Enum.map(runs, &Map.get(&1, "hours_ago"))
+    durations = Enum.map(runs, &Map.get(&1, "duration_seconds"))
+
+    unless Enum.all?(hours ++ durations, &count?/1) and hours == Enum.sort(hours, :desc) and
+             hours == Enum.uniq(hours),
+           do:
+             raise(
+               "jobs #{key}: runs are listed oldest first, each hours_ago a whole number below the one before and each duration_seconds a whole number, got #{inspect(hours)} and #{inspect(durations)}"
+             )
   end
 
   defp check_run!(key, run) do
@@ -542,7 +598,44 @@ defmodule SeedState do
         )
 
     check_timeline!(key, Map.get(run, "tool_timeline"))
+    check_tally!(key, Map.get(run, "tool_tally"))
   end
+
+  # The runner's tally (M106 §6), each tool once: a tally the engine cannot read would
+  # count as none and trip nothing, so a malformed one is refused before the reset
+  # rather than seeded to measure nothing.
+  defp check_tally!(_key, nil), do: :ok
+
+  defp check_tally!(key, entries) when is_list(entries) do
+    Enum.each(entries, fn entry ->
+      unless tally_entry?(entry),
+        do:
+          raise(
+            "jobs #{key}: a tool_tally entry is the runner's: a name, ok, error and unfinished counts (not all 0), an optional plugin and last_error, nothing else; got #{inspect(entry)}"
+          )
+    end)
+
+    names = Enum.map(entries, &Map.fetch!(&1, "name"))
+
+    unless names == Enum.uniq(names),
+      do: raise("jobs #{key}: a tool_tally names each tool once, got #{inspect(names)}")
+  end
+
+  defp check_tally!(key, other),
+    do: raise("jobs #{key}: tool_tally must be a list, got #{inspect(other)}")
+
+  defp tally_entry?(%{"name" => name} = entry) when is_binary(name) and name != "" do
+    counts = Enum.map(@tally_counts, &Map.get(entry, &1))
+
+    Map.keys(entry) -- @tally_keys == [] and Enum.all?(counts, &count?/1) and
+      Enum.sum(counts) > 0 and plugin?(Map.get(entry, "plugin")) and
+      (is_nil(entry["last_error"]) or is_binary(entry["last_error"]))
+  end
+
+  defp tally_entry?(_entry), do: false
+
+  defp count?(value), do: is_integer(value) and value >= 0
+  defp plugin?(plugin), do: is_nil(plugin) or (is_binary(plugin) and plugin != "")
 
   defp check_timeline!(_key, nil), do: :ok
 
@@ -562,14 +655,16 @@ defmodule SeedState do
   defp check_timeline!(key, other),
     do: raise("jobs #{key}: tool_timeline must be a list, got #{inspect(other)}")
 
-  # A conclusion of a failed run's heal: a decision the seed can state, a note as the
-  # decision tool takes one, a change that says what the job holds, and a time after
-  # this run ended and before the next began.
-  defp check_heal!(key, spec, run, next_run, heal) do
+  # A conclusion of the heal a run opened: a decision the seed can state, a note as
+  # the decision tool takes one, a change that says what the job holds, and a time
+  # after this run ended and before the next began.
+  defp check_heal!(key, spec, runs, index, heal) do
+    run = Enum.at(runs, index)
+    next_run = Enum.at(runs, index + 1)
     decision = Map.get(heal, "decision")
     note = Map.get(heal, "note")
 
-    unless failed?(run), do: raise("jobs #{key}: only a failed run's heal can be concluded")
+    unless failed?(run), do: check_tool_heal!(key, tripped(runs, index))
 
     unless decision in @heal_decisions,
       do:
@@ -584,6 +679,22 @@ defmodule SeedState do
     check_rerun_outcome!(key, decision, next_run, Map.get(heal, "rerun_outcome"))
     check_conclusion_time!(key, run, next_run, Map.get(heal, "delivered_hours_ago"))
   end
+
+  # An ok run's heal is one its tool opened for the job (M106 §6). A plugin's heal is
+  # told by code with no decision, so it has no conclusion to seed.
+  defp check_tool_heal!(_key, {:tool, %{plugin: nil}}), do: :ok
+
+  defp check_tool_heal!(key, {:tool, %{plugin: plugin}}),
+    do:
+      raise(
+        "jobs #{key}: the heal this run opens is the plugin #{plugin}'s, which code tells with no decision; it has no conclusion to seed"
+      )
+
+  defp check_tool_heal!(key, :none),
+    do:
+      raise(
+        "jobs #{key}: a heal is concluded on a failed run, or on an ok run whose tool never worked in it and in the job's two runs before it; this run opens none"
+      )
 
   # A rerun says what came of its ask (`Jobs.HealRun`'s outcomes), and no other
   # decision has one. A run that `started` is the spec's next run, started by hand.

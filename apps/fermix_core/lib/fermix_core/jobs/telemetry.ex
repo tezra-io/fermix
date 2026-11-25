@@ -17,7 +17,10 @@ defmodule FermixCore.Jobs.Telemetry do
   heal a second time, §5.9) and `closed` from a run's settle; `decided`,
   `rerun`, `delivered`, `delivery_failed` and `closed` (still failing) from
   its heal run; and `closed` again when the Scheduler expires one. Each
-  carries `heal_id`, and `job_id` and `run_id` when a run moved it.
+  carries `heal_id`, and `job_id` and `run_id` when a run moved it. A settle
+  that took a failure says its `failure_kind`, `subject_kind` and
+  `subject_id`: an ok run whose tool never worked three runs in a row (M106
+  §6) is `tool_never_succeeded`, its subject the tool's plugin or the job.
 
   A job's heal run is a run kind of its own (§5.5, §10): its diagnosis runs
   the agent loop under the session `heal_<job id>_<time>_<6 hex>`, the failed
@@ -154,21 +157,20 @@ defmodule FermixCore.Jobs.Telemetry do
   end
 
   @doc """
-  The heal events a scheduled run's settle caused: `opened` or `joined` for a
-  failure a heal took, and `closed` (outcome `healed`) for each heal an ok run
-  closed. A failure retried, kept quiet or out of scope causes none; its
-  `run_error` says which.
+  The heal events a scheduled run's settle caused: `opened`, `joined` or
+  `verdict` for a failure a heal took, with the settlement's `failure_kind`,
+  `subject_kind` and `subject_id` (an ok run's included, M106 §6), and
+  `closed` (outcome `healed`) for each heal an ok run closed. A failure
+  retried, kept quiet or out of scope causes none; its `run_error` says which.
   """
   @spec heal_settled(map(), map(), map()) :: :ok
-  def heal_settled(job, run, %{heal: heal, healed: healed}) when is_list(healed) do
+  def heal_settled(job, run, %{heal: heal, healed: healed} = settlement) when is_list(healed) do
     ids = %{job_id: job.id, run_id: run.id}
 
     case heal do
       {phase, heal_id} when phase in [:opened, :joined, :verdict] ->
-        heal(
-          Atom.to_string(phase),
-          Map.merge(ids, %{heal_id: heal_id, failure_kind: run.failure_kind})
-        )
+        taken = Map.take(settlement, [:failure_kind, :subject_kind, :subject_id])
+        heal(Atom.to_string(phase), ids |> Map.merge(taken) |> Map.put(:heal_id, heal_id))
 
       _none_quiet_or_out_of_scope ->
         :ok
