@@ -17,7 +17,9 @@ guest. Since M106 §6 an ok run whose tool never once worked, as in the
 job's two runs before it, goes to a heal too, its own row ok and its text
 delivered. The heal's own rows are left out; its run's one move on the job
 (a pause, a raised time limit or a "run now") takes the owner's own path,
-which the spec models. Checks 61 to 72 cover retries; see "Retries (M106)"
+which the spec models; since M106 S4 that move is one guarded write, which
+checks 73 to 76 model (see "Heal moves (M106 S4)"). Checks 61 to 72 cover
+retries; see "Retries (M106)"
 below, "Re-read for M106 retries and heals", "Re-read for the heal's
 diagnosis and moves" and "Re-read for runs that end ok without working".
 
@@ -204,7 +206,8 @@ crash or timeout step itself.
 
 The bounds are constants too: `NumRuns`, `Fires`, `SendAttempts` (3 in the
 code, 2 in the checks), `OwnerMoves` (pause/resume requests), `OwnerEdits`
-(`update_job` requests) and `ManualRuns`.
+(`update_job` requests), `ManualRuns` and `HealMoves` (a heal run's move on
+the job, 0 or 1: 0 in every check before 73).
 
 **Mechanism switches** (`TRUE` is the real code; each is switched off by the
 checks listed under it):
@@ -216,7 +219,7 @@ checks listed under it):
 - `RetriesOnlyUnsent`: a send is retried only when it never reached the
   platform (`channel_send.ex:140-143`, `:194-202`). This is the mechanism for
   platforms that do not dedupe. The runner tags its send with the proactive
-  key `job:<run id>` (`runner.ex:1668`). The mobile channel keeps one row per
+  key `job:<run id>` (`runner.ex:1685`). The mobile channel keeps one row per
   key (`mobile_sql.ex:44-46`), so a retry there would not show twice. Check 04.
 - `ReconcilesRuns`: at init and every 60 s the Scheduler reaps unsettled runs
   with no live runner and adopts live ones (`scheduler.ex:235`, `:270-540`).
@@ -242,12 +245,12 @@ checks listed under it):
   (`scheduler.ex:721-725`, `:1211-1217`). Switched off, the refusal counts as a
   clean drain and a past-due job re-arms at 0 ms. Check 19.
 - `OwnerWritesColumns`: pause, resume and `update_job` write only the columns
-  they own, in place (`registry.ex:264-287`;
+  they own, in place (`registry.ex:324-359`;
   `Repo.update_scheduled_job_fields`, `repo.ex:2506-2509`, `:7286-7293`, the owner
   field list `:8096-8134`). Switched off, pause and `update_job` upsert the
   whole row they read. Check 27.
 - `LoopDiesWithRunner`: a runner's AgentLoop is spawned linked to it and
-  reports its own crash as a value (`runner.ex:1305-1309`, `:1321-1338`), so a
+  reports its own crash as a value (`runner.ex:1322-1326`, `:1338-1355`), so a
   restart that kills the runner kills its loop. Switched off, the code before
   the fix: the loop was only monitored, and a daemon crash (which stands for
   a restart of the job subtree) leaves a runner's loop running as a stray
@@ -272,7 +275,7 @@ checks listed under it):
 - `StampsToolStart`: a run's first tool start is on its row before the tool
   runs. AgentLoop calls the runner's gate in the loop's own process ahead of
   each call (`gate_tool`, `agent_loop.ex:1396-1457`), and the gate stores the
-  start in one Repo call (`put_tool_start_store`, `runner.ex:1711-1750`); a
+  start in one Repo call (`put_tool_start_store`, `runner.ex:1728-1767`); a
   start it cannot store runs no tool. Switched off, the order before JOB-9's
   fix: the tool runs, and the runner stores its start when it handles the
   loop's message. Check 62.
@@ -283,6 +286,15 @@ checks listed under it):
   (`update_scheduled_job_fields_row`, `repo.ex:8820-8834`) and run now
   (`claim_job_now_tx`, `:8303-8312`) delete the job's retry in their own
   transaction. Check 65.
+- `HealMoveGuarded`: a heal run's move (a pause, a raised limit) is one
+  transaction that writes the job only while it is still the version the
+  move was drawn for (`heal_job_write_tx`, `repo.ex:9030-9064`). Switched
+  off, the S3 shape: the move is written whatever the job became during the
+  diagnosis. Check 74.
+- `MarksOwnerWrites`: every owner write marks the job's diagnosing heal,
+  whatever value it leaves, the heal's claim clears the mark, and a heal
+  run's move under a marked heal is not made (JOB-12's fix). Switched off,
+  the version compare alone: the first S4 code. Check 76.
 
 **What holds.** Every property below is also broken by its `needs` check.
 - **At most one active run per job** (check 01). An active run is a
@@ -480,6 +492,27 @@ check.
   once its run row is final).
 - Witness 71 shows a retry claim is reached: the scan finds the job due by
   its retry alone, and the claim will take it.
+
+**Heal moves (M106 S4).** With `HealMoves = 1` a heal run reads the job
+before its diagnosis (`HealRead`, its plan's kind and the job's version as
+read) and later makes its one move (`HealWrite`), beside a run, its loop's
+errors, the owner's pause or resume and an edit.
+- **A heal's raised limit never lands over an owner edit that still
+  stands** (check 73, `HealNeverOverwritesEdit`, 69,561 states). This rests
+  on `HealMoveGuarded` (check 74, the S3 shape). The owner reads the job for
+  an edit, the heal run reads it, the owner's edit lands, and then the
+  raise drawn from the earlier read lands over it: the stale read a review
+  found.
+- **A heal's pause never lands after an owner resume made since its read**
+  (check 75, `HealPauseNeverUndoesResume`, 69,561 states). This rests on
+  `MarksOwnerWrites` (check 76: JOB-12's 4-state counterexample, a resume
+  that leaves the job as read, which the version compare alone cannot
+  see).
+
+In every other check `HealMoves = 0`. There a heal run's move is still
+covered by the owner's steps, since a move that lands writes what an atomic
+`Pause` or an edit writes (retry cleared, no other modelled column), and a
+move that does not land writes nothing.
 
 "A retry never moves `next_run_at`" is not a check. In this clock a job
 that is not due always has `next_run_at` at the next fire time (`now + 1`),
@@ -1481,6 +1514,93 @@ shortest and can change between runs.
   "the loop dies with its heal run, before any further model call"; "the
   watchdog kills the loop, and the heal run goes on to send the facts".
 
+### JOB-12: a heal's pause lands after an owner's resume that left the job as read
+- **Severity:** low.
+  - It needs the owner to resume the job while its heal run is diagnosing,
+    the two minutes or so between the run's read of the job and its move:
+    either a resume of a job that was running anyway, or a pause and then a
+    resume.
+  - The job then ends paused although the owner's last word was to resume
+    it. The heal's message says Fermix paused it, so the owner could resume
+    it again.
+- **Status:** fixed (S4). Found by reading the first S4 code in "Re-read
+  for the owner's answer and a heal's one write" below, and fixed before
+  the stage shipped.
+- **Checks:**
+  - 75 holds (`HealPauseNeverUndoesResume`).
+  - 76 (`needs MarksOwnerWrites`) breaks it with the fix switched off. Its
+    4-state counterexample is the one below.
+  - 73 and 74, the stale read the first S4 fence was written for, hold and
+    break as before.
+- **Counterexample (check 76, 4 states):**
+  1. The job is enabled and scheduled.
+  2. A heal run reads it before its diagnosis and resolves a pause
+     (`HealRead`).
+  3. The owner resumes the job (`Resume`). Nothing checks that it is
+     paused, and a resume always reaches its write (`enabled?` TRUE,
+     `state` "scheduled", a fresh `next_run_at`), so the owner is told
+     "resumed".
+  4. The heal run's move (`HealWrite`) compares the job's version with the
+     one it read. They are equal, because `enabled` and the definition are
+     as read, so it writes the pause.
+
+  A pause and then a resume during the diagnosis ends the same way, two
+  steps longer.
+- **Code (before the fix):**
+  - The heal's fence compared only `HealDecision.job_version/1` (a SHA-256
+    of the definition fields and `enabled?`, `heal_decision.ex:49-62`,
+    `:130-136`) of the job as it was then with the one in the plan
+    (`heal_job_write_fenced`). A value digest cannot tell a job the owner
+    never touched from one the owner put back as it was.
+  - The owner's writes left no mark the fence read. `updated_at` is
+    written by runs as well (`@run_written_fields`, `heal_decision.ex:63`),
+    so no version reads it.
+- **Fix:**
+  - Every owner write (`update_scheduled_job_fields_row`,
+    `repo.ex:8989-9002`) marks the job's `diagnosing` heal in its own
+    transaction (`JobHealsSql.mark_written_under/3`, `job_heals.owner_wrote_at`),
+    whatever value it leaves. Every pause, resume and edit reaches that
+    write.
+  - The heal's claim clears the mark (`take_lease`,
+    `job_heals_sql.ex:946-960`): the run reads the job after its claim.
+  - Under a heal run's claim, `heal_job_write_fenced` (`repo.ex:9047-9056`)
+    treats a set mark as moved on, as it treats a moved digest, and writes
+    nothing.
+  - The digest compare is kept. It sees a change made outside the owner's
+    write (the Scheduler's own write of `enabled?`) and is the answer
+    claim's only guard there.
+- **Whether the mark can be lost or wrongly kept**, read against the code:
+  - *A claim between the owner's write and the heal's move.* A heal run
+    holds its heal's lease, and the Scheduler claims no heal while a heal
+    run lives: it runs one at a time and adopts a live one after a restart.
+    A new claim therefore means the old run is dead, or its lease ran out
+    and it is fenced out: a new claim writes a new `lease_token`, and the
+    old run's `heal_job_write` then fails `claimant` with `:lease_lost` and
+    writes nothing.
+    - The new run reads the job after its claim, so clearing the mark at
+      the claim is right: any owner write before it is in what that run
+      reads.
+  - *An owner write between the claim and the heal run's read* is marked
+    though the read sees it. The move is then refused and recorded as
+    `tell`: conservative, never unsafe. The model starts the mark at the
+    read (`HealRead` folds the claim in), so it refuses fewer moves than
+    the code, never more.
+  - *A crash.* The mark is a column, so it survives. The heal's lease runs
+    out, the next claim clears the mark, and that run reads the job afresh.
+    `DaemonCrash` sends a reading heal back to `idle`, whose next
+    `HealRead` clears the mark the same way.
+  - *A write that is no owner write* (a run's claim or settle, a heal's own
+    move) leaves no mark. Those writes write no version field, or are the
+    move itself.
+- **Tests** (names read in the export, not run here):
+  - `heal_run_diagnosis_test.exs`: "paused then resumed: the heal's pause
+    is not made, and no pause is claimed"; "a limit edited and edited back:
+    the heal's raise is not made, nor claimed";
+  - `repo_job_heals_answer_test.exs`: "an owner's write during the
+    diagnosis that leaves the value as read still blocks"; "an owner's
+    write before the claim does not block the move"; "the mark does not
+    survive into the next claim".
+
 ## Re-read for M106 retries and heals (2026-11-24)
 
 M106's quiet retry (§5.3) and its heal (§5.4) staled `scheduler.ex`,
@@ -1840,6 +1960,135 @@ Citations:
 
 No check was added or changed, and no finding came of the re-read.
 
+## Re-read for the owner's answer and a heal's one write (M106, 2026-11-25)
+
+M106's §5.7 (S4: every job write that belongs to a heal is one
+transaction, and the store can apply or leave a stored proposal) staled
+`runner.ex`, `registry.ex`, `heal_run.ex` and, in `repo.ex`,
+`update_scheduled_job_fields_row`, `scheduled_job_field_assignments!` and
+then `heal_job_write_fenced`. This section reads the code as it shipped:
+the first S4 code was reworked once more before the stage was pushed (the
+mark of JOB-12's fix, and no caller for the answer yet). Point by point:
+
+1. **The owner's steps still describe the owner's writes.**
+   - `Repo.update_scheduled_job_fields_row` (`repo.ex:8989-9002`) is still
+     one `BEGIN IMMEDIATE`. It now reads the job before its write and
+     again after it. The write itself (`write_scheduled_job_fields`,
+     `:9009-9018`) sets the given columns, clears a follow-up's stale
+     approval and deletes the retry, as before.
+   - When the job's version moved (`HealDecision.job_version/1`), it also
+     closes the job's waiting proposals superseded (`supersede_moved`,
+     `:9020-9024`; `JobHealsSql.supersede_proposals`). Whatever it leaves,
+     it marks the job's `diagnosing` heal (`mark_written_under/3`,
+     JOB-12's fix). Those are heal rows; the mark is read by the heal's
+     move, which is modelled (`hMark`, below).
+   - `scheduled_job_field_assignments!` now refuses a field not on
+     `@owner_job_fields` before any clause reads it. That changes no write
+     the owner's steps make.
+   - So `Pause`, `Resume` and `UpdateRead` then `UpdateWrite` stand. The
+     edit's read (`prepare_update`) still feeds only the edited columns,
+     none of them modelled.
+   - A run's claim and settle write no version field and supersede
+     nothing.
+2. **A heal run's move is now its own step: modelled** (`HealRead`,
+   `HealWrite`, checks 73 to 76; see "Heal moves (M106 S4)").
+   - The move is `Registry.heal_write/5` → `Repo.heal_job_write/5`
+     (`heal_job_write_tx`, `repo.ex:9030-9064`). In one transaction it checks
+     the heal is still `diagnosing` under the run's lease
+     (`JobHealsSql.claimant`), reads the job, and compares its version
+     with the plan's `change_job_digest`. The plan's digest comes from the
+     job read before the diagnosis (`diagnose`, `heal_run.ex:228-237`).
+     It also treats a heal an owner write marked since its claim as moved
+     on (`written_under?`, `:9053-9056`).
+   - Then it either writes nothing to the job (`moved_on`: the plan is
+     recorded as `tell`, refused `job_changed`), or writes the job as an
+     owner write does and records the decision under the lease, both or
+     neither.
+   - The old `{:hold, ...}`, a lease proof followed by an unguarded
+     `Registry.pause_job` or `update_job`, is gone.
+   - Check 73 shows the fence keeps a raise off an edit that still stands.
+     Check 74 is the S3 shape, whose counterexample is the stale read a
+     review found: an owner edit lands during the diagnosis and the raise
+     overwrites it.
+   - Check 75 holds: a heal's pause never lands after an owner resume
+     since its read. Check 76 is the first S4 code, which compared the
+     version alone: a resume that leaves `enabled` as read (of a running
+     job, or after a pause) let the pause land after it. That is JOB-12,
+     found in that code and fixed by the mark before the stage shipped.
+   - The mark is never lost while the run that will move is alive. It is
+     wrongly kept only for an owner write between the claim and the run's
+     read, which refuses a move whose read saw the write: conservative.
+     See JOB-12.
+3. **The owner's answer: no caller yet, so not a step.**
+   - The model-called tool of the first S4 code (`answer_job_proposal`,
+     with its `owner_words`) is removed: the owner answers a proposal on
+     its card, a later stage.
+   - `Jobs.HealAnswer` holds the two answers, and nothing in production
+     calls it.
+     - `apply_change/4` writes through the same `heal_job_write/5` under
+       the answer claim. The claim needs the heal to be the job's
+       unanswered waiting proposal on its first conclusion; the version is
+       the proposal's, and the mark is not read. The write is either an
+       owner write with the heal moved to `watching`, or nothing with the
+       heal closed `superseded`.
+     - `leave/3` closes the heal `skipped` in one `job_heals` call.
+   - The heal records `decided_from`, where it was answered, in place of a
+     session.
+   - Once something calls it, an `apply` is `UpdateRead` with
+     `UpdateWrite` at once (its read folded into the guarded write), or no
+     write: the owner's own steps.
+   - The value comparison cannot reach an answer: the first owner write
+     that moves the version (an edit, a pause, a resume) closes the
+     proposal in that write's own transaction, so a later `apply` finds it
+     not waiting.
+4. **The runner's error text: nothing decides on it.**
+   - A failed run's `error` and its job's `last_error` now hold Fermix's
+     sentence for the failure's kind (`run_error`, `runner.ex:689-695`;
+     `Failure.sentence/2`, which delegates to `Failure.kind_sentence/3`).
+     For a kind Fermix has no sentence for, they hold the failure's own
+     text (`Failure.other_text/1`).
+   - Every decision still reads the reason term:
+     - the runner's settle retry (`failure_settle_by`, `runner.ex:610`,
+       `Failure.provider_failure?/1`);
+     - the stored kind (`Failure.stored(Failure.kind(reason))`);
+     - a cue run's outcome (`CueRun.outcome/3` on the `{status, reason}`
+       result);
+     - the reaper's crash settle, from its own kind (`Failure.sentence(kind)`,
+       `Failure.stored(kind)`);
+     - `Retry.decide`, from the settle and `tools_started_at`.
+   - The text is only shown: `get_job_run`, `list_job_runs`, `list_jobs`,
+     a cue run's final failure report (`stopped_text`,
+     `cue_run.ex:424-427`) and telemetry.
+   - `Failure.kind_sentence/3` is total. In the first S4 code, `told/3`
+     matched `:time_limit`, `:idle_limit` and `:unknown_skill` only on
+     their own reason; that shape is gone.
+
+`cue_inbox` went stale on `runner.ex#mark_failed` alone. Its cue clause
+changed only the stored `error` text; the cue settle still decides from
+`CueRun.outcome/3`, a term.
+
+New `SOURCE` pins:
+- the heal write's functions in `repo.ex` (`heal_job_write`,
+  `heal_job_write_tx`, `heal_job_write_fenced`, `heal_job_write_in_tx`,
+  `write_scheduled_job_fields`, `supersede_moved`);
+- `heal_decision.ex#job_version,@version_fields,@run_written_fields,decide`;
+- `job_heals_sql.ex`'s `claimant`, `claim_written`, `moved_on`,
+  `mark_written_under` and `take_lease`;
+- `written_under?` beside the heal write's functions in `repo.ex`.
+
+New constants:
+- `HealMoves` (0 in checks 01 to 72);
+- `HealMoveGuarded` and `MarksOwnerWrites` (TRUE in checks 01 to 72).
+
+The new variables are constant when `HealMoves = 0`, so checks 01 to 72
+keep every verdict and every `holds` state count.
+
+Citations:
+- `runner.ex`, `registry.ex` and `failure.ex` ones in the spec and in this
+  README's top sections and assumptions were shifted to the S4 lines;
+- the earlier dated re-reads and the findings cite the code as it was then;
+- the `repo.ex` ones were left as before.
+
 ## Re-read for events drawn as cards (2026-11-13)
 
 `reply_delivery_opts` now keeps the run's events and trips blocks beside its lists (M89): it
@@ -1998,11 +2247,24 @@ moved up by two with the code.
   retries and heals" for why none of the settle's heal writes touches a job
   row, a run row or the claim, and "Re-read for runs that end ok without
   working" for an ok run's, which also reads the job's earlier runs' tool
-  tallies in the same transaction. A heal run's one move on the job is the
-  owner's pause, edit or "run now" (see "Re-read for the heal's diagnosis and
-  moves"), so `intent` is the last pause or resume any caller made, and
-  `OwnerMoves`, `OwnerEdits` and `ManualRuns` bound a heal run's moves with
-  the owner's.
+  tallies in the same transaction.
+- A heal run's move on the job:
+  - in checks 73 to 76 (`HealMoves = 1`) it is its own two steps
+    (`HealRead`, `HealWrite`), and `intent` is the owner's alone;
+  - `HealRead` folds in the heal's claim, which in the code comes just
+    before the read and clears the owner-write mark. So the model's mark
+    starts at the read and refuses fewer moves than the code, never more.
+  - everywhere else it is covered by the owner's pause, edit or "run now"
+    (see "Re-read for the heal's diagnosis and moves" and "Heal moves (M106
+    S4)"), and `OwnerMoves`, `OwnerEdits` and `ManualRuns` bound it with the
+    owner's.
+- The definition the heal's version reads is `defVer`, a count that every
+  edit (the owner's, or a heal's raise) moves.
+  - In checks 73 to 76 every owner edit is taken to set the time limit,
+    the field a raise writes, so an edit the raise lands over is
+    overwritten.
+  - An edit that puts the definition back as it was is not modelled. The
+    mark refuses the move after it all the same (see JOB-12).
 - The admission ceiling (4 runs) is never reached by one job (two runners).
   A heal run is not counted against it: the ceiling and the cue share count
   runs by the run id each runner publishes (`active_run_count/1`). Expiry,

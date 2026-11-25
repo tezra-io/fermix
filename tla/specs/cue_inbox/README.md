@@ -742,3 +742,18 @@ stale. It was re-read for what it models:
   not a delivery or a run row.
 
 No step, variable or check changed.
+
+## Re-read for the owner's answer and a heal's one write (M106, 2026-11-25)
+
+M106's §5.7 (S4) staled `runner.ex#mark_failed`. Its cue clause now stores
+Fermix's sentence for the failure's kind as the run's `error`. The cue
+settle (`CueAdmission.settle/3`) still decides from `CueRun.outcome/3` on
+the reason term, and `settle_cue_run` reads no error text.
+
+A heal's one write writes the job as an owner's edit or pause does, which
+is `job_runs`' scope, and so does the owner-write mark that guards it. The
+owner's answer to a proposal (`Jobs.HealAnswer`) has no caller yet. A job
+a watcher wakes never gets a proposal to answer
+(`HealDecision.proposal_scope/2`).
+
+No step, variable or check changed.

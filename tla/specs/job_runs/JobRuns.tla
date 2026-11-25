@@ -96,21 +96,23 @@
 (* transaction, and its own row stays ok and its text is delivered as      *)
 (* before. Jobs.HealRun, a child of the RunnerSupervisor that the          *)
 (* Scheduler starts, monitors in a map of its own and adopts after a       *)
-(* restart, sends the heal's message. For a job's heal it first runs a     *)
-(* diagnosis, whose loop reads the job and its runs and writes nothing,    *)
-(* then makes at most one move on the job through the owner's own paths    *)
-(* (M106 5.5): a pause (Registry.pause_job), a raised time limit           *)
-(* (Registry.update_job, a column no step reads) or, once its message is   *)
-(* out, a "run now" (Registry.check_run_now, then Scheduler.run_now).      *)
-(* Those are Pause, UpdateRead with UpdateWrite, and ManualRun below,      *)
-(* which the spec takes at any time, so a heal run is one more caller of   *)
-(* them, within the same bounds. A plugin's heal has no job and makes no   *)
-(* move. The Scheduler's heal claim and its expiry of waiting and watching *)
-(* heals are Repo calls on those tables inside callbacks modelled here,    *)
-(* where a timeout changes nothing modelled and a crash is SchedulerCrash; *)
-(* and a heal run is no run for the admission ceiling or the cue share,    *)
-(* which count runs by the run id each publishes (active_run_count,        *)
-(* scheduler.ex:713-717).                                                  *)
+(* restart, sends the heal's message. For a job's heal it first reads the  *)
+(* job and runs a diagnosis that writes nothing, then makes at most one    *)
+(* move on the job: a pause or a raised time limit, since M106 S4 one      *)
+(* transaction fenced on its lease, on the job still being the version it  *)
+(* read and on no owner write having marked the heal since its claim       *)
+(* (Repo.heal_job_write), which is HealRead and HealWrite below (with      *)
+(* HealMoves); or, once its message is out, a "run now"                    *)
+(* (Registry.check_run_now, then Scheduler.run_now), which is ManualRun.   *)
+(* Without HealMoves a landed pause or raise writes what Pause or an edit  *)
+(* writes, so the owner's steps cover it. The owner's answer to a stored   *)
+(* proposal (Jobs.HealAnswer) has no caller yet. A plugin's heal has no    *)
+(* job and makes no move. The Scheduler's heal claim and its expiry of     *)
+(* waiting and watching heals are Repo calls on those tables inside        *)
+(* callbacks modelled here, where a timeout changes nothing modelled and a *)
+(* crash is SchedulerCrash; and a heal run is no run for the admission     *)
+(* ceiling or the cue share, which count runs by the run id each publishes *)
+(* (active_run_count, scheduler.ex:713-717).                               *)
 (* The access gate is not modelled either. A run's access-sensitive tool   *)
 (* call that its job row does not name is refused inside the one loop      *)
 (* step, since a scheduled run never parks a call for the owner            *)
@@ -164,7 +166,7 @@
 (* RunnerSupervisor itself: under :rest_for_one each restarts the          *)
 (* RunnerSupervisor with its runners and the Scheduler                     *)
 (* (application.ex:209). A runner's send helper (REMIND-2,                 *)
-(* channel_send.ex:219-224) and its AgentLoop (JOB-8, runner.ex:1439-1443) *)
+(* channel_send.ex:219-224) and its AgentLoop (JOB-8, runner.ex:1456-1460) *)
 (* are linked to it, so the restart kills them too. With                   *)
 (* LoopDiesWithRunner off (the code before JOB-8's fix, an unlinked        *)
 (* spawn_monitor) the loop outlives it (strayLoops). Process-local values  *)
@@ -217,12 +219,12 @@
 (*   RearmsOnDown)                                                          *)
 (***************************************************************************)
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/scheduler.ex @ a471050804a5
-\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/runner.ex @ 45d59955e7ee
+\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/runner.ex @ fa9a95a63556
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/runner_supervisor.ex @ 6a21dfe6cfad
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/delivery.ex @ b1dd0422b409
-\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/registry.ex @ f05b3184f9a7
+\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/registry.ex @ 6eb782d14bb5
 \* SOURCE: apps/fermix_core/lib/fermix_core/delivery/channel_send.ex @ 9b06289e25ae
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,request_message,deadline_after,deadline_passed?,call_or_timeout_error,request_name,periodic_opts,claim_due_job,claim_job_now,claim_due_job_tx,claim_in_tx,claim_job_now_tx,transact_claim,fetch_claimable_due_job,finish_job_claim,rollback_job_claim,upsert_scheduled_job_row,upsert_job_run_row,ensure_no_active_job_run,fetch_claimable_job,settle_job_run,settle_job_run_tx,settle_job_run_in_tx,ensure_job_run_active,release_settled_job,finish_job_settle,rollback_job_settle,unsettled_job_runs,fetch_unsettled_job_runs,@unsettled_job_runs_sql,update_scheduled_job_fields,update_scheduled_job_fields_row,scheduled_job_field_assignments!,scheduled_job_field_assignment!,@owner_text_fields,due_scheduled_jobs,fetch_due_scheduled_jobs,next_scheduled_job,fetch_next_scheduled_job,upsert_job_run,upsert_scheduled_job,get_job_run,get_scheduled_job,upsert_memory,claim_retry_job,claim_retry_job_tx,fetch_claimable_retry_job,then_in_claim,scheduled_job_with_retry,@earliest_wakeup_sql @ 62587394f196
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,request_message,deadline_after,deadline_passed?,call_or_timeout_error,request_name,periodic_opts,claim_due_job,claim_job_now,claim_due_job_tx,claim_in_tx,claim_job_now_tx,transact_claim,fetch_claimable_due_job,finish_job_claim,rollback_job_claim,upsert_scheduled_job_row,upsert_job_run_row,ensure_no_active_job_run,fetch_claimable_job,settle_job_run,settle_job_run_tx,settle_job_run_in_tx,ensure_job_run_active,release_settled_job,finish_job_settle,rollback_job_settle,unsettled_job_runs,fetch_unsettled_job_runs,@unsettled_job_runs_sql,update_scheduled_job_fields,update_scheduled_job_fields_row,scheduled_job_field_assignments!,scheduled_job_field_assignment!,@owner_text_fields,due_scheduled_jobs,fetch_due_scheduled_jobs,next_scheduled_job,fetch_next_scheduled_job,upsert_job_run,upsert_scheduled_job,get_job_run,get_scheduled_job,upsert_memory,claim_retry_job,claim_retry_job_tx,fetch_claimable_retry_job,then_in_claim,scheduled_job_with_retry,@earliest_wakeup_sql @ bb2d114865d9
 \* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,supervision_children,jobs_scheduler_opts @ 55d9a796413f
 \* SOURCE: apps/fermix_core/lib/fermix_core/timeouts.ex#expired,repo_call,@repo_call_ms @ 05d3e6ea2142
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/cue_admission.ex @ b98563b66ad5
@@ -233,11 +235,13 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_follow_up_sql.ex#claimable,mark_started,refuse_starting @ 0b00297833af
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/retry.ex @ 29a81ebd67c8
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/job_retries_sql.ex @ d45d0abed8ea
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/job_heals_sql.ex#settle,take_failure,not_closed,verdict,join,open_or_quiet,open,link_run,close_rows,expire_waiting,expire_rows,rerun_outcome,degraded,earlier_tallies,settle_ok,close_proven,open_for,query_open_for,close_ids,run_tally @ 51af797760a4
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/job_heals_sql.ex#settle,take_failure,not_closed,verdict,join,open_or_quiet,open,link_run,close_rows,expire_waiting,expire_rows,rerun_outcome,degraded,earlier_tallies,settle_ok,close_proven,open_for,query_open_for,close_ids,run_tally,claimant,claim_written,moved_on,mark_written_under,take_lease @ 3fc59dd5c98c
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/degraded.ex @ a44077b00219
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#heal_job_write,heal_job_write_tx,heal_job_write_fenced,heal_job_write_in_tx,write_scheduled_job_fields,supersede_moved,written_under? @ f9994ae3ed8a
+\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/heal_decision.ex#job_version,@version_fields,@run_written_fields,decide @ 9df0bacc4c33
 \* SOURCE: apps/fermix_core/lib/fermix_core/agent_loop.ex#run,run_tool_call,gate_tool,trace_unexecuted @ fb2d6fbb7f69
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/failure.ex#provider_failure? @ e1cc6a876455
-\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/heal_run.ex @ 7032c107729a
+\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/heal_run.ex @ cb90a4228cdc
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/heal_diagnosis.ex#@allowed_tools,supervise_loop,await_loop,report_loop,release_loop,kill_loop @ 4c906da777a9
 EXTENDS Naturals, FiniteSets
 
@@ -249,6 +253,8 @@ CONSTANTS
     OwnerMoves,         \* pause/resume requests the owner may make
     OwnerEdits,         \* update_job requests the owner may make
     ManualRuns,         \* "run now" requests the owner may make
+    HealMoves,          \* moves a heal run may make on the job (0 or 1): a pause or a raised
+                        \* time limit, drawn from the job as read before its diagnosis
     Cues,               \* passed deliveries the cue inbox may hand the task, each with its wake;
                         \* for a follow-up, the triggers its watcher may set starting, each with
                         \* its wake
@@ -293,9 +299,9 @@ CONSTANTS
     RefusalBacksOff,          \* a due claim refused as :already_running is backpressure: the re-arm
                               \* floors at the 5 s backoff (scheduler.ex:721-725, :1211-1217)
     OwnerWritesColumns,       \* pause, resume and update_job write only the columns they own
-                              \* (registry.ex:264-287; repo.ex:2506-2509, :7286-7293, :8260-8298)
+                              \* (registry.ex:324-359; repo.ex:2506-2509, :7286-7293, :8260-8298)
     LoopDiesWithRunner,       \* a runner's AgentLoop is linked to it, so a restart that kills
-                              \* the runner kills its loop too (runner.ex:1439-1443)
+                              \* the runner kills its loop too (runner.ex:1456-1460)
     TicksAdmit,               \* the due and reconcile ticks run cue admission after their due
                               \* scan (handle_info(:due_tick | :reconcile_tick), scheduler.ex
                               \* :263-281), so a cue whose wake found nothing to claim is still
@@ -310,9 +316,18 @@ CONSTANTS
     StampsToolStart,          \* a run's first tool start is on its row before the tool runs: the
                               \* loop calls the runner's gate ahead of each call (gate_tool,
                               \* agent_loop.ex:1396-1457; put_tool_start_store, runner.ex
-                              \* :1711-1750), so a run the Scheduler settles after a crash has it
+                              \* :1728-1767), so a run the Scheduler settles after a crash has it
     RetryNeedsNoTool,         \* Retry.decide retries only a run in which no tool had started
                               \* (retried?, retry.ex:88-89)
+    HealMoveGuarded,          \* a heal run's move is ONE transaction that writes the job only
+                              \* while it is still the version the move was drawn for
+                              \* (heal_job_write_tx, repo.ex:9030-9064; HealDecision.job_version/1);
+                              \* FALSE: the S3 shape, the move written whatever the job became
+    MarksOwnerWrites,         \* every owner write marks the job's diagnosing heal
+                              \* (mark_written_under, in update_scheduled_job_fields_row,
+                              \* repo.ex:8989-9002), the heal's claim clears the mark (take_lease),
+                              \* and a heal run's move under a marked heal is not made
+                              \* (written_under?, :9047-9056); FALSE: the version compare alone
     OwnerClearsRetry,         \* the owner's pause, resume and edit (update_scheduled_job_fields_row,
                               \* repo.ex:8820-8834) and run now (claim_job_now_tx, :8303-8312)
                               \* delete the job's retry in their own transaction
@@ -320,14 +335,14 @@ CONSTANTS
     ToolsCanStart,            \* a run's AgentLoop may start a tool before it ends; FALSE: every
                               \* run ends before any tool
     ProviderCanFail,          \* a loop error may be one waiting can clear, the provider's
-                              \* (failure_settle_by, runner.ex:603-605), which the runner's
+                              \* (failure_settle_by, runner.ex:614-616), which the runner's
                               \* settle retries; FALSE: no loop error is the provider's
     StampCanFail,             \* the store refuses a run's first tool start (an error, or no
                               \* answer within the Repo's bound); FALSE: it always records it
     GuestJob                  \* the job was set up at guest trust: a failure no retry takes
-                              \* sends its failure text (finish_failure, runner.ex:616-619);
+                              \* sends its failure text (finish_failure, runner.ex:627-630);
                               \* FALSE: the owner's job, whose failure a heal takes, sending
-                              \* nothing (:621-624)
+                              \* nothing (:632-635)
 
 Runs == 1..NumRuns
 
@@ -404,6 +419,16 @@ VARIABLES
     movesLeft,   \* pause/resume requests left
     editsLeft,   \* update_job requests left
     manualLeft,  \* "run now" requests left
+    \* --- a heal run's move on the job (M106 5.6), with HealMoves > 0 ---
+    hPc,         \* "idle" | "read" (it read the job before its diagnosis) | "done"
+    hSnap,       \* the job's version as it read it: enabled and the definition
+    hKind,       \* the move its plan holds: "-" | "pause" | "raise"
+    defVer,      \* the job's definition as the version reads it (every field but
+                 \* enabled), counted: each edit, the owner's or the heal's, moves it
+    sinceRead,   \* the owner's writes since the heal run's read: "pause", "resume", "edit"
+    hMark,       \* job_heals.owner_wrote_at: an owner write since the heal's claim
+    overwrote,   \* a heal's raise landed while an owner edit made since its read stood
+    undidResume, \* a heal's pause landed after an owner resume made since its read
     \* --- bookkeeping ---
     daemonCrashed, \* the daemon has died (at most once)
     schedCrashes,  \* times the Scheduler alone has died
@@ -416,7 +441,8 @@ helperVars == <<helper, tries, delivered, report>>
 schedVars  == <<sPc, reapReturn, monitors, downs, changed, dueTimer, refused, sRun,
                activeSnap, reapQ, sSnap, cuePending, admit, runsKnown, fQ, fClaimed,
                exits, sBy>>
-ownerVars  == <<oPc, oSnap, intent, movesLeft, editsLeft, manualLeft>>
+healVars   == <<hPc, hSnap, hKind, defVer, sinceRead, hMark, overwrote, undidResume>>
+ownerVars  == <<oPc, oSnap, intent, movesLeft, editsLeft, manualLeft, healVars>>
 envVars    == <<now, strayLoops, daemonCrashed, schedCrashes, schedTimeouts, cueSupply>>
 vars == <<jobVars, rowVars, runnerVars, helperVars, schedVars, ownerVars, envVars>>
 
@@ -435,7 +461,7 @@ Final == {"skipped", "sent", "failed"}
 \* configuration that can take them; this holds that the others cannot.
 \* Every check carries TypeOK, so each proves that its own omission is sound.
 FairnessScope ==
-    /\ OwnerMoves + OwnerEdits = 0 => ~changed
+    /\ OwnerMoves + OwnerEdits + HealMoves = 0 => ~changed
     /\ ~CuesOn => ~cuePending
 
 TypeOK ==
@@ -476,6 +502,12 @@ TypeOK ==
     /\ intent \in {"none", "paused", "resumed"}
     /\ movesLeft \in 0..OwnerMoves /\ editsLeft \in 0..OwnerEdits
     /\ manualLeft \in 0..ManualRuns
+    /\ hPc \in {"idle", "read", "done"}
+    /\ hSnap \in [en : BOOLEAN, ver : 0..(OwnerEdits + HealMoves)]
+    /\ hKind \in {"-", "pause", "raise"}
+    /\ defVer \in 0..(OwnerEdits + HealMoves)
+    /\ sinceRead \subseteq {"pause", "resume", "edit"}
+    /\ hMark \in BOOLEAN /\ overwrote \in BOOLEAN /\ undidResume \in BOOLEAN
     /\ daemonCrashed \in BOOLEAN /\ schedCrashes \in 0..SchedulerCrashes
     /\ schedTimeouts \in 0..SchedulerTimeouts
 
@@ -575,11 +607,11 @@ SettleDecidesRetry == AtomicSettle /\ ~CueTask
 RunsAgain == ~WatcherJob /\ jobEnabled /\ jobState \in {"running", "scheduled"}
 
 \* The runner's own settle of a failed run: {:failed, :provider} only when the
-\* provider failed (failure_settle_by, runner.ex:603-605), so never after a
+\* provider failed (failure_settle_by, runner.ex:614-616), so never after a
 \* start the store refused (tool_start_unrecorded, which is no provider's
-\* failure: provider_failure?, failure.ex:213). `tool` is what the runner
+\* failure: provider_failure?, failure.ex:319). `tool` is what the runner
 \* knows: it handled every message of the loop's before its result
-\* (watch_loop, :1782-1790, put_run_facts, :1977-1985).
+\* (watch_loop, :1799-1807, put_run_facts, :1994-2002).
 RunnerRetries(r) ==
     IF /\ SettleDecidesRetry /\ pc[r] = "fail" /\ ProviderCanFail /\ RunsAgain
        /\ tool[r] /= "refused"
@@ -597,6 +629,18 @@ ReapRetries(r) ==
 SettledRetry(set, r) ==
     retryAt' = IF set THEN (IF tool[r] \in {"ran", "stamped"} THEN "afterTool" ELSE "clean")
                ELSE IF SettleDecidesRetry THEN "none" ELSE retryAt
+
+\* An owner's write while a heal run diagnoses: recorded as made since its
+\* read (a ghost for the heal's properties), and marked on the heal in the
+\* write's own transaction, whatever value it leaves (JOB-12's fix:
+\* JobHealsSql.mark_written_under/3 in update_scheduled_job_fields_row,
+\* repo.ex:8989-9002; every pause, resume and edit reaches that write). The
+\* code marks the heal from its claim on, which comes before the run's read:
+\* a mark the model starts at the read refuses fewer moves, never more.
+OwnerSince(move) ==
+    /\ sinceRead' = IF hPc = "read" THEN sinceRead \cup {move} ELSE sinceRead
+    /\ hMark' = (hMark \/ hPc = "read")
+HealQuiet == <<hPc, hSnap, hKind, overwrote, undidResume>>
 
 \* What the owner's pause, resume, edit or run now leaves of a pending retry.
 OwnerLeavesRetry ==
@@ -643,15 +687,19 @@ OwnerQuiet == <<runStatus, delivery, waiting, starting, tool, runnerVars, helper
                 activeSnap, reapQ, sSnap, cuePending, admit, runsKnown, fQ, fClaimed,
                 exits, sBy>>
 
-\* Registry.pause_job (registry.ex:124-126 -> update_job_fields :267-275):
+\* Registry.pause_job (registry.ex:127-129 -> update_job_fields :327-337):
 \* Repo.update_scheduled_job_fields writes enabled = false and state =
 \* "paused" in place (repo.ex:2506-2509, :7286-7293), then the :job_changed cast
-\* (registry.ex:724-729). The owner is told "paused". Nothing is read first.
+\* (registry.ex:796-801). The owner is told "paused". Nothing is read first.
 \* The write and the deletion of the job's retry are one BEGIN IMMEDIATE
 \* (update_scheduled_job_fields_row, repo.ex:8820-8834), and so for resume
-\* and update_job below (OwnerLeavesRetry). A heal run's pause (M106 5.5,
-\* heal_run.ex:279-280) is this same call, made right after a write on
-\* job_heals that proves its lease (:284-291): this step too.
+\* and update_job below (OwnerLeavesRetry). Since M106 S4 the same
+\* transaction reads the job before and after its write and, when the
+\* job's version moved (HealDecision.job_version/1, enabled included),
+\* closes its waiting heal proposal superseded (update_scheduled_job_fields_row,
+\* repo.ex:8989-9002; supersede_moved, :9020-9024), and marks the job's
+\* diagnosing heal whatever the write leaves (OwnerSince's hMark): heal rows
+\* only. A heal run's pause is no longer this call: it is HealWrite below.
 Pause ==
     /\ OwnerWritesColumns
     /\ oPc = "idle" /\ movesLeft > 0
@@ -661,7 +709,8 @@ Pause ==
     /\ changed' = TRUE
     /\ intent' = "paused"
     /\ movesLeft' = movesLeft - 1
-    /\ UNCHANGED <<OwnerQuiet, nextRun, oPc, oSnap, editsLeft, manualLeft>>
+    /\ OwnerSince("pause")
+    /\ UNCHANGED <<OwnerQuiet, nextRun, oPc, oSnap, editsLeft, manualLeft, HealQuiet, defVer>>
 
 \* Without OwnerWritesColumns, the pause before the fix: first
 \* Repo.get_scheduled_job ...
@@ -671,7 +720,8 @@ PauseRead ==
     /\ oPc' = "pausing"
     /\ oSnap' = JobRow
     /\ movesLeft' = movesLeft - 1
-    /\ UNCHANGED <<OwnerQuiet, jobVars, retryAt, changed, intent, editsLeft, manualLeft>>
+    /\ UNCHANGED <<OwnerQuiet, jobVars, retryAt, changed, intent, editsLeft, manualLeft,
+                   healVars>>
 
 \* ... then an upsert of the row it read with enabled = false, state =
 \* "paused" (next_run_at as read), then the :job_changed cast. The code before
@@ -687,16 +737,17 @@ PauseWrite ==
     /\ intent' = "paused"
     /\ oPc' = "idle"
     /\ oSnap' = NoSnap
-    /\ UNCHANGED <<OwnerQuiet, movesLeft, editsLeft, manualLeft>>
+    /\ OwnerSince("pause")
+    /\ UNCHANGED <<OwnerQuiet, movesLeft, editsLeft, manualLeft, HealQuiet, defVer>>
 
-\* Registry.resume_job (registry.ex:128-140): get the row, then write enabled =
+\* Registry.resume_job (registry.ex:131-143): get the row, then write enabled =
 \* true, state = "scheduled" and next_run_at = the next future occurrence
-\* (update_job_fields, :267-275), whatever state the job is in (nothing checks
+\* (update_job_fields, :327-337), whatever state the job is in (nothing checks
 \* that it is paused), then the :job_changed cast. The read is folded into the
 \* write: every modelled column the write sets comes from the patch, none from
 \* the read, with or without OwnerWritesColumns. A resume of a job a watcher
 \* runs, a cue task or a follow-up, arms no next run (next_run_at_for_resume,
-\* registry.ex:366-368).
+\* registry.ex:438-440).
 Resume ==
     /\ oPc = "idle" /\ movesLeft > 0
     /\ jobEnabled' = TRUE
@@ -706,22 +757,26 @@ Resume ==
     /\ changed' = TRUE
     /\ intent' = "resumed"
     /\ movesLeft' = movesLeft - 1
-    /\ UNCHANGED <<OwnerQuiet, oPc, oSnap, editsLeft, manualLeft>>
+    /\ OwnerSince("resume")
+    /\ UNCHANGED <<OwnerQuiet, oPc, oSnap, editsLeft, manualLeft, HealQuiet, defVer>>
 
-\* Registry.update_job (registry.ex:143-151 -> prepare_update :167-173):
+\* Registry.update_job (registry.ex:146-154 -> prepare_update :227-233):
 \* Repo.get_scheduled_job, whose row the edit is computed from
-\* (normalize_update_attrs) ... A heal run's raised limit (M106 5.5,
-\* heal_run.ex:271-277, fenced as its pause is) is this edit with
-\* timeout_seconds alone (timeout_patch, registry.ex:342-354), a column no
-\* step reads.
+\* (normalize_update_attrs) ... A heal run's raised limit is no longer this
+\* edit: it is HealWrite below. The owner's answer to a stored proposal
+\* (Jobs.HealAnswer.apply_change/4, which nothing calls yet) would be the
+\* owner's own edit, its read folded into one guarded write
+\* (heal_job_write_tx under the answer claim): this step with the read at
+\* the write.
 UpdateRead ==
     /\ oPc = "idle" /\ editsLeft > 0
     /\ oPc' = "editing"
     /\ oSnap' = JobRow
     /\ editsLeft' = editsLeft - 1
-    /\ UNCHANGED <<OwnerQuiet, jobVars, retryAt, changed, intent, movesLeft, manualLeft>>
+    /\ UNCHANGED <<OwnerQuiet, jobVars, retryAt, changed, intent, movesLeft, manualLeft,
+                   healVars>>
 
-\* ... then apply_job_update (registry.ex:279-287). With OwnerWritesColumns,
+\* ... then apply_job_update (registry.ex:341-359). With OwnerWritesColumns,
 \* Repo.update_scheduled_job_fields writes only the edited columns, never
 \* state, enabled or last_* (repo.ex:7286-7293; the owner field list,
 \* :8096-8134): the modelled edit writes no modelled column. Without it, the
@@ -730,7 +785,7 @@ UpdateRead ==
 \* The write and the clearing of a follow-up's Always allow the edit
 \* made stale run in one BEGIN IMMEDIATE (update_scheduled_job_fields_row,
 \* repo.ex:8162-8173; cue_watchers columns, not modelled), still one Repo
-\* call. A follow-up's own edit (update_follow_up_job, registry.ex:185-194)
+\* call. A follow-up's own edit (update_follow_up_job, registry.ex:245-254)
 \* takes the same path and may also write its tools and timeout
 \* (repo.ex:9162-9167), which no step here reads.
 UpdateWrite ==
@@ -744,7 +799,67 @@ UpdateWrite ==
     /\ changed' = TRUE
     /\ oPc' = "idle"
     /\ oSnap' = NoSnap
-    /\ UNCHANGED <<OwnerQuiet, intent, movesLeft, editsLeft, manualLeft>>
+    /\ OwnerSince("edit")
+    /\ defVer' = IF HealMoves > 0 THEN defVer + 1 ELSE defVer
+    /\ UNCHANGED <<OwnerQuiet, intent, movesLeft, editsLeft, manualLeft, HealQuiet>>
+
+\* A heal run's move (M106 5.6, with HealMoves > 0). Jobs.HealRun reads the
+\* job once, before its diagnosis (diagnose, heal_run.ex:228-237), and code
+\* resolves the decision against that read (HealDecision.resolve): a pause
+\* only for a job enabled and scheduled or running (decide(:pause),
+\* heal_decision.ex:188-192), a raised limit any time (:194). The plan
+\* carries the job's version as read (job_version, :130-136: the
+\* definition and enabled, never what a run writes). Up to two minutes of
+\* diagnosis then pass, in which anything else may happen. The step folds
+\* in the Scheduler's claim just before the read (take_lease,
+\* job_heals_sql.ex:946-960), which clears the owner-write mark: the run
+\* reads the job after it, so an owner write before it is in what it reads.
+HealRead ==
+    /\ HealMoves > 0 /\ hPc = "idle"
+    /\ hPc' = "read"
+    /\ hSnap' = [en |-> jobEnabled, ver |-> defVer]
+    /\ hMark' = FALSE
+    /\ hKind' \in IF jobEnabled /\ jobState \in {"scheduled", "running"}
+                  THEN {"pause", "raise"} ELSE {"raise"}
+    /\ sinceRead' = {}
+    /\ UNCHANGED <<OwnerQuiet, jobVars, retryAt, changed, oPc, oSnap, intent, movesLeft,
+                   editsLeft, manualLeft, defVer, overwrote, undidResume>>
+
+\* ... then the move: Registry.heal_write (registry.ex:187-195) prepares the
+\* fields as an owner's pause or edit (heal_move_fields, :200-206) and
+\* Repo.heal_job_write writes them in ONE BEGIN IMMEDIATE (heal_job_write_tx,
+\* repo.ex:9030-9064): the heal still diagnosing under the run's lease
+\* (JobHealsSql.claimant), the job read, and, with HealMoveGuarded, the job
+\* written only while its version is the one the plan carries and, with
+\* MarksOwnerWrites, no owner write has marked the heal since its claim
+\* (heal_job_write_fenced, written_under?, :9047-9056); then the
+\* decision's record under the lease, both or neither. The write is an owner
+\* write's (write_scheduled_job_fields, :9009-9018): the columns, the
+\* follow-up's stale approval and the job's retry (OwnerLeavesRetry), then
+\* the :job_changed cast (after_heal_write). A job that moved gets nothing,
+\* and the plan is recorded as tell. Without HealMoveGuarded, the S3 shape:
+\* Registry.pause_job or update_job after a write that only proved the
+\* lease, whatever the job had become. A raised limit writes a field the
+\* version reads, so it moves defVer; enabled is the only modelled column a
+\* move writes. The ghosts record what a landing write did after the
+\* owner's writes since the read.
+HealMoved == [en |-> jobEnabled, ver |-> defVer] /= hSnap
+
+HealWrite ==
+    /\ hPc = "read"
+    /\ hPc' = "done"
+    /\ IF HealMoveGuarded /\ (HealMoved \/ (MarksOwnerWrites /\ hMark))
+       THEN UNCHANGED <<jobVars, retryAt, changed, defVer, overwrote, undidResume>>
+       ELSE /\ jobEnabled' = IF hKind = "pause" THEN FALSE ELSE jobEnabled
+            /\ jobState' = IF hKind = "pause" THEN "paused" ELSE jobState
+            /\ UNCHANGED nextRun
+            /\ defVer' = IF hKind = "raise" THEN defVer + 1 ELSE defVer
+            /\ OwnerLeavesRetry
+            /\ changed' = TRUE
+            /\ overwrote' = (overwrote \/ (hKind = "raise" /\ defVer /= hSnap.ver))
+            /\ undidResume' = (undidResume \/ (hKind = "pause" /\ "resume" \in sinceRead))
+    /\ UNCHANGED <<OwnerQuiet, oPc, oSnap, intent, movesLeft, editsLeft, manualLeft, hSnap,
+                   hKind, sinceRead, hMark>>
 
 -----------------------------------------------------------------------------
 (* The Scheduler: callbacks that start when it is idle *)
@@ -849,10 +964,10 @@ HandleExit(r) ==
 \* request is out of the model's bounds and is refused. A Repo call that
 \* times out is ManualRunTimeout. A cue task never gets here: run_job_now
 \* refuses it before calling the Scheduler (Registry.check_run_now,
-\* run_job_now.ex:71, registry.ex:106-110), and a job's kind never changes.
+\* run_job_now.ex:71, registry.ex:109-113), and a job's kind never changes.
 \* A follow-up does: check_run_now refuses only the cue kind, since a run of
-\* a follow-up is not the run of one item (registry.ex:100-111).
-\* A heal run's rerun (M106 5.5, heal_run.ex:426-464) takes the same path,
+\* a follow-up is not the run of one item (registry.ex:103-114).
+\* A heal run's rerun (M106 5.5, heal_run.ex:462-500) takes the same path,
 \* check_run_now then Scheduler.run_now, once its message is out. Its call
 \* waits behind whatever callback runs and is served here: the Scheduler
 \* never waits on a heal run (its init/1 does no work, and its heal id is
@@ -880,7 +995,7 @@ ManualRun ==
             /\ UNCHANGED <<jobEnabled, nextRun>>
        ELSE /\ sPc' = "arm"
             /\ UNCHANGED <<jobVars, rowVars, runnerVars, helperVars, sRun>>
-    /\ UNCHANGED <<envVars, oPc, oSnap, intent, movesLeft, editsLeft, reapReturn,
+    /\ UNCHANGED <<envVars, oPc, oSnap, intent, movesLeft, editsLeft, healVars, reapReturn,
                    monitors, downs, changed, dueTimer, refused, activeSnap, reapQ, sSnap,
                    waiting, starting, cuePending, admit, runsKnown, fQ, fClaimed, exits, sBy>>
 
@@ -1393,7 +1508,7 @@ ManualRunTimeout ==
              /\ UNCHANGED <<jobEnabled, nextRun>>
     /\ sPc' = "arm"
     /\ UNCHANGED <<now, strayLoops, daemonCrashed, schedCrashes, oPc, oSnap, intent,
-                   movesLeft, editsLeft, reapReturn, monitors, downs, changed, dueTimer,
+                   movesLeft, editsLeft, healVars, reapReturn, monitors, downs, changed, dueTimer,
                    refused, sRun, activeSnap, reapQ, sSnap, waiting, starting, cueSupply,
                    cuePending, admit, runsKnown, fQ, fClaimed, exits, sBy>>
 
@@ -1480,7 +1595,7 @@ MarkRunning(r) ==
                    outcome, helperVars>>
 
 \* The whole AgentLoop, run in a process linked to the runner that the runner
-\* watches (runner.ex:231, :1414-1446): final text, [SILENT], or an
+\* watches (runner.ex:231, :1431-1463): final text, [SILENT], or an
 \* error/timeout (a crash of the loop included, reported as a value).
 Loop(r) ==
     /\ pc[r] = "loop"
@@ -1497,13 +1612,13 @@ Loop(r) ==
 \* the loop's own process ahead of the call (gate_tool, agent_loop.ex
 \* :1396-1457), and the gate stores the start on the run row in one Repo call
 \* before the tool can run (put_tool_start_store, store_tool_start,
-\* runner.ex:1711-1750): the start and its stamp are one step. A start the
+\* runner.ex:1728-1767): the start and its stamp are one step. A start the
 \* store refuses (StampCanFail: an error, or no answer within the Repo's
 \* bound) runs no tool: the call is traced unexecuted and the loop ends in
 \* {:tool_start_unrecorded, _} (run/1's catch, agent_loop.ex:189-199), an
 \* error the runner settles as any other. Only for a job that can be
 \* retried: a cue run has no gate, its first tool is its mandate gate's
-\* (tools_started_stamp, runner.ex:1703-1709; tla/specs/cue_inbox), and a
+\* (tools_started_stamp, runner.ex:1720-1726; tla/specs/cue_inbox), and a
 \* follow-up is never retried. Without StampsToolStart, the order before
 \* JOB-9's fix: the loop announces the start by a message and runs the tool
 \* at once, so its effect may already have happened while the row says
@@ -1576,7 +1691,7 @@ Settleable(r) == ~AtomicSettle \/ runStatus[r] \in {"queued", "running"}
 \* M106: a run that is not a cue run's also has its job's retry decided in
 \* the settle's transaction (RunnerRetries, SettledRetry). A failure retried,
 \* and one a heal took (a job not set up by a guest), only mark the delivery
-\* "skipped" (finish_failure, runner.ex:607-624); only a guest's job sends its
+\* "skipped" (finish_failure, runner.ex:618-635); only a guest's job sends its
 \* failure text. The settle carries the run's first tool start, which the
 \* row keeps (the upsert's coalesce), and nothing here reads it again.
 Settle(r) ==
@@ -1627,10 +1742,10 @@ MarkFailed(r) ==
                    waiting, starting, retryAt, tool>>
 
 \* persist_run_summary_memory (runner.ex:274, :416-453): Repo.upsert_memory
-\* (skipped for [SILENT]), then the memory-source update (:274, :610-624,
+\* (skipped for [SILENT]), then the memory-source update (:274, :621-635,
 \* whose failures are logged), folded in. No modelled row changes; it is a
 \* crash point. With AtomicSettle
-\* finalize_delivery (:275, :574-582) follows: a pending delivery spawns the
+\* finalize_delivery (:275, :585-593) follows: a pending delivery spawns the
 \* monitored send helper (Delivery.deliver_with_timeout ->
 \* ChannelSend.with_timeout, delivery.ex:53-78, channel_send.ex:219-224); a
 \* skipped one is immediate. Without it the split job write comes first.
@@ -1675,14 +1790,14 @@ GotResult(r) ==
     /\ Move(r, "mark")
     /\ UNCHANGED <<RunnerQuiet, rowVars, resp, finSnap, tries, delivered, report>>
 
-\* mark_delivery (runner.ex:700-721): Repo.upsert_job_run with the result,
+\* mark_delivery (runner.ex:716-737): Repo.upsert_job_run with the result,
 \* then {:stop, :normal}. A Scheduler that monitors the runner gets its DOWN
 \* :normal, which now waits in its mailbox (HandleExit): since M106 5.3 its
 \* handler re-arms the due timer, a Repo call, so it is no longer folded in.
 \* The monitor is dropped here all the same: nothing reads a dead runner's
 \* monitor but the cue share, which never binds one job.
 \* A refused write exits the runner with the outcome and its error in its
-\* reason (:710-720): that is RunnerCrash at "mark".
+\* reason (:726-736): that is RunnerCrash at "mark".
 MarkDelivery(r) ==
     /\ pc[r] = "mark"
     /\ delivery' = [delivery EXCEPT ![r] =
@@ -1703,14 +1818,14 @@ RunnerStep(r) ==
 
 \* The runner dies at one of its Repo calls and the call never lands (a
 \* kill, a failed {:ok, _} match, or mark_delivery's exit on a refused
-\* write, runner.ex:601-607). A failed output.md/error.md write also
+\* write, runner.ex:612-618). A failed output.md/error.md write also
 \* kills it ({:ok, _} match, runner.ex:336, :494); that write is folded into
 \* the final write, so it is the crash at "complete"/"fail". The
 \* memory-source calls after the split job upsert are a crash point with no
 \* pc of their own: a crash there leaves the rows a crash at "mark" leaves,
 \* minus the send. It raises nowhere while it waits on a send. While it
 \* waits on its loop, the loop reports its own crash as a value
-\* (runner.ex:1448-1465); the one death left there, a process the loop links
+\* (runner.ex:1465-1482); the one death left there, a process the loop links
 \* to itself killing the loop and through the link the runner, leaves the
 \* rows the Loop step and then a crash at "complete" or "fail" leave, so it
 \* needs no step of its own. Its supervisor does not restart it
@@ -1787,7 +1902,7 @@ HelperSend(r) ==
                   /\ tries' = [tries EXCEPT ![r] = 0]
     /\ UNCHANGED <<RunnerQuiet, rowVars, runnerVars, report>>
 
-\* The runner's own delivery timer (delivery_timeout_ms, runner.ex:1802):
+\* The runner's own delivery timer (delivery_timeout_ms, runner.ex:1819):
 \* no result yet, so it kills the helper and returns {:error,
 \* :delivery_timeout} (channel_send.ex:238-239, :284-300). It cannot tell whether the
 \* platform already took the message.
@@ -1913,7 +2028,7 @@ SchedulerCrashLate ==
 \* survive. On boot the Scheduler's init reconciles. The same step stands for
 \* a restart of the job subtree, which the loop of a runner inside its
 \* AgentLoop outlives unless it is linked to that runner (LoopDiesWithRunner,
-\* runner.ex:1432-1436; spawn_monitor before JOB-8's fix).
+\* runner.ex:1449-1453; spawn_monitor before JOB-8's fix).
 DaemonCrash ==
     /\ DaemonCanCrash /\ ~daemonCrashed
     /\ daemonCrashed' = TRUE
@@ -1928,8 +2043,11 @@ DaemonCrash ==
     /\ report' = [r \in Runs |-> "none"]
     /\ oPc' = "idle"
     /\ oSnap' = NoSnap
+    /\ hPc' = IF hPc = "read" THEN "idle" ELSE hPc
+    /\ sinceRead' = {}
     /\ SchedRestart
     /\ UNCHANGED <<jobVars, rowVars, delivered, intent, movesLeft, editsLeft, manualLeft,
+                   hSnap, hKind, defVer, hMark, overwrote, undidResume,
                    now, schedCrashes, schedTimeouts, cueSupply>>
 
 \* A stray loop ends: max_iterations, a provider error, or the real daemon
@@ -1987,6 +2105,14 @@ Init ==
     /\ movesLeft = OwnerMoves
     /\ editsLeft = OwnerEdits
     /\ manualLeft = ManualRuns
+    /\ hPc = "idle"
+    /\ hSnap = [en |-> TRUE, ver |-> 0]
+    /\ hKind = "-"
+    /\ defVer = 0
+    /\ sinceRead = {}
+    /\ hMark = FALSE
+    /\ overwrote = FALSE
+    /\ undidResume = FALSE
     /\ daemonCrashed = FALSE
     /\ schedCrashes = 0
     /\ schedTimeouts = 0
@@ -2007,7 +2133,7 @@ Terminated == Done /\ UNCHANGED vars
 
 Next ==
     \/ Tick \/ Pause \/ PauseRead \/ PauseWrite \/ Resume \/ UpdateRead \/ UpdateWrite
-    \/ ManualRun \/ CueArrives
+    \/ ManualRun \/ CueArrives \/ HealRead \/ HealWrite
     \/ DueTimerFires \/ ReconcileFires \/ JobChanged \/ CueAdmit
     \/ \E r \in Runs : HandleDown(r) \/ HandleExit(r) \/ ToolStarts(r)
     \/ SchedStep
@@ -2033,7 +2159,7 @@ Next ==
 Fairness ==
     /\ WF_vars(SchedStep)
     /\ SF_vars(DueTimerFires) /\ SF_vars(ReconcileFires)
-    /\ IF OwnerMoves + OwnerEdits > 0 THEN SF_vars(JobChanged) ELSE TRUE
+    /\ IF OwnerMoves + OwnerEdits + HealMoves > 0 THEN SF_vars(JobChanged) ELSE TRUE
     /\ IF CuesOn THEN SF_vars(CueAdmit) ELSE TRUE
     /\ \A r \in Runs :
           /\ SF_vars(HandleDown(r) \/ HandleExit(r))
@@ -2137,6 +2263,19 @@ RetryOnlyBeforeTool == retryAt /= "afterTool"
 \* fires after one"; and a run now takes the retry with it (:8303-8305). Read
 \* as: no pending retry outlives one of those owner actions.
 RetryClearedByOwner == retryAt /= "afterOwner"
+
+\* M106 S4 (Repo.heal_job_write/5): "a job the owner changed while the
+\* diagnosis ran gets no move". Read as: a heal's raised limit never lands
+\* while an edit the owner made after the heal's read still stands. (Only a
+\* raise can overwrite one: a pause writes enabled alone, and an owner write
+\* that left enabled other than as read left it FALSE, as the pause would.)
+HealNeverOverwritesEdit == ~overwrote
+
+\* Read more strongly: a heal's pause never lands after the owner resumed the
+\* job since the heal's read. The version compares values, so a resume that
+\* leaves enabled as the heal read it is not seen by it (JOB-12); the mark
+\* every owner write leaves is (JOB-12's fix, MarksOwnerWrites).
+HealPauseNeverUndoesResume == ~undidResume
 
 \* scheduler.ex:335-338: "A run's end can have set its job a retry (M106 5.3),
 \* from its runner's settle or the crash settle here, so the due timer is
