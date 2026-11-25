@@ -767,6 +767,83 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
       assert error.code == "invalid_request_error"
       assert error.message == "tools[0] is malformed"
     end
+
+    # Vercel AI Gateway tries a model on several upstream providers, and `error`
+    # carries the last attempt's words. Cut from the live answer to a prompt
+    # over Grok 4.7's window (M105 §11.8): Vertex, tried last, said only "Bad
+    # Request"; xAI and Bedrock named the window.
+    defp gateway_attempts_body(attempt_errors) do
+      %{
+        "error" => %{"message" => "Bad Request", "type" => "AI_APICallError"},
+        "providerMetadata" => %{
+          "gateway" => %{
+            "routing" => %{
+              "originalModelId" => "xai/grok-4.7",
+              "modelAttempts" => [
+                %{
+                  "success" => false,
+                  "providerAttempts" =>
+                    Enum.map(attempt_errors, fn {provider, words} ->
+                      %{"provider" => provider, "success" => false, "error" => words}
+                    end)
+                }
+              ]
+            }
+          }
+        }
+      }
+    end
+
+    defp vercel_overflow_chat(provider, body) do
+      Req.Test.stub(__MODULE__, fn conn ->
+        conn |> Plug.Conn.put_status(400) |> Req.Test.json(body)
+      end)
+
+      ChatCompletions.chat([%{role: "user", content: "x"}], [],
+        api_key: "vck-test",
+        provider: provider,
+        model: "spacexai/grok-4.7",
+        base_url: "https://ai-gateway.vercel.sh/v1",
+        req_options: [plug: {Req.Test, __MODULE__}]
+      )
+    end
+
+    test "a Vercel AI Gateway 400 whose overflow is named only by an upstream attempt" do
+      body =
+        gateway_attempts_body([
+          {"xai",
+           "invalid-argument: Failed to start sampling: [input_too_large] The prompt is too " <>
+             "long for this model's context window (1041250 tokens > 500000 tokens)"},
+          {"bedrock",
+           "The model returned the following errors: Your input exceeds the context window " <>
+             "of this model. Please adjust your input and try again."},
+          {"vertex", "Bad Request"}
+        ])
+
+      assert {:error, :context_length_exceeded} = vercel_overflow_chat(:vercel, body)
+    end
+
+    test "a Vercel AI Gateway 400 whose attempts name no overflow stays a provider error" do
+      body =
+        gateway_attempts_body([
+          {"xai",
+           "'file part media type application/pdf as inline data (xAI Responses requires a " <>
+             "URL or a Files API reference for non-image files)' functionality not supported."},
+          {"vertex", "Bad Request"}
+        ])
+
+      assert {:error,
+              {:provider_error, %{provider: :vercel, status: 400, message: "Bad Request"}}} =
+               vercel_overflow_chat(:vercel, body)
+    end
+
+    test "another provider's body is read as before, attempts or not" do
+      body =
+        gateway_attempts_body([{"xai", "The prompt is too long for this model's context window"}])
+
+      assert {:error, {:provider_error, %{provider: :openrouter, status: 400}}} =
+               vercel_overflow_chat(:openrouter, body)
+    end
   end
 
   describe "continue/3 screenshot retention" do

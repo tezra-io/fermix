@@ -3227,6 +3227,37 @@ defmodule FermixCore.AgentLoopTest do
       refute_received {:chat, :eligible_fail}
     end
 
+    test "a PDF on a Grok model through Vercel AI Gateway falls over before the call",
+         %{registry: registry} do
+      pdf = %{type: :document, mime_type: "application/pdf", data: "%PDF-1.4", name: "lease.pdf"}
+
+      routes = [
+        {%{
+           provider: :vercel,
+           model: "spacexai/grok-4.7",
+           auth_mode: :api_key,
+           base_url: "https://1/v1"
+         }, [adapter: EligibleFailAdapter, model: "spacexai/grok-4.7", test_pid: self()]},
+        {%{
+           provider: :vercel,
+           model: "anthropic/claude-sonnet-4.6",
+           auth_mode: :api_key,
+           base_url: "https://2/v1"
+         }, [adapter: RecoveringAdapter, model: "anthropic/claude-sonnet-4.6", test_pid: self()]}
+      ]
+
+      assert {:ok, %{response: "recovered"}} =
+               AgentLoop.run(
+                 messages: [%{role: "user", content: "read this", parts: [pdf]}],
+                 routes: routes,
+                 capability_registry: registry,
+                 context: %{agent_name: "test", conversation_key: :test}
+               )
+
+      refute_received {:chat, :eligible_fail}
+      assert_received {:chat, :recovering}
+    end
+
     test "a picture in a format the provider refuses falls over", %{registry: registry} do
       webp = %{type: :image, mime_type: "image/webp", data: "RIFF....WEBP"}
 

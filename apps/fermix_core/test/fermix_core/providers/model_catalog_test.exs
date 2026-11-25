@@ -380,6 +380,24 @@ defmodule FermixCore.Providers.ModelCatalogTest do
     end
   end
 
+  # Vercel AI Gateway sends a `spacexai/` model to xAI, which refuses an inline
+  # PDF (M105 §11.8), whatever the gateway's listing says about the model.
+  describe "documents?/2" do
+    test "a Grok model through Vercel AI Gateway takes no inline PDF, listed or curated" do
+      refute ModelCatalog.documents?(:vercel, "spacexai/grok-4.7")
+      refute ModelCatalog.documents?(:vercel, "spacexai/grok-4.3")
+      refute ModelCatalog.documents?(:vercel, "spacexai/grok-future-unlisted")
+    end
+
+    test "every other model takes one where its provider does" do
+      assert ModelCatalog.documents?(:vercel, "anthropic/claude-sonnet-4.6")
+      assert ModelCatalog.documents?(:vercel, "openai/gpt-6-luna")
+      assert ModelCatalog.documents?(:openrouter, "x-ai/grok-4.7")
+      assert ModelCatalog.documents?(:anthropic, "claude-opus-4-8")
+      assert ModelCatalog.documents?(:mock, "mock")
+    end
+  end
+
   describe "model_effort_ceiling/2, effort_levels_for/2, clamp_effort/3" do
     test "older OpenAI models cap at :xhigh; the current generation is uncapped" do
       assert ModelCatalog.model_effort_ceiling(:openai, "gpt-5.5") == :xhigh

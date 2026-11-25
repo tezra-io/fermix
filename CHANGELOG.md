@@ -33,12 +33,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   of the local Ollama hop. The model picker lists every tool-calling chat model
   the gateway serves, grouped by maker with the newest first, and suggests the
   same models OpenRouter does; the default is Claude Sonnet 4.6. Every request
-  asks the gateway to place the prompt-cache markers itself, which is how
-  Vercel documents prompt caching for Anthropic's models through it. The
-  gateway is paid from credits bought in your Vercel account: a team that has
-  bought none is on a free tier with fewer models and lower limits. Vercel
-  serves no request until the team has a payment method on file, and a turn
-  refused for that says so instead of blaming the key.
+  asks the gateway to place the prompt-cache markers itself, so turns of a
+  Claude conversation that follow within minutes read its repeated instructions
+  from the cache instead of paying for them in full. The gateway is paid from
+  credits bought in your Vercel account: a team that has bought none is on a
+  free tier with fewer models and lower limits. Vercel serves no request until
+  the team has a payment method on file, and a turn refused for that says so
+  instead of blaming the key. A PDF sent to a Grok model through it goes to the
+  next provider in the chain, because xAI reads no PDF inline.
 
 ### Fixed
 

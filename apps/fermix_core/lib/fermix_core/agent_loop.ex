@@ -522,7 +522,8 @@ defmodule FermixCore.AgentLoop do
 
   # A picture needs a vision model, in a format the provider takes; a PDF needs a
   # vision model on a provider that reads one inline (OpenAI reads PDFs on its
-  # vision models only). `nil` admits the part.
+  # vision models only), and a model that does (`ModelCatalog.documents?/2`).
+  # `nil` admits the part.
   defp part_refusal(%{type: :image, mime_type: mime}, provider, model) do
     cond do
       not ModelCatalog.vision?(provider, model) ->
@@ -537,9 +538,12 @@ defmodule FermixCore.AgentLoop do
   end
 
   defp part_refusal(%{type: :document}, provider, model) do
-    if Descriptor.documents?(provider) and ModelCatalog.vision?(provider, model),
-      do: nil,
-      else: {:error, {:attachment_unsupported, :document, provider, model}}
+    if Descriptor.documents?(provider) and ModelCatalog.vision?(provider, model) and
+         ModelCatalog.documents?(provider, model) do
+      nil
+    else
+      {:error, {:attachment_unsupported, :document, provider, model}}
+    end
   end
 
   defp initial_attempt(state) do

@@ -279,7 +279,7 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
          _prior,
          _caps
        ) do
-    if ResponsesShared.context_length_error?(body) do
+    if context_length_error?(provider, body) do
       {:error, :context_length_exceeded}
     else
       Logger.error("#{provider} Chat Completions error: #{status} - #{inspect(body)}")
@@ -302,6 +302,32 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
     Logger.error("#{provider} Chat Completions request failed: #{inspect(reason)}")
     {:error, reason}
   end
+
+  # Vercel AI Gateway tries a model on several upstream providers, and `error`
+  # carries the last attempt's words; each attempt's own are under
+  # `providerMetadata.gateway.routing`. A prompt over Grok 4.7's window answered
+  # "Bad Request" (Vertex, tried last) while xAI's attempt named the window
+  # (M105 §11.8), so an overflow any attempt names is the turn's overflow.
+  defp context_length_error?(:vercel, body) do
+    ResponsesShared.context_length_error?(body) or
+      Enum.any?(
+        gateway_attempt_errors(body),
+        &ResponsesShared.context_length_error?(%{"error" => %{"message" => &1}})
+      )
+  end
+
+  defp context_length_error?(_provider, body), do: ResponsesShared.context_length_error?(body)
+
+  defp gateway_attempt_errors(%{
+         "providerMetadata" => %{"gateway" => %{"routing" => %{"modelAttempts" => attempts}}}
+       })
+       when is_list(attempts) do
+    for %{"providerAttempts" => tries} when is_list(tries) <- attempts,
+        %{"error" => words} when is_binary(words) <- tries,
+        do: words
+  end
+
+  defp gateway_attempt_errors(_body), do: []
 
   defp build_turn(
          %{"choices" => [choice | _], "usage" => usage},

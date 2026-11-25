@@ -854,6 +854,19 @@ defmodule FermixCore.Providers.ModelCatalog do
     end
   end
 
+  @doc """
+  Whether `model_id` takes an inline PDF on a provider whose wire does
+  (`Descriptor.documents?/1`). Vercel AI Gateway sends a `spacexai/` model to
+  xAI, which takes no inline PDF (the direct `:xai` descriptor's `documents?`
+  is false for the same reason): the gateway answered HTTP 400 "Bad Request"
+  for Grok 4.7 and Grok 4.3 on 2026-11-24, though its listing names `pdf`
+  among Grok 4.3's inputs (M105 §11.8). Every other model is `true`, and its
+  provider's refusal is the reply.
+  """
+  @spec documents?(atom(), String.t()) :: boolean()
+  def documents?(:vercel, "spacexai/" <> _model), do: false
+  def documents?(provider, model_id) when is_atom(provider) and is_binary(model_id), do: true
+
   # Quiet lookup — no unknown_model telemetry. Callers that need that signal
   # use context_window_for/2, which wraps this and emits on a miss. Returns nil
   # for providers outside the catalog (e.g. direct-adapter `:mock`) so callers
