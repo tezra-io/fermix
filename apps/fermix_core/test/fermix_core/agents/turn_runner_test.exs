@@ -2080,7 +2080,8 @@ defmodule FermixCore.Agents.TurnRunnerTest do
 
       assert reply =~
                "This ChatGPT account or workspace can't use its plan in Fermix. " <>
-                 "ChatGPT Plus and Pro plans can."
+                 "Check your ChatGPT plan, or ask your workspace admin to let apps use the " <>
+                 "ChatGPT plan."
 
       refute reply =~ "authentication failed"
     end

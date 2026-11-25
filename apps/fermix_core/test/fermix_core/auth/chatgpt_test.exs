@@ -46,12 +46,32 @@ defmodule FermixCore.Auth.ChatGPTTest do
     end
   end
 
+  # What a sign-out left in a home before a sign-out forgot the registration:
+  # no tokens and no sign-in under way, the client and the account kept.
+  defp leftover do
+    ready(%{
+      tokens: %{access_token: nil, refresh_token: nil},
+      expires_at: nil,
+      status: "signed_out"
+    })
+  end
+
+  defp other_profile do
+    %{
+      auth_mode: "oauth_pkce",
+      provider: "xai",
+      tokens: %{access_token: "XAI-AT", refresh_token: "XAI-RT"},
+      expires_at: DateTime.add(DateTime.utc_now(), 3_600, :second),
+      last_refresh: nil
+    }
+  end
+
   describe "logout/1" do
-    test "revokes the refresh token upstream, clears the tokens and keeps the registration", %{
-      path: path
-    } do
+    test "revokes the refresh token upstream, then forgets the registration", %{path: path} do
       :ok = Store.write("chatgpt", ready(), path)
+      :ok = Store.write("xai_oauth", other_profile(), path)
       {:ok, host_id} = HostId.fetch_or_create(path)
+      host_file = File.read!(HostId.path(path))
 
       assert {:ok, %{revoked: true}} =
                ChatGPT.logout(fermix_path: path, req_options: [plug: revoke_plug(200)])
@@ -64,23 +84,18 @@ defmodule FermixCore.Auth.ChatGPTTest do
                "client_id" => "oaiapp_A1"
              }
 
-      assert {:ok, kept} = Registration.read(path)
-      assert kept.tokens == %{access_token: nil, refresh_token: nil}
-      assert kept.status == "signed_out"
-      assert kept.client_id == "oaiapp_A1"
-      assert kept.subject == "user-sub-1"
-      assert Store.account_label(kept) == "ada@example.test"
-      assert kept.granted_scopes == @full_scope
-
-      assert {:error, {:invalid_auth_entry, "chatgpt", :missing_access_token}} =
-               Store.read("chatgpt", path)
-
-      assert {:ok, []} = Store.list_profiles(path)
+      assert {:ok, nil} = Registration.read(path)
+      refute Map.has_key?(Jason.decode!(File.read!(path))["providers"], "chatgpt")
+      assert {:error, {:provider_missing, "chatgpt"}} = Store.read("chatgpt", path)
+      assert {:ok, %{tokens: %{access_token: "XAI-AT"}}} = Store.read("xai_oauth", path)
       assert ChatGPT.summary(fermix_path: path) == %{state: :not_connected, account: nil}
+
+      # The host id names this install, not the account, so it stays.
+      assert File.read!(HostId.path(path)) == host_file
       assert {:ok, ^host_id} = HostId.fetch_or_create(path)
     end
 
-    test "unconfirmed after the retries clears locally and says so", %{path: path} do
+    test "unconfirmed after the retries forgets it locally and says so", %{path: path} do
       :ok = Store.write("chatgpt", ready(), path)
       test = self()
       sleep = fn ms -> send(test, {:slept, ms}) end
@@ -100,7 +115,7 @@ defmodule FermixCore.Auth.ChatGPTTest do
       refute_received {:revoke, _method, _path, _form}
       assert_received {:slept, 350}
       assert_received {:slept, 700}
-      assert {:ok, %{status: "signed_out", client_id: "oaiapp_A1"}} = Registration.read(path)
+      assert {:ok, nil} = Registration.read(path)
       assert log =~ "revoke_not_confirmed"
       refute log =~ "RT-0"
     end
@@ -118,7 +133,7 @@ defmodule FermixCore.Auth.ChatGPTTest do
         end)
 
       assert result == {:ok, %{revoked: false}}
-      assert {:ok, %{status: "signed_out"}} = Registration.read(path)
+      assert {:ok, nil} = Registration.read(path)
     end
 
     test "a 4xx is not retried and is not confirmation", %{path: path} do
@@ -132,20 +147,24 @@ defmodule FermixCore.Auth.ChatGPTTest do
       assert result == {:ok, %{revoked: false}}
       assert_received {:revoke, _method, _path, _form}
       refute_received {:revoke, _method, _path, _form}
+      assert {:ok, nil} = Registration.read(path)
     end
 
-    test "with nothing signed in there is nothing to revoke", %{path: path} do
+    test "with nothing signed in there is nothing to revoke or forget", %{path: path} do
       never = fn _conn -> flunk("nothing to revoke") end
 
       assert {:ok, %{revoked: true}} =
                ChatGPT.logout(fermix_path: path, req_options: [plug: never])
 
+      refute File.exists?(path)
+
+      # An unfinished sign-in is not a sign-in: it stays for its retry.
       :ok = Store.write("chatgpt", Registration.pending("oaiapp_P"), path)
 
       assert {:ok, %{revoked: true}} =
                ChatGPT.logout(fermix_path: path, req_options: [plug: never])
 
-      assert {:ok, %{client_id: "oaiapp_P"}} = Registration.read(path)
+      assert {:ok, %{client_id: "oaiapp_P", status: "pending"}} = Registration.read(path)
     end
 
     test "its locked section ends inside the profile lock's stale threshold" do
@@ -202,8 +221,11 @@ defmodule FermixCore.Auth.ChatGPTTest do
       end
     end
 
-    test "a signed-out registration is not connected", %{path: path} do
-      :ok = Store.write("chatgpt", Registration.signed_out(ready()), path)
+    test "a registration with no tokens and no sign-in under way is not connected", %{
+      path: path
+    } do
+      :ok = Store.write("chatgpt", leftover(), path)
+      assert ChatGPT.summary(fermix_path: path) == %{state: :not_connected, account: nil}
       assert ChatGPT.route_status(fermix_path: path) == {:error, :not_signed_in}
     end
 
@@ -227,7 +249,8 @@ defmodule FermixCore.Auth.ChatGPTTest do
       for reason <- [:client_mismatch, :account_mismatch] do
         assert ChatGPT.failure_sentence(reason) ==
                  "The browser returned a different ChatGPT account than the one Fermix is " <>
-                   "connected to. Nothing was changed."
+                   "connected to. Nothing was changed. To use a different account or " <>
+                   "workspace, sign out of ChatGPT in Fermix, then sign in again."
       end
 
       assert ChatGPT.failure_sentence(:revoke_not_confirmed) ==

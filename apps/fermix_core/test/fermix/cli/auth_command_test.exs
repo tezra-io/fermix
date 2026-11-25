@@ -181,10 +181,10 @@ defmodule Fermix.CLI.AuthCommandTest do
   end
 
   describe "auth logout" do
-    # ChatGPT's own sign-out: the tokens go, the registration and every other
-    # profile stay. With no refresh token there is no session to revoke, so
+    # ChatGPT's own sign-out: the sign-in and its registration go, every other
+    # profile stays. With no refresh token there is no session to revoke, so
     # nothing leaves this machine.
-    test "clears the ChatGPT tokens, keeps the registration and other providers", %{dir: dir} do
+    test "removes the ChatGPT sign-in and keeps other providers", %{dir: dir} do
       path = seed_chatgpt(dir, tokens: %{access_token: "AT", refresh_token: nil})
 
       :ok =
@@ -201,11 +201,9 @@ defmodule Fermix.CLI.AuthCommandTest do
 
       assert {0, output} = run_out(["logout"], [])
 
-      assert output == "Logged out of ChatGPT. Cleared its tokens in #{path}.\n"
+      assert output == "Logged out of ChatGPT. Removed its sign-in from #{path}.\n"
       data = path |> File.read!() |> Jason.decode!()
-      assert data["providers"]["chatgpt"]["status"] == "signed_out"
-      assert data["providers"]["chatgpt"]["client_id"] == "oaiapp_cli"
-      assert data["providers"]["chatgpt"]["tokens"]["access_token"] == nil
+      refute Map.has_key?(data["providers"], "chatgpt")
       assert Map.has_key?(data["providers"], "openai")
       assert {:ok, %{mode: mode}} = File.stat(path)
       assert Bitwise.band(mode, 0o777) == 0o600
@@ -238,6 +236,18 @@ defmodule Fermix.CLI.AuthCommandTest do
       assert output =~ "Already logged out (no ChatGPT sign-in in "
     end
 
+    # An unfinished sign-in is not a sign-in: it stays for its retry.
+    test "is a no-op for a sign-in that has not finished", %{dir: dir} do
+      path = Path.join(dir, "auth.json")
+      :ok = Store.write("chatgpt", ChatGPT.Registration.pending("oaiapp_P"), path)
+      seams = [logout: fn [] -> flunk("nothing to sign out of") end]
+
+      output = capture_out(fn -> run_auth(["logout"], seams) end)
+
+      assert output == "Already logged out (no ChatGPT sign-in in #{path}).\n"
+      assert {:ok, %{status: "pending"}} = ChatGPT.Registration.read(path)
+    end
+
     # No daemon answers in this home, so the logout is the local one alone.
     # Codex has no auth-mode route, so no restart is asked for.
     test "with no daemon running, the logout and its message are the local ones", %{dir: dir} do
@@ -248,7 +258,7 @@ defmodule Fermix.CLI.AuthCommandTest do
         capture_err(fn ->
           output = capture_out(fn -> assert run_auth(["logout"], seams) == 0 end)
 
-          assert output == "Logged out of ChatGPT. Cleared its tokens in #{path}.\n"
+          assert output == "Logged out of ChatGPT. Removed its sign-in from #{path}.\n"
         end)
 
       assert stderr == ""
@@ -312,7 +322,7 @@ defmodule Fermix.CLI.AuthCommandTest do
       assert_receive {:fake_daemon_request, %{"method" => "auth_forget"}}
       Task.await(daemon)
 
-      assert stderr =~ "fermix auth: cleared the ChatGPT tokens in #{path}"
+      assert stderr =~ "fermix auth: removed the ChatGPT sign-in from #{path}"
       assert stderr =~ "the running daemon could not drop its chatgpt tokens: wedged"
 
       # Production runs the daemon from the macOS app, so an app-managed home is

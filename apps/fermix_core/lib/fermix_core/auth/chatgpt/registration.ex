@@ -1,6 +1,6 @@
 defmodule FermixCore.Auth.ChatGPT.Registration do
   @moduledoc """
-  The `chatgpt` entry in `auth.json`: one registration per home (M57 D3).
+  The `chatgpt` entry in `auth.json`: at most one registration per home (M57).
 
   It carries the client OpenAI issued this home (`client_id`), the verified
   account (`subject`, and the email under `account`, which
@@ -10,13 +10,19 @@ defmodule FermixCore.Auth.ChatGPT.Registration do
     * `"pending"`: a client was issued but the sign-in did not finish. No
       tokens; the next sign-in reuses the client instead of registering again.
     * `"ready"`: signed in.
-    * `"signed_out"`: tokens cleared; client, subject and email kept.
     * `"reauthorization_required"`: a refresh was refused for good. The token
       managers write it, as they do for every OAuth profile.
 
-  A pending or signed-out entry holds no access token, so `Store.read/2`, which
-  every reader that serves or reports a sign-in uses, refuses it: only this
-  module reads a registration without a token (`Store.read_registration/2`).
+  OpenAI binds an issued client to the account and the workspace chosen when
+  it was registered, and asks for them only when a client is registered. So a
+  sign-in resumes a registration only while it is in use (`resumed/1`), and a
+  sign-out removes the entry (`ChatGPT.Logout`): the sign-in after it
+  registers a new client, and ChatGPT asks again which account and workspace
+  to use.
+
+  A pending entry holds no access token, so `Store.read/2`, which every reader
+  that serves or reports a sign-in uses, refuses it: only this module reads a
+  registration without a token (`Store.read_registration/2`).
   """
 
   alias FermixCore.Auth.Store
@@ -72,6 +78,20 @@ defmodule FermixCore.Auth.ChatGPT.Registration do
 
   def signed_in?(%{}), do: false
 
+  @doc """
+  The registration a sign-in resumes, or `nil` when the sign-in registers a
+  new client.
+
+  Only a registration in use is resumed: an unfinished sign-in (`"pending"`),
+  whose retry must register no second app, and one that holds a token set,
+  ready or quarantined for a reconnect, whose re-authorization keeps its
+  client and its account. Any other entry is replaced by the new registration.
+  """
+  @spec resumed(Store.entry() | nil) :: Store.entry() | nil
+  def resumed(nil), do: nil
+  def resumed(%{status: "pending"} = entry), do: entry
+  def resumed(%{} = entry), do: if(signed_in?(entry), do: entry)
+
   @doc "Whether the grant includes ChatGPT plan usage."
   @spec plan_usage?(Store.entry()) :: boolean()
   def plan_usage?(%{} = entry), do: @plan_scope in (Map.get(entry, :granted_scopes) || [])
@@ -117,18 +137,6 @@ defmodule FermixCore.Auth.ChatGPT.Registration do
       last_refresh: DateTime.utc_now(),
       status: "ready"
     }
-  end
-
-  @doc "The entry once signed out: no tokens, the registration kept."
-  @spec signed_out(Store.entry()) :: Store.entry()
-  def signed_out(%{} = entry) do
-    %{
-      entry
-      | tokens: %{access_token: nil, refresh_token: nil},
-        expires_at: nil,
-        status: "signed_out"
-    }
-    |> Map.put(:earliest_refresh_at, nil)
   end
 
   @doc """

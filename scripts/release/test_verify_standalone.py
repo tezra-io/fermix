@@ -405,6 +405,14 @@ class VerifyStandaloneTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("left the ChatGPT tokens in auth.json", result.stderr)
 
+    def test_rejects_a_logout_that_keeps_the_registration(self):
+        self._write_artifact(create_disclaim=True, auth_logout="keeps_registration")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("left the ChatGPT registration in auth.json", result.stderr)
+
     def test_rejects_a_logout_that_leaves_a_lockfile(self):
         self._write_artifact(create_disclaim=True, auth_logout="leaves_lock")
 
@@ -1922,31 +1930,39 @@ class VerifyStandaloneTest(unittest.TestCase):
             )
         raise ValueError(f"unknown computer join behaviour: {computer_join}")
 
-    # The real verb's shape: the seeded ChatGPT sign-in's tokens leave auth.json
-    # while its registration stays, signed out; the sentence says so, and no
-    # lockfile stays beside auth.json.
+    # The real verb's shape: the seeded ChatGPT sign-in leaves auth.json with
+    # its registration; the sentence says so, and no lockfile stays beside
+    # auth.json. `keeps_registration` is what an older build did: it cleared
+    # the tokens and kept the client, signed out.
     def _auth_logout_behaviour(self, auth_logout):
         argv = '  [ "$*" = "auth logout" ] || exit 64\n'
-        cleared = (
+        removed = (
+            "  printf '{\"version\": 2, \"providers\": {}}\\n'"
+            ' > "$FERMIX_HOME/auth.json"\n'
+        )
+        signed_out = (
             "  printf '{\"version\": 2, \"providers\": {\"chatgpt\": "
             "{\"auth_mode\": \"oauth_siwc\", \"status\": \"signed_out\", "
+            "\"client_id\": \"verify-client\", "
             "\"tokens\": {\"access_token\": null, \"refresh_token\": null}}}}\\n'"
             ' > "$FERMIX_HOME/auth.json"\n'
         )
         reported = (
-            "  printf 'Logged out of ChatGPT. Cleared its tokens in %s.\\n'"
+            "  printf 'Logged out of ChatGPT. Removed its sign-in from %s.\\n'"
             ' "$FERMIX_HOME/auth.json"\n'
         )
         lock = '  : > "$FERMIX_HOME/auth.json.lock"\n'
         done = "  exit 0\n"
         if auth_logout == "removes":
-            return argv + cleared + reported + done
+            return argv + removed + reported + done
         if auth_logout == "silent":
-            return argv + cleared + done
+            return argv + removed + done
         if auth_logout == "keeps_tokens":
             return argv + reported + done
+        if auth_logout == "keeps_registration":
+            return argv + signed_out + reported + done
         if auth_logout == "leaves_lock":
-            return argv + cleared + lock + reported + done
+            return argv + removed + lock + reported + done
         raise ValueError(f"unknown auth logout behaviour: {auth_logout}")
 
     def _unknown_keychain_argv_is_refused(self):

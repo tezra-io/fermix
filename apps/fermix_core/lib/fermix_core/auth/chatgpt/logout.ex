@@ -1,16 +1,21 @@
 defmodule FermixCore.Auth.ChatGPT.Logout do
   @moduledoc """
   Signs this home out of ChatGPT (M57 §6.3): revokes the renewable session
-  upstream, then clears the tokens and keeps the registration (client id,
-  subject, email, granted scopes), so the next sign-in reuses the client.
+  upstream, then removes the `chatgpt` entry, registration and all, so the
+  next sign-in registers a new client and ChatGPT asks again which account and
+  workspace to use. The install's host id (`ChatGPT.HostId`) stays: it names
+  this install, not the account.
+
+  Only a registration that holds tokens is signed out. A sign-in that has not
+  finished is not one: it stays, for its retry to reuse.
 
   The revoke is a form `POST` of the refresh token with its issued client id.
   Any 200 means revoked, including a token that was already invalid. A 5xx or a
   network failure is retried twice with backoff; when revocation is still not
-  confirmed the tokens are cleared anyway and the result says
-  `revoked: false`. All of it runs under the profile lock, so no refresh
-  rotates the token between its read and its revoke, and the lock's bound
-  holds (`worst_case_ms/0`).
+  confirmed the entry is removed anyway and the result says `revoked: false`.
+  All of it runs under the profile lock, so no refresh rotates the token
+  between its read and its revoke, and the lock's bound holds
+  (`worst_case_ms/0`).
   """
 
   alias FermixCore.Auth.ChatGPT.Registration
@@ -27,7 +32,7 @@ defmodule FermixCore.Auth.ChatGPT.Logout do
   @retry_base_ms 350
 
   @doc """
-  Revokes, clears, and makes a running token manager let go of the profile.
+  Revokes, removes, and makes a running token manager let go of the profile.
   Options: `:fermix_path`, `:req_options` (with `:retry_sleep`, a one-argument
   function replacing `Process.sleep/1` between attempts, as a test seam).
   """
@@ -71,15 +76,23 @@ defmodule FermixCore.Auth.ChatGPT.Logout do
   defp sign_out(auth_path, req_options, sleep) do
     case Registration.read(auth_path) do
       {:ok, nil} -> {:ok, %{revoked: true}}
-      {:ok, entry} -> revoke_then_clear(entry, auth_path, req_options, sleep)
+      {:ok, entry} -> sign_out_entry(entry, auth_path, req_options, sleep)
       {:error, _reason} = error -> error
     end
   end
 
-  defp revoke_then_clear(entry, auth_path, req_options, sleep) do
+  # With no token set there is no sign-in to revoke or forget.
+  defp sign_out_entry(entry, auth_path, req_options, sleep) do
+    if Registration.signed_in?(entry),
+      do: revoke_then_remove(entry, auth_path, req_options, sleep),
+      else: {:ok, %{revoked: true}}
+  end
+
+  # The profile lock is held, so the removal takes the store lock alone.
+  defp revoke_then_remove(entry, auth_path, req_options, sleep) do
     revoked = revoke(entry, req_options, sleep)
 
-    case Store.write(Registration.profile(), Registration.signed_out(entry), auth_path) do
+    case Store.remove(Registration.profile(), auth_path) do
       :ok -> {:ok, %{revoked: revoked}}
       {:error, reason} -> {:error, {:persist_failed, reason}}
     end
@@ -138,7 +151,7 @@ defmodule FermixCore.Auth.ChatGPT.Logout do
   defp not_confirmed(why, detail) do
     Logger.warning(
       "ChatGPT.Logout: revoke_not_confirmed (#{why}: #{Redaction.format(detail)}); " <>
-        "clearing local tokens anyway"
+        "removing the local sign-in anyway"
     )
 
     false

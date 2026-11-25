@@ -301,15 +301,34 @@ defmodule FermixCore.Auth.ChatGPT.RefreshTest do
       assert {:ok, %{status: "reauthorization_required"}} = Store.read("chatgpt", path)
     end
 
+    # The sign-out ran elsewhere (a CLI VM whose notice has not reached this
+    # manager): its tokens are dropped instead of refreshed and written back.
     test "drops its tokens when the stored registration was signed out", %{path: path} do
-      entry = stored(path)
+      stored(path)
       server = start_manager(path, never_called())
-      :ok = Store.write("chatgpt", ChatGPT.Registration.signed_out(entry), path)
+      revoked = fn conn -> Plug.Conn.send_resp(conn, 200, "") end
+      {:ok, %{revoked: true}} = ChatGPT.logout(fermix_path: path, req_options: [plug: revoked])
 
       {result, _log} = with_log(fn -> TokenManager.refresh(server) end)
 
       assert result == {:error, :reauthorization_required}
       assert {:ok, %{loaded?: false}} = TokenManager.status(server)
+      assert {:error, {:provider_missing, "chatgpt"}} = Store.read("chatgpt", path)
+    end
+
+    # A sign-in that registered afresh stores its client before the exchange,
+    # with no tokens: there is no sign-in to refresh either.
+    test "drops its tokens when a new sign-in has not finished", %{path: path} do
+      stored(path)
+      server = start_manager(path, never_called())
+      :ok = Store.delete_provider("chatgpt", path)
+      :ok = Store.write("chatgpt", ChatGPT.Registration.pending("oaiapp_NEW"), path)
+
+      {result, _log} = with_log(fn -> TokenManager.refresh(server) end)
+
+      assert result == {:error, :reauthorization_required}
+      assert {:ok, %{loaded?: false}} = TokenManager.status(server)
+      assert {:ok, %{status: "pending"}} = ChatGPT.Registration.read(path)
     end
 
     test "arms its proactive refresh no earlier than earliest_refresh_at", %{path: path} do

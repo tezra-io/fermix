@@ -12,10 +12,10 @@ defmodule FermixCore.Auth.Store do
   Every auth profile has its own `TokenManager` process, and CLI VMs, sign-ins
   and logouts write the same file, so no one mailbox serializes them:
 
-    * The store lock (`auth.json.lock`) makes each `write/3` and
-      `delete_provider/2` one step: nothing renames the file between its read
-      and its own rename, so no writer drops another's update. Reads take no
-      lock; the atomic rename keeps every read whole.
+    * The store lock (`auth.json.lock`) makes each `write/3`, `replace/3`,
+      `remove/2` and `delete_provider/2` one step: nothing renames the file
+      between its read and its own rename, so no writer drops another's
+      update. Reads take no lock; the atomic rename keeps every read whole.
     * The profile lock (`with_profile_lock/3`) covers one profile from the read
       of its entry to the write of the result: a refresh, a delete, and a
       sign-in or import from before it spends anything (an authorization-code
@@ -116,9 +116,9 @@ defmodule FermixCore.Auth.Store do
   @doc """
   Reads one profile's entry whether or not it holds a token.
 
-  A ChatGPT registration outlives its tokens: a sign-out, or a sign-in whose
-  exchange failed, keeps the issued client id and the account with no token
-  (`Auth.ChatGPT.Registration`). Only that registration's own reader uses this;
+  A ChatGPT sign-in that has not finished keeps the client it was issued with
+  no token, so a retry registers no second app (`Auth.ChatGPT.Registration`).
+  Only that registration's own reader uses this;
   every reader that serves or reports a sign-in uses `read/2`, which refuses an
   entry with no access token, so a registration with no token is never taken
   for a signed-in account.
@@ -180,25 +180,47 @@ defmodule FermixCore.Auth.Store do
   def write(provider, %{} = entry, path \\ default_path())
       when is_atom(provider) or is_binary(provider) do
     lock(store_lock_path(path), @store_lock_opts, :lock_unavailable, fn ->
-      merge_write(provider, entry, path)
+      merge_write(provider, entry, path, :merge)
+    end)
+  end
+
+  @doc """
+  Writes one profile's entry in place of the stored one. Unlike `write/3`, no
+  field of the stored entry carries over, so a new grant never inherits
+  another's account. Takes the store lock only, as `write/3` does.
+  """
+  @spec replace(provider(), entry(), Path.t()) :: :ok | {:error, term()}
+  def replace(provider, %{} = entry, path)
+      when (is_atom(provider) or is_binary(provider)) and is_binary(path) do
+    lock(store_lock_path(path), @store_lock_opts, :lock_unavailable, fn ->
+      merge_write(provider, entry, path, :replace)
     end)
   end
 
   @doc """
   Removes one profile's entry.
 
-  Takes the profile lock, then the store lock, so it waits for a refresh of
-  that profile in flight and deletes after it, instead of being undone by that
-  refresh's write. A profile lock that stays busy past its wait fails with
-  nothing deleted.
+  Takes the profile lock, then removes it as `remove/2` does, so it waits for a
+  refresh of that profile in flight and deletes after it, instead of being
+  undone by that refresh's write. A profile lock that stays busy past its wait
+  fails with nothing deleted.
   """
   @spec delete_provider(provider(), Path.t()) :: :ok | {:error, term()}
   def delete_provider(provider, path \\ default_path())
       when is_atom(provider) or is_binary(provider) do
-    with_profile_lock(provider, path, fn ->
-      lock(store_lock_path(path), @store_lock_opts, :lock_unavailable, fn ->
-        remove_write(provider, path)
-      end)
+    with_profile_lock(provider, path, fn -> remove(provider, path) end)
+  end
+
+  @doc """
+  Removes one profile's entry under the store lock only, for a caller that
+  already holds that profile's lock (`with_profile_lock/3`), which
+  `delete_provider/2` would take again.
+  """
+  @spec remove(provider(), Path.t()) :: :ok | {:error, term()}
+  def remove(provider, path)
+      when (is_atom(provider) or is_binary(provider)) and is_binary(path) do
+    lock(store_lock_path(path), @store_lock_opts, :lock_unavailable, fn ->
+      remove_write(provider, path)
     end)
   end
 
@@ -466,11 +488,11 @@ defmodule FermixCore.Auth.Store do
     end
   end
 
-  defp merge_write(provider, entry, path) do
+  defp merge_write(provider, entry, path, kept) do
     remove_leftover_tmps(path)
 
     with {:ok, current} <- read_for_write(path),
-         updated <- put_provider(current, provider, entry),
+         updated <- put_provider(current, provider, entry, kept),
          :ok <- atomic_write(path, encode(updated)) do
       :ok
     end
@@ -558,10 +580,10 @@ defmodule FermixCore.Auth.Store do
   defp legacy_codex_doc(flat),
     do: %{"version" => @schema_version, "providers" => %{"openai_codex" => flat}}
 
-  defp put_provider(doc, provider, entry) do
+  defp put_provider(doc, provider, entry, kept) do
     providers = Map.get(doc, "providers", %{})
     provider_key = provider_key(provider)
-    existing = Map.get(providers, provider_key, %{})
+    existing = stored_fields(providers, provider_key, kept)
 
     serialized =
       %{
@@ -592,9 +614,14 @@ defmodule FermixCore.Auth.Store do
     %{"version" => @schema_version, "providers" => Map.put(providers, provider_key, merged)}
   end
 
+  # What of the stored entry a write keeps: everything it does not name
+  # (`write/3`), or nothing (`replace/3`).
+  defp stored_fields(providers, provider_key, :merge), do: Map.get(providers, provider_key, %{})
+  defp stored_fields(_providers, _provider_key, :replace), do: %{}
+
   # A nil field keeps what is stored, except `earliest_refresh_at`: it belongs
   # to one token set, so an entry that names it as nil (a refresh whose answer
-  # carried none, a sign-out) clears the old one.
+  # carried none) clears the old one.
   defp drop_cleared(existing, %{earliest_refresh_at: nil}),
     do: Map.delete(existing, "earliest_refresh_at")
 

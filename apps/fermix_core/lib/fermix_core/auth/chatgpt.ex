@@ -8,7 +8,7 @@ defmodule FermixCore.Auth.ChatGPT do
     * `ChatGPT.Login`: the browser sign-in and its redeem order.
     * `ChatGPT.TerminalLogin`: the same sign-in from a terminal, which also
       takes a pasted address.
-    * `ChatGPT.Logout`: revoke upstream, clear the tokens, keep the registration.
+    * `ChatGPT.Logout`: revoke upstream, then remove the registration.
     * `ChatGPT.Refresh`: the token managers' refresh of the `chatgpt` profile.
     * `ChatGPT.Registration`: the stored entry and what it means.
     * `ChatGPT.HostId` and `ChatGPT.IdToken`.
@@ -32,7 +32,8 @@ defmodule FermixCore.Auth.ChatGPT do
   @type route_error :: :not_signed_in | :plan_usage_off | :reconnect_needed
 
   @mismatch "The browser returned a different ChatGPT account than the one Fermix is " <>
-              "connected to. Nothing was changed."
+              "connected to. Nothing was changed. To use a different account or workspace, " <>
+              "sign out of ChatGPT in Fermix, then sign in again."
   @start_again "Start the sign-in again."
 
   @doc "The scope whose grant lets Fermix use the person's ChatGPT plan."
@@ -70,7 +71,10 @@ defmodule FermixCore.Auth.ChatGPT do
     :ok
   end
 
-  @doc "Revokes the session upstream, then clears the tokens and keeps the registration."
+  @doc """
+  Revokes the session upstream, then removes the registration, so the next
+  sign-in asks again which account and workspace to use.
+  """
   @spec logout(keyword()) :: {:ok, %{revoked: boolean()}} | {:error, term()}
   def logout(opts \\ []) when is_list(opts) do
     case Logout.run(opts) do

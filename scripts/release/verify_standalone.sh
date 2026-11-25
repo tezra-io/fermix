@@ -455,7 +455,7 @@ grep -Fq "fermix computer join: Fermix is not running here. Start it, then run t
 # nothing. The sign-in holds an access token and no refresh token: there is no
 # renewable session to revoke, so the verb makes no network call. ChatGPT has
 # no auth-mode route to revert, so it touches no config and no keychain: it
-# must exit 0, clear the tokens and leave no lockfile.
+# must exit 0, remove the sign-in with its registration and leave no lockfile.
 logout_home="$runtime_root/logout-home"
 mkdir -m 700 "$logout_home"
 cat > "$logout_home/auth.json" <<'AUTH'
@@ -474,11 +474,14 @@ printf '%s\n' "$logout_output"
 
 [ "$logout_status" -eq 0 ] || fail "auth logout must exit 0 in the throwaway world, got $logout_status"
 case "$logout_output" in
-  *"Logged out of ChatGPT. Cleared its tokens in"*) ;;
+  *"Logged out of ChatGPT. Removed its sign-in from"*) ;;
   *) fail "auth logout did not report the removed entry" ;;
 esac
 if grep -Fq 'verify-at' "$logout_home/auth.json"; then
   fail "auth logout left the ChatGPT tokens in auth.json"
+fi
+if grep -Fq 'verify-client' "$logout_home/auth.json"; then
+  fail "auth logout left the ChatGPT registration in auth.json"
 fi
 logout_locks="$(find "$logout_home" -name '*.lock' -print)"
 [ -z "$logout_locks" ] || fail "auth logout left a lockfile behind: $logout_locks"

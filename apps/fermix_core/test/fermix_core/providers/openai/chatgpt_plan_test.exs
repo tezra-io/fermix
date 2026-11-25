@@ -623,7 +623,8 @@ defmodule FermixCore.Providers.OpenAI.ChatGPTPlanTest do
                plan_error(:plan_not_eligible, %{code: "subscription_sharing_user_not_eligible"})
              ) ==
                "This ChatGPT account or workspace can't use its plan in Fermix. " <>
-                 "ChatGPT Plus and Pro plans can."
+                 "Check your ChatGPT plan, or ask your workspace admin to let apps use the " <>
+                 "ChatGPT plan."
 
       assert ChatGPTPlan.refusal_sentence(
                plan_error(:plan_not_eligible, %{

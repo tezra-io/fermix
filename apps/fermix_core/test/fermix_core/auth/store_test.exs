@@ -483,6 +483,63 @@ defmodule FermixCore.Auth.StoreTest do
     end
   end
 
+  # A holder of a profile's lock cannot call `delete_provider/2`, which takes
+  # that lock again: it removes or replaces under the store lock alone, as it
+  # writes with `write/3`.
+  describe "remove/2 and replace/3 under the profile lock" do
+    defp held_entry(access_token, fields \\ %{}) do
+      Map.merge(
+        %{
+          auth_mode: "oauth_siwc",
+          tokens: %{access_token: access_token, refresh_token: "RT"},
+          expires_at: nil,
+          last_refresh: nil
+        },
+        fields
+      )
+    end
+
+    test "remove/2 removes the profile's entry and keeps every other" do
+      path = tmp_path()
+      :ok = Store.write("chatgpt", held_entry("AT-C"), path)
+      :ok = Store.write("xai_oauth", held_entry("AT-X"), path)
+
+      assert :ok =
+               Store.with_profile_lock("chatgpt", path, fn -> Store.remove("chatgpt", path) end)
+
+      assert {:error, {:provider_missing, "chatgpt"}} = Store.read("chatgpt", path)
+      assert {:ok, %{tokens: %{access_token: "AT-X"}}} = Store.read("xai_oauth", path)
+      assert {:error, {:provider_missing, "chatgpt"}} = Store.remove("chatgpt", path)
+      assert {:ok, %{mode: mode}} = File.stat(path)
+      assert Bitwise.band(mode, 0o777) == 0o600
+    end
+
+    test "replace/3 carries nothing of the stored entry over, where write/3 merges" do
+      path = tmp_path()
+      held = %{client_id: "c-1", subject: "sub-1", account: %{email: "a@example.test"}}
+
+      :ok =
+        Store.write("chatgpt", held_entry("AT", Map.put(held, :granted_scopes, ["openid"])), path)
+
+      fresh = held_entry(nil, %{client_id: "c-2", status: "pending"})
+
+      assert :ok =
+               Store.with_profile_lock("chatgpt", path, fn ->
+                 Store.replace("chatgpt", fresh, path)
+               end)
+
+      assert {:ok, replaced} = Store.read_registration("chatgpt", path)
+      assert replaced.client_id == "c-2"
+      assert replaced.status == "pending"
+      assert replaced.subject == nil
+      assert replaced.account == nil
+      assert replaced.granted_scopes == []
+
+      :ok = Store.write("chatgpt", held_entry("AT-2", %{subject: "sub-2"}), path)
+      assert {:ok, %{client_id: "c-2", subject: "sub-2"}} = Store.read("chatgpt", path)
+    end
+  end
+
   describe "list_profiles/1" do
     test "returns an empty list when the auth file is missing" do
       assert {:ok, []} = Store.list_profiles(tmp_path())

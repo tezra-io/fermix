@@ -6,7 +6,6 @@ defmodule FermixWebWeb.SetupLiveTest do
   alias Fermix.CLI.Doctor.Checks
   alias Fermix.CLI.Upgrade.Manifest
   alias FermixCore.Auth.AnthropicLogin
-  alias FermixCore.Auth.ChatGPT.Registration, as: ChatGPTRegistration
   alias FermixCore.Auth.ClientRejection
   alias FermixCore.Auth.Store
   alias FermixCore.Capabilities.MCP.RuntimeStatus
@@ -5780,7 +5779,7 @@ defmodule FermixWebWeb.SetupLiveTest do
   defp signing_out_runner(parent, revoked?) do
     fn opts ->
       send(parent, {:chatgpt_logout, opts})
-      :ok = Store.write("chatgpt", ChatGPTRegistration.signed_out(chatgpt_entry()))
+      :ok = Store.delete_provider("chatgpt")
       {:ok, %{revoked: revoked?}}
     end
   end
