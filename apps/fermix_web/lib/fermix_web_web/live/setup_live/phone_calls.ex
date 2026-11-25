@@ -1,24 +1,27 @@
 defmodule FermixWebWeb.SetupLive.PhoneCalls do
   @moduledoc """
-  The browser setup's Phone calls section (M94 §12), under the Realtime tab
-  beside Talk to Fermix's voice form and independent of it: the switch, where
-  phone calls stand, the five settings, the OpenAI key the phone engine
-  shares with the OpenAI provider, the call in progress with its Stop, the
-  recovery view of an unresolved call with the owner's confirmation that it
-  ended, and the recent calls. The page's Restart asks `restart_hold/0` first,
-  so it refuses while a call is in progress.
+  The browser setup's Phone calls tab (M94 §12), the step after Voice and
+  independent of Talk to Fermix: the switch beside where phone calls stand,
+  the call in progress with its Stop, the recovery view of an unresolved call
+  with the owner's confirmation that it ended, then the settings and the
+  OpenAI key the phone engine shares with the OpenAI provider. It lists no
+  finished calls: each call's end is a line in the daemon log, and its report
+  is in the chat that asked for it. The page's Restart asks `restart_hold/0`
+  first, so it refuses while a call is in progress.
 
   It calls what the management methods call, in the page's own process, so
   each write is validated and refused exactly as the socket's is:
   `FermixCore.Management.Settings` for the `phone_calls` section (its rows,
   and its write, which applies the switch once it lands),
   `FermixCore.Management.Secrets` for the two credentials, and
-  `FermixCore.Management.PhoneCalls` for the status, the calls, the stop, the
-  recovery view and its confirmation. Every label, sentence and state word is the daemon's; a
+  `FermixCore.Management.PhoneCalls` for the status, the stop, the recovery
+  view and its confirmation. Every label, sentence and state word is the daemon's; a
   refusal is said in the daemon's words.
 
-  The switch is its own setter, never part of the section's form, as the
-  StackChan switch is. A blank secret field keeps the stored value.
+  The switch is its own setter, never part of the settings form, as the
+  StackChan switch is. The form has no button of its own: the step's footer
+  below the page submits it (`form_id/0`). A blank secret field keeps the
+  stored value.
 
   While a call is in progress the section reads its state again on a timer
   (`handle_info/2`), the Phone card's way, and stops once no call is.
@@ -39,9 +42,7 @@ defmodule FermixWebWeb.SetupLive.PhoneCalls do
 
   @section "phone_calls"
   @switch "phone_calls_enabled"
-  # The recent calls drawn: a short list, newest first (`phone_calls.list`
-  # answers more; a client draws what it needs).
-  @recent_max 5
+  @form_id "phone-calls-form"
   # While a call holds the slot the section reads its state again this often,
   # as the Phone card reads a pairing (`SetupLive.Phone`); otherwise it waits.
   @poll_ms 2_000
@@ -55,7 +56,6 @@ defmodule FermixWebWeb.SetupLive.PhoneCalls do
     do: %{
       rows: [],
       status: nil,
-      calls: [],
       recovery: [],
       unreadable: nil,
       notice: nil,
@@ -63,7 +63,7 @@ defmodule FermixWebWeb.SetupLive.PhoneCalls do
       poll: nil
     }
 
-  @doc "Reads the section's rows, the status, the recent calls and the recovery view."
+  @doc "Reads the section's rows, the status and the recovery view."
   @spec load(Phoenix.LiveView.Socket.t()) :: Phoenix.LiveView.Socket.t()
   def load(socket) do
     opts = management_opts()
@@ -73,7 +73,6 @@ defmodule FermixWebWeb.SetupLive.PhoneCalls do
     |> update(fn state ->
       %{state | rows: rows, unreadable: nil}
       |> read(:status, ManagementPhoneCalls.status(opts), & &1)
-      |> read(:calls, ManagementPhoneCalls.list(opts), & &1["calls"])
       |> read(:recovery, ManagementPhoneCalls.recovery(opts), & &1["calls"])
     end)
     |> poll_while_live()
@@ -247,12 +246,20 @@ defmodule FermixWebWeb.SetupLive.PhoneCalls do
 
   # -- drawing -----------------------------------------------------------------------
 
+  @doc "The id of the settings form, which the step's footer submits."
+  @spec form_id() :: String.t()
+  def form_id, do: @form_id
+
   attr :phone_calls, :map, required: true
 
-  @doc "The section, below the voice form."
-  def panel(%{phone_calls: %{rows: []}} = assigns), do: ~H""
+  @doc """
+  The tab's page, top to bottom: what phone calls are, where they stand
+  beside their switch, what the owner's last action answered, a call in
+  progress, each unresolved call, then the settings form.
+  """
+  def pane(%{phone_calls: %{rows: []}} = assigns), do: ~H""
 
-  def panel(assigns) do
+  def pane(assigns) do
     state = assigns.phone_calls
     switch = row(state.rows, @switch)
 
@@ -261,17 +268,21 @@ defmodule FermixWebWeb.SetupLive.PhoneCalls do
         switch: switch,
         on?: switch["value"] == true,
         status: state.status,
-        summary: row(state.rows, "phone_calls_status"),
-        recent: Enum.take(state.calls, @recent_max)
+        summary: row(state.rows, "phone_calls_status")
       )
 
     ~H"""
-    <section id="phone-calls" class="mt-10 rounded-box border border-base-300 p-5 space-y-4">
-      <div class="flex items-center justify-between gap-4">
-        <div>
-          <h3 class="text-base font-semibold">{@switch["label"]}</h3>
-          <p class="text-sm text-base-content/70">{@switch["footer"]}</p>
-        </div>
+    <div id="phone-calls" class="space-y-5">
+      <div class="max-w-3xl">
+        <h2 class="text-2xl font-semibold tracking-normal">{@switch["label"]}</h2>
+        <p class="mt-2 text-sm leading-6 text-base-content/70">{@switch["footer"]}</p>
+      </div>
+
+      <div class="flex items-center justify-between gap-4 rounded-box border border-base-300 bg-base-200/40 px-4 py-3">
+        <p id="phone-calls-summary" class="flex flex-wrap items-baseline gap-x-2 text-sm">
+          <span class="font-medium">{@summary["value"]}</span>
+          <span class="text-base-content/70">{@summary["footer"]}</span>
+        </p>
         <form id="phone-calls-switch" phx-submit="phone_calls_switch">
           <input type="hidden" name="enabled" value={to_string(not @on?)} />
           <button type="submit" class={["btn btn-sm", @on? && "btn-primary"]}>
@@ -280,10 +291,6 @@ defmodule FermixWebWeb.SetupLive.PhoneCalls do
         </form>
       </div>
 
-      <p id="phone-calls-summary" class="text-sm">
-        <span class="font-medium">{@summary["value"]}</span>
-        <span class="text-base-content/70">{@summary["footer"]}</span>
-      </p>
       <p :if={@phone_calls.notice} id="phone-calls-notice" class="text-sm">
         {@phone_calls.notice}
       </p>
@@ -297,11 +304,10 @@ defmodule FermixWebWeb.SetupLive.PhoneCalls do
       >
         {@phone_calls.unreadable}
       </p>
-      <.settings_form rows={@phone_calls.rows} />
       <.current_call :if={@status && @status["call"]} call={@status["call"]} />
       <.recovery :for={call <- @phone_calls.recovery} call={call} />
-      <.recent :if={@recent != []} calls={@recent} />
-    </section>
+      <.settings_form rows={@phone_calls.rows} />
+    </div>
     """
   end
 
@@ -319,7 +325,7 @@ defmodule FermixWebWeb.SetupLive.PhoneCalls do
 
     ~H"""
     <form
-      id="phone-calls-form"
+      id={form_id()}
       phx-submit="phone_calls_save"
       class="grid items-start gap-4 @xl:grid-cols-2"
     >
@@ -342,9 +348,6 @@ defmodule FermixWebWeb.SetupLive.PhoneCalls do
       <.text_field row={@username} name="phone_calls[sip_username]" />
       <.secret_field row={@password} name="phone_calls[sip_password]" />
       <.secret_field row={@key} name="phone_calls[openai_api_key]" />
-      <div class="@xl:col-span-2">
-        <button type="submit" class="btn btn-sm btn-primary">Save phone calls</button>
-      </div>
     </form>
     """
   end
@@ -434,21 +437,6 @@ defmodule FermixWebWeb.SetupLive.PhoneCalls do
         <input type="hidden" name="call_id" value={@call["call_id"]} />
         <button type="submit" class="btn btn-sm btn-outline">The call has ended</button>
       </form>
-    </div>
-    """
-  end
-
-  attr :calls, :list, required: true
-
-  defp recent(assigns) do
-    ~H"""
-    <div id="phone-calls-recent" class="space-y-1 text-sm">
-      <h4 class="font-medium">Recent calls</h4>
-      <p :for={call <- @calls} id={"phone-calls-recent-#{call["call_id"]}"}>
-        <span class="font-medium">{call["contact_name"]}</span>
-        <span class="text-base-content/70">{at(call["created_at"])}</span>
-        <span>{call["label"]}</span>
-      </p>
     </div>
     """
   end

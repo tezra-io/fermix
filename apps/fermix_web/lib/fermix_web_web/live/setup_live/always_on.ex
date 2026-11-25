@@ -181,6 +181,7 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   @tab_requests %{
     "provider" => {"settings.apply", "providers.openai"},
     "realtime" => {"settings.apply", "realtime"},
+    "phone_calls" => {"settings.apply", "phone_calls"},
     "channels" => {"settings.apply", "channels.telegram"},
     "transcription" => {"settings.apply", "transcription"},
     "plugins" => {"plugins.list", nil},

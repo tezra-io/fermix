@@ -2,7 +2,7 @@ defmodule FermixWebWeb.SetupLive.Accessories do
   @moduledoc """
   The browser setup's StackChan section (M91 E3; the Mac design's *Browser
   setup*, widened by the owner on 8 November so this page pairs too): an
-  optional block under the Realtime tab's voice settings with the switch that
+  optional block under the Voice tab's settings with the switch that
   allows a StackChan connection, the daemon's own sentence for where it
   stands and the voice the next call takes; and, on a local Mac primary with
   StackChan on, what the Mac app's Pet offers, drawn by

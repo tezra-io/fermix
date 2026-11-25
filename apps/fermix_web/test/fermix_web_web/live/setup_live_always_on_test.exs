@@ -564,7 +564,7 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
     test "the server's tabs say so instead of offering their forms; this computer's stay", %{
       conn: conn
     } do
-      for tab <- ~w(provider channels realtime plugins cues memory) do
+      for tab <- ~w(provider channels realtime phone_calls plugins cues memory) do
         {:ok, view, html} = live(conn, "/setup?tab=#{tab}")
 
         assert html =~ ~s(id="primary-only-pane"), "#{tab} offers the primary's settings"
@@ -575,6 +575,7 @@ defmodule FermixWebWeb.SetupLiveAlwaysOnTest do
 
         refute html =~ ~s(phx-submit="save_provider")
         refute html =~ ~s(phx-submit="save_channels")
+        refute html =~ ~s(id="phone-calls")
         GenServer.stop(view.pid)
       end
 

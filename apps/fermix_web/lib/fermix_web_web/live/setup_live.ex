@@ -95,7 +95,8 @@ defmodule FermixWebWeb.SetupLive do
 
   @tabs [
     %{id: "provider", label: "Provider", component: "provider:*", description: "Model and key"},
-    %{id: "realtime", label: "Realtime", component: "realtime:*", description: "Voice companion"},
+    %{id: "realtime", label: "Voice", component: "realtime:*", description: "Talk to Fermix"},
+    %{id: "phone_calls", label: "Phone calls", component: nil, description: "Outbound calls"},
     %{id: "channels", label: "Channels", component: "channel:*", description: "Message ingress"},
     %{id: "transcription", label: "Voice notes", component: nil, description: "Speech-to-text"},
     %{id: "plugins", label: "Plugins", component: nil, description: "Integrations"},
@@ -433,7 +434,7 @@ defmodule FermixWebWeb.SetupLive do
       |> maybe_put_string(:realtime_persist_transcripts, params["persist_transcripts"])
 
     {:noreply,
-     save_answers(socket, answers, "Realtime saved.", Map.get(root, "__nav"),
+     save_answers(socket, answers, "Voice saved.", Map.get(root, "__nav"),
        restart_required?: runtime_restart_answers?(answers)
      )}
   end
@@ -492,13 +493,18 @@ defmodule FermixWebWeb.SetupLive do
     end
   end
 
-  # The Phone calls section's events (M94 §12), before the Phone card's, whose
+  # The Phone calls tab's events (M94 §12), before the Phone card's, whose
   # prefix they share: its switch, its settings, a stop, the owner's word that
-  # an unresolved call ended. A settings write refreshes the report.
+  # an unresolved call ended. A settings write refreshes the report, and the
+  # form's save answers as every other step's does (`phone_calls_saved/3`). A
+  # refused write stays on the tab, which says why.
   def handle_event("phone_calls_" <> _rest = event, params, socket) do
-    case PhoneCalls.handle_event(event, params, socket) do
-      {socket, nil} -> {:noreply, socket}
-      {socket, _write} -> {:noreply, assign_report(socket, Wizard.report())}
+    case PhoneCalls.handle_event(event, params, assign(socket, :saved_flash, nil)) do
+      {socket, nil} ->
+        {:noreply, socket}
+
+      {socket, _write} ->
+        {:noreply, socket |> assign_report(Wizard.report()) |> phone_calls_saved(event, params)}
     end
   end
 
@@ -1416,6 +1422,13 @@ defmodule FermixWebWeb.SetupLive do
     do: maybe_advance(socket, Map.get(params, "__nav"))
 
   defp cues_advance(socket, _action, _result, _params), do: socket
+
+  # The Phone calls form's save says it saved and, on Save & next, moves on.
+  # The switch is its own setter: the tab says what it did.
+  defp phone_calls_saved(socket, "phone_calls_save", params),
+    do: socket |> flash_info("Phone calls saved.") |> maybe_advance(Map.get(params, "__nav"))
+
+  defp phone_calls_saved(socket, _event, _params), do: socket
 
   defp apply_cues(socket, {:edit, cues}), do: assign(socket, :cues, cues)
   defp apply_cues(socket, :refresh), do: refresh_cues_on(socket, "cues")

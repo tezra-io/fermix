@@ -393,6 +393,7 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   defp render_active_pane("provider", assigns), do: provider_pane(assigns)
   defp render_active_pane("realtime", assigns), do: realtime_pane(assigns)
+  defp render_active_pane("phone_calls", assigns), do: phone_calls_pane(assigns)
   defp render_active_pane("channels", assigns), do: channels_pane(assigns)
   defp render_active_pane("plugins", assigns), do: plugins_pane(assigns)
   defp render_active_pane("search", assigns), do: search_pane(assigns)
@@ -1307,24 +1308,49 @@ defmodule FermixWebWeb.SetupLive.Components do
     provider |> ModelCatalog.effort_levels_for(model) |> Enum.map(&Atom.to_string/1)
   end
 
+  # The Voice tab: Talk to Fermix's form, then StackChan. The step's footer
+  # closes the page, below every section, and submits the form by its id.
   defp realtime_pane(assigns) do
     ~H"""
     <div>
-      <.pane_header
-        title="Voice companion"
-        subtitle="Enable the local Realtime voice path when this host should run FermixPet."
-      />
+      <.pane_header title="Voice" subtitle="Talk to Fermix out loud and hear it answer." />
 
-      <form phx-change="change_realtime" phx-submit="save_realtime" class="mt-6 space-y-5">
+      <form
+        id="realtime-form"
+        phx-change="change_realtime"
+        phx-submit="save_realtime"
+        class="mt-6 space-y-5"
+      >
         <.realtime_primary_fields form={@realtime_form} />
         <.realtime_secret_field form={@realtime_form} />
         <.realtime_limit_fields form={@realtime_form} />
-        <.form_actions active_tab={@active_tab} tabs={@tabs} save_label="Save realtime" />
       </form>
 
-      <PhoneCalls.panel :if={@phone_calls} phone_calls={@phone_calls} />
-
       <Accessories.panel :if={@accessories} accessories={@accessories} />
+
+      <.form_actions
+        active_tab={@active_tab}
+        tabs={@tabs}
+        save_label="Save voice"
+        form="realtime-form"
+      />
+    </div>
+    """
+  end
+
+  # The Phone calls tab (M94 §12): its page, then the step's footer, whose
+  # Save and Save & next submit the page's settings form.
+  defp phone_calls_pane(assigns) do
+    ~H"""
+    <div>
+      <PhoneCalls.pane :if={@phone_calls} phone_calls={@phone_calls} />
+
+      <.form_actions
+        active_tab={@active_tab}
+        tabs={@tabs}
+        save_label="Save phone calls"
+        form={PhoneCalls.form_id()}
+      />
     </div>
     """
   end
@@ -1335,7 +1361,7 @@ defmodule FermixWebWeb.SetupLive.Components do
     ~H"""
     <div class="grid items-start gap-4 @xl:grid-cols-2">
       <label class="form-control w-full">
-        <span class="label pb-1 text-sm font-medium">Realtime status</span>
+        <span class="label pb-1 text-sm font-medium">Talk to Fermix</span>
         <select name="realtime_form[enabled]" class="select select-bordered w-full bg-base-100">
           <option value="false" selected={!@form.enabled}>Disabled</option>
           <option value="true" selected={@form.enabled}>Enabled</option>
@@ -1410,7 +1436,7 @@ defmodule FermixWebWeb.SetupLive.Components do
     """
   end
 
-  defp realtime_key_label("openai"), do: "OpenAI API key for Realtime"
+  defp realtime_key_label("openai"), do: "OpenAI API key for voice"
   defp realtime_key_label("xai"), do: "SpaceXAI API key for Grok voice"
 
   defp realtime_key_info("openai"),
@@ -2721,8 +2747,8 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :active_tab, :string, required: true
   attr :tabs, :list, required: true
   attr :save_label, :string, required: true
-  # The form its buttons submit, when they sit outside it (the Cues tab's
-  # footer, below the lists).
+  # The form its buttons submit, when they sit outside it: a tab with more
+  # than one section keeps its footer below them all (Voice, Phone calls, Cues).
   attr :form, :string, default: nil
 
   @doc "A step's footer: Back, then its Save and Save & next."
@@ -4464,8 +4490,8 @@ defmodule FermixWebWeb.SetupLive.Components do
   # Panes that persist via a single "Save" button — these get the unsaved-edits
   # hint. Plugins and Doctor act per item/probe, so a pane-level hint doesn't fit.
   defp form_pane?(tab_id),
-    do:
-      tab_id in ~w(provider realtime channels meetings search sandbox coding memory personalization)
+    do: tab_id in ~w(provider realtime phone_calls channels meetings search sandbox coding memory
+                   personalization)
 
   defp install_banner_class(:error), do: "text-error"
   defp install_banner_class(:info), do: "text-base-content/70"

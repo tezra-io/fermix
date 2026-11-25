@@ -580,7 +580,8 @@ defmodule FermixWebWeb.SetupLiveTest do
       for label <-
             [
               "Provider",
-              "Realtime",
+              "Voice",
+              "Phone calls",
               "Channels",
               "Plugins",
               "Search",
@@ -605,7 +606,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert render(view) =~ "Provider &amp; Model"
 
       html = view |> element("button[phx-value-tab=\"realtime\"]") |> render_click()
-      assert html =~ "Voice companion"
+      assert html =~ ~s(id="setup-pane-realtime")
 
       # Switch to Personalization
       html = view |> element("button[phx-value-tab=\"personalization\"]") |> render_click()
@@ -1574,7 +1575,7 @@ defmodule FermixWebWeb.SetupLiveTest do
         |> render_submit(%{"__nav" => "next"})
 
       assert html =~ "Provider saved."
-      assert html =~ "Voice companion"
+      assert html =~ ~s(id="setup-pane-realtime")
     end
 
     test "provider pane offers canonical reasoning effort levels (xhigh, not minimal)", %{
@@ -3165,7 +3166,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       )
       |> render_submit()
 
-      assert render(view) =~ "Realtime saved."
+      assert render(view) =~ "Voice saved."
       assert render(view) =~ "Apply &amp; restart"
 
       realtime = Application.get_env(:fermix_core, :realtime, [])
@@ -3278,7 +3279,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       )
       |> render_submit()
 
-      assert render(view) =~ "Realtime saved."
+      assert render(view) =~ "Voice saved."
 
       realtime = Application.get_env(:fermix_core, :realtime, [])
       assert Keyword.get(realtime, :engine) == "openai_live"
@@ -3313,7 +3314,7 @@ defmodule FermixWebWeb.SetupLiveTest do
         |> element("button[phx-value-tab=\"realtime\"]")
         |> render_click()
 
-      assert openai_html =~ "OpenAI API key for Realtime"
+      assert openai_html =~ "OpenAI API key for voice"
 
       grok_html =
         view
@@ -3325,7 +3326,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert selected_options(view, "voice") == ["eve"]
       refute grok_html =~ ~s(name="realtime_form[reasoning_effort]")
       assert grok_html =~ "SpaceXAI API key for Grok voice"
-      refute grok_html =~ "OpenAI API key for Realtime"
+      refute grok_html =~ "OpenAI API key for voice"
       assert Application.get_env(:fermix_core, :realtime) == []
     end
 
@@ -3383,7 +3384,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       )
       |> render_submit()
 
-      assert render(view) =~ "Realtime saved."
+      assert render(view) =~ "Voice saved."
 
       realtime = Application.get_env(:fermix_core, :realtime, [])
       assert Keyword.get(realtime, :provider) == "xai"

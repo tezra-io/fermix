@@ -1,5 +1,5 @@
 defmodule FermixWebWeb.SetupLivePhoneCallsTest do
-  # The setup page's Phone calls section (M94 §12), under the Realtime tab:
+  # The setup page's Phone calls tab (M94 §12), the step after Voice:
   # drawn from the `phone_calls` settings section and `Management.PhoneCalls`
   # in the page's own process, written through the same management writers as
   # the socket's. Every case runs in a temporary FERMIX_HOME against the stub
@@ -78,7 +78,7 @@ defmodule FermixWebWeb.SetupLivePhoneCallsTest do
   # and a call manager that never runs.
   defp page(conn, management \\ host(), settings \\ []) do
     Application.put_env(:fermix_web, :phone_calls, management: management, settings: settings)
-    live(conn, "/setup?tab=realtime")
+    live(conn, "/setup?tab=phone_calls")
   end
 
   defp host,
@@ -90,7 +90,7 @@ defmodule FermixWebWeb.SetupLivePhoneCallsTest do
   # Read at a glance: the switch with its one sentence, the status as one
   # line and the form; the engine that calls is a constant while it has one
   # possible value, so it is not drawn.
-  test "the Realtime tab draws Phone calls off, with no row for the one engine", %{conn: conn} do
+  test "the Phone calls tab draws Phone calls off, with no row for the one engine", %{conn: conn} do
     {:ok, view, html} = page(conn)
 
     assert has_element?(view, "#phone-calls")
@@ -100,6 +100,55 @@ defmodule FermixWebWeb.SetupLivePhoneCallsTest do
     refute has_element?(view, "#phone-calls-engine")
     refute html =~ "GPT-Live"
     refute html =~ "90 days"
+  end
+
+  # One step, one footer: the tab's Back, Save and Save & next are the last
+  # thing on its page and submit its one settings form, which has no button of
+  # its own, so nothing sits between a section and the buttons that save it.
+  test "the tab's Save and Save & next close its page and submit its form", %{conn: conn} do
+    {:ok, view, _html} = page(conn)
+    footer = "#setup-pane-phone_calls > div:last-child > div:last-child"
+
+    assert has_element?(
+             view,
+             footer <> " button[form='phone-calls-form'][name='__nav'][value='stay']",
+             "Save phone calls"
+           )
+
+    assert has_element?(view, footer <> " button[form='phone-calls-form'][value='next']")
+    refute has_element?(view, "#phone-calls-form button")
+  end
+
+  test "the Voice tab draws no Phone calls, and its footer closes its page too", %{conn: conn} do
+    {:ok, view, html} = open(conn, "realtime", host())
+    footer = "#setup-pane-realtime > div:last-child > div:last-child"
+
+    refute has_element?(view, "#phone-calls")
+    assert has_element?(view, footer <> " button[form='realtime-form'][value='next']")
+    assert has_element?(view, footer <> " button[form='realtime-form']", "Save voice")
+    refute has_element?(view, "#realtime-form button[name='__nav']")
+    assert html =~ "Voice"
+    refute html =~ "Voice companion"
+    refute html =~ "FermixPet"
+  end
+
+  test "Save says it saved, and Save & next moves on to the next step", %{conn: conn} do
+    {:ok, view, _html} = page(conn)
+    form = fn number -> form(view, "#phone-calls-form", phone_calls: %{caller_number: number}) end
+
+    assert render_submit(form.(@caller), %{"__nav" => "stay"}) =~ "Phone calls saved."
+    assert Config.get().caller_number == @caller
+    assert has_element?(view, "#phone-calls")
+
+    # A refused save stays on the tab and says why, with no word that it saved.
+    html = render_submit(form.("4155550142"), %{"__nav" => "next"})
+    assert view |> element("#phone-calls-refusal") |> render() =~ "international form"
+    refute html =~ "Phone calls saved."
+
+    render_submit(form.("+14155550143"), %{"__nav" => "next"})
+    assert Config.get().caller_number == "+14155550143"
+    refute has_element?(view, "#phone-calls")
+    assert has_element?(view, "#setup-pane-channels")
   end
 
   test "saving writes the settings and the password, and leaves Talk to Fermix alone",
@@ -169,9 +218,9 @@ defmodule FermixWebWeb.SetupLivePhoneCallsTest do
   end
 
   # The section reads again on a timer while a call is in progress, as the
-  # Phone card reads a pairing, and stops once none is; a call that stopped
-  # says why in the recent calls.
-  test "a call in progress is followed until it ends, and the recent call says why it stopped",
+  # Phone card reads a pairing, and stops once none is. A call that is over
+  # leaves the page: the daemon log keeps one line for each call's end.
+  test "a call in progress is followed until it ends, and then leaves the page",
        %{conn: conn} do
     test = self()
     world = PhoneCallGoldens.world(:in_progress)
@@ -182,21 +231,24 @@ defmodule FermixWebWeb.SetupLivePhoneCallsTest do
       schedule: fn message, ms -> send(test, {:scheduled, message, ms}) end
     )
 
-    {:ok, view, _html} = live(conn, "/setup?tab=realtime")
+    {:ok, view, _html} = live(conn, "/setup?tab=phone_calls")
     assert_receive {:scheduled, {:phone_calls_poll, ref} = poll, 2_000}
 
     fields = %{ended_at: PhoneCallGoldens.now(), failure_reason: "call_failed"}
     id = PhoneCallGoldens.ids().in_progress
     {:ok, _row} = Ledger.terminalize(id, "failed", fields, server: world[:repo])
 
+    assert has_element?(view, "#phone-calls-call")
     send(view.pid, poll)
-    assert view |> element("#phone-calls-recent-#{id}") |> render() =~ "Failed"
+    refute has_element?(view, "#phone-calls-call")
     refute has_element?(view, "#phone-calls-stop")
+    refute has_element?(view, "#phone-calls-recent")
     refute_received {:scheduled, {:phone_calls_poll, _next}, _ms}
 
     # A poll an earlier read scheduled and no longer awaits changes nothing.
     send(view.pid, {:phone_calls_poll, ref})
-    assert view |> element("#phone-calls-recent-#{id}") |> render() =~ "Failed"
+    refute has_element?(view, "#phone-calls-call")
+    refute_received {:scheduled, {:phone_calls_poll, _next}, _ms}
   end
 
   test "an unresolved call shows what is known and the steps at Telnyx", %{conn: conn} do
@@ -232,46 +284,18 @@ defmodule FermixWebWeb.SetupLivePhoneCallsTest do
     assert has_element?(view, "#phone-calls-confirm-#{unconfirmed}")
   end
 
-  # A short list, newest first: at most five, one line each with who was
-  # called, when, and the daemon's own few words for how it went.
-  test "recent calls are at most five, one line each", %{conn: conn} do
-    world = PhoneCallGoldens.world(:empty)
+  # Settings, not a call log: a home with finished calls lists none of them.
+  # Each call's end is one line in the daemon log, and its report is in the
+  # chat that asked for it.
+  test "finished calls are not listed on the page", %{conn: conn} do
+    opts = PhoneCallGoldens.world(:history)
+    assert {:ok, %{"calls" => [_call | _rest]}} = ManagementPhoneCalls.list(opts)
 
-    ids =
-      for day <- 6..1//-1 do
-        at = DateTime.add(PhoneCallGoldens.now(), -day * 86_400, :second)
-        {:ok, {:admitted, row}} = Ledger.admit(call_attrs(day), at, server: world[:repo])
-        {:ok, _row} = Ledger.claim_dispatch(row.id, at, server: world[:repo])
+    {:ok, view, html} = page(conn, opts)
 
-        {:ok, _row} =
-          Ledger.record_session(row.id, "sess_recent_#{day}", at, server: world[:repo])
-
-        fields = %{
-          ended_at: at,
-          outcome: "confirmed",
-          voice_seconds: 61,
-          evidence: [%{speaker: "recipient", text: "Yes, we have rye today."}]
-        }
-
-        {:ok, _row} = Ledger.terminalize(row.id, "ended", fields, server: world[:repo])
-        row.id
-      end
-
-    # Seeded oldest first, so the newest is the last seeded.
-    newest_first = Enum.reverse(ids)
-    {:ok, view, _html} = page(conn, world)
-    recent = view |> element("#phone-calls-recent") |> render()
-
-    lines = for id <- newest_first, has_element?(view, "#phone-calls-recent-#{id}"), do: id
-    assert lines == Enum.take(newest_first, 5)
-
-    line = view |> element("#phone-calls-recent-#{hd(newest_first)}") |> render()
-    assert line =~ "Rowan Bakery"
-    assert line =~ "Confirmed"
-    refute recent =~ "Voice time"
-    refute recent =~ "Carrier charges"
-    refute recent =~ "Backend work"
-    refute recent =~ "The call ended."
+    assert has_element?(view, "#phone-calls")
+    refute has_element?(view, "#phone-calls-recent")
+    refute html =~ "Recent calls"
   end
 
   test "the owner's word that an unresolved call ended frees its slot", %{conn: conn} do
@@ -309,7 +333,7 @@ defmodule FermixWebWeb.SetupLivePhoneCallsTest do
     refute_received :restart_stopped
   end
 
-  # M94 §12: the Providers and Realtime forms write the OpenAI key through the
+  # M94 §12: the Providers and Voice forms write the OpenAI key through the
   # setup save, whose writer holds it while a call is in progress, as it does
   # for `secret.set`. A held save says why and saves nothing.
   describe "the credentials a call reads" do
@@ -337,7 +361,7 @@ defmodule FermixWebWeb.SetupLivePhoneCallsTest do
       assert SecretWriterStub.get(:openai_api_key) == {:ok, @new_key}
     end
 
-    test "the Realtime form cannot replace the key Live speaks with during a call",
+    test "the Voice form cannot replace the key Live speaks with during a call",
          %{conn: conn, world: world, end_call: end_call} do
       Application.put_env(:fermix_core, :realtime,
         enabled: true,
@@ -351,49 +375,24 @@ defmodule FermixWebWeb.SetupLivePhoneCallsTest do
 
       html = submit.()
       assert html =~ "Save failed: " <> @held
-      refute html =~ "Realtime saved."
+      refute html =~ "Voice saved."
       assert SecretWriterStub.get(:openai_api_key) == {:ok, @key}
 
       end_call.()
-      assert submit.() =~ "Realtime saved."
+      assert submit.() =~ "Voice saved."
       assert SecretWriterStub.get(:openai_api_key) == {:ok, @new_key}
     end
 
-    test "the Realtime form stores Grok's key during a call: no phone call reads it",
+    test "the Voice form stores Grok's key during a call: no phone call reads it",
          %{conn: conn, world: world} do
       {:ok, view, _html} = open(conn, "realtime", world)
 
       assert render_submit(view, "save_realtime", realtime_form("xai-invented-voice-key")) =~
-               "Realtime saved."
+               "Voice saved."
 
       assert SecretWriterStub.get(:xai_api_key) == {:ok, "xai-invented-voice-key"}
       assert SecretWriterStub.get(:openai_api_key) == {:ok, @key}
     end
-  end
-
-  defp call_attrs(day) do
-    brief = %{
-      "destination" => "+12125550110",
-      "destination_kind" => "business",
-      "contact_name" => "Rowan Bakery",
-      "goal" => "Ask whether the bakery has rye bread on day #{day}."
-    }
-
-    %{
-      request_id: "main-recent-#{day}",
-      owner_id: "default",
-      authorization: "direct",
-      origin_kind: "chat",
-      delivery_mode: "origin",
-      platform: "telegram",
-      destination: "40017",
-      mandate: brief,
-      mandate_hash: String.duplicate("d4", 32),
-      model: "gpt-live-1",
-      voice: "marin",
-      prompt_version: "phone-test-1",
-      carrier_profile: "telnyx_credential_v1"
-    }
   end
 
   defp open(conn, tab, management) do
