@@ -224,4 +224,152 @@ defmodule FermixCore.Jobs.FailureTest do
       assert sentence =~ ~r/without an error\.$/
     end
   end
+
+  # M106 §5.2, §5.8 (stage S4, round two): every kind on the closed list has
+  # one plain sentence, built by code from the tagged reason, and none can
+  # reach a generic line. The reasons below are one of each kind, as they
+  # reach a run's settle; the table must name every kind on the list.
+  describe "sentence/2: one plain sentence for every kind" do
+    test "the table names every kind on the closed list, and each its own reason" do
+      assert Enum.sort(Map.keys(reasons())) == Enum.sort(Failure.kinds())
+
+      for {kind, reason} <- reasons(), kind not in [:reaped, :tool_never_succeeded] do
+        assert Failure.kind(reason) == kind, "#{inspect(reason)} should be #{kind}"
+      end
+    end
+
+    test "every kind's sentence is one plain sentence of its own, never a generic line" do
+      sentences = Map.new(reasons(), fn {kind, reason} -> {kind, Failure.sentence(reason)} end)
+
+      for {kind, sentence} <- sentences do
+        assert sentence =~ ~r/^[A-Z].*[.]$/s, "#{kind}: #{inspect(sentence)}"
+        refute sentence =~ "The run failed with an error", "#{kind}"
+        refute sentence =~ ~r/\{:|%\{|ms\b/, "#{kind}: #{inspect(sentence)}"
+      end
+
+      assert sentences |> Map.values() |> Enum.uniq() |> length() == map_size(sentences)
+    end
+
+    test "a limit is stated in minutes, with the tool still running when there was one" do
+      assert Failure.sentence({:time_limit, 600_000}) ==
+               "The run stopped at its 10-minute time limit."
+
+      assert Failure.sentence({:time_limit, 600_000}, in_flight: "web_fetch") ==
+               ~s(The run stopped at its 10-minute time limit while its tool "web_fetch" ) <>
+                 "was still running."
+
+      assert Failure.sentence({:idle_limit, 300_000}) ==
+               "The run stopped after 5 minutes with nothing happening."
+
+      assert Failure.sentence({:time_limit, 90_000}) ==
+               "The run stopped at its 90-second time limit."
+
+      assert Failure.sentence({:time_limit, 1_000}) ==
+               "The run stopped at its 1-second time limit."
+    end
+
+    test "a missing skill is named, a check's own sentence is stated, and a provider is named" do
+      assert Failure.sentence({:unknown_skill, "lantern-rota-digest"}) ==
+               ~s(The run could not start: the skill "lantern-rota-digest" it is bound to ) <>
+                 "does not exist."
+
+      assert Failure.sentence(reasons().tools_unavailable) ==
+               "The job's tools are not available: tide_lookup is turned off."
+
+      assert Failure.sentence(api(429)) == "OpenAI is limiting this account's requests."
+      assert Failure.sentence(transport(:econnrefused)) == "Fermix could not reach Anthropic."
+      assert Failure.sentence(@pool_empty) == "Fermix could not reach the model provider."
+    end
+
+    test "other is said to be other, and its text is kept for the row and quoted as its own" do
+      assert Failure.sentence("Maximum iterations (100) reached") ==
+               "The run stopped on an error Fermix has no sentence of its own for."
+
+      assert Failure.other_text("Maximum iterations (100) reached") ==
+               "Maximum iterations (100) reached"
+
+      assert Failure.other_text({:cue_history_lost, "Skill plugin_helper drops cue_history."}) ==
+               "Skill plugin_helper drops cue_history."
+
+      assert Failure.other_text(:context_overflow_after_compaction) ==
+               ":context_overflow_after_compaction"
+    end
+  end
+
+  # A sentence must never be what takes a run's settle down: every kind
+  # crossed with a reason of the wrong shape gets a sentence, the kind's
+  # plainest, and a kind off the list gets other's.
+  describe "the sentence is total" do
+    @wrong [
+      nil,
+      :wrong,
+      "text",
+      42,
+      %{},
+      [],
+      {:time_limit, "ten minutes"},
+      {:idle_limit, nil},
+      {:unknown_skill, 7},
+      {:tools_unavailable, :gone},
+      {:skill_grants_nothing, nil},
+      {:provider_error, :x},
+      {:no_route, 1}
+    ]
+
+    test "every kind crossed with a reason of the wrong shape gets a sentence" do
+      for kind <- Failure.kinds(), reason <- @wrong, in_flight <- [nil, "web_fetch", 7] do
+        sentence = Failure.kind_sentence(kind, reason, in_flight: in_flight)
+        assert sentence =~ ~r/^[A-Z].*[.]$/s, "#{kind} #{inspect(reason)}: #{inspect(sentence)}"
+      end
+
+      for reason <- @wrong, do: assert(Failure.sentence(reason, in_flight: 7) =~ ~r/[.]$/)
+    end
+
+    test "a reason of the wrong shape gets its kind's plainest sentence" do
+      assert Failure.kind_sentence(:time_limit, :wrong) == "The run stopped at its time limit."
+
+      assert Failure.kind_sentence(:idle_limit, nil) ==
+               "The run stopped after too long with nothing happening."
+
+      assert Failure.kind_sentence(:unknown_skill, 7) ==
+               "The run could not start: the skill it is bound to does not exist."
+
+      assert Failure.kind_sentence(:tools_unavailable, :gone) ==
+               "The run could not start: the tools the job names are not available to it."
+
+      assert Failure.kind_sentence(:skill_grants_nothing, nil) ==
+               "The run could not start: the skill it is bound to grants it no tool it can use."
+
+      assert Failure.kind_sentence(:provider_quota, :x) ==
+               "The model provider says this account is out of credit or over its usage limit."
+
+      assert Failure.kind_sentence(:not_a_kind, :x) == Failure.sentence(:other)
+    end
+  end
+
+  # One reason of each kind, as it reaches a run's settle.
+  defp reasons do
+    %{
+      provider_rate_limit: api(429),
+      provider_quota: api(402),
+      provider_auth: api(401),
+      provider_unavailable: api(503),
+      provider_timeout: transport(:timeout),
+      provider_transport: transport(:econnrefused),
+      no_route: {:no_route, "scheduled job route selection failed: :no_primary"},
+      time_limit: {:time_limit, 600_000},
+      idle_limit: {:idle_limit, 300_000},
+      unknown_skill: {:unknown_skill, "lantern-rota-digest"},
+      tools_unavailable:
+        {:tools_unavailable, "The job's tools are not available: tide_lookup is turned off."},
+      skill_grants_nothing:
+        {:skill_grants_nothing, "Skill quay-notes asks only for classes the job cannot have."},
+      context_recovery: {:context_recovery_failed, :empty_summary},
+      crashed: {:agent_loop_exit, {%RuntimeError{message: "adapter exploded"}, []}},
+      reaped: :reaped,
+      tool_start_unrecorded: {:tool_start_unrecorded, :busy},
+      tool_never_succeeded: :tool_never_succeeded,
+      other: "Maximum iterations (100) reached"
+    }
+  end
 end

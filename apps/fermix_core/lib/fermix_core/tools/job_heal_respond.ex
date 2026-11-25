@@ -17,8 +17,8 @@ defmodule FermixCore.Tools.JobHealRespond do
 
   to `reply_to` and tells the model the run ends here. It changes nothing
   itself: whether a decision is carried out, and how, is code's, in the heal
-  run after its loop has ended (`Jobs.HealDecision`). A note is at most 500
-  characters and a longer one is refused, never cut. A proposed
+  run after its loop has ended (`Jobs.HealDecision`). A note is at most 280
+  characters, one or two sentences, and a longer one is refused, never cut. A proposed
   `change` names only `update_job`'s own fields for what a job does, where
   it reports and how long it may run: never its tools, and never its removal.
   Every accepted call is sent: keeping the first decision and ignoring a
@@ -38,7 +38,7 @@ defmodule FermixCore.Tools.JobHealRespond do
     "propose" => :propose,
     "tell" => :tell
   }
-  @note_max 500
+  @note_max 280
   @text_fields ~w(task schedule skill_name provider model delivery_mode)
   @change_fields @text_fields ++ ~w(timeout_seconds clear_route_pin delivery_target)
 
@@ -57,8 +57,9 @@ defmodule FermixCore.Tools.JobHealRespond do
   @spec description() :: String.t()
   def description do
     "Report this heal run's one decision about the failed job, with a short note for the " <>
-      "owner. rerun runs the job once more; raise_limit, with timeout_seconds, gives each " <>
-      "run more time; pause stops it until the owner resumes it; propose, with change, " <>
+      "owner of at most #{@note_max} characters. rerun runs the job once more; raise_limit, " <>
+      "with timeout_seconds, gives each run more time; pause stops it until the owner " <>
+      "resumes it; propose, with change, " <>
       "states the exact edit for the owner to consider and applies nothing; tell changes " <>
       "nothing. Fermix checks the decision and carries it out itself. Exactly one call ends " <>
       "the run."

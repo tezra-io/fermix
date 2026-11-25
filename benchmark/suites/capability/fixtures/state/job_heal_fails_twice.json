@@ -10,11 +10,16 @@
       "timeout_seconds": 300,
       "runs": [
         {
-          "hours_ago": 20,
+          "fires_ago": 2,
           "duration_seconds": 2,
           "status": "error",
-          "failure_kind": "unknown_skill",
-          "error": "The run stopped before it began: the skill brackwater-watering-plan it is bound to was not found."
+          "failure_kind": "unknown_skill"
+        },
+        {
+          "fires_ago": 1,
+          "duration_seconds": 2,
+          "status": "error",
+          "failure_kind": "unknown_skill"
         }
       ]
     }

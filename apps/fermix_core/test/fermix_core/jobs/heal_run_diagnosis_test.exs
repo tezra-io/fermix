@@ -15,6 +15,7 @@ defmodule FermixCore.Jobs.HealRunDiagnosisTest do
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Jobs.HealDecision
   alias FermixCore.Jobs.HealRun
   alias FermixCore.Jobs.Registry
   alias FermixCore.Jobs.Runner
@@ -724,10 +725,14 @@ defmodule FermixCore.Jobs.HealRunDiagnosisTest do
       assert change["task"] == %{"from" => job.task_prompt, "to" => task}
       assert change["schedule"] == %{"from" => job.schedule_expr, "to" => "every 2 hours"}
       assert DateTime.compare(stored.change_job_version, job.updated_at) == :eq
+      # The version an apply is fenced on (stage S4): the job's definition as drawn.
+      assert stored.change_job_digest == HealDecision.job_version(job)
 
       assert [%{text: text}] = calls(ctx)
       assert text =~ "every 2 hours"
-      assert text =~ "the full text is in the job's record"
+      assert text =~ "Task: a longer rewrite than fits here."
+      assert text =~ "Fermix has not made this change."
+      refute text =~ "Reply"
       refute text =~ ~r/button|card|tap|approve|\/confirm/i
     end
 
@@ -770,6 +775,38 @@ defmodule FermixCore.Jobs.HealRunDiagnosisTest do
       assert [%{text: text}] = calls(ctx)
       [facts, _rest] = String.split(text, @note, parts: 2)
       assert facts =~ @failure
+    end
+
+    # Stage S4, round two: the note is model text from a run that read outside
+    # content. The owner reads it in the message as sent; the conversation's
+    # history, which no turn's outside sources hold, keeps every line of the
+    # message but the note, so no turn reads the diagnosis's words but through
+    # a tool that counts as outside content (`get_job_run`).
+    test "the history copy keeps every line but the note; the sent copy has it", ctx do
+      start_channel(ctx, [:ok])
+      {_job, heal} = claimed_heal!(ctx)
+
+      run!(ctx, heal, script([respond(%{"decision" => "tell", "note" => @note})]))
+
+      assert [%{text: sent}] = calls(ctx)
+      assert sent =~ "Fermix's reading: " <> @note
+
+      key = {"telegram", Atom.to_string(ctx.channel), :root}
+
+      assert [%{role: "assistant", content: kept}] =
+               ConversationStore.get_history(key, server: ctx.store)
+
+      refute kept =~ @note
+
+      assert kept ==
+               String.replace(
+                 sent,
+                 "Fermix's reading: " <> @note,
+                 "Fermix's reading: sent to the owner with this message; it is not kept in " <>
+                   "this history."
+               )
+
+      assert {:ok, %{message: ^sent}} = get_heal(ctx, heal.id)
     end
 
     test "a second decision is ignored: the first well-formed one is kept", ctx do
@@ -879,6 +916,143 @@ defmodule FermixCore.Jobs.HealRunDiagnosisTest do
       assert [%{text: text}] = calls(ctx)
       assert text =~ @failure
       assert {:ok, %{state: "waiting", decision: "none"}} = get_heal(ctx, heal.id)
+    end
+  end
+
+  describe "a move is written only to the job the diagnosis read" do
+    test "the owner's limit set during the diagnosis stands: no move is recorded or claimed",
+         ctx do
+      start_channel(ctx, [:ok])
+      {job, heal} = claimed_heal!(ctx, timeout_seconds: 600)
+      TelemetryCapture.attach([@heal_event], heal_id: heal.id)
+      repo = ctx.repo
+
+      # The owner sets 45 minutes while the run looks at the 10 it read.
+      owner_edit = fn ->
+        {:ok, _job} =
+          Registry.update_job(job.id, %{timeout_seconds: 2_700}, repo: repo, scheduler: nil)
+
+        :ok
+      end
+
+      overrides =
+        [respond(%{"decision" => "raise_limit", "timeout_seconds" => 1_800, "note" => @note})]
+        |> script()
+        |> put_in([:adapter_opts, :before_reply], owner_edit)
+
+      {_result, log} = with_log(fn -> run!(ctx, heal, overrides) end)
+
+      assert log =~ "job_changed"
+      assert {:ok, %{timeout_seconds: 2_700}} = Repo.get_scheduled_job(job.id, server: ctx.repo)
+      assert {:ok, %{state: "waiting", decision: "tell", change: nil}} = get_heal(ctx, heal.id)
+
+      assert_received {:telemetry, @heal_event, _measurements,
+                       %{phase: "decided", decision: "tell", requested: "raise_limit"} = meta}
+
+      assert meta.refusal == "job_changed"
+      assert [%{text: text}] = calls(ctx)
+      refute text =~ "raised"
+    end
+
+    test "a job the owner edited during the diagnosis is not paused, and no pause is claimed",
+         ctx do
+      start_channel(ctx, [:ok])
+      {job, heal} = claimed_heal!(ctx)
+      repo = ctx.repo
+
+      owner_edit = fn ->
+        {:ok, _job} =
+          Registry.update_job(job.id, %{task_prompt: "Read the tide board."},
+            repo: repo,
+            scheduler: nil
+          )
+
+        :ok
+      end
+
+      overrides =
+        [respond(%{"decision" => "pause", "note" => @note})]
+        |> script()
+        |> put_in([:adapter_opts, :before_reply], owner_edit)
+
+      {_result, _log} = with_log(fn -> run!(ctx, heal, overrides) end)
+
+      assert {:ok, %{enabled?: true, state: "scheduled", task_prompt: "Read the tide board."}} =
+               Repo.get_scheduled_job(job.id, server: ctx.repo)
+
+      assert {:ok, %{state: "waiting", decision: "tell"}} = get_heal(ctx, heal.id)
+      assert [%{text: text}] = calls(ctx)
+      refute text =~ "paused"
+    end
+  end
+
+  # JOB-12: the owner's last word stands even when it leaves the job as the
+  # diagnosis read it: their writes during the diagnosis are seen when they
+  # happen, not inferred from the job's value afterwards.
+  describe "an owner's write during the diagnosis, whatever it leaves" do
+    test "paused then resumed: the heal's pause is not made, and no pause is claimed", ctx do
+      start_channel(ctx, [:ok])
+      {job, heal} = claimed_heal!(ctx)
+      TelemetryCapture.attach([@heal_event], heal_id: heal.id)
+      repo = ctx.repo
+
+      owner_pauses_then_resumes = fn ->
+        {:ok, _paused} = Registry.pause_job(job.id, repo: repo, scheduler: nil)
+        {:ok, _resumed} = Registry.resume_job(job.id, repo: repo, scheduler: nil, now: @now)
+        :ok
+      end
+
+      overrides =
+        [respond(%{"decision" => "pause", "note" => @note})]
+        |> script()
+        |> put_in([:adapter_opts, :before_reply], owner_pauses_then_resumes)
+
+      {_result, _log} = with_log(fn -> run!(ctx, heal, overrides) end)
+
+      assert {:ok, %{enabled?: true, state: "scheduled"}} =
+               Repo.get_scheduled_job(job.id, server: ctx.repo)
+
+      assert {:ok, %{state: "waiting", decision: "tell"}} = get_heal(ctx, heal.id)
+
+      assert_received {:telemetry, @heal_event, _measurements,
+                       %{phase: "decided", decision: "tell", requested: "pause"} = meta}
+
+      assert meta.refusal == "job_changed"
+      assert [%{text: text}] = calls(ctx)
+      refute text =~ "paused"
+    end
+
+    test "a limit edited and edited back: the heal's raise is not made, nor claimed", ctx do
+      start_channel(ctx, [:ok])
+      {job, heal} = claimed_heal!(ctx, timeout_seconds: 600)
+      TelemetryCapture.attach([@heal_event], heal_id: heal.id)
+      repo = ctx.repo
+
+      owner_edits_and_back = fn ->
+        {:ok, _job} =
+          Registry.update_job(job.id, %{timeout_seconds: 2_700}, repo: repo, scheduler: nil)
+
+        {:ok, _job} =
+          Registry.update_job(job.id, %{timeout_seconds: 600}, repo: repo, scheduler: nil)
+
+        :ok
+      end
+
+      overrides =
+        [respond(%{"decision" => "raise_limit", "timeout_seconds" => 1_200, "note" => @note})]
+        |> script()
+        |> put_in([:adapter_opts, :before_reply], owner_edits_and_back)
+
+      {_result, _log} = with_log(fn -> run!(ctx, heal, overrides) end)
+
+      assert {:ok, %{timeout_seconds: 600}} = Repo.get_scheduled_job(job.id, server: ctx.repo)
+      assert {:ok, %{state: "waiting", decision: "tell", change: nil}} = get_heal(ctx, heal.id)
+
+      assert_received {:telemetry, @heal_event, _measurements,
+                       %{phase: "decided", requested: "raise_limit", refusal: "job_changed"}}
+
+      assert [%{text: text}] = calls(ctx)
+      refute text =~ "raised"
     end
   end
 
@@ -1141,7 +1315,7 @@ defmodule FermixCore.Jobs.HealRunDiagnosisTest do
     {:ok, job} = Registry.create_job(attrs, repo: ctx.repo, now: @created, scheduler: nil)
 
     # Its next run a day on, so nothing here runs it but a heal's rerun.
-    {:ok, job} =
+    {:ok, job, []} =
       Repo.update_scheduled_job_fields(
         job.id,
         %{next_run_at: DateTime.add(@failed_at, 86_400, :second), updated_at: @created},

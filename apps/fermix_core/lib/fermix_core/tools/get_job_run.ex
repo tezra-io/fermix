@@ -1,11 +1,19 @@
 defmodule FermixCore.Tools.GetJobRun do
   @moduledoc """
   Fetch the full record of a single scheduled-job run.
+
+  A run a heal took carries the heal's note as `heal_note`, inside the
+  outside-content frame (source `job_heal_note`, M106 §9): a model wrote it
+  after reading the failure's words, so it reaches the main agent only here,
+  a tool whose every call counts as an outside source for its turn
+  (`Capabilities.UntrustedContent.outside_source/1`). `list_jobs` says only
+  that a note exists.
   """
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Jobs.CueRun
   alias FermixCore.Memory.Repo
   alias FermixCore.Tools.JobRegistrySupport, as: Support
@@ -84,9 +92,17 @@ defmodule FermixCore.Tools.GetJobRun do
   defp present(run, context) do
     pairs = [{Support.job_run_payload(run), run}]
 
-    case CueRun.present_runs(pairs, context, repo: Support.repo(context)) do
-      {:ok, [payload]} -> Support.success_json(payload)
+    with {:ok, [payload]} <- CueRun.present_runs(pairs, context, repo: Support.repo(context)),
+         {:ok, note} <-
+           Repo.job_heals_call({:note_for_run, run.id}, server: Support.repo(context)) do
+      payload |> put_heal_note(note) |> Support.success_json()
+    else
       {:error, reason} -> Support.error(reason)
     end
   end
+
+  defp put_heal_note(payload, nil), do: payload
+
+  defp put_heal_note(payload, note),
+    do: Map.put(payload, :heal_note, UntrustedContent.frame("job_heal_note", note))
 end

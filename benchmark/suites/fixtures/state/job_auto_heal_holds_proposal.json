@@ -9,12 +9,16 @@
       "timeout_seconds": 300,
       "runs": [
         {
-          "hours_ago": 4,
+          "fires_ago": 1,
           "duration_seconds": 18,
           "status": "error",
           "error": "The holds page at marrowfield-library.example/holds answered 404 Not Found; the library's notice says holds moved to marrowfield-library.example/account/holds.",
           "tool_timeline": [
-            {"name": "web_fetch", "duration_ms": 2100, "status": "error"}
+            {
+              "name": "web_fetch",
+              "duration_ms": 2100,
+              "status": "error"
+            }
           ],
           "heal": {
             "decision": "propose",
@@ -25,7 +29,7 @@
                 "to": "Read my holds list at marrowfield-library.example/account/holds and tell me which books are ready to collect."
               }
             },
-            "delivered_hours_ago": 3
+            "delivered_minutes_after": 60
           }
         }
       ]

@@ -13,10 +13,16 @@ defmodule FermixCore.Jobs.HealDecision do
       above it, or an ask past it, gets a proposal of the same limit instead;
       a limit not above the job's own is refused.
     * `pause`: only for a job that is not paused already.
+    * A raised limit, a pause and a proposal each carry the version of the job
+      they were resolved against (`job_version/1`). A move is written only
+      while the job is still that version (`Memory.Repo.heal_job_write/5`), so
+      a check made against the job read before the diagnosis can never be
+      carried out on a job the owner changed while the diagnosis ran.
     * `propose`: checked as an owner's edit is (`Tools.UpdateJob.change_attrs/2`,
       `Jobs.Registry.check_update/3` and the skill's tool check), then stored
       as the exact change (each field with its `from` and `to`) and the job's
-      version it was drawn for. Never applied.
+      version it was drawn for (`job_version/1`). Applied only by the owner's
+      answer on the proposal's card (`Jobs.HealAnswer`), never here.
     * A job a watcher wakes or a mandate names changes only on the owner's own
       consent turn (M60 S6, §10.4), so its heal may rerun, pause or tell: a
       raised limit or a proposal for it is kept as `tell`.
@@ -36,6 +42,26 @@ defmodule FermixCore.Jobs.HealDecision do
 
   @refusal_detail_max 300
 
+  # The job's definition, the version a heal's move or proposal is drawn for:
+  # every field an owner's edit, pause or resume can write
+  # (`Memory.Repo.owner_job_fields/0`) but the three a run's claim and settle
+  # also write. A test holds the two lists to the store's.
+  @version_fields [
+    :task_prompt,
+    :description,
+    :skill_name,
+    :provider,
+    :model,
+    :delivery_mode,
+    :delivery_target,
+    :schedule_kind,
+    :schedule_expr,
+    :timeout_seconds,
+    :allowed_tools,
+    :enabled?
+  ]
+  @run_written_fields [:next_run_at, :state, :updated_at]
+
   @type plan :: %{
           decision: String.t(),
           requested: String.t() | nil,
@@ -43,7 +69,8 @@ defmodule FermixCore.Jobs.HealDecision do
           refusal_detail: String.t() | nil,
           note: String.t() | nil,
           change: map() | nil,
-          change_job_version: DateTime.t() | nil
+          change_job_version: DateTime.t() | nil,
+          change_job_digest: String.t() | nil
         }
 
   @typedoc """
@@ -67,7 +94,8 @@ defmodule FermixCore.Jobs.HealDecision do
       refusal_detail: nil,
       note: nil,
       change: nil,
-      change_job_version: nil
+      change_job_version: nil,
+      change_job_digest: nil
     }
   end
 
@@ -82,10 +110,56 @@ defmodule FermixCore.Jobs.HealDecision do
       refusal_detail: nil,
       note: note,
       change: nil,
-      change_job_version: nil
+      change_job_version: nil,
+      change_job_digest: nil
     }
 
     decide(choice, decision, job, checks, plan)
+  end
+
+  @doc """
+  The version of `job` a heal's move or proposal is drawn for (M106 §5.6,
+  §5.7): a digest of its definition (`version_fields/0`), never what a run's
+  claim and settle write. Two reads of a job no owner write touched give the
+  same digest; an edit, a pause and a resume each move it. Pure: the store
+  fences every job write that belongs to a heal on it
+  (`Memory.Repo.heal_job_write/5`), and an owner write that moves it
+  supersedes a waiting proposal.
+  """
+  @spec job_version(map()) :: String.t()
+  def job_version(job) when is_map(job) do
+    values = Enum.map(@version_fields, &Map.get(job, &1))
+
+    :sha256
+    |> :crypto.hash(:erlang.term_to_binary(values, [:deterministic]))
+    |> Base.encode16(case: :lower)
+  end
+
+  @doc "The fields of a job's definition `job_version/1` reads."
+  @spec version_fields() :: [atom()]
+  def version_fields, do: @version_fields
+
+  @doc """
+  The fields an owner's write may set that a run's claim and settle write
+  too, so no version reads them.
+  """
+  @spec run_written_fields() :: [atom()]
+  def run_written_fields, do: @run_written_fields
+
+  @doc """
+  Whether `job` may get a proposal, or have one applied: never one a watcher
+  wakes or a mandate names, which changes only by the owner's own edit on
+  their consent turn (M60 S6, §10.4). A watcher that cannot be read is no
+  proof there is none.
+  """
+  @spec proposal_scope(map(), GenServer.server()) ::
+          :ok | {:error, :watched | :mandated | {:watcher_unreadable, term()}}
+  def proposal_scope(job, repo) when is_map(job) do
+    case Watchers.watcher_for_job(job.id, repo: repo) do
+      {:ok, nil} -> mandate_free(job)
+      {:ok, _watcher} -> {:error, :watched}
+      {:error, reason} -> {:error, {:watcher_unreadable, reason}}
+    end
   end
 
   @doc """
@@ -99,6 +173,7 @@ defmodule FermixCore.Jobs.HealDecision do
       | decision: "tell",
         change: nil,
         change_job_version: nil,
+        change_job_digest: nil,
         refusal: tag(reason),
         refusal_detail: detail(reason)
     }
@@ -112,7 +187,7 @@ defmodule FermixCore.Jobs.HealDecision do
 
   defp decide(:pause, _decision, job, _checks, plan) do
     if job.enabled? and job.state in ["scheduled", "running"],
-      do: plan,
+      do: %{plan | change_job_digest: job_version(job)},
       else: refuse(plan, :not_running)
   end
 
@@ -155,7 +230,13 @@ defmodule FermixCore.Jobs.HealDecision do
 
       true ->
         change = %{"timeout_seconds" => %{"from" => job.timeout_seconds, "to" => asked}}
-        %{plan | change: change, change_job_version: job.updated_at}
+
+        %{
+          plan
+          | change: change,
+            change_job_version: job.updated_at,
+            change_job_digest: job_version(job)
+        }
     end
   end
 
@@ -163,14 +244,34 @@ defmodule FermixCore.Jobs.HealDecision do
   defp past_ceiling(%{decision: "propose"} = plan), do: %{plan | refusal: "past_ceiling"}
   defp past_ceiling(refused), do: refused
 
-  defp propose(change, job, checks, plan) do
+  @doc """
+  `change` (`update_job`'s arguments) checked as an owner's edit of `job` is
+  (`Tools.UpdateJob.change_attrs/2`, `Jobs.Registry.check_update/3`, the
+  skill's tool check), from no chat: the registry's attributes it would
+  write, or the check's refusal. A proposal is drawn through it, and an
+  answer applying one checks it again (`Jobs.HealAnswer`).
+  """
+  @spec check_change(map(), map(), checks()) :: {:ok, map()} | {:error, term()}
+  def check_change(change, job, checks) when is_map(change) and is_map(job) and is_map(checks) do
     context = validation_context(checks)
 
     with {:ok, attrs, skill} <- UpdateJob.change_attrs(change, context),
          {:ok, _patch} <- Registry.check_update(job.id, attrs, repo: checks.repo, now: checks.now),
-         :ok <- Support.check_skill_tools(job, skill, context),
+         :ok <- Support.check_skill_tools(job, skill, context) do
+      {:ok, attrs}
+    end
+  end
+
+  defp propose(change, job, checks, plan) do
+    with {:ok, attrs} <- check_change(change, job, checks),
          {:ok, diff} <- diff(change, attrs, job) do
-      %{plan | decision: "propose", change: diff, change_job_version: job.updated_at}
+      %{
+        plan
+        | decision: "propose",
+          change: diff,
+          change_job_version: job.updated_at,
+          change_job_digest: job_version(job)
+      }
     else
       {:error, reason} -> refuse(plan, {:invalid_change, reason})
     end
@@ -222,19 +323,19 @@ defmodule FermixCore.Jobs.HealDecision do
   defp unchanged?({_field, %{"from" => from, "to" => to}}), do: from == to
 
   # A job a watcher wakes or a mandate names changes only on the owner's
-  # consent turn; a watcher that cannot be read is no proof there is none.
+  # consent turn, so its heal neither raises its limit nor proposes.
   defp consent_free(job, checks) do
-    case Watchers.watcher_for_job(job.id, repo: checks.repo) do
-      {:ok, nil} -> mandate_free(job)
-      {:ok, _watcher} -> {:error, :consent_required}
-      {:error, reason} -> {:error, {:watcher_unreadable, reason}}
+    case proposal_scope(job, checks.repo) do
+      :ok -> :ok
+      {:error, reason} when reason in [:watched, :mandated] -> {:error, :consent_required}
+      {:error, reason} -> {:error, reason}
     end
   end
 
   defp mandate_free(job) do
     case Mandates.names_for_job(job.id) do
       [] -> :ok
-      [_name | _rest] -> {:error, :consent_required}
+      [_name | _rest] -> {:error, :mandated}
     end
   end
 

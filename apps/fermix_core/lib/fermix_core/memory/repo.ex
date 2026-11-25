@@ -11,6 +11,7 @@ defmodule FermixCore.Memory.Repo do
   alias FermixCore.Agents.IterationLimits
   alias FermixCore.ComputerHistory.Spool
   alias FermixCore.Home.Candidate
+  alias FermixCore.Jobs.HealDecision
   alias FermixCore.Jobs.Retry
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.Repo.ChecklistsSql
@@ -112,6 +113,7 @@ defmodule FermixCore.Memory.Repo do
   @job_heals_migration_version 71
   @job_heal_diagnosis_migration_version 72
   @job_run_tally_migration_version 73
+  @job_heal_answer_migration_version 74
   @sqlite_open_intent :readwritecreate
 
   # The home's requests about notes from every machine (M97 §8), all served by
@@ -2639,19 +2641,71 @@ defmodule FermixCore.Memory.Repo do
 
   @doc """
   Writes only the given columns of one scheduled job, in place, and returns
-  the row.
+  the row and the heals its write superseded.
 
   The owner's pause, resume and edits go through it, so an owner write never
   carries back a stale copy of a column it does not own: a run's release
   (`state` from `running`, `last_*`) can land between the owner's read and its
   write. Only owner-editable fields are accepted; any other key raises in the
-  caller.
+  caller. A write that moves the job's definition
+  (`Jobs.HealDecision.job_version/1`) closes the job's waiting heal proposal
+  superseded in the same transaction (M106 §5.7). A pause and a resume move
+  it too (`enabled?` is part of the definition), so they supersede a waiting
+  proposal as an edit does; a run's claim and settle write elsewhere and move
+  none. Every write here, whatever value it leaves, also marks the job's
+  `diagnosing` heal written-under (JOB-12), so that heal run's move is not
+  made.
   """
   @spec update_scheduled_job_fields(String.t(), map(), keyword()) ::
-          {:ok, scheduled_job_row()} | {:error, :not_found | term()}
+          {:ok, scheduled_job_row(), [String.t()]} | {:error, :not_found | term()}
   def update_scheduled_job_fields(id, fields, opts \\ [])
       when is_binary(id) and is_map(fields) and map_size(fields) > 0 do
     call({:update_scheduled_job_fields, id, scheduled_job_field_assignments!(fields)}, opts)
+  end
+
+  @doc """
+  A job write that belongs to a heal (M106 §5.6, §5.7, D5): ONE `BEGIN
+  IMMEDIATE` that checks the caller's right to the heal and that the job is
+  still the version the write was drawn for (`Jobs.HealDecision.job_version/1`
+  against the version `claim` names), then writes the given columns as
+  `update_scheduled_job_fields/3` writes an owner's edit, pause or resume (the
+  follow-up approval and the retry cleared with it) and writes the heal, and
+  commits both or neither.
+
+  `claim` is whose write it is:
+
+    * `{:heal_run, lease_token, record, now}`: a heal run's move (a raised
+      limit, a pause). The heal must be `diagnosing` under `lease_token`
+      (`{:error, :lease_lost}` otherwise), the version is
+      `record.change_job_digest`, and the heal's write is the decision's
+      record (`record`, as `{:decided, ...}` writes it), under the lease. A
+      heal an owner's write marked since its claim (`owner_wrote_at`, JOB-12)
+      is treated as a moved version, whatever the job's value.
+    * `{:answer, answer}`: the owner's answer applying a waiting proposal
+      (`Jobs.HealAnswer`), `answer` its time and `decided_from`. The heal
+      must be the job's waiting proposal on its first conclusion, unanswered
+      (`{:error, :not_waiting}` otherwise), the version is the heal's
+      `change_job_digest`, and the heal's write is the move to watching with
+      the answer.
+
+  `{:ok, {:written, job, heal}}` after both writes. A job whose version moved
+  gets nothing written: for a heal run nothing at all is written
+  (`{:ok, {:moved_on, heal}}`, the heal as it stands, for the caller to record
+  its plan refused), and for the owner's answer the heal closes superseded
+  with the answer recorded (`{:ok, {:moved_on, heal}}`).
+  """
+  @spec heal_job_write(String.t(), String.t(), map(), JobHealsSql.claim(), keyword()) ::
+          {:ok, {:written, scheduled_job_row(), map()} | {:moved_on, map()}}
+          | {:error, :lease_lost | :not_waiting | term()}
+  def heal_job_write(heal_id, job_id, fields, claim, opts \\ [])
+      when is_binary(heal_id) and is_binary(job_id) and is_map(fields) and map_size(fields) > 0 and
+             is_tuple(claim) do
+    true = JobHealsSql.claim?(claim)
+
+    call(
+      {:heal_job_write, heal_id, job_id, scheduled_job_field_assignments!(fields), claim},
+      opts
+    )
   end
 
   @spec get_scheduled_job(String.t(), keyword()) ::
@@ -4916,6 +4970,11 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call({:heal_job_write, heal_id, job_id, assignments, claim}, _from, state) do
+    reply = with_connection(state, &heal_job_write_tx(&1, heal_id, job_id, assignments, claim))
+    {:reply, reply, state}
+  end
+
   def handle_call({:get_scheduled_job, id}, _from, state) do
     reply = with_connection(state, &fetch_scheduled_job(&1, id))
     {:reply, reply, state}
@@ -5380,8 +5439,38 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_job_retries_migration(conn, versions),
          :ok <- apply_job_heals_migration(conn, versions),
          :ok <- apply_job_heal_diagnosis_migration(conn, versions),
-         :ok <- apply_job_run_tally_migration(conn, versions) do
+         :ok <- apply_job_run_tally_migration(conn, versions),
+         :ok <- apply_job_heal_answer_migration(conn, versions) do
       :ok
+    end
+  end
+
+  # M106 §5.7, D5: the version of the job a heal's proposal was drawn for,
+  # the owner's answer to it (which, when, from which surface, and when the
+  # change was applied), and the mark of an owner's write while a heal run
+  # diagnoses (JOB-12), as columns on `job_heals`, in one transaction, after
+  # 73. `job_heals` is this milestone's own table, read by
+  # column name, so it widens; `job_runs` and `scheduled_jobs` are left as
+  # they were. No row is rewritten: a proposal from before has no version, so
+  # an apply to it writes nothing. Reapplying it changes nothing: the columns
+  # are added only while the table holds 73's, and a table that holds neither
+  # set is refused.
+  defp apply_job_heal_answer_migration(conn, versions) do
+    if Enum.member?(versions, @job_heal_answer_migration_version) do
+      :ok
+    else
+      with :ok <- Sqlite3.execute(conn, "BEGIN;") do
+        conn |> job_heal_answer_step() |> commit_migration(conn)
+      end
+    end
+  end
+
+  defp job_heal_answer_step(conn) do
+    with :ok <- add_columns(conn, "job_heals", JobHealsSql.answer_columns()) do
+      Sqlite3.execute(
+        conn,
+        "INSERT INTO schema_migrations(version) VALUES (#{@job_heal_answer_migration_version});"
+      )
     end
   end
 
@@ -8893,23 +8982,85 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
+  # An owner write, and what it supersedes: a write that moves the job's
+  # definition closes its waiting heal proposal in the same transaction (M106
+  # §5.7), since that proposal was drawn for the version the write replaced;
+  # and every write marks the job's diagnosing heal written-under (JOB-12).
+  defp update_scheduled_job_fields_row(conn, id, assignments) do
+    result =
+      CuesSql.with_immediate_transaction(conn, fn ->
+        with {:ok, before} <- fetch_scheduled_job(conn, id),
+             :ok <- write_scheduled_job_fields(conn, id, assignments),
+             {:ok, job} <- fetch_scheduled_job(conn, id),
+             {:ok, superseded} <- supersede_moved(conn, before, job),
+             :ok <- JobHealsSql.mark_written_under(conn, id, job.updated_at) do
+          {:ok, {job, superseded}}
+        end
+      end)
+
+    with {:ok, {job, superseded}} <- result, do: {:ok, job, superseded}
+  end
+
   # A watcher's follow-up is a job: an edit that changes what its Always allow
   # is bound to clears that approval in the same transaction
   # (M60_WATCHER_CODING_RUNS.md §5), whichever path changed the job.
   # The owner's pause, resume and edits each leave the job with no retry (M106
   # §5.3), in their own transaction, so an old retry never fires after one.
-  defp update_scheduled_job_fields_row(conn, id, assignments) do
+  defp write_scheduled_job_fields(conn, id, assignments) do
     {columns, values} = Enum.unzip(assignments)
     set_sql = Enum.map_join(columns, ", ", &"#{&1} = ?")
     update = "UPDATE scheduled_jobs SET #{set_sql} WHERE id = ?"
 
+    with :ok <- execute(conn, update, values ++ [id]),
+         :ok <- CuesFollowUpAllowSql.clear_stale_approval(conn, {:follow_up_job, id}) do
+      JobRetriesSql.delete(conn, id)
+    end
+  end
+
+  defp supersede_moved(conn, before, job) do
+    if HealDecision.job_version(before) == HealDecision.job_version(job),
+      do: {:ok, []},
+      else: JobHealsSql.supersede_proposals(conn, job.id, job.updated_at)
+  end
+
+  # A job write that belongs to a heal (`heal_job_write/5`): the caller's
+  # right and the job read in this transaction; the job written only while it
+  # is the version the write was drawn for, then the heal written, so a
+  # failure of either (a lease lost, a constraint) rolls both back.
+  defp heal_job_write_tx(conn, heal_id, job_id, assignments, claim) do
     CuesSql.with_immediate_transaction(conn, fn ->
-      with :ok <- execute(conn, update, values ++ [id]),
-           :ok <- CuesFollowUpAllowSql.clear_stale_approval(conn, {:follow_up_job, id}),
-           :ok <- JobRetriesSql.delete(conn, id) do
-        fetch_scheduled_job(conn, id)
+      with {:ok, heal, version} <- JobHealsSql.claimant(conn, heal_id, job_id, claim),
+           {:ok, job} <- fetch_scheduled_job(conn, job_id) do
+        heal_job_write_fenced(conn, {heal, version}, job, assignments, claim)
       end
     end)
+  end
+
+  # Two guards, neither redundant. The mark sees every owner write since the
+  # heal run's claim when it happens, a write that left the definition's value
+  # as the run read it included (a pause then a resume, an edit and back:
+  # JOB-12), which a compare by value cannot see. The digest compare sees
+  # what no mark can: a proposal answered after its heal run (a waiting heal
+  # holds no claim to mark, and its other guard is the supersede in the
+  # owner's write), and any change to the job made outside the owner-write
+  # path (a Scheduler's own write of `enabled?`).
+  defp heal_job_write_fenced(conn, {heal, version}, job, assignments, claim) do
+    if written_under?(heal, claim) or HealDecision.job_version(job) != version,
+      do: JobHealsSql.moved_on(conn, heal, claim),
+      else: heal_job_write_in_tx(conn, heal.id, job.id, assignments, claim)
+  end
+
+  defp written_under?(%{owner_wrote_at: %DateTime{}}, {:heal_run, _token, _record, _now}),
+    do: true
+
+  defp written_under?(_heal, _claim), do: false
+
+  defp heal_job_write_in_tx(conn, heal_id, job_id, assignments, claim) do
+    with :ok <- write_scheduled_job_fields(conn, job_id, assignments),
+         {:ok, heal} <- JobHealsSql.claim_written(conn, heal_id, claim),
+         {:ok, job} <- fetch_scheduled_job(conn, job_id) do
+      {:ok, {:written, job, heal}}
+    end
   end
 
   defp fetch_scheduled_jobs(conn, selector) do
@@ -9921,10 +10072,43 @@ defmodule FermixCore.Memory.Repo do
     :state
   ]
 
+  # Every field an owner write may set: the text fields and those below. A
+  # field not listed here is refused before any clause reads it, so a new
+  # editable field joins this list (and with it the heal's version of a job,
+  # `Jobs.HealDecision.version_fields/0`, which a test holds to it).
+  @owner_job_fields @owner_text_fields ++
+                      [
+                        :enabled?,
+                        :next_run_at,
+                        :updated_at,
+                        :delivery_target,
+                        :allowed_tools,
+                        :timeout_seconds
+                      ]
+
+  @doc """
+  The fields an owner's write may set on a scheduled job in place
+  (`update_scheduled_job_fields/3`, `heal_job_write/5`), and no other: the list
+  a heal's version of a job is held to (`Jobs.HealDecision.version_fields/0`).
+  """
+  @spec owner_job_fields() :: [atom()]
+  def owner_job_fields, do: @owner_job_fields
+
   defp scheduled_job_field_assignments!(fields) do
     fields
     |> Enum.sort_by(fn {key, _value} -> key end)
+    |> Enum.map(&owner_field!/1)
     |> Enum.map(&scheduled_job_field_assignment!/1)
+  end
+
+  defp owner_field!({key, value} = field) do
+    if key in @owner_job_fields,
+      do: field,
+      else:
+        raise(ArgumentError,
+          message:
+            "not an owner-editable scheduled job field: #{inspect(key)} = #{inspect(value)}"
+        )
   end
 
   defp scheduled_job_field_assignment!({:enabled?, value}) when is_boolean(value),

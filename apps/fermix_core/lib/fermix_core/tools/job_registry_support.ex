@@ -516,10 +516,15 @@ defmodule FermixCore.Tools.JobRegistrySupport do
   the plugin), the failure's kind (with the tool, for a run that ended ok
   without working, §6), since when, how many runs it took, and whether the
   owner was told;
-  once diagnosed (§5.5), what Fermix decided and the diagnosis's note, for a
-  proposal each field it would change with the value it would take, and for
-  a rerun what came of it.
-  Nil for a job with none.
+  once diagnosed (§5.5), what Fermix decided and whether the diagnosis left a
+  note (`has_note`, and `note_run_id`, the run whose `get_job_run` shows it:
+  never its text, which a model wrote after reading the failure's words and
+  is read only as outside content), for a
+  proposal each field it would change with the whole value it would take
+  (exactly what applying it would write), and for a rerun what came of it; after
+  the owner's answer to a proposal (§5.7, D5), the `answer` (`apply` or
+  `leave`), when it came, and when the change was applied; for a closed heal
+  its `outcome`. Nil for a job with none.
   """
   @spec heal_payload(map() | nil) :: map() | nil
   def heal_payload(nil), do: nil
@@ -536,6 +541,21 @@ defmodule FermixCore.Tools.JobRegistrySupport do
     |> put_heal_provider(heal)
     |> put_heal_tool(Map.get(heal, :tool))
     |> put_heal_decision(heal)
+    |> put_heal_answer(heal)
+  end
+
+  # What became of a proposal: the heal's outcome once closed, and the
+  # owner's answer with when it came and when the change was applied.
+  defp put_heal_answer(payload, heal) do
+    [
+      outcome: Map.get(heal, :outcome),
+      answer: Map.get(heal, :answer),
+      answered_at: heal |> Map.get(:answered_at) |> timestamp(),
+      applied_at: heal |> Map.get(:applied_at) |> timestamp(),
+      closed_at: heal |> Map.get(:closed_at) |> timestamp()
+    ]
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Enum.into(payload)
   end
 
   defp put_heal_provider(payload, %{subject_kind: "provider", subject_id: provider}),
@@ -552,12 +572,18 @@ defmodule FermixCore.Tools.JobRegistrySupport do
 
   defp put_heal_decision(payload, %{decision: decision} = heal) when is_binary(decision) do
     payload
-    |> Map.merge(%{decision: decision, note: heal.note})
+    |> Map.put(:decision, decision)
+    |> put_heal_note(heal)
     |> put_heal_proposal(decision, heal.change)
     |> put_heal_rerun(Map.get(heal, :rerun_outcome))
   end
 
   defp put_heal_decision(payload, _undiagnosed), do: payload
+
+  defp put_heal_note(payload, %{has_note: true} = heal),
+    do: Map.merge(payload, %{has_note: true, note_run_id: heal.last_run_id})
+
+  defp put_heal_note(payload, _heal), do: Map.put(payload, :has_note, false)
 
   defp put_heal_proposal(payload, "propose", change) when is_map(change),
     do: Map.put(payload, :proposal, Map.new(change, fn {field, %{"to" => to}} -> {field, to} end))

@@ -996,8 +996,8 @@ spec:
 ```json
 {"jobs": [{"key": "weather", "name": "morning weather", "schedule": "0 7 * * *",
            "task_prompt": "...", "timeout_seconds": 300, "expires_in_days": 60,
-           "runs": [{"hours_ago": 25, "duration_seconds": 300, "status": "timeout",
-                     "error": "wall-clock timeout after 300000ms"}]}],
+           "runs": [{"fires_ago": 1, "duration_seconds": 300, "status": "timeout",
+                     "failure_kind": "time_limit"}]}],
  "reminders": [{"title": "...", "date": "2027-04-16", "time": "09:00:00",
                 "kind": "appointment", "plan": [{"type": "at_time"}]}]}
 ```
@@ -1010,12 +1010,33 @@ pass, within its 60 s reconcile; for a kind a model could help with its heal run
 diagnoses it first, one model run on the home's main route, and code carries out the
 decision, then sends its message. A seeded ok run after it closes the heal as healed.
 A spec's failed `runs` therefore seed what the owner was told, not only rows.
-`checkers/job_heal.py` grades that heal (its docstring has the gold); it needs a home
-seeded with `--owner-inbox-cli`, the one eval inbox a send reaches.
+`checkers/job_heal.py` grades that heal (its docstring has the gold), and
+`checkers/job_proposal.py` what stays true of a stored proposal nobody answered; both need
+a home seeded with `--owner-inbox-cli`, the one eval inbox a send reaches.
+
+When each run happened (`bin/seed_run_times.exs`, checked by
+`bin/seed_run_times_test.exs`, which needs the engine compiled: `FERMIX_HOME=$(mktemp -d)
+mix run --no-start --no-compile benchmark/bin/seed_run_times_test.exs`): a scheduled
+run (`trigger: schedule`, the default) runs at its job's own fire time, `fires_ago: n`
+being the nth most recent fire of the job's cron schedule in the job's zone (the
+config's when the job names none), through the engine's own schedule parser, so a
+5:40 AM job's runs started at 5:40 AM. Only fires early enough that every run of the
+job, with any conclusion seeded on it, is over before now are counted, so a seed taken
+just after a fire still finds every run over. An off-schedule run is stated as one: a
+`manual` run says `hours_ago`, whole hours before now, and never `fires_ago`. Each run
+lasts `duration_seconds` (whole). A scheduled run that says `hours_ago`, a fire count
+on a schedule that is not cron, and any other trigger are refused.
 
 A run may also say (M106 §5.1, §5.5):
 
-- `failure_kind` — a `Jobs.Failure` kind for a failed run (`other` when absent);
+- `failure_kind` — a failed run's kind, stored as the runner stores one (M106 §5.8):
+  `other` (the default) states the failure's own words as `error`, which the run keeps
+  and the heal quotes as someone else's beside Fermix's sentence for the kind;
+  `unknown_skill` (the job's `skill_name` is the missing skill) and `time_limit` (a
+  `timeout` run stopped at its whole `duration_seconds`, naming the tool its timeline
+  left unfinished) state no `error`, as the run and the heal hold Fermix's own sentence
+  (`Jobs.Failure.sentence/2`), taken from the engine, never a copy. An ok run states
+  neither;
 - `tool_timeline` — the runner's entries, `{"name", "duration_ms", "status": ok |
   error | unfinished, "plugin"?}`, oldest first, which a diagnosis reads;
 - `tool_tally` (M106 §6) — the runner's whole-run tally, one entry per tool,
@@ -1029,8 +1050,9 @@ A run may also say (M106 §5.1, §5.5):
 - `trigger` — `schedule` (the default) or `manual`;
 - `heal` (a failed run, or an ok run that opens its job's heal by its tally) — the
   conclusion its heal run would have reached,
-  `{"decision": rerun | raise_limit | propose | tell, "note", "change"?,
-  "read_outside"?, "rerun_outcome"?, "delivered_hours_ago"}`, made through the Repo's
+  `{"decision": rerun | raise_limit | propose | tell, "note" (at most 280 characters, the
+  bound a diagnosis note keeps), "change"?,
+  "read_outside"?, "rerun_outcome"?, "delivered_minutes_after", "owner_edit"?}` and nothing else, made through the Repo's
   own heal calls (the claim, the inbox, the decision, the message `Jobs.HealMessage`
   builds, the delivered mark, and for a rerun what came of its ask: `started`,
   `running`, `refused` or `unanswered`, required with `rerun` and refused on any other
@@ -1042,16 +1064,21 @@ A run may also say (M106 §5.1, §5.5):
   decision left it. A `raise_limit` change is `{"timeout_seconds": {"from", "to"}}`
   with the job's `timeout_seconds` already `to` (at most the engine's run limit); a
   `propose` change names `task`, `schedule`, `skill_name` or `timeout_seconds`, each
-  `{"from", "to"}`, with the job still holding `from`; `rerun` and `tell` carry
-  none. A seeded pause is not offered (every seeded job is enabled), nor is a plugin's
-  heal concluded (code tells it, with no decision). The conclusion's
-  time falls after its run ended and before the next run began. A spec that concludes
+  `{"from", "to"}`, with the job still holding `from`, and is stored with the job's
+  version it was drawn for (`Jobs.HealDecision.job_version/1`), which the owner's
+  answer to it is fenced on (M106 §5.7); `rerun` and `tell` carry
+  none. A `propose` conclusion may add `owner_edit`, the owner's own edit after the
+  proposal reached them (`schedule`, `task_prompt` or `timeout_seconds`, each a new
+  value), made through `Jobs.Registry.update_job/3`, which closes the proposal
+  `superseded` as a live edit does; the manifest's job is the edited one. A seeded pause is not offered (every seeded job is enabled), nor is a plugin's
+  heal concluded (code tells it, with no decision). The conclusion comes
+  `delivered_minutes_after` (whole, positive) its run ended, before the next run began
+  and before now. A spec that concludes
   a heal gives only one job runs that open one, failed or ending ok without working
   (the claim takes the oldest open heal), and needs the local owner inbox
-  (`--owner-inbox-cli`). A job's runs are listed oldest first, `hours_ago` and
-  `duration_seconds` whole numbers, so the runs before one in the spec are the runs its
-  settle reads. All of it is checked before the reset, so a refused spec leaves the
-  home as it was.
+  (`--owner-inbox-cli`). A job's runs are listed oldest first, each over before the next
+  starts, so the runs before one in the spec are the runs its settle reads. All of it
+  is checked before the reset, so a refused spec leaves the home as it was.
 
 Reminder dates are absolute: a weekday or "tomorrow" computed from the run date
 means something different on a Friday than on a Monday. The checker reads the

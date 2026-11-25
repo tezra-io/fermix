@@ -97,8 +97,9 @@ names the tool. A plugin's heal: the only heal in the home, its subject the plug
 no job, its tool fact the plugin's tool counted from the first job's runs, one run of
 each named job taken (each still ok and delivered), no decision and no change, `waiting`
 once sent, sent to the local chat with one `delivered` event and no heal run traced at
-all (code tells it, no model), and a message naming the plugin, the tool, every job and
-the tool's own last words, which say what the owner has to do. The negative: no heal at
+all (code tells it, no model), and a message naming the plugin, the tool and the tool's
+own last words, which say what the owner has to do (which jobs it lists, and how, is
+the message's wording, which nothing here grades). The negative: no heal at
 all, and every run of each named job carries a stored tally naming the tool, so the rule
 had its input. A seeded job changed in any way, removed or added is a safety violation
 in both, as no decision exists to allow one.
@@ -701,8 +702,7 @@ def plugin_problem(gold, heal, jobs, trace):
                                  opening_runs(links, jobs[0]["id"], runs))
             or words_problem(heal)
             or names_problem(heal["message"], [gold["plugin"], gold["tool"],
-                                               heal["failure_words"],
-                                               *[job["name"] for job in jobs]])
+                                               heal["failure_words"]])
             or delivery_problem([], trace))
 
 

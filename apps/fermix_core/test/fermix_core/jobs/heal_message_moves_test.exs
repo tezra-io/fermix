@@ -1,9 +1,9 @@
 defmodule FermixCore.Jobs.HealMessageMovesTest do
   # M106 §5.8 and §5.9 (stage S3): after Fermix's facts the message carries
   # the heal run's note, as Fermix's reading of the failure, then one line
-  # saying what Fermix did or what it would change; a fix that did not hold
-  # gets one message of its own. Pure and code-built: no ids, every value
-  # quoted and bounded, and no promise of how the owner says yes.
+  # saying what Fermix did; a fix that did not hold gets one message of its
+  # own. Pure and code-built: no ids, every value quoted and bounded. What a
+  # proposal asks is `heal_message_proposal_test.exs` (stage S4).
   use ExUnit.Case, async: true
 
   alias FermixCore.Jobs.HealMessage
@@ -37,7 +37,7 @@ defmodule FermixCore.Jobs.HealMessageMovesTest do
 
   defp build(overrides), do: @facts |> Map.merge(overrides) |> HealMessage.build(@lisbon)
 
-  describe "what Fermix did, or would change" do
+  describe "what Fermix did" do
     for {{decision, change, job, line}, n} <-
           Enum.with_index([
             {"rerun", nil, nil, "Fermix has asked for it to run again now."},
@@ -46,30 +46,7 @@ defmodule FermixCore.Jobs.HealMessageMovesTest do
             {"raise_limit", %{"timeout_seconds" => %{"from" => 45, "to" => 90}}, nil,
              "Fermix raised its time limit from 45 to 90 seconds."},
             {"pause", nil, %{enabled?: false, state: "paused"},
-             "Fermix paused it; it will not run until you resume it."},
-            {"propose", %{"schedule" => %{"from" => "every 1 hour", "to" => "every 2 hours"}},
-             nil, ~s(Fermix would change its schedule to "every 2 hours".)},
-            {"propose", %{"timeout_seconds" => %{"from" => 1_800, "to" => 3_600}}, nil,
-             "Fermix would change its time limit to 1 hour."},
-            {"propose", %{"skill_name" => %{"from" => nil, "to" => "tide-reader"}}, nil,
-             ~s(Fermix would change the skill it uses to "tide-reader".)},
-            {"propose",
-             %{
-               "provider" => %{"from" => "openai", "to" => "anthropic"},
-               "model" => %{"from" => "retired-9", "to" => "claude-tide"}
-             }, nil,
-             ~s(Fermix would change the model it is pinned to to "anthropic claude-tide".)},
-            {"propose",
-             %{"clear_route_pin" => %{"from" => %{"provider" => "openai"}, "to" => true}}, nil,
-             "Fermix would remove the model it is pinned to."},
-            {"propose",
-             %{
-               "delivery_mode" => %{"from" => "none", "to" => "channel"},
-               "delivery_target" => %{
-                 "from" => nil,
-                 "to" => %{"platform" => "telegram", "chat_id" => "40017"}
-               }
-             }, nil, ~s(Fermix would change where it delivers to "channel, on telegram".)}
+             "Fermix paused it; it will not run until you resume it."}
           ]) do
       test "#{n}: #{decision} #{inspect(change && Map.keys(change))}" do
         job = unquote(Macro.escape(job))
@@ -111,36 +88,6 @@ defmodule FermixCore.Jobs.HealMessageMovesTest do
       refute text =~ "First.\n"
       [_before, reading] = String.split(text, "Fermix's reading: ")
       assert reading |> String.split("\n") |> hd() |> String.length() <= 500
-    end
-
-    test "a long task is cut with an ellipsis, and the message says the full text is kept" do
-      task = "Fetch the tides from the new harbour page, " <> String.duplicate("compare ", 80)
-
-      text =
-        build(%{
-          decision: "propose",
-          note: @note,
-          change: %{"task" => %{"from" => "Old.", "to" => task}}
-        })
-
-      assert text =~
-               ~s(Fermix would change its task to "Fetch the tides from the new harbour page)
-
-      assert text =~ "…\""
-      assert text =~ "the full text is in the job's record"
-      refute text =~ task
-    end
-
-    test "a proposal promises no button, card or command" do
-      text =
-        build(%{
-          decision: "propose",
-          note: @note,
-          change: %{"schedule" => %{"from" => "every 1 hour", "to" => "every 2 hours"}}
-        })
-
-      refute text =~ ~r/button|card|tap|approve|\/confirm|reply yes/i
-      assert text =~ ~r/nothing has been changed/i
     end
 
     test "a pause is not said twice" do

@@ -219,6 +219,10 @@ SKILL_TOKEN_FILE = os.path.join("eval-fixtures", "skill_token")
 # cap_untrusted_content's hostile surface (its order_notes tool); that pack needs no
 # consent gate granted, because the writes its injection asks for must stay possible.
 BENCH_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# The checkout this harness runs from, and what a workspace snapshot of it leaves out,
+# as the CI eval box's rsync does (.github/workflows/eval-box.yml).
+REPO_DIR = os.path.dirname(BENCH_DIR)
+SNAPSHOT_EXCLUDES = ("_build", "deps")
 FIXTURE_MCP_SERVER = os.path.join(BENCH_DIR, "suites", "capability", "fixtures", "mcp",
                                   "halden_ops.py")
 FIXTURE_SKILLS_DIR = os.path.join(BENCH_DIR, "suites", "capability", "fixtures", "skills")
@@ -1173,6 +1177,43 @@ def copy_skill_dirs(source_root: str, skills: str) -> None:
         shutil.copytree(os.path.join(source_root, name), dest)
 
 
+def snapshot_checkout(home: str, checkout: str) -> None:
+    """Make <home>/workspace a snapshot of `checkout`: its tracked files and its .git,
+    with _build and deps left out, so the workspace's git HEAD is the harness's, which
+    run_eval.py requires of an isolated run (workspace_revision_error). On the CI eval
+    box, a fresh checkout, that is what its rsync of the whole tree copies; a local
+    checkout also holds untracked files (outputs, logs, local settings) that no model
+    under test should read. The old workspace goes first, so nothing an earlier trial
+    left stays. Refused when either tree holds the other."""
+    resolved = disposable_home(home, "snapshot the checkout")
+    source = os.path.realpath(checkout)
+    target = os.path.join(resolved, "workspace")
+    if not os.path.isdir(os.path.join(source, ".git")):
+        die(f"--workspace-snapshot needs a git checkout with its own .git: {source}")
+    if _within(target, source) or _within(source, resolved):
+        die(f"refusing to snapshot {source} into {target}: one holds the other")
+    tracked = _run_or_die(["git", "-C", source, "ls-files", "-z"], f"list {source}'s files")
+    keep = [path for path in tracked.split("\0")
+            if path and path.split("/")[0] not in SNAPSHOT_EXCLUDES]
+    if os.path.isdir(target):
+        safe_rm.rm_rf(target, resolved, min_below=1)
+    os.makedirs(target)
+    _run_or_die(["rsync", "-a", "--from0", "--files-from=-", f"{source}/", f"{target}/"],
+                f"copy {source}'s files", stdin="\0".join(keep))
+    _run_or_die(["rsync", "-a", f"{source}/.git/", f"{target}/.git/"], f"copy {source}/.git")
+
+
+def _run_or_die(cmd: list[str], what: str, stdin: str | None = None) -> str:
+    done = subprocess.run(cmd, input=stdin, capture_output=True, text=True)
+    if done.returncode != 0:
+        die(f"could not {what}: {done.stderr.strip()}")
+    return done.stdout
+
+
+def _within(path: str, root: str) -> bool:
+    return os.path.commonpath([os.path.realpath(path), root]) == root
+
+
 def disposable_home(home: str, what: str) -> str:
     """The home as a REALPATH, refused unless it is disposable.
 
@@ -1261,6 +1302,12 @@ def parse_args() -> argparse.Namespace:
                         help="put a stub claude first on the daemon's PATH that fails every "
                              "run as signed out, for coding_harness's signed-out case; off "
                              "by default")
+    parser.add_argument("--workspace-snapshot", dest="workspace_snapshot", action="store_true",
+                        help="make <home>/workspace a snapshot of this checkout (its tracked "
+                             "files and .git, _build and deps left out), as the CI eval box "
+                             "does, "
+                             "so run_eval.py's isolated precondition (the workspace at the "
+                             "harness's own HEAD) holds; off by default")
     parser.add_argument("--owner-inbox-cli", dest="owner_inbox_cli", action="store_true",
                         help="make the local cli chat the owner's inbox (the default "
                              "delivery target), so a message to the owner, such as a job "
@@ -1336,6 +1383,8 @@ def main() -> None:
     if not os.path.isdir(os.path.join(workspace, ".git")):
         subprocess.run(["git", "-C", workspace, "init", "-q"], check=True)
     reset_state(home)
+    if args.workspace_snapshot:
+        snapshot_checkout(home, REPO_DIR)
     install_skills(home, args.private_dir)
     write_skill_token(home)
 

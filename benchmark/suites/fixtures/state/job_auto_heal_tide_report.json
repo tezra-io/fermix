@@ -9,14 +9,14 @@
       "timeout_seconds": 300,
       "runs": [
         {
-          "hours_ago": 3,
+          "fires_ago": 1,
           "duration_seconds": 42,
           "status": "error",
           "error": "The tide service at tides.kelmscott.example answered 503 Service Unavailable on all four tries.",
           "heal": {
             "decision": "tell",
             "note": "The tide service was down for every try; nothing in the job needs to change, so the next run should work once the service is back.",
-            "delivered_hours_ago": 2
+            "delivered_minutes_after": 60
           }
         }
       ]

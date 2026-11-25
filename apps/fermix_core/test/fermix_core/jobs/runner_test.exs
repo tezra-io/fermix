@@ -9,6 +9,7 @@ defmodule FermixCore.Jobs.RunnerTest do
   alias FermixCore.Capabilities.Builtin, as: BuiltinCapability
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Jobs.Failure
   alias FermixCore.Jobs.Registry
   alias FermixCore.Jobs.Runner
   alias FermixCore.Jobs.RunnerSupervisor
@@ -813,7 +814,8 @@ defmodule FermixCore.Jobs.RunnerTest do
 
     assert {:ok, timed_out_run} = Repo.get_job_run(run.id, server: repo)
     assert timed_out_run.status == "timeout"
-    assert timed_out_run.error =~ "inactivity timeout"
+    assert timed_out_run.error =~ "The run stopped after"
+    assert timed_out_run.error =~ "with nothing happening"
     assert timed_out_run.output_ref == "job_runs/#{run.id}/error.md"
     assert timed_out_run.failure_kind == "idle_limit"
     assert timed_out_run.tool_timeline == []
@@ -866,7 +868,8 @@ defmodule FermixCore.Jobs.RunnerTest do
 
     assert {:ok, timed_out_run} = Repo.get_job_run(run.id, server: repo)
     assert timed_out_run.status == "timeout"
-    assert timed_out_run.error =~ "inactivity timeout"
+    assert timed_out_run.error =~ "The run stopped after"
+    assert timed_out_run.error =~ "with nothing happening"
     assert timed_out_run.failure_kind == "idle_limit"
     assert %DateTime{} = timed_out_run.tools_started_at
 
@@ -901,7 +904,7 @@ defmodule FermixCore.Jobs.RunnerTest do
 
     assert {:ok, timed_out_run} = Repo.get_job_run(run.id, server: repo)
     assert timed_out_run.status == "timeout"
-    assert timed_out_run.error =~ "wall-clock timeout after 20ms"
+    assert timed_out_run.error =~ "The run stopped at its 20-millisecond time limit"
     assert timed_out_run.failure_kind == "time_limit"
   end
 
@@ -931,7 +934,7 @@ defmodule FermixCore.Jobs.RunnerTest do
 
     assert {:ok, timed_out_run} = Repo.get_job_run(run.id, server: repo)
     assert timed_out_run.status == "timeout"
-    assert timed_out_run.error =~ "wall-clock timeout after 1000ms"
+    assert timed_out_run.error =~ "The run stopped at its 1-second time limit"
   end
 
   test "job inactivity_timeout_seconds is honored when the caller passes inactivity_timeout_ms: nil",
@@ -961,7 +964,7 @@ defmodule FermixCore.Jobs.RunnerTest do
 
     assert {:ok, timed_out_run} = Repo.get_job_run(run.id, server: repo)
     assert timed_out_run.status == "timeout"
-    assert timed_out_run.error =~ "inactivity timeout after 1000ms"
+    assert timed_out_run.error =~ "The run stopped after 1 second with nothing happening"
   end
 
   test "an explicit caller timeout_ms still overrides the job's timeout_seconds", %{
@@ -990,7 +993,7 @@ defmodule FermixCore.Jobs.RunnerTest do
 
     assert {:ok, timed_out_run} = Repo.get_job_run(run.id, server: repo)
     assert timed_out_run.status == "timeout"
-    assert timed_out_run.error =~ "wall-clock timeout after 20ms"
+    assert timed_out_run.error =~ "The run stopped at its 20-millisecond time limit"
   end
 
   # A guest job's own list naming these fails its run instead (below, "a job
@@ -1965,9 +1968,13 @@ defmodule FermixCore.Jobs.RunnerTest do
     assert log =~ "Scheduled job #{job.id} AgentLoop crashed"
     assert {:ok, failed} = Repo.get_job_run(run.id, server: repo)
     assert failed.status == "error"
-    assert failed.error =~ "agent_loop_exit"
-    assert failed.error =~ "adapter exploded"
+    # The row states the kind's sentence; the crash itself is the artifact's
+    # detail (stage S4, round two).
+    assert failed.error == "The run stopped before it finished: the process running it ended."
     assert failed.failure_kind == "crashed"
+    artifact = File.read!(Path.join(output_base_dir, failed.output_ref))
+    assert artifact =~ "agent_loop_exit"
+    assert artifact =~ "adapter exploded"
   end
 
   # The `Keyword.get(opts, :timeout_ms)` shape below is load-bearing: it mirrors
@@ -2984,7 +2991,7 @@ defmodule FermixCore.Jobs.RunnerTest do
 
       assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
       assert stored_run.status == "error"
-      assert stored_run.error =~ "connection_unavailable"
+      assert stored_run.error =~ "Fermix could not reach"
     end
 
     test "does not retry a non-transient error", %{
@@ -3160,7 +3167,12 @@ defmodule FermixCore.Jobs.RunnerTest do
 
       assert {:ok, stopped} = Repo.get_job_run(run.id, server: repo)
       assert stopped.status == "timeout"
-      assert stopped.error == "wall-clock timeout after 600000ms"
+      # The row keeps Fermix's sentence for the kind (M106 S4), in minutes and
+      # naming the tool the limit stopped.
+      assert stopped.error ==
+               ~s(The run stopped at its 10-minute time limit while its tool "harbour_fetch" ) <>
+                 "was still running."
+
       assert stopped.failure_kind == "time_limit"
       assert %DateTime{} = stopped.tools_started_at
       assert DateTime.compare(stopped.tools_started_at, stopped.started_at) != :lt
@@ -3300,7 +3312,10 @@ defmodule FermixCore.Jobs.RunnerTest do
 
       assert {:ok, failed} = Repo.get_job_run(run.id, server: repo)
       assert failed.status == "error"
-      assert failed.error == ~s({:unknown_skill, "harbour_tides"})
+
+      assert failed.error ==
+               ~s(The run could not start: the skill "harbour_tides" it is bound to does not exist.)
+
       assert failed.failure_kind == "unknown_skill"
       assert failed.tool_timeline == []
     end
@@ -3458,7 +3473,7 @@ defmodule FermixCore.Jobs.RunnerTest do
              ] =
                open_heals(repo)
 
-      assert heal.failure_text == TurnRunner.error_reply(rate_limited(), surface: :job)
+      assert heal.failure_text == Failure.sentence(rate_limited())
 
       assert {:ok, %{last_status: "error"}} =
                Registry.get_memory_source(job.memory_source_id, repo: repo)
@@ -3504,10 +3519,16 @@ defmodule FermixCore.Jobs.RunnerTest do
       end
 
       heals = Map.new(open_heals(repo), &{&1.subject_id, &1})
-      assert %{failure_kind: "unknown_skill", subject_kind: "job"} = heals[gone.id]
 
-      assert %{failure_kind: "time_limit", failure_text: "wall-clock timeout after 20ms"} =
-               heals[slow.id]
+      assert %{failure_kind: "unknown_skill", subject_kind: "job", failure_text: gone_text} =
+               heals[gone.id]
+
+      assert gone_text =~ "The run could not start: the skill"
+
+      assert %{
+               failure_kind: "time_limit",
+               failure_text: "The run stopped at its 20-millisecond time limit."
+             } = heals[slow.id]
 
       for run <- [gone_run, slow_run] do
         assert {:ok, %{delivery_status: "skipped"}} = Repo.get_job_run(run.id, server: repo)
@@ -3774,7 +3795,7 @@ defmodule FermixCore.Jobs.RunnerTest do
       assert artifact =~ "## Error\n\n#{sentence}\n\nDetail: :context_overflow_after_compaction\n"
     end
 
-    test "a timeout run's delivered text is unchanged", %{
+    test "a timeout run's delivered text states the limit as Fermix's sentence", %{
       repo: repo,
       capability_registry: capability_registry,
       output_base_dir: output_base_dir
@@ -3808,16 +3829,18 @@ defmodule FermixCore.Jobs.RunnerTest do
                Scheduled job "Timeout Delivery Check" finished with timeout.
 
                Run ID: #{run.id}
-               Error: inactivity timeout after 20ms
+               Error: The run stopped after 20 milliseconds with nothing happening.
                """
                |> String.trim()
 
       assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
       assert stored_run.status == "timeout"
-      assert stored_run.error == "inactivity timeout after 20ms"
+      assert stored_run.error == "The run stopped after 20 milliseconds with nothing happening."
 
       artifact = File.read!(Path.join(output_base_dir, stored_run.output_ref))
-      assert artifact =~ "## Error\n\ninactivity timeout after 20ms\n"
+
+      assert artifact =~
+               "## Error\n\nThe run stopped after 20 milliseconds with nothing happening.\n"
     end
   end
 

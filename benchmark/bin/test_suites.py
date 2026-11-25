@@ -883,6 +883,7 @@ def test_the_shipped_numbered_rubrics_parse():
                       "tide_report_never_came_route_sanity": 3, "tide_report_missing": 3,
                       "holds_digest_anything_done": 3, "holds_digest_sorted_yet": 3,
                       "river_digest_coming_through_empty": 3, "river_digest_no_reading_any_more": 3,
+                      "holds_digest_what_would_change": 3,
                       # voice_greeting_goodbye.yaml
                       "greeted_then_asked_if_heard": 4,
                       # phone_reach.yaml

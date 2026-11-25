@@ -131,7 +131,14 @@ defmodule FermixCore.Home.ReadableTest do
     # knows, so it reads past the tally. `job_runs` and `scheduled_jobs` keep
     # their widths, and a run it writes has no tally, which only breaks a
     # newer engine's streak: the format stays.
-    @migrations Enum.to_list(1..39) ++ [41, 42, 43] ++ Enum.to_list(45..73)
+    # 74 (M106 §5.7, D5, a proposal's version, the owner's answer to it and
+    # the surface it came from, and the mark of an owner's write while a heal
+    # run diagnoses, JOB-12) adds columns to `job_heals` only, a table an
+    # engine at this format never reads; every heal row is kept as it was. `job_runs` and `scheduled_jobs`
+    # keep their widths. A change the owner approved is a value in a column
+    # that engine already reads, written as an owner's edit is: the format
+    # stays.
+    @migrations Enum.to_list(1..39) ++ [41, 42, 43] ++ Enum.to_list(45..74)
     @manifest_keys ~w(created_at engine_version files format home_format home_root host links
                       primary_epoch)
     @entry_keys ~w(bytes mode path sha256)

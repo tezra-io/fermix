@@ -45,7 +45,7 @@ defmodule FermixCore.Tools.JobHealRespondTest do
           {"an unknown decision", %{"decision" => "remove", "note" => @note}},
           {"no note", %{"decision" => "tell"}},
           {"a blank note", %{"decision" => "tell", "note" => "   "}},
-          {"a note too long", %{"decision" => "tell", "note" => String.duplicate("a", 501)}},
+          {"a note too long", %{"decision" => "tell", "note" => String.duplicate("a", 281)}},
           {"raise_limit with no limit", %{"decision" => "raise_limit", "note" => @note}},
           {"raise_limit below one second",
            %{"decision" => "raise_limit", "timeout_seconds" => 0, "note" => @note}},
@@ -72,6 +72,20 @@ defmodule FermixCore.Tools.JobHealRespondTest do
         refute_received {:job_heal_respond, _ref, _decision}
       end
     end
+  end
+
+  # Stage S4, round two: the note is one or two sentences, so its bound is 280
+  # characters, stated in the schema, the description and the refusal.
+  test "a note of 280 characters is taken and one of 281 refused, whole, saying the bound" do
+    {taken, _ref} = respond(%{"decision" => "tell", "note" => String.duplicate("a", 280)})
+    assert taken.success
+
+    {refused, _ref} = respond(%{"decision" => "tell", "note" => String.duplicate("a", 281)})
+    refute refused.success
+    assert refused.error =~ "The note is 281 characters and must be at most 280"
+
+    assert JobHealRespond.parameters().properties.note.description =~ "At most 280 characters"
+    assert JobHealRespond.description() =~ "at most 280 characters"
   end
 
   test "a note goes as written, trimmed and never cut; the message flattens it" do

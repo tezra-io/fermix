@@ -9,48 +9,100 @@
       "timeout_seconds": 300,
       "runs": [
         {
-          "hours_ago": 52,
+          "fires_ago": 3,
           "duration_seconds": 38,
           "status": "ok",
           "final_response": "No bird counts today: the reserve's counts page could not be read.",
           "tool_timeline": [
-            {"name": "web_fetch", "duration_ms": 2100, "status": "error"},
-            {"name": "web_fetch", "duration_ms": 1900, "status": "error"}
+            {
+              "name": "web_fetch",
+              "duration_ms": 2100,
+              "status": "error"
+            },
+            {
+              "name": "web_fetch",
+              "duration_ms": 1900,
+              "status": "error"
+            }
           ],
           "tool_tally": [
-            {"name": "web_fetch", "ok": 0, "error": 2, "unfinished": 0,
-             "last_error": "HTTP 410 Gone: counts.saltmarsh-reserve.example/latest"}
+            {
+              "name": "web_fetch",
+              "ok": 0,
+              "error": 2,
+              "unfinished": 0,
+              "last_error": "HTTP 410 Gone: counts.saltmarsh-reserve.example/latest"
+            }
           ]
         },
         {
-          "hours_ago": 28,
+          "fires_ago": 2,
           "duration_seconds": 51,
           "status": "ok",
           "final_response": "No bird counts today: the reserve's counts page could not be read.",
           "tool_timeline": [
-            {"name": "web_fetch", "duration_ms": 2300, "status": "error"},
-            {"name": "web_search", "duration_ms": 4100, "status": "ok"},
-            {"name": "web_fetch", "duration_ms": 2000, "status": "error"},
-            {"name": "web_fetch", "duration_ms": 1800, "status": "error"}
+            {
+              "name": "web_fetch",
+              "duration_ms": 2300,
+              "status": "error"
+            },
+            {
+              "name": "web_search",
+              "duration_ms": 4100,
+              "status": "ok"
+            },
+            {
+              "name": "web_fetch",
+              "duration_ms": 2000,
+              "status": "error"
+            },
+            {
+              "name": "web_fetch",
+              "duration_ms": 1800,
+              "status": "error"
+            }
           ],
           "tool_tally": [
-            {"name": "web_fetch", "ok": 0, "error": 3, "unfinished": 0,
-             "last_error": "HTTP 410 Gone: counts.saltmarsh-reserve.example/latest"},
-            {"name": "web_search", "ok": 1, "error": 0, "unfinished": 0}
+            {
+              "name": "web_fetch",
+              "ok": 0,
+              "error": 3,
+              "unfinished": 0,
+              "last_error": "HTTP 410 Gone: counts.saltmarsh-reserve.example/latest"
+            },
+            {
+              "name": "web_search",
+              "ok": 1,
+              "error": 0,
+              "unfinished": 0
+            }
           ]
         },
         {
-          "hours_ago": 4,
+          "fires_ago": 1,
           "duration_seconds": 36,
           "status": "ok",
           "final_response": "No bird counts today: the reserve's counts page could not be read.",
           "tool_timeline": [
-            {"name": "web_fetch", "duration_ms": 2200, "status": "error"},
-            {"name": "web_fetch", "duration_ms": 2000, "status": "error"}
+            {
+              "name": "web_fetch",
+              "duration_ms": 2200,
+              "status": "error"
+            },
+            {
+              "name": "web_fetch",
+              "duration_ms": 2000,
+              "status": "error"
+            }
           ],
           "tool_tally": [
-            {"name": "web_fetch", "ok": 0, "error": 2, "unfinished": 0,
-             "last_error": "HTTP 410 Gone: counts.saltmarsh-reserve.example/latest"}
+            {
+              "name": "web_fetch",
+              "ok": 0,
+              "error": 2,
+              "unfinished": 0,
+              "last_error": "HTTP 410 Gone: counts.saltmarsh-reserve.example/latest"
+            }
           ]
         }
       ]

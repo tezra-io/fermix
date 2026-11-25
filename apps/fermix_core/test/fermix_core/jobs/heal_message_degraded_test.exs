@@ -87,14 +87,11 @@ defmodule FermixCore.Jobs.HealMessageDegradedTest do
     assert text =~ "3 runs in a row"
     assert text =~ ~s(The tool said: "needs reconnection")
 
-    assert text =~
-             ~s(3 runs have ended this way since Tuesday, March 4, 2031 at 6:00 AM WET: ) <>
-               ~s("Harbour tide table" \(2\), "Morning brief" \(1\).)
-
-    one =
-      HealMessage.build(%{@plugin_facts | run_count: 1, jobs: [hd(@plugin_facts.jobs)]}, @lisbon)
-
-    assert one =~ "1 run has ended this way"
+    # The jobs are named with no count or "since", which would start at the run
+    # that opened the heal (stage S4, round two).
+    assert text =~ ~s(It affects these jobs: "Harbour tide table", "Morning brief".)
+    refute text =~ "since"
+    refute text =~ ~r/runs? ha(s|ve) ended/
   end
 
   # A stored tool this engine could not read reads as none (§6): the message

@@ -776,7 +776,7 @@ def test_dry_run_counts_the_attempts_seeded_with_state(capsys):
     code = run_eval.main(["--suite", "job_auto_heal", "--profile", "isolated_mutation",
                           "--judge", "--dry-run"])
     assert code == 0
-    assert "state: 6 case trial(s) would each seed" in capsys.readouterr().out
+    assert "state: 7 case trial(s) would each seed" in capsys.readouterr().out
 
 
 def test_dry_run_counts_the_attempts_that_start_from_the_snapshot(capsys):

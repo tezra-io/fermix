@@ -2,8 +2,17 @@ defmodule FermixCore.Tools.ListJobs do
   @moduledoc """
   List durable scheduled jobs. Each carries its heal that is not closed (M106
   §5.4), or nil: what failed, since when, how many runs, and whether the
-  owner was told, and once diagnosed (§5.5) what Fermix decided, its note,
-  and a proposal's fields with the values they would take.
+  owner was told, and once diagnosed (§5.5) what Fermix decided, whether the
+  diagnosis left a note (its text is read with the run, through
+  `get_job_run`, as outside content: a model wrote it after reading the
+  failure's words), and a proposal's fields with the whole values they would
+  take. A job's latest proposal that is no longer its open heal (answered,
+  superseded, expired or closed by a clean run) shows as `last_proposal` for
+  the seven days its failure is quiet, whatever heal is open beside it
+  (§5.7, D5).
+
+  Context seams: `:memory_repo` and `:now_fn` (the clock that window is
+  counted on).
   """
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
@@ -62,8 +71,10 @@ defmodule FermixCore.Tools.ListJobs do
           state -> Keyword.put(opts, :state, state)
         end
 
+      now = Map.get(context, :now_fn, &DateTime.utc_now/0).()
+
       with {:ok, jobs} <- Registry.list_jobs(opts),
-           {:ok, heals} <- Repo.job_heals_call(:open_by_job, server: opts[:repo]) do
+           {:ok, heals} <- Repo.job_heals_call({:listed_by_job, now}, server: opts[:repo]) do
         Support.success_json(%{jobs: Enum.map(jobs, &listed_job(&1, heals, opts[:repo]))})
       else
         {:error, reason} -> Support.error(reason)
@@ -71,9 +82,18 @@ defmodule FermixCore.Tools.ListJobs do
     end)
   end
 
-  defp listed_job(job, heals, repo) do
+  defp listed_job(job, %{open: open, proposals: proposals}, repo) do
+    heal = Map.get(open, job.id)
+
     job
     |> Support.job_payload(repo)
-    |> Map.put(:heal, heals |> Map.get(job.id) |> Support.heal_payload())
+    |> Map.put(:heal, Support.heal_payload(heal))
+    |> put_last_proposal(heal, Map.get(proposals, job.id))
   end
+
+  defp put_last_proposal(payload, _heal, nil), do: payload
+  defp put_last_proposal(payload, %{id: id}, %{id: id}), do: payload
+
+  defp put_last_proposal(payload, _heal, proposal),
+    do: Map.put(payload, :last_proposal, Support.heal_payload(proposal))
 end

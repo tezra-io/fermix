@@ -1232,6 +1232,28 @@ defmodule FermixOpik.AggregationTest do
     assert trace.metadata.read_outside == true
   end
 
+  # M106 §5.7, D5 (stage S4): the owner's answer to a proposal is a phase of
+  # its own, carrying which answer and whether the change was applied.
+  test "a heal's answer is its own point trace, with the answer and whether it applied" do
+    {_state, closed} =
+      run([
+        {[:fermix, :job, :heal], %{count: 1},
+         %{
+           agent: "scheduled:job-9",
+           phase: "answered",
+           heal_id: "jhl_0a1b",
+           job_id: "job-9",
+           decision: "propose",
+           answer: "apply",
+           applied: false
+         }}
+      ])
+
+    assert [%{trace: trace}] = closed
+    assert trace.name == "job_heal:answered"
+    assert %{answer: "apply", applied: false, decision: "propose"} = trace.metadata
+  end
+
   # M106 §5.5 (stage S3): a heal run is a run kind of its own. Its session is
   # its own root: the failed run it was spawned for has shipped, so its
   # session rides as correlation metadata, never as a parent.

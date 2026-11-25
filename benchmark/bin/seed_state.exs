@@ -11,7 +11,9 @@
 # reply to a follow-up, then creates the spec's jobs (with their past runs) and
 # reminders through the same registry and claim/settle calls the daemon uses, so
 # validation, schedule parsing and reminder planning are the product's own. Run
-# history is back-dated relative to now; reminders take absolute local dates in
+# history is back-dated: a scheduled run at one of its job's own past fire times
+# (`fires_ago`), an off-schedule manual run `hours_ago` before now
+# (bin/seed_run_times.exs, the rule); reminders take absolute local dates in
 # the home's configured timezone. Open loops are written through Memory.Repo
 # already due (see seed_open_loop!/3), dated or waited on (`anchor_kind`), with
 # their reach and the rung 1 window the lifecycle gives them; the owner's replies
@@ -36,24 +38,29 @@
 # stays ok; a plugin's tool makes it the plugin's heal, which a later job's tripping
 # run joins. A tally the engine could not read would trip nothing, so a malformed one
 # is refused. A failed run, or an ok run that opens a heal of its job, may also carry
-# a `heal`: the
-# conclusion its heal run would have reached (M106 §5.5), made through the Repo's
-# own heal calls (claim, inbox, decision, message, delivered) at
-# `delivered_hours_ago`, so a later failed run joins a waiting heal or concludes a
-# watching one a second time (the verdict) in its own settle. A rerun also names what
-# came of its ask (`rerun_outcome`), recorded through the same call. Nothing is sent
-# and the job is not touched: the spec states the job as the decision left it (a raised
-# limit already raised, a proposal not applied). Every job and run is checked before the
-# reset, so a refused spec leaves the home as it was.
+# a `heal`: the conclusion its heal run would have reached (M106 §5.5), made through
+# the Repo's own heal calls (claim, inbox, decision, message, delivered)
+# `delivered_minutes_after` its run ended, so a later failed run joins a waiting heal
+# or concludes a watching one a second time (the verdict) in its own settle. A rerun
+# also names what came of its ask (`rerun_outcome`), recorded through the same call; a
+# proposal is stored with the job version it was drawn for, which the owner's answer to
+# it is fenced on, and may be followed by the owner's own edit (`owner_edit`), which
+# supersedes it.
+# Nothing is sent and the job is not touched otherwise: the spec states the job as the
+# decision left it (a raised limit already raised, a proposal not applied). Every job and
+# run is checked before the reset, so a refused spec leaves the home as it was.
 #
 # It runs in its own BEAM beside the eval daemon; SQLite (WAL, busy_timeout)
 # serialises the two writers. Every value a spec carries is invented.
+
+Code.require_file("seed_run_times.exs", __DIR__)
 
 defmodule SeedState do
   alias Exqlite.Sqlite3
   alias FermixCore.Delivery.OwnerInbox
   alias FermixCore.Jobs.Degraded
   alias FermixCore.Jobs.Failure
+  alias FermixCore.Jobs.HealDecision
   alias FermixCore.Jobs.HealMessage
   alias FermixCore.Jobs.Registry, as: Jobs
   alias FermixCore.Memory.Config, as: MemoryConfig
@@ -95,6 +102,15 @@ defmodule SeedState do
   @tally_counts ~w(ok error unfinished)
   @tally_read_statuses ~w(ok error timeout)
   @heal_decisions ~w(rerun raise_limit propose tell)
+  @heal_keys ~w(decision note change read_outside rerun_outcome delivered_minutes_after
+                owner_edit)
+  # What a seeded owner's edit after a proposal may change, as `Jobs.Registry`
+  # takes it: each moves the job's definition, so the edit supersedes the proposal.
+  @owner_edit_fields %{
+    "schedule" => :schedule,
+    "task_prompt" => :task_prompt,
+    "timeout_seconds" => :timeout_seconds
+  }
   @rerun_outcomes ~w(started running refused unanswered)
   # The job field each change field names, as a spec states the job.
   @change_fields %{
@@ -103,7 +119,12 @@ defmodule SeedState do
     "skill_name" => "skill_name",
     "timeout_seconds" => "timeout_seconds"
   }
-  @note_max 500
+  # The note a diagnosis may leave (`Tools.JobHealRespond`: longer is refused, never cut).
+  @note_max 280
+  # The failure kinds a seed can state the way the runner stores them: the reason each
+  # is built from is the spec's (`other`'s own text) or the job's (`unknown_skill`'s
+  # skill) or the run's (`time_limit`'s limit, the run's whole length).
+  @seeded_kinds ~w(other unknown_skill time_limit)
   # The lease a seeded conclusion takes, as the Scheduler's claim does.
   @seeded_lease_s 300
 
@@ -124,7 +145,7 @@ defmodule SeedState do
     loop_keys = Enum.map(loop_plans, & &1.key)
     reply_plans = plan_replies!(Map.get(spec, "open_loop_replies", []), loop_keys, now)
     said_plans = plan_owner_messages!(Map.get(spec, "owner_messages", []), now)
-    :ok = check_jobs!(Map.get(spec, "jobs", []), config)
+    :ok = check_jobs!(Map.get(spec, "jobs", []), config, now)
     reset!(now, System.monotonic_time(:millisecond) + @reset_wait_ms)
     jobs = Map.new(Map.get(spec, "jobs", []), &seed_job!(&1, now, config))
     reminders = Enum.map(Map.get(spec, "reminders", []), &seed_reminder!(&1, now, config))
@@ -335,8 +356,11 @@ defmodule SeedState do
     }
 
     {:ok, job} = Jobs.create_job(attrs, now: now, scheduler: nil)
-    Enum.each(Map.get(spec, "runs", []), &seed_run!(job, &1, now, config))
-    {Map.fetch!(spec, "key"), job_snapshot(job)}
+    starts = SeedRunTimes.starts!(spec, job_zone(spec, config), now)
+    Enum.zip_with(runs(spec), starts, &seed_run!(job, &1, &2, config))
+    # As the seed left it, a seeded owner's edit included.
+    {:ok, seeded} = Repo.get_scheduled_job(job.id)
+    {Map.fetch!(spec, "key"), job_snapshot(seeded)}
   end
 
   # What a checker compares the end state with ("unchanged" fields, the same id).
@@ -369,12 +393,12 @@ defmodule SeedState do
     end
   end
 
-  # The scheduler's own claim, then the runner's own settle, back-dated: the job's
-  # last_run_at / last_status / last_error come from the settle exactly as they do
-  # after a real run. A run's `heal` is concluded right after its settle.
-  defp seed_run!(job, spec, now, config) do
-    started = DateTime.add(now, -Map.fetch!(spec, "hours_ago") * 3600, :second)
-    completed = DateTime.add(started, Map.fetch!(spec, "duration_seconds"), :second)
+  # The scheduler's own claim, then the runner's own settle, back-dated to the run's
+  # start (`SeedRunTimes`): the job's last_run_at / last_status / last_error come from
+  # the settle exactly as they do after a real run. A run's `heal` is concluded right
+  # after its settle.
+  defp seed_run!(job, spec, started, config) do
+    completed = SeedRunTimes.ended(spec, started)
     id = "run_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
 
     run = %{
@@ -400,19 +424,18 @@ defmodule SeedState do
         |> Map.merge(%{
           status: status,
           completed_at: completed,
-          error: Map.get(spec, "error"),
           final_response: Map.get(spec, "final_response"),
           tool_timeline: Map.get(spec, "tool_timeline"),
           tool_tally: Map.get(spec, "tool_tally"),
           updated_at: completed
         })
-        |> Map.merge(seeded_failure(status, spec)),
+        |> Map.merge(seeded_failure(status, job, spec)),
         seeded_settle_by(status)
       )
 
     case Map.get(spec, "heal") do
       nil -> :ok
-      heal -> conclude_heal!(job, heal, now, config)
+      heal -> conclude_heal!(job, heal, SeedRunTimes.concluded(spec, started), config)
     end
   end
 
@@ -426,16 +449,41 @@ defmodule SeedState do
   defp seeded_settle_by("ok"), do: :ok
   defp seeded_settle_by(_failed), do: {:failed, :other}
 
-  # A seeded failure is of the kind its spec names (`other` by default), and its
-  # error is the sentence a heal of the owner's job is told (M106 §5.4), as a real
-  # run's settle tells it.
-  defp seeded_failure("ok", _spec), do: %{}
+  # A seeded failure stored as the runner stores one (M106 §5.8): of the kind its spec
+  # names (`other` by default), its reason built as the runner's would be, the heal
+  # told Fermix's own sentence for it (`Failure.sentence/2`, naming the tool still
+  # running when a limit stopped it), and the run's error that sentence, or for a kind
+  # Fermix has no sentence for its own words, which the heal quotes as someone else's.
+  defp seeded_failure("ok", _job, _spec), do: %{}
 
-  defp seeded_failure(_failed, spec) do
+  defp seeded_failure(_failed, job, spec) do
+    kind = Map.get(spec, "failure_kind", "other")
+    reason = seeded_reason(kind, job, spec)
+    tool = in_flight(Map.get(spec, "tool_timeline"))
+    sentence = Failure.sentence(reason, in_flight: tool)
+    own_words = if kind == "other", do: Failure.other_text(reason), else: nil
+
     %{
-      failure_kind: Map.get(spec, "failure_kind", "other"),
-      heal_facts: %{failure_text: Map.fetch!(spec, "error"), provider: nil}
+      error: own_words || sentence,
+      failure_kind: kind,
+      heal_facts: %{failure_text: sentence, failure_words: own_words, provider: nil}
     }
+  end
+
+  defp seeded_reason("other", _job, spec), do: Map.fetch!(spec, "error")
+  defp seeded_reason("unknown_skill", job, _spec), do: {:unknown_skill, job.skill_name}
+
+  defp seeded_reason("time_limit", _job, spec),
+    do: {:time_limit, Map.fetch!(spec, "duration_seconds") * 1_000}
+
+  # The tool still running when the run stopped: the newest entry its timeline marks
+  # unfinished, as the runner reads it.
+  defp in_flight(nil), do: nil
+
+  defp in_flight(timeline) do
+    timeline
+    |> Enum.reverse()
+    |> Enum.find_value(fn entry -> entry["status"] == "unfinished" && entry["name"] end)
   end
 
   # --- a seeded heal's conclusion (M106 §5.5) ----------------------------------
@@ -446,8 +494,7 @@ defmodule SeedState do
   # delivery marked, which takes it where its decision says. Nothing is sent, and the
   # job is as the spec states it. `check_jobs!/2` made sure no other heal is open, so
   # the claim's oldest open heal is this run's.
-  defp conclude_heal!(job, heal, now, config) do
-    at = DateTime.add(now, -round(Map.fetch!(heal, "delivered_hours_ago") * 3600), :second)
+  defp conclude_heal!(job, heal, at, config) do
     lease_until = DateTime.add(at, @seeded_lease_s, :second)
     {id, token} = claim_seeded_heal!(job, at, lease_until)
     {:ok, inbox} = OwnerInbox.for_approval(jobs_config: config.jobs, configured_owners: %{})
@@ -458,6 +505,18 @@ defmodule SeedState do
     :ok = Repo.job_heals_call({:put_message, id, token, text, at})
     :ok = Repo.job_heals_call({:delivered, id, token, at})
     record_rerun_outcome!(id, heal, at)
+    owner_edit!(job, Map.get(heal, "owner_edit"))
+  end
+
+  # The owner's own edit of the job after its proposal reached them, through the
+  # edit path `update_job` takes, which closes the waiting proposal superseded in
+  # the same write (M106 §5.7).
+  defp owner_edit!(_job, nil), do: :ok
+
+  defp owner_edit!(job, edit) do
+    attrs = Map.new(edit, fn {field, value} -> {Map.fetch!(@owner_edit_fields, field), value} end)
+    {:ok, _edited} = Jobs.update_job(job.id, attrs, scheduler: nil)
+    :ok
   end
 
   # What came of a seeded rerun's ask, recorded with the call the heal run makes after
@@ -489,14 +548,20 @@ defmodule SeedState do
       note: Map.fetch!(heal, "note"),
       read_outside: Map.get(heal, "read_outside", true),
       change: change,
-      change_job_version: change && job.updated_at
+      change_job_version: change && job.updated_at,
+      change_job_digest: proposal_digest(Map.fetch!(heal, "decision"), job)
     }
   end
 
+  # The version of the job a proposal is drawn for (M106 §5.7), from the engine's
+  # own digest: without it the owner's yes reads as superseded and applies nothing.
+  defp proposal_digest("propose", job), do: HealDecision.job_version(job)
+  defp proposal_digest(_decision, _job), do: nil
+
   # --- what a jobs spec may say, checked before the reset ----------------------
 
-  defp check_jobs!(specs, config) when is_list(specs) do
-    Enum.each(specs, &check_job_runs!/1)
+  defp check_jobs!(specs, config, now) when is_list(specs) do
+    Enum.each(specs, &check_job_runs!(&1, config, now))
     concluding = Enum.filter(specs, &Enum.any?(runs(&1), fn run -> Map.has_key?(run, "heal") end))
     opening = Enum.filter(specs, &opens_heal?/1)
 
@@ -512,6 +577,7 @@ defmodule SeedState do
 
   defp runs(spec), do: Map.get(spec, "runs", [])
   defp failed?(run), do: Map.get(run, "status") != "ok"
+  defp job_zone(spec, config), do: Map.get(spec, "timezone", config.zone)
 
   # A failed run opens a heal (or joins one); so does an ok run that trips the rule of
   # runs that end ok without working (M106 §6).
@@ -525,8 +591,8 @@ defmodule SeedState do
 
   # What the seed's own settle of the ok run at `index` makes of the tallies, by the
   # engine's rule (`Jobs.Degraded`): the run's tally, then those of the runs settled
-  # before it that the settle reads, newest first. `check_order!/2` keeps the spec's
-  # order the settle's.
+  # before it that the settle reads, newest first. `SeedRunTimes.check_order!/4` keeps
+  # the spec's order the settle's.
   defp tripped(runs, index) do
     {before, [run | _after]} = Enum.split(runs, index)
 
@@ -549,15 +615,16 @@ defmodule SeedState do
     end
   end
 
-  defp check_job_runs!(spec) do
+  defp check_job_runs!(spec, config, now) do
     key = Map.get(spec, "key")
     runs = runs(spec)
-    check_order!(key, runs)
+    starts = SeedRunTimes.starts!(spec, job_zone(spec, config), now)
+    :ok = SeedRunTimes.check_order!(key, runs, starts, now)
 
     runs
     |> Enum.with_index()
     |> Enum.each(fn {run, index} ->
-      check_run!(key, run)
+      check_run!(key, spec, run)
 
       case Map.get(run, "heal") do
         nil -> :ok
@@ -566,24 +633,8 @@ defmodule SeedState do
     end)
   end
 
-  # Oldest first, as the seed settles them, so the runs before one in the spec are the
-  # runs its settle reads before it; whole hours and seconds, as the back-dating adds.
-  defp check_order!(key, runs) do
-    hours = Enum.map(runs, &Map.get(&1, "hours_ago"))
-    durations = Enum.map(runs, &Map.get(&1, "duration_seconds"))
-
-    unless Enum.all?(hours ++ durations, &count?/1) and hours == Enum.sort(hours, :desc) and
-             hours == Enum.uniq(hours),
-           do:
-             raise(
-               "jobs #{key}: runs are listed oldest first, each hours_ago a whole number below the one before and each duration_seconds a whole number, got #{inspect(hours)} and #{inspect(durations)}"
-             )
-  end
-
-  defp check_run!(key, run) do
+  defp check_run!(key, spec, run) do
     trigger = Map.get(run, "trigger", "schedule")
-    kind = Map.get(run, "failure_kind")
-    kinds = Enum.map(Failure.kinds(), &Failure.stored/1)
 
     unless trigger in @run_triggers,
       do:
@@ -591,14 +642,54 @@ defmodule SeedState do
           "jobs #{key}: trigger must be one of #{inspect(@run_triggers)}, got #{inspect(trigger)}"
         )
 
-    unless is_nil(kind) or (failed?(run) and kind in kinds),
-      do:
-        raise(
-          "jobs #{key}: failure_kind #{inspect(kind)} needs a failed run and one of #{inspect(kinds)}"
-        )
-
+    check_failure!(key, spec, run)
     check_timeline!(key, Map.get(run, "tool_timeline"))
     check_tally!(key, Map.get(run, "tool_tally"))
+  end
+
+  # A failed run's kind is one the seed builds a reason for. Only `other` states its
+  # own words (`error`); every other kind's text is Fermix's sentence, which the seed
+  # takes from the engine, so a spec never carries a copy of it. An ok run states none.
+  defp check_failure!(key, _spec, %{"status" => "ok"} = run) do
+    if Map.has_key?(run, "failure_kind") or Map.has_key?(run, "error"),
+      do: raise("jobs #{key}: an ok run states no failure_kind or error, got #{inspect(run)}")
+  end
+
+  defp check_failure!(key, spec, run) do
+    kind = Map.get(run, "failure_kind", "other")
+
+    unless kind in @seeded_kinds,
+      do:
+        raise(
+          "jobs #{key}: a seeded failure's kind is one of #{inspect(@seeded_kinds)}, got #{inspect(kind)}"
+        )
+
+    check_failure_reason!(key, kind, spec, run)
+  end
+
+  defp check_failure_reason!(key, "other", _spec, run) do
+    unless is_binary(run["error"]) and run["error"] != "",
+      do: raise("jobs #{key}: an `other` failure states its own words as error")
+  end
+
+  defp check_failure_reason!(key, kind, spec, run) do
+    if Map.has_key?(run, "error"),
+      do:
+        raise(
+          "jobs #{key}: a #{kind} failure's text is Fermix's own sentence, so the spec states no error"
+        )
+
+    check_kind_source!(key, kind, spec, run)
+  end
+
+  defp check_kind_source!(key, "unknown_skill", spec, _run) do
+    unless is_binary(spec["skill_name"]) and spec["skill_name"] != "",
+      do: raise("jobs #{key}: an unknown_skill failure needs the job's skill_name")
+  end
+
+  defp check_kind_source!(key, "time_limit", _spec, run) do
+    unless run["status"] == "timeout",
+      do: raise("jobs #{key}: a time_limit failure is a timeout, stopped at its whole length")
   end
 
   # The runner's tally (M106 §6), each tool once: a tally the engine cannot read would
@@ -656,8 +747,8 @@ defmodule SeedState do
     do: raise("jobs #{key}: tool_timeline must be a list, got #{inspect(other)}")
 
   # A conclusion of the heal a run opened: a decision the seed can state, a note as
-  # the decision tool takes one, a change that says what the job holds, and a time
-  # after this run ended and before the next began.
+  # the decision tool takes one, a change that says what the job holds, nothing else,
+  # and a time after this run ended and before the next began (`SeedRunTimes`).
   defp check_heal!(key, spec, runs, index, heal) do
     run = Enum.at(runs, index)
     next_run = Enum.at(runs, index + 1)
@@ -665,6 +756,12 @@ defmodule SeedState do
     note = Map.get(heal, "note")
 
     unless failed?(run), do: check_tool_heal!(key, tripped(runs, index))
+
+    unless Map.keys(heal) -- @heal_keys == [],
+      do:
+        raise(
+          "jobs #{key}: a seeded heal names only #{inspect(@heal_keys)}, got #{inspect(heal)}"
+        )
 
     unless decision in @heal_decisions,
       do:
@@ -677,8 +774,28 @@ defmodule SeedState do
 
     check_change!(key, spec, decision, Map.get(heal, "change"))
     check_rerun_outcome!(key, decision, next_run, Map.get(heal, "rerun_outcome"))
-    check_conclusion_time!(key, run, next_run, Map.get(heal, "delivered_hours_ago"))
+    check_owner_edit!(key, spec, decision, Map.get(heal, "owner_edit"))
   end
+
+  # An owner's edit after a proposal: on a proposal only, each field one the edit
+  # path takes, each value a change from what the spec states.
+  defp check_owner_edit!(_key, _spec, _decision, nil), do: :ok
+
+  defp check_owner_edit!(key, spec, "propose", edit) when is_map(edit) and map_size(edit) > 0 do
+    for {field, value} <- edit,
+        not Map.has_key?(@owner_edit_fields, field) or Map.get(spec, field) == value do
+      raise "jobs #{key}: an owner_edit changes one of #{inspect(Map.keys(@owner_edit_fields))} " <>
+              "to a new value, got #{field}: #{inspect(value)}"
+    end
+
+    :ok
+  end
+
+  defp check_owner_edit!(key, _spec, decision, edit),
+    do:
+      raise(
+        "jobs #{key}: an owner_edit follows a propose conclusion only, got #{decision}: #{inspect(edit)}"
+      )
 
   # An ok run's heal is one its tool opened for the job (M106 §6). A plugin's heal is
   # told by code with no decision, so it has no conclusion to seed.
@@ -716,17 +833,6 @@ defmodule SeedState do
   defp check_rerun_outcome!(key, decision, _next_run, outcome),
     do:
       raise("jobs #{key}: a #{decision} conclusion has no rerun_outcome, got #{inspect(outcome)}")
-
-  defp check_conclusion_time!(key, run, next_run, hours) do
-    ended_hours_ago = Map.fetch!(run, "hours_ago") - Map.fetch!(run, "duration_seconds") / 3600
-    next_hours_ago = if next_run, do: Map.fetch!(next_run, "hours_ago"), else: 0
-
-    unless is_number(hours) and hours <= ended_hours_ago and hours > next_hours_ago,
-      do:
-        raise(
-          "jobs #{key}: delivered_hours_ago must fall after the run ended and before the next began, got #{inspect(hours)}"
-        )
-  end
 
   # A raised limit is on the job already (the spec states it raised, within the
   # engine's run limit); a proposal is not (each field holds its `from`). Any other

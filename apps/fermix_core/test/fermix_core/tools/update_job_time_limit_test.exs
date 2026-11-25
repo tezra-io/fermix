@@ -89,7 +89,9 @@ defmodule FermixCore.Tools.UpdateJobTimeLimitTest do
     end
   end
 
-  test "list_jobs shows a heal's decision, its note and a stored proposal", %{
+  # The note's text is read only through `get_job_run`, as outside content
+  # (M106 S4, round two): `list_jobs` says that one exists.
+  test "list_jobs shows a heal's decision, that it has a note, and a stored proposal", %{
     repo: repo,
     context: context
   } do
@@ -115,10 +117,12 @@ defmodule FermixCore.Tools.UpdateJobTimeLimitTest do
     assert {:ok, %{success: true, output: output}} = ListJobs.execute(%{}, context)
     [listed] = Jason.decode!(output)["jobs"]
 
+    refute output =~ "new harbour page"
+
     assert %{
              "state" => "waiting",
              "decision" => "propose",
-             "note" => "Point the task at the new harbour page.",
+             "has_note" => true,
              "proposal" => %{
                "task" => "Fetch the tides from the new page.",
                "schedule" => "every 2 hours"

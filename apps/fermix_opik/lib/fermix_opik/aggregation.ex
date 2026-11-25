@@ -362,7 +362,7 @@ defmodule FermixOpik.Aggregation do
   end
 
   # A heal (M106 §5.4) has no run of its own: each phase (opened, joined,
-  # delivered, delivery_failed, closed) is a point event that becomes its own
+  # delivered, delivery_failed, answered, closed) is a point event that becomes its own
   # self-closing trace, built inline and never tracked in state. Correlation
   # is by `heal_id`, and by `job_id` and `run_id` when a run moved it; nesting
   # under the run would resurrect a trace that has already shipped.
@@ -2283,7 +2283,11 @@ defmodule FermixOpik.Aggregation do
           requested: Map.get(metadata, :requested),
           refusal: Map.get(metadata, :refusal),
           read_outside: Map.get(metadata, :read_outside),
-          rerun_outcome: Map.get(metadata, :rerun_outcome)
+          rerun_outcome: Map.get(metadata, :rerun_outcome),
+          # The owner's answer to a proposal (M106 §5.7, D5), and whether the
+          # change was applied.
+          answer: Map.get(metadata, :answer),
+          applied: Map.get(metadata, :applied)
         }),
       tags: ["job_heal"]
     })

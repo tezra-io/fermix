@@ -16,7 +16,12 @@ defmodule FermixCore.Jobs.Telemetry do
   `phase`: `opened`, `joined`, `verdict` (a failure concluding a watching
   heal a second time, §5.9) and `closed` from a run's settle; `decided`,
   `rerun`, `delivered`, `delivery_failed` and `closed` (still failing) from
-  its heal run; and `closed` again when the Scheduler expires one. Each
+  its heal run; `closed` again when the Scheduler expires one, and when an
+  owner's edit supersedes a waiting proposal; and `answered` (M106 §5.7, D5)
+  when the owner's answer to a proposal is recorded, followed by `closed`
+  when that answer closed it (`skipped`, or `superseded` for an apply to a
+  job that moved on); `Jobs.HealAnswer` emits those two, and has no
+  production caller until the proposal's card is built. Each
   carries `heal_id`, and `job_id` and `run_id` when a run moved it. A settle
   that took a failure says its `failure_kind`, `subject_kind` and
   `subject_id`: an ok run whose tool never worked three runs in a row (M106
@@ -34,7 +39,7 @@ defmodule FermixCore.Jobs.Telemetry do
   @run_complete_event [:fermix, :job, :run_complete]
   @run_error_event [:fermix, :job, :run_error]
   @heal_event [:fermix, :job, :heal]
-  @heal_phases ~w(opened joined verdict decided rerun delivered delivery_failed closed)
+  @heal_phases ~w(opened joined verdict decided rerun delivered delivery_failed closed answered)
   @heal_run_start_event [:fermix, :job, :heal_run_start]
   @heal_run_complete_event [:fermix, :job, :heal_run_complete]
   @heal_run_error_event [:fermix, :job, :heal_run_error]
@@ -181,13 +186,15 @@ defmodule FermixCore.Jobs.Telemetry do
 
   @doc """
   One phase of a heal's life (`opened`, `joined`, `verdict`, `decided`,
-  `rerun`, `delivered`, `delivery_failed` or `closed`), with its `heal_id`
-  and whatever of `job_id`, `run_id`, `subject_kind`, `subject_id`,
-  `failure_kind`, `outcome`, `attempts`, `dead_letter`, `platform`, `error`,
-  `conclusion`, `decision` (what code carried out), `requested` (what the
-  heal run asked), `refusal` (why code did not carry the request out),
-  `read_outside` and, on `rerun`, its `rerun_outcome` (`started`, `running`,
-  `refused` or `unanswered`) the phase knows.
+  `rerun`, `delivered`, `delivery_failed`, `closed` or `answered`), with its
+  `heal_id` and whatever of `job_id`, `run_id`, `subject_kind`,
+  `subject_id`, `failure_kind`, `outcome`, `attempts`, `dead_letter`,
+  `platform`, `error`, `conclusion`, `decision` (what code carried out),
+  `requested` (what the heal run asked), `refusal` (why code did not carry
+  the request out), `read_outside`, on `rerun` its `rerun_outcome`
+  (`started`, `running`, `refused` or `unanswered`), and on `answered` the
+  owner's `answer` (`apply` or `leave`) and whether the change was
+  `applied` the phase knows.
   """
   @spec heal(String.t(), map()) :: :ok
   def heal(phase, %{heal_id: heal_id} = facts)
@@ -198,7 +205,7 @@ defmodule FermixCore.Jobs.Telemetry do
       facts
       |> Map.take(
         ~w(job_id run_id subject_kind subject_id failure_kind outcome attempts dead_letter platform
-           conclusion decision requested refusal read_outside rerun_outcome)a
+           conclusion decision requested refusal read_outside rerun_outcome answer applied)a
       )
       |> Map.merge(%{
         agent: if(job_id, do: "scheduled:#{job_id}", else: "job_heal"),

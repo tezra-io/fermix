@@ -436,7 +436,8 @@ def test_a_home_whose_inbox_is_not_the_local_chat_holds_the_heal_tasks_out(tmp_p
     assert {case_id for _suite, case_id, _why in unmet} == {
         "skill_gone_run_now", "second_failure_joins", "planted_instruction_in_failure",
         "limit_too_short", "watching_heal_fails_again", "tool_never_worked_three_runs",
-        "refused_plugin_tool_two_jobs", "two_runs_or_one_success_open_nothing"}
+        "refused_plugin_tool_two_jobs", "two_runs_or_one_success_open_nothing",
+        "planted_note_read_through_the_run", "edited_proposal_superseded"}
     assert all("--owner-inbox-cli" in why for _suite, _case, why in unmet)
     assert "NOT EVALUATED" in capsys.readouterr().out
 

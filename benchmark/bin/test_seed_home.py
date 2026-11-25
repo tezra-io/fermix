@@ -984,6 +984,66 @@ def test_a_seed_without_owner_inbox_cli_puts_the_telegram_target_back(tmp_path, 
     assert "--owner-inbox-cli" in seed.owner_inbox.home_problem(str(home))
 
 
+def _throwaway_checkout(root):
+    """A small git checkout with a commit, a _build and a deps dir, standing in for the
+    harness's own checkout. Every git call names this repo."""
+    repo = root / "checkout"
+    (repo / "apps").mkdir(parents=True)
+    (repo / "apps" / "core.ex").write_text("defmodule Core do\nend\n")
+    env = {**os.environ, "GIT_AUTHOR_NAME": "eval", "GIT_AUTHOR_EMAIL": "eval@localhost",
+           "GIT_COMMITTER_NAME": "eval", "GIT_COMMITTER_EMAIL": "eval@localhost"}
+    for args in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "snapshot me"]):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, env=env)
+    for skipped in ("_build", "deps"):
+        (repo / skipped).mkdir()
+        (repo / skipped / "big.bin").write_text("compiled")
+    (repo / "error.log").write_text("an untracked local file")
+    return repo
+
+
+def _head(repo):
+    return subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True,
+                          capture_output=True, text=True).stdout.strip()
+
+
+def test_workspace_snapshot_puts_the_checkout_at_its_head_as_ci_does(tmp_path, monkeypatch):
+    # run_eval.py refuses an isolated behavioral run unless the disposable workspace is
+    # a git snapshot at the harness's own HEAD (workspace_revision_error, tested in
+    # test_eval_safety.py); the CI eval box rsyncs its checkout in.
+    repo = _throwaway_checkout(tmp_path)
+    monkeypatch.setattr(seed, "REPO_DIR", str(repo))
+    home = tmp_path / "x-eval"
+    _seed_main(monkeypatch, home)
+    workspace = home / "workspace"
+    assert subprocess.run(["git", "-C", str(workspace), "rev-parse", "HEAD"],
+                          capture_output=True).returncode != 0    # an empty repo: refused
+    (workspace / "eval").mkdir()
+    (workspace / "eval" / "left_by_a_trial.txt").write_text("old")
+
+    _seed_main(monkeypatch, home, "--workspace-snapshot")
+    assert _head(workspace) == _head(repo)
+    assert (workspace / "apps" / "core.ex").is_file()
+    assert not (workspace / "_build").exists() and not (workspace / "deps").exists()
+    assert not (workspace / "error.log").exists()     # untracked: never copied
+    assert not (workspace / "eval").exists()          # an earlier trial's files are gone
+    status = subprocess.run(["git", "-C", str(workspace), "status", "--porcelain"],
+                            check=True, capture_output=True, text=True).stdout
+    assert status == ""                                # the tree is the commit, nothing more
+
+
+def test_workspace_snapshot_refuses_a_checkout_without_git_or_holding_the_home(
+        tmp_path, monkeypatch):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    monkeypatch.setattr(seed, "REPO_DIR", str(plain))
+    with pytest.raises(SystemExit):
+        _seed_main(monkeypatch, tmp_path / "x-eval", "--workspace-snapshot")
+    repo = _throwaway_checkout(tmp_path)
+    monkeypatch.setattr(seed, "REPO_DIR", str(repo))
+    with pytest.raises(SystemExit):
+        _seed_main(monkeypatch, repo / "inner-eval", "--workspace-snapshot")
+
+
 @pytest.mark.parametrize("flags", [("--provider", "openai", "--model", "gpt-x"),
                                    ("--provider", "ollama", "--model", "brindle-7b",
                                     "--voice", "--voice-engine", "openai_live")])

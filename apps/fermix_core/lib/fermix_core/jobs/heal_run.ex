@@ -18,13 +18,18 @@ defmodule FermixCore.Jobs.HealRun do
     2. diagnoses a heal on its first conclusion whose subject is its job and
        whose kind a model could help with (`Jobs.Failure.model_cannot_help?/1`
        false) and that holds no decision yet: one isolated loop
-       (`Jobs.HealDiagnosis`) whose decision code checks (`Jobs.HealDecision`).
-       A raised limit or a pause is written to the job through
-       `Jobs.Registry`, the path an owner's edit takes, right after a write
-       that proves the lease still held; then the decision, its note, what
-       the run read and the exact change are recorded on the heal. A
-       provider's heal, a plugin's (M106 §6), a kind no model can help with,
-       and a verdict run no model;
+       (`Jobs.HealDiagnosis`) whose decision code checks (`Jobs.HealDecision`)
+       against the job as read before the diagnosis. A raised limit or a
+       pause and the decision's record (its note, what the run read, the
+       exact change and the version of the job it was resolved against) are
+       ONE write (`Jobs.Registry.heal_write/5`, `Memory.Repo.heal_job_write/5`):
+       prepared as an owner's edit or pause is, fenced on this run's lease and
+       on the job still being that version, both committed or neither. A job
+       the owner changed while the diagnosis ran gets no move, and the
+       decision is recorded as `tell`, refused as `job_changed`, so the
+       message never claims a move; any other decision is recorded alone,
+       under the lease. A provider's heal, a plugin's (M106 §6), a kind no
+       model can help with, and a verdict run no model;
     3. builds the message once with `Jobs.HealMessage` from the store's facts
        and stores it, so every later attempt sends the same text;
     4. sends it once through `Delivery.ChannelSend` under the key
@@ -33,7 +38,9 @@ defmodule FermixCore.Jobs.HealRun do
     5. on a confirmed send, FIRST marks the delivery delivered, which takes
        the heal where its decision says (watching after a rerun or a raised
        limit, waiting otherwise, closed still failing on a verdict), THEN
-       writes the message to that conversation's history, only for an inbox
+       writes the message to that conversation's history, every line of it
+       but the note, which a model wrote after reading outside content
+       (`HealMessage.history_copy/2`), only for an inbox
        keyed as a turn there is (`OwnerInbox.dm_origin/1`), and THEN asks for
        a rerun's one run through the path "run now" takes, once per heal (the
        ask stamped by that same write), recording what came of it
@@ -52,10 +59,11 @@ defmodule FermixCore.Jobs.HealRun do
   the heal again. So the owner can get the message twice: a run that dies
   after its send landed and before its delivered mark (or whose mark found the
   lease gone) leaves a heal the next run sends again. The delivered mark comes
-  before the history row so a death between those two never resends. A run
-  that dies between a job write and the decision's record leaves the heal
-  undecided: the run that claims it next diagnoses it again, from the job as
-  it now stands.
+  before the history row so a death between those two never resends. A job
+  write and the decision's record are one transaction, so no death leaves a
+  job Fermix changed with no record of the change: a run that dies before it
+  leaves the heal undecided and the job as it was, and the run that claims it
+  next diagnoses it again.
   """
 
   use GenServer, restart: :temporary
@@ -224,8 +232,7 @@ defmodule FermixCore.Jobs.HealRun do
 
       decision
       |> HealDecision.resolve(job, checks(state))
-      |> carry_out(job, state)
-      |> record(ending, state)
+      |> carry_out(job, stored(ending), state)
     end
   end
 
@@ -264,57 +271,81 @@ defmodule FermixCore.Jobs.HealRun do
     }
   end
 
-  # A move on the job is written after a write that proves the lease is still
-  # this run's, through the registry an owner's edit uses (which clears the
-  # job's pending retry as any edit does). A write the registry refuses is
-  # never retried another way: the decision goes on as tell.
-  defp carry_out(%{decision: "raise_limit", change: change} = plan, job, state) do
+  # A move on the job and the decision's record are one write
+  # (`Registry.heal_write/5`, `Memory.Repo.heal_job_write/5`): fenced on this
+  # run's lease and on the job still being the version the decision was
+  # resolved against, prepared as an owner's edit or pause is (so the job's
+  # pending retry is cleared as any edit clears it), and committed with the
+  # record or not at all. A job that moved while the diagnosis ran is not
+  # written, and the decision goes on as tell, refused as `job_changed`; a
+  # write the registry refuses is never retried another way, and goes on as
+  # tell too. A lost lease writes nothing and records nothing.
+  defp carry_out(%{decision: "raise_limit", change: change} = plan, _job, stored, state) do
     %{"timeout_seconds" => %{"to" => seconds}} = change
-
-    fenced(plan, state, fn ->
-      Registry.update_job(job.id, %{timeout_seconds: seconds}, registry_opts(state))
-    end)
+    move(plan, {:update, %{timeout_seconds: seconds}}, stored, state)
   end
 
-  defp carry_out(%{decision: "pause"} = plan, job, state),
-    do: fenced(plan, state, fn -> Registry.pause_job(job.id, registry_opts(state)) end)
+  defp carry_out(%{decision: "pause"} = plan, _job, stored, state),
+    do: move(plan, :pause, stored, state)
 
-  defp carry_out(plan, _job, _state), do: {:ok, plan}
+  defp carry_out(plan, _job, stored, state), do: record(plan, stored, state)
 
-  defp fenced(plan, state, job_write) do
-    with :ok <- write(state, {:hold, state.heal.id, token(state), now(state)}) do
-      case job_write.() do
-        {:ok, _job} -> {:ok, plan}
-        {:error, reason} -> {:ok, HealDecision.refuse(plan, {:move_failed, reason})}
-      end
+  defp move(plan, job_move, stored, state) do
+    kept = Map.merge(stored_plan(plan), stored)
+    claim = {:heal_run, token(state), kept, now(state)}
+
+    case Registry.heal_write(
+           state.heal.id,
+           state.heal.job_id,
+           job_move,
+           claim,
+           registry_opts(state)
+         ) do
+      {:ok, {:written, _job, _heal}} ->
+        recorded(plan, kept, state)
+
+      {:ok, {:moved_on, _heal}} ->
+        plan |> HealDecision.refuse(:job_changed) |> record(stored, state)
+
+      {:error, :lease_lost} ->
+        {:error, :lease_lost}
+
+      {:error, reason} ->
+        plan |> HealDecision.refuse({:move_failed, reason}) |> record(stored, state)
     end
   end
 
   defp registry_opts(state), do: [repo: state.repo, scheduler: state.scheduler, now: now(state)]
 
-  # The decision is recorded on the heal, under the lease, and traced with
-  # what was asked and why a check refused it; a refusal is logged too.
-  defp record({:ok, plan}, ending, state) do
-    read_outside = read_outside?(ending)
-    stored = Map.take(plan, [:decision, :note, :change, :change_job_version])
-    stored = Map.put(stored, :read_outside, read_outside)
+  # What the heal keeps of a plan, and of the run that made it.
+  defp stored_plan(plan),
+    do: Map.take(plan, [:decision, :note, :change, :change_job_version, :change_job_digest])
 
-    with :ok <- write(state, {:decided, state.heal.id, token(state), stored, now(state)}) do
-      log_refusal(state, plan)
+  defp stored(ending), do: %{read_outside: read_outside?(ending)}
 
-      trace(state, "decided", %{
-        decision: plan.decision,
-        requested: plan.requested,
-        refusal: plan.refusal,
-        read_outside: read_outside,
-        error: plan.refusal_detail
-      })
+  # A decision that wrote no job is recorded on the heal under the lease.
+  defp record(plan, stored, state) do
+    kept = Map.merge(stored_plan(plan), stored)
 
-      {:ok, %{state | heal: Map.merge(state.heal, stored)}}
-    end
+    with :ok <- write(state, {:decided, state.heal.id, token(state), kept, now(state)}),
+         do: recorded(plan, kept, state)
   end
 
-  defp record({:error, reason}, _ending, _state), do: {:error, reason}
+  # Traced with what was asked and why a check refused it; a refusal is
+  # logged too.
+  defp recorded(plan, kept, state) do
+    log_refusal(state, plan)
+
+    trace(state, "decided", %{
+      decision: plan.decision,
+      requested: plan.requested,
+      refusal: plan.refusal,
+      read_outside: kept.read_outside,
+      error: plan.refusal_detail
+    })
+
+    {:ok, %{state | heal: Map.merge(state.heal, kept)}}
+  end
 
   # Whether the run read content someone else could have written: its framed
   # failure or a tool's. A run the watchdog killed or that failed left no
@@ -395,12 +426,17 @@ defmodule FermixCore.Jobs.HealRun do
     end
   end
 
+  # The history holds the message without the heal run's note
+  # (`HealMessage.history_copy/2`): the owner was sent it, and the main agent
+  # reads it only through `get_job_run`, as outside content.
   defp record_history(state, inbox, text) do
     case OwnerInbox.dm_origin(inbox) do
-      {:ok, _origin} -> add_history(state, inbox, text)
+      {:ok, _origin} -> add_history(state, inbox, HealMessage.history_copy(text, note(state)))
       :error -> :ok
     end
   end
+
+  defp note(%{heal: heal}), do: Map.get(heal, :note)
 
   defp add_history(state, inbox, text) do
     :ok =

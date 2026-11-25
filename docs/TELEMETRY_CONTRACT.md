@@ -874,6 +874,11 @@ its mandate `refused_cue_run` (see "Access-gate labels").
 
 ### Scheduled job retries
 
+A scheduled run's `run_error` `error` is Fermix's sentence for its failure's
+kind (`Jobs.Failure.sentence/2`, one per kind on the closed list, a limit in
+minutes), or for a failure Fermix has no sentence for (`:other`) its own text;
+the term itself is the run's artifact's detail, never a field here.
+
 A failed scheduled run is run again quietly when it failed before its first
 tool on a failure waiting can clear (M106 §5.3), and its
 `[:fermix, :job, :run_error]` bookend says what became of it:
@@ -904,6 +909,9 @@ emitted only through `Jobs.Telemetry.heal/2` and `heal_settled/3`, with a
 | `verdict` | the same | a failure, or such an ok run, joined a `watching` heal, which is open again for its second message |
 | `closed` | the same, `outcome: "healed"` | an ok run closed the heal |
 | `closed` | `Jobs.Scheduler`'s reconcile pass, `outcome: "expired"` | the heal waited, or watched, 7 days |
+| `closed` | `Jobs.Registry`, `outcome: "superseded"` | an owner's edit, pause or resume moved the job's definition while a proposal waited, and its own write closed the proposal |
+| `answered` | `Jobs.HealAnswer`, `decision: "propose"`, `answer` (`apply` or `leave`), `applied` | the owner's answer to a waiting proposal was recorded: `applied` true when the change was written with the heal's move to watching, false for a leave or for an apply to a job no longer the version the change was drawn for. `Jobs.HealAnswer` has no production caller yet (the proposal's card, which will call it, is not built), so no running engine emits this phase |
+| `closed` | `Jobs.HealAnswer`, `outcome: "skipped"` or `"superseded"` | the answer just recorded closed the heal: a leave, or an apply to a job that moved on |
 | `decided` | `Jobs.HealRun` | its diagnosis's decision, as code carries it out, was recorded |
 | `delivered` | `Jobs.HealRun` | the one message was sent and marked |
 | `delivery_failed` | `Jobs.HealRun`, `dead_letter` true or false | a send failed, or no inbox |
@@ -918,8 +926,12 @@ of `job_id`, `run_id`, `subject_kind`, `subject_id`, `failure_kind`, `outcome`,
 `rerun`, `raise_limit`, `pause`, `propose`, `tell` or `none`), `requested`
 (what the heal run asked), `refusal` (why a check did not carry the request
 out as asked: `not_upward`, `past_ceiling`, `not_runnable`, `not_running`,
-`consent_required`, `watcher_unreadable`, `invalid_change` or `move_failed`),
-`read_outside` and `rerun_outcome` the phase knows. A settle's `opened`, `joined` and
+`consent_required`, `watcher_unreadable`, `invalid_change`, `move_failed`, or
+`job_changed` when the owner wrote the job while the diagnosis ran, whatever
+value the write left, or anything else moved its definition, so its raised
+limit or pause was not written), `read_outside`,
+`rerun_outcome`, and on `answered` the owner's `answer` and whether the change
+was `applied` the phase knows. A settle's `opened`, `joined` and
 `verdict` always carry `failure_kind`, `subject_kind` (`job`, `provider` or
 `plugin`) and `subject_id`. A heal's events are points, not a run:
 they have no `session_id`, and its diagnosis is the run kind below. The trace

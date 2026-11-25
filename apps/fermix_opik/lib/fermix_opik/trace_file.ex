@@ -304,7 +304,9 @@ defmodule FermixOpik.TraceFile do
        :requested,
        :refusal,
        :read_outside,
-       :rerun_outcome
+       :rerun_outcome,
+       :answer,
+       :applied
      ])}
   end
 

@@ -20,6 +20,9 @@ defmodule FermixCore.Memory.RepoJobRunFactsMigrationTest do
   # The table as 69 makes it, and the tally 73 adds after it
   # (`RepoJobRunTallyMigrationTest`).
   @facts_columns ~w(run_id failure_kind tool_timeline_json tool_tally_json)
+  # The columns 74 adds to `job_heals` (`RepoJobHealsAnswerMigrationTest`),
+  # which a store from before 69 does not have either.
+  @answer_columns ~w(change_job_digest answer answered_at decided_from applied_at owner_wrote_at)
 
   # `job_runs` as an engine at home format 1 reads it, in order.
   @job_run_columns ~w(id job_id session_id trigger status claimed_at started_at completed_at
@@ -174,7 +177,8 @@ defmodule FermixCore.Memory.RepoJobRunFactsMigrationTest do
     raw(db_path, """
     DROP TABLE job_run_facts;
     ALTER TABLE job_heals DROP COLUMN tool_json;
-    DELETE FROM schema_migrations WHERE version IN (#{@version}, 73);
+    #{Enum.map_join(@answer_columns, "\n", &"ALTER TABLE job_heals DROP COLUMN #{&1};")}
+    DELETE FROM schema_migrations WHERE version IN (#{@version}, 73, 74);
     """)
 
     assert columns(db_path, "job_run_facts") == []

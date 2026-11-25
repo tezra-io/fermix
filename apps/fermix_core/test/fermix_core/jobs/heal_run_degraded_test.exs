@@ -231,8 +231,11 @@ defmodule FermixCore.Jobs.HealRunDegradedTest do
     assert text =~ ~s(Scheduled jobs cannot use the plugin "harbour_id")
     assert text =~ ~s(its tool "tide_lookup")
     assert text =~ ~s(The tool said: "#{@words}")
-    assert text =~ ~s("Harbour tide table" \(1\))
-    assert text =~ ~s("Morning brief" \(1\))
+    # The jobs are named, with no count or "since" (stage S4, round two).
+    assert text =~ ~s(It affects these jobs: )
+    assert text =~ ~s("Harbour tide table")
+    assert text =~ ~s("Morning brief")
+    refute text =~ "since"
 
     assert {:ok, %{state: "waiting", decision: nil, delivery_status: "delivered"}} =
              get_heal(ctx, heal.id)

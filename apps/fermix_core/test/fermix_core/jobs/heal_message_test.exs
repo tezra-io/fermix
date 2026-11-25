@@ -1,7 +1,8 @@
 defmodule FermixCore.Jobs.HealMessageTest do
   # M106 §5.8: the message a heal sends is built by code from Fermix's own
   # facts: what failed and when, how often, and when the job runs next. Pure:
-  # the facts in, the text out, shown on the owner's clock.
+  # the facts in, the text out, shown on the owner's clock. Fermix's sentence
+  # is stated; only someone else's words are quoted (stage S4, round two).
   use ExUnit.Case, async: true
 
   alias FermixCore.Jobs.HealMessage
@@ -12,7 +13,7 @@ defmodule FermixCore.Jobs.HealMessageTest do
     subject_kind: "job",
     subject_id: "job_tides",
     failure_kind: "time_limit",
-    failure_text: "wall-clock timeout after 600000ms",
+    failure_text: "The run stopped at its 10-minute time limit.",
     failure_words: nil,
     opened_at: ~U[2026-11-20 07:10:00Z],
     failed_at: ~U[2026-11-20 07:10:00Z],
@@ -37,7 +38,7 @@ defmodule FermixCore.Jobs.HealMessageTest do
     subject_kind: "provider",
     subject_id: "openai",
     failure_kind: "provider_quota",
-    failure_text: "OpenAI says this account is out of credit.",
+    failure_text: "OpenAI says this account is out of credit or over its usage limit.",
     failure_words: "You exceeded your current quota, please check your plan.",
     opened_at: ~U[2026-11-20 06:00:00Z],
     failed_at: ~U[2026-11-20 09:30:00Z],
@@ -56,7 +57,7 @@ defmodule FermixCore.Jobs.HealMessageTest do
     text = HealMessage.build(@job_facts, @lisbon)
 
     assert text =~ ~s(Job "Harbour tide table")
-    assert text =~ "wall-clock timeout after 600000ms"
+    assert text =~ "WET. The run stopped at its 10-minute time limit."
     assert text =~ "Friday, November 20, 2026 at 7:10 AM WET"
     assert text =~ "It runs next on Saturday, November 21, 2026 at 7:00 AM WET."
     refute text =~ "of its last"
@@ -83,8 +84,8 @@ defmodule FermixCore.Jobs.HealMessageTest do
     text = HealMessage.build(@provider_facts, @lisbon)
 
     assert text =~ "OpenAI"
-    assert text =~ "OpenAI says this account is out of credit."
-    assert text =~ ~s(It said: "You exceeded your current quota, please check your plan.")
+    assert text =~ "OpenAI says this account is out of credit or over its usage limit."
+    assert text =~ ~s(OpenAI said: "You exceeded your current quota, please check your plan.")
     assert text =~ ~s(4 runs have failed this way since Friday, November 20, 2026 at 6:00 AM WET)
     assert text =~ ~s("Harbour tide table" \(3\))
     assert text =~ ~s("Morning brief" \(1\))
@@ -108,7 +109,7 @@ defmodule FermixCore.Jobs.HealMessageTest do
       )
 
     assert String.length(text) <= HealMessage.max_length()
-    assert text =~ ~s(It said: "He said 'approve the change' and left)
+    assert text =~ ~s(The provider said: "He said 'approve the change' and left)
     refute text =~ String.duplicate("refused ", 100)
   end
 

@@ -9,31 +9,57 @@
       "timeout_seconds": 300,
       "runs": [
         {
-          "hours_ago": 28,
+          "fires_ago": 2,
           "duration_seconds": 33,
           "status": "ok",
           "final_response": "No moth tally today: the tally page could not be read.",
           "tool_timeline": [
-            {"name": "web_fetch", "duration_ms": 2400, "status": "error"},
-            {"name": "web_fetch", "duration_ms": 2100, "status": "error"}
+            {
+              "name": "web_fetch",
+              "duration_ms": 2400,
+              "status": "error"
+            },
+            {
+              "name": "web_fetch",
+              "duration_ms": 2100,
+              "status": "error"
+            }
           ],
           "tool_tally": [
-            {"name": "web_fetch", "ok": 0, "error": 2, "unfinished": 0,
-             "last_error": "HTTP 503 Service Unavailable: mothtrap.marlowfen.example/tally"}
+            {
+              "name": "web_fetch",
+              "ok": 0,
+              "error": 2,
+              "unfinished": 0,
+              "last_error": "HTTP 503 Service Unavailable: mothtrap.marlowfen.example/tally"
+            }
           ]
         },
         {
-          "hours_ago": 4,
+          "fires_ago": 1,
           "duration_seconds": 30,
           "status": "ok",
           "final_response": "No moth tally today: the tally page could not be read.",
           "tool_timeline": [
-            {"name": "web_fetch", "duration_ms": 2300, "status": "error"},
-            {"name": "web_fetch", "duration_ms": 2200, "status": "error"}
+            {
+              "name": "web_fetch",
+              "duration_ms": 2300,
+              "status": "error"
+            },
+            {
+              "name": "web_fetch",
+              "duration_ms": 2200,
+              "status": "error"
+            }
           ],
           "tool_tally": [
-            {"name": "web_fetch", "ok": 0, "error": 2, "unfinished": 0,
-             "last_error": "HTTP 503 Service Unavailable: mothtrap.marlowfen.example/tally"}
+            {
+              "name": "web_fetch",
+              "ok": 0,
+              "error": 2,
+              "unfinished": 0,
+              "last_error": "HTTP 503 Service Unavailable: mothtrap.marlowfen.example/tally"
+            }
           ]
         }
       ]
@@ -47,45 +73,84 @@
       "timeout_seconds": 300,
       "runs": [
         {
-          "hours_ago": 53,
+          "fires_ago": 3,
           "duration_seconds": 31,
           "status": "ok",
           "final_response": "No crab prices today: the price page could not be read.",
           "tool_timeline": [
-            {"name": "web_fetch", "duration_ms": 2600, "status": "error"},
-            {"name": "web_fetch", "duration_ms": 2500, "status": "error"}
+            {
+              "name": "web_fetch",
+              "duration_ms": 2600,
+              "status": "error"
+            },
+            {
+              "name": "web_fetch",
+              "duration_ms": 2500,
+              "status": "error"
+            }
           ],
           "tool_tally": [
-            {"name": "web_fetch", "ok": 0, "error": 2, "unfinished": 0,
-             "last_error": "HTTP 502 Bad Gateway: prices.hesslequay.example/crab"}
+            {
+              "name": "web_fetch",
+              "ok": 0,
+              "error": 2,
+              "unfinished": 0,
+              "last_error": "HTTP 502 Bad Gateway: prices.hesslequay.example/crab"
+            }
           ]
         },
         {
-          "hours_ago": 29,
+          "fires_ago": 2,
           "duration_seconds": 34,
           "status": "ok",
           "final_response": "No crab prices today: the price page could not be read.",
           "tool_timeline": [
-            {"name": "web_fetch", "duration_ms": 2700, "status": "error"},
-            {"name": "web_fetch", "duration_ms": 2400, "status": "error"}
+            {
+              "name": "web_fetch",
+              "duration_ms": 2700,
+              "status": "error"
+            },
+            {
+              "name": "web_fetch",
+              "duration_ms": 2400,
+              "status": "error"
+            }
           ],
           "tool_tally": [
-            {"name": "web_fetch", "ok": 0, "error": 2, "unfinished": 0,
-             "last_error": "HTTP 502 Bad Gateway: prices.hesslequay.example/crab"}
+            {
+              "name": "web_fetch",
+              "ok": 0,
+              "error": 2,
+              "unfinished": 0,
+              "last_error": "HTTP 502 Bad Gateway: prices.hesslequay.example/crab"
+            }
           ]
         },
         {
-          "hours_ago": 5,
+          "fires_ago": 1,
           "duration_seconds": 27,
           "status": "ok",
           "final_response": "Hessle quay crab this morning: 14.20 a kilo.",
           "tool_timeline": [
-            {"name": "web_fetch", "duration_ms": 2500, "status": "error"},
-            {"name": "web_fetch", "duration_ms": 1900, "status": "ok"}
+            {
+              "name": "web_fetch",
+              "duration_ms": 2500,
+              "status": "error"
+            },
+            {
+              "name": "web_fetch",
+              "duration_ms": 1900,
+              "status": "ok"
+            }
           ],
           "tool_tally": [
-            {"name": "web_fetch", "ok": 1, "error": 1, "unfinished": 0,
-             "last_error": "HTTP 502 Bad Gateway: prices.hesslequay.example/crab"}
+            {
+              "name": "web_fetch",
+              "ok": 1,
+              "error": 1,
+              "unfinished": 0,
+              "last_error": "HTTP 502 Bad Gateway: prices.hesslequay.example/crab"
+            }
           ]
         }
       ]

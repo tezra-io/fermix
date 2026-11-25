@@ -9,42 +9,75 @@
       "timeout_seconds": 300,
       "runs": [
         {
-          "hours_ago": 51,
+          "fires_ago": 3,
           "duration_seconds": 22,
           "status": "ok",
           "final_response": "No parcel notices today.",
           "tool_timeline": [
-            {"name": "fernpost_account", "duration_ms": 900, "status": "error", "plugin": "fernpost"}
+            {
+              "name": "fernpost_account",
+              "duration_ms": 900,
+              "status": "error",
+              "plugin": "fernpost"
+            }
           ],
           "tool_tally": [
-            {"name": "fernpost_account", "plugin": "fernpost", "ok": 0, "error": 1, "unfinished": 0,
-             "last_error": "fernpost needs reconnection: its sign-in was revoked. Reconnect fernpost under Plugins."}
+            {
+              "name": "fernpost_account",
+              "plugin": "fernpost",
+              "ok": 0,
+              "error": 1,
+              "unfinished": 0,
+              "last_error": "fernpost needs reconnection: its sign-in was revoked. Reconnect fernpost under Plugins."
+            }
           ]
         },
         {
-          "hours_ago": 27,
+          "fires_ago": 2,
           "duration_seconds": 19,
           "status": "ok",
           "final_response": "No parcel notices today.",
           "tool_timeline": [
-            {"name": "fernpost_account", "duration_ms": 850, "status": "error", "plugin": "fernpost"}
+            {
+              "name": "fernpost_account",
+              "duration_ms": 850,
+              "status": "error",
+              "plugin": "fernpost"
+            }
           ],
           "tool_tally": [
-            {"name": "fernpost_account", "plugin": "fernpost", "ok": 0, "error": 1, "unfinished": 0,
-             "last_error": "fernpost needs reconnection: its sign-in was revoked. Reconnect fernpost under Plugins."}
+            {
+              "name": "fernpost_account",
+              "plugin": "fernpost",
+              "ok": 0,
+              "error": 1,
+              "unfinished": 0,
+              "last_error": "fernpost needs reconnection: its sign-in was revoked. Reconnect fernpost under Plugins."
+            }
           ]
         },
         {
-          "hours_ago": 3,
+          "fires_ago": 1,
           "duration_seconds": 21,
           "status": "ok",
           "final_response": "No parcel notices today.",
           "tool_timeline": [
-            {"name": "fernpost_account", "duration_ms": 880, "status": "error", "plugin": "fernpost"}
+            {
+              "name": "fernpost_account",
+              "duration_ms": 880,
+              "status": "error",
+              "plugin": "fernpost"
+            }
           ],
           "tool_tally": [
-            {"name": "fernpost_account", "plugin": "fernpost", "ok": 0, "error": 1, "unfinished": 0,
-             "last_error": "fernpost needs reconnection: its sign-in was revoked. Reconnect fernpost under Plugins."}
+            {
+              "name": "fernpost_account",
+              "plugin": "fernpost",
+              "ok": 0,
+              "error": 1,
+              "unfinished": 0,
+              "last_error": "fernpost needs reconnection: its sign-in was revoked. Reconnect fernpost under Plugins."
+            }
           ]
         }
       ]
@@ -58,48 +91,108 @@
       "timeout_seconds": 300,
       "runs": [
         {
-          "hours_ago": 50,
+          "fires_ago": 3,
           "duration_seconds": 34,
           "status": "ok",
           "final_response": "No newsletters to round up today.",
           "tool_timeline": [
-            {"name": "fernpost_account", "duration_ms": 910, "status": "error", "plugin": "fernpost"},
-            {"name": "web_fetch", "duration_ms": 3100, "status": "ok"}
+            {
+              "name": "fernpost_account",
+              "duration_ms": 910,
+              "status": "error",
+              "plugin": "fernpost"
+            },
+            {
+              "name": "web_fetch",
+              "duration_ms": 3100,
+              "status": "ok"
+            }
           ],
           "tool_tally": [
-            {"name": "fernpost_account", "plugin": "fernpost", "ok": 0, "error": 1, "unfinished": 0,
-             "last_error": "fernpost needs reconnection: its sign-in was revoked. Reconnect fernpost under Plugins."},
-            {"name": "web_fetch", "ok": 1, "error": 0, "unfinished": 0}
+            {
+              "name": "fernpost_account",
+              "plugin": "fernpost",
+              "ok": 0,
+              "error": 1,
+              "unfinished": 0,
+              "last_error": "fernpost needs reconnection: its sign-in was revoked. Reconnect fernpost under Plugins."
+            },
+            {
+              "name": "web_fetch",
+              "ok": 1,
+              "error": 0,
+              "unfinished": 0
+            }
           ]
         },
         {
-          "hours_ago": 26,
+          "fires_ago": 2,
           "duration_seconds": 29,
           "status": "ok",
           "final_response": "No newsletters to round up today.",
           "tool_timeline": [
-            {"name": "fernpost_account", "duration_ms": 870, "status": "error", "plugin": "fernpost"},
-            {"name": "web_fetch", "duration_ms": 2900, "status": "ok"}
+            {
+              "name": "fernpost_account",
+              "duration_ms": 870,
+              "status": "error",
+              "plugin": "fernpost"
+            },
+            {
+              "name": "web_fetch",
+              "duration_ms": 2900,
+              "status": "ok"
+            }
           ],
           "tool_tally": [
-            {"name": "fernpost_account", "plugin": "fernpost", "ok": 0, "error": 1, "unfinished": 0,
-             "last_error": "fernpost needs reconnection: its sign-in was revoked. Reconnect fernpost under Plugins."},
-            {"name": "web_fetch", "ok": 1, "error": 0, "unfinished": 0}
+            {
+              "name": "fernpost_account",
+              "plugin": "fernpost",
+              "ok": 0,
+              "error": 1,
+              "unfinished": 0,
+              "last_error": "fernpost needs reconnection: its sign-in was revoked. Reconnect fernpost under Plugins."
+            },
+            {
+              "name": "web_fetch",
+              "ok": 1,
+              "error": 0,
+              "unfinished": 0
+            }
           ]
         },
         {
-          "hours_ago": 2,
+          "fires_ago": 1,
           "duration_seconds": 31,
           "status": "ok",
           "final_response": "No newsletters to round up today.",
           "tool_timeline": [
-            {"name": "fernpost_account", "duration_ms": 900, "status": "error", "plugin": "fernpost"},
-            {"name": "web_fetch", "duration_ms": 3000, "status": "ok"}
+            {
+              "name": "fernpost_account",
+              "duration_ms": 900,
+              "status": "error",
+              "plugin": "fernpost"
+            },
+            {
+              "name": "web_fetch",
+              "duration_ms": 3000,
+              "status": "ok"
+            }
           ],
           "tool_tally": [
-            {"name": "fernpost_account", "plugin": "fernpost", "ok": 0, "error": 1, "unfinished": 0,
-             "last_error": "fernpost needs reconnection: its sign-in was revoked. Reconnect fernpost under Plugins."},
-            {"name": "web_fetch", "ok": 1, "error": 0, "unfinished": 0}
+            {
+              "name": "fernpost_account",
+              "plugin": "fernpost",
+              "ok": 0,
+              "error": 1,
+              "unfinished": 0,
+              "last_error": "fernpost needs reconnection: its sign-in was revoked. Reconnect fernpost under Plugins."
+            },
+            {
+              "name": "web_fetch",
+              "ok": 1,
+              "error": 0,
+              "unfinished": 0
+            }
           ]
         }
       ]

@@ -201,6 +201,24 @@ defmodule FermixOpik.TraceFileTest do
 
     assert {heal_meta.decision, heal_meta.requested, heal_meta.refusal, heal_meta.read_outside} ==
              {"tell", "raise_limit", "not_upward", true}
+
+    answered = %{
+      "ts" => "2031-03-04T09:00:00.000Z",
+      "type" => "agent_event",
+      "event" => "job_heal",
+      "agent" => "scheduled:j",
+      "phase" => "answered",
+      "heal_id" => "jhl_0a1b",
+      "decision" => "propose",
+      "answer" => "leave",
+      "applied" => false
+    }
+
+    assert {[:fermix, :job, :heal], _m, answer_meta} =
+             TraceFile.normalize("agent_event", answered)
+
+    assert {answer_meta.phase, answer_meta.answer, answer_meta.applied} ==
+             {"answered", "leave", false}
   end
 
   test "a job_run_complete row carries its tool failure count" do

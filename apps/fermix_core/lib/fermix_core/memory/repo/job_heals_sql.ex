@@ -55,7 +55,33 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
 
   A stored tally or tool this engine cannot read (`Jobs.Degraded.readable_tally/1`)
   reads as none and is logged by its row's id, never by its content: the
-  store, whose process runs the settle, never raises on one.
+  store, whose process runs the settle, never raises on one. A stored change
+  it cannot read reads as none the same way.
+
+  A job write that belongs to a heal (M106 §5.6, §5.7, decision D5, stage S4;
+  the columns migration 74 adds) is one transaction in `Memory.Repo`
+  (`heal_job_write/5`), whose heal half is here (`claimant/4`,
+  `claim_written/3`, `moved_on/3`): a heal run's raised limit or pause, and
+  the owner's answer applying a proposal (`Jobs.HealAnswer`). Each is drawn
+  for one version of its job, `change_job_digest`
+  (`Jobs.HealDecision.job_version/1`, a digest of the job's definition: what
+  an owner's edit, pause or resume can write, never what a run writes;
+  `change_job_version`, the job's `updated_at` then, moves with every run's
+  claim and settle, so it is kept as a record and fences nothing). A waiting
+  proposal on its first conclusion is answered once: `leave` closes it
+  `skipped` (quiet seven days, as `still_failing` and `expired` are); an
+  apply writes the job and takes the heal `watching` while the job is still
+  that version, and otherwise closes it `superseded` and writes nothing to the
+  job. Either records `answer`, `answered_at` and `decided_from` (the surface
+  the answer came from, as the card rail names it); an applied one
+  `applied_at`. Every owner write to a job (`Memory.Repo`'s
+  `update_scheduled_job_fields/3`: an edit, a pause, a resume) closes its
+  waiting proposal `superseded` when it moves the definition
+  (`supersede_proposals/3`), and marks its `diagnosing` heal written-under
+  (`owner_wrote_at`, `mark_written_under/3`) whatever value it leaves, which
+  the heal's claim clears; a heal run's move under a marked heal writes
+  nothing (JOB-12). A proposal stored before 74 has no version, so applying
+  it writes nothing.
   """
 
   require Logger
@@ -87,8 +113,10 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
   # that tool succeeding in an ok run closes.
   @degraded "tool_never_succeeded"
 
-  # The columns 71 made, the ones 72 adds for the diagnosis (M106 §5.5), and
-  # the one 73 adds for a run that ended ok without working (§6).
+  # The columns 71 made, the ones 72 adds for the diagnosis (M106 §5.5), the
+  # one 73 adds for a run that ended ok without working (§6), and the ones 74
+  # adds for a proposal's version, the owner's answer to it (§5.7, D5) and an
+  # owner's write during a diagnosis (JOB-12).
   @columns_71 ~w(id subject_kind subject_id job_id failure_kind failure_text failure_words state
                  outcome run_count last_run_id last_failed_at opened_at updated_at waiting_since
                  closed_at lease_token lease_until message inbox_platform inbox_destination
@@ -97,11 +125,31 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
   @diagnosis_columns ~w(conclusion decision note read_outside change_json change_job_version
                         rerun_at rerun_outcome)
   @tool_columns ~w(tool_json)
-  @columns @columns_71 ++ @diagnosis_columns ++ @tool_columns
+  @columns_73 @columns_71 ++ @diagnosis_columns ++ @tool_columns
+  @answer_columns ~w(change_job_digest answer answered_at decided_from applied_at owner_wrote_at)
+  @columns @columns_73 ++ @answer_columns
   @fields Enum.map(@columns, &String.to_atom/1)
   @select "SELECT #{Enum.join(@columns, ", ")} FROM job_heals"
   @stamped ~w(last_failed_at opened_at updated_at waiting_since closed_at lease_until
-              next_delivery_at delivered_at change_job_version rerun_at)a
+              next_delivery_at delivered_at change_job_version rerun_at answered_at
+              applied_at owner_wrote_at)a
+  # The owner's two answers to a proposal (M106 §5.7, D5).
+  @answers ~w(apply leave)
+  # A waiting proposal the owner may still answer: on its first conclusion and
+  # not answered yet.
+  @answerable "state = 'waiting' AND decision = 'propose' AND conclusion = 'first' " <>
+                "AND answer IS NULL"
+  # How long `list_jobs` shows a proposal after it closed: its quiet days.
+  @listed_closed_days 7
+
+  @answer_sql """
+  ALTER TABLE job_heals ADD COLUMN change_job_digest TEXT;
+  ALTER TABLE job_heals ADD COLUMN answer TEXT CHECK (answer IN ('apply', 'leave'));
+  ALTER TABLE job_heals ADD COLUMN answered_at TEXT;
+  ALTER TABLE job_heals ADD COLUMN decided_from TEXT;
+  ALTER TABLE job_heals ADD COLUMN applied_at TEXT;
+  ALTER TABLE job_heals ADD COLUMN owner_wrote_at TEXT;
+  """
 
   @diagnosis_sql """
   ALTER TABLE job_heals ADD COLUMN conclusion TEXT NOT NULL DEFAULT 'first'
@@ -200,8 +248,23 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
           required(:note) => String.t() | nil,
           required(:read_outside) => boolean() | nil,
           required(:change) => map() | nil,
-          optional(:change_job_version) => DateTime.t() | nil
+          optional(:change_job_version) => DateTime.t() | nil,
+          optional(:change_job_digest) => String.t() | nil
         }
+
+  @typedoc """
+  The owner's answer as the heal records it: when, and the surface it came
+  from (`decided_from`, as the card rail names it: `companion`,
+  `mobile:<device>`, a chat's platform).
+  """
+  @type answer :: %{required(:at) => DateTime.t(), required(:decided_from) => String.t()}
+
+  @typedoc """
+  Whose job write it is (`Memory.Repo.heal_job_write/5`): a heal run's move,
+  under its lease, with the decision it records; or the owner's yes to a
+  waiting proposal.
+  """
+  @type claim :: {:heal_run, String.t(), plan(), DateTime.t()} | {:answer, answer()}
 
   @doc "The two tables and their indexes, for their migration."
   @spec schema_sql() :: String.t()
@@ -211,15 +274,31 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
   The column migration 73 adds to `job_heals` for the tool a heal of a run
   that ended ok without working is about (M106 §6), as `diagnosis_columns/0`
   adds 72's: added while the table holds 72's columns, nothing while it holds
-  them and it, refused for any other set.
+  them and it (or what 74 made of them), refused for any other set.
   """
-  @spec tool_columns() :: %{before: [String.t()], after: [String.t()], sql: String.t()}
+  @spec tool_columns() :: %{
+          before: [String.t()],
+          after: [String.t()],
+          later: [[String.t()]],
+          sql: String.t()
+        }
   def tool_columns,
     do: %{
       before: @columns_71 ++ @diagnosis_columns,
-      after: @columns,
+      after: @columns_73,
+      later: [@columns],
       sql: "ALTER TABLE job_heals ADD COLUMN tool_json TEXT;"
     }
+
+  @doc """
+  The columns migration 74 adds to `job_heals` for a proposal's version, the
+  owner's answer to it (M106 §5.7, D5) and an owner's write while the heal
+  is diagnosing (JOB-12), as `tool_columns/0` adds 73's:
+  added while the table holds 73's columns, nothing while it holds them and
+  these, refused for any other set.
+  """
+  @spec answer_columns() :: %{before: [String.t()], after: [String.t()], sql: String.t()}
+  def answer_columns, do: %{before: @columns_73, after: @columns, sql: @answer_sql}
 
   @doc """
   The columns migration 72 adds to `job_heals` for the diagnosis (M106 §5.5,
@@ -237,7 +316,7 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
     do: %{
       before: @columns_71,
       after: @columns_71 ++ @diagnosis_columns,
-      later: [@columns],
+      later: [@columns_73, @columns],
       sql: @diagnosis_sql
     }
 
@@ -310,8 +389,21 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
   def handle(conn, {:get, id}) when is_binary(id), do: get(conn, id)
   def handle(conn, {:runs, id}) when is_binary(id), do: runs(conn, id)
   def handle(conn, :open_heals), do: open_heals(conn)
-  def handle(conn, :open_by_job), do: open_by_job(conn)
+  def handle(conn, {:listed_by_job, %DateTime{} = now}), do: listed_by_job(conn, now)
   def handle(conn, {:message_facts, id}) when is_binary(id), do: message_facts(conn, id)
+  def handle(conn, {:note_for_run, run_id}) when is_binary(run_id), do: note_for_run(conn, run_id)
+
+  # The owner's no to a waiting proposal (M106 §5.7, D5): the heal closes
+  # skipped, which keeps the same failure quiet for seven days.
+  def handle(conn, {:leave, id, %{at: %DateTime{}} = answer}) when is_binary(id) do
+    closed = [
+      {"state", "closed"},
+      {"outcome", "skipped"},
+      {"closed_at", CuesSql.stamp(answer.at)}
+    ]
+
+    CuesSql.with_immediate_transaction(conn, fn -> answered(conn, id, "leave", answer, closed) end)
+  end
 
   def handle(conn, {:claim, %DateTime{} = now, %DateTime{} = lease_until}),
     do: CuesSql.with_immediate_transaction(conn, fn -> claim(conn, now, lease_until) end)
@@ -328,11 +420,6 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
 
   def handle(conn, {:put_message, id, token, text, %DateTime{} = now}) when is_binary(text),
     do: held_write(conn, id, token, [{"message", text}], now)
-
-  # The fence a heal run takes right before it writes the job: the lease
-  # still its own (M106 §5.5).
-  def handle(conn, {:hold, id, token, %DateTime{} = now}),
-    do: held_write(conn, id, token, [], now)
 
   def handle(conn, {:decided, id, token, %{decision: decision} = plan, %DateTime{} = now})
       when decision in @decisions,
@@ -385,6 +472,152 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
 
   def handle(conn, {:expire_waiting, %DateTime{} = now}),
     do: CuesSql.with_immediate_transaction(conn, fn -> expire_waiting(conn, now) end)
+
+  @doc "Whether `claim` is a `claim()` of a well-formed shape."
+  @spec claim?(term()) :: boolean()
+  def claim?({:heal_run, token, %{decision: decision} = record, %DateTime{}})
+      when is_binary(token) and decision in @decisions,
+      do: is_binary(Map.get(record, :change_job_digest))
+
+  def claim?({:answer, %{at: %DateTime{}, decided_from: from}}),
+    do: is_binary(from) and from != ""
+
+  def claim?(_other), do: false
+
+  @doc """
+  Inside a heal's job write (`Memory.Repo.heal_job_write/5`), on its
+  connection: the heal `id` of `job_id` while `claim` has the right to it,
+  and the version of the job the write was drawn for. A heal run's right is
+  the heal `diagnosing` under its lease token (`{:error, :lease_lost}`
+  otherwise), its version the one its record names; the owner's yes needs
+  the heal to be the job's waiting proposal on its first conclusion,
+  unanswered (`{:error, :not_waiting}` otherwise), its version the one the
+  proposal stored.
+  """
+  @spec claimant(conn(), String.t(), String.t(), claim()) ::
+          {:ok, heal(), String.t() | nil} | {:error, term()}
+  def claimant(conn, id, job_id, {:heal_run, token, record, _now}) do
+    sql = "#{@select} WHERE id = ? AND job_id = ? AND lease_token = ? AND state = 'diagnosing'"
+
+    case CuesSql.query_all(conn, sql, [id, job_id, token]) do
+      {:ok, [row]} -> {:ok, heal_row(row), record.change_job_digest}
+      {:ok, []} -> {:error, :lease_lost}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def claimant(conn, id, job_id, {:answer, _answer}) do
+    case CuesSql.query_all(conn, "#{@select} WHERE id = ? AND job_id = ? AND #{@answerable}", [
+           id,
+           job_id
+         ]) do
+      {:ok, [row]} -> {:ok, heal_row(row), heal_row(row).change_job_digest}
+      {:ok, []} -> {:error, :not_waiting}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  The heal's half of a job write that landed, in the same transaction: a
+  heal run's decision recorded under its lease (as `{:decided, ...}`
+  records it), or the owner's yes taken to watching (`answer_applied/3`).
+  """
+  @spec claim_written(conn(), String.t(), claim()) :: {:ok, heal()} | {:error, term()}
+  def claim_written(conn, id, {:heal_run, token, record, now}) do
+    with :ok <- held_write(conn, id, token, decided_assignments(record), now), do: get(conn, id)
+  end
+
+  def claim_written(conn, id, {:answer, answer}), do: answer_applied(conn, id, answer)
+
+  @doc """
+  A job write whose job moved off the version it was drawn for: nothing is
+  written to the job. A heal run's heal is left as it stands, for the run to
+  record its plan refused; the owner's yes closes the heal superseded
+  (`answer_superseded/3`).
+  """
+  @spec moved_on(conn(), heal(), claim()) :: {:ok, {:moved_on, heal()}} | {:error, term()}
+  def moved_on(_conn, heal, {:heal_run, _token, _record, _now}), do: {:ok, {:moved_on, heal}}
+
+  def moved_on(conn, heal, {:answer, answer}) do
+    with {:ok, closed} <- answer_superseded(conn, heal.id, answer), do: {:ok, {:moved_on, closed}}
+  end
+
+  # An apply whose change was written in the same transaction: the heal watches
+  # the job's next run from `answer.at` (§5.9), with the answer and the time
+  # the change was applied recorded.
+  defp answer_applied(conn, id, %{at: %DateTime{} = at} = answer) do
+    stamp = CuesSql.stamp(at)
+    moved = [{"state", "watching"}, {"waiting_since", stamp}, {"applied_at", stamp}]
+    answered(conn, id, "apply", answer, moved)
+  end
+
+  # An apply for a job that is no longer the version its proposal was drawn for:
+  # nothing is applied and the heal closes superseded, the answer recorded.
+  defp answer_superseded(conn, id, %{at: %DateTime{} = at} = answer) do
+    closed = [{"state", "closed"}, {"outcome", "superseded"}, {"closed_at", CuesSql.stamp(at)}]
+    answered(conn, id, "apply", answer, closed)
+  end
+
+  @doc """
+  An edit that moved `job_id`'s definition closes the job's waiting proposal
+  superseded at `at`, in the edit's own transaction (§5.7). Returns the ids
+  it closed.
+  """
+  @spec supersede_proposals(conn(), String.t(), DateTime.t()) ::
+          {:ok, [String.t()]} | {:error, term()}
+  def supersede_proposals(conn, job_id, %DateTime{} = at) when is_binary(job_id) do
+    sql = "SELECT id FROM job_heals WHERE job_id = ? AND #{@answerable} ORDER BY id"
+
+    with {:ok, rows} <- CuesSql.query_all(conn, sql, [job_id]),
+         ids = List.flatten(rows),
+         :ok <- close_superseded(conn, ids, at) do
+      {:ok, ids}
+    end
+  end
+
+  @doc """
+  An owner's write to `job_id` at `at` (an edit, a pause, a resume, whatever
+  value it leaves), in the write's own transaction: the job's `diagnosing`
+  heal is marked written-under, so the heal run's move, resolved against the
+  job as read before the write, is not made (JOB-12). A compare by value
+  cannot see a write that left the value as read (a pause then a resume, an
+  edit and back); this sees each write when it happens. Cleared by the heal's
+  next claim.
+  """
+  @spec mark_written_under(conn(), String.t(), DateTime.t()) :: :ok | {:error, term()}
+  def mark_written_under(conn, job_id, %DateTime{} = at) when is_binary(job_id) do
+    sql = "UPDATE job_heals SET owner_wrote_at = ? WHERE job_id = ? AND state = 'diagnosing'"
+    CuesSql.execute(conn, sql, [CuesSql.stamp(at), job_id])
+  end
+
+  defp close_superseded(_conn, [], _at), do: :ok
+
+  defp close_superseded(conn, ids, at) do
+    where = "#{@answerable} AND id IN (#{placeholders(ids)})"
+    close_rows(conn, where, ids, "superseded", at, ids)
+  end
+
+  # The one write of an answer: the heal moved as `assignments` say, with the
+  # answer, when and from which turn, only while it is still answerable.
+  defp answered(conn, id, given, answer, assignments) when given in @answers do
+    stamp = CuesSql.stamp(answer.at)
+
+    recorded = [
+      {"answer", given},
+      {"answered_at", stamp},
+      {"decided_from", answer.decided_from},
+      {"updated_at", stamp}
+    ]
+
+    {columns, values} = Enum.unzip(assignments ++ recorded)
+    set_sql = Enum.map_join(columns, ", ", &"#{&1} = ?")
+    sql = "UPDATE job_heals SET #{set_sql} WHERE id = ? AND #{@answerable}"
+
+    with :ok <- CuesSql.execute(conn, sql, values ++ [id]),
+         {:ok, changed} <- CuesSql.changes(conn) do
+      if changed == 1, do: get(conn, id), else: {:error, :not_waiting}
+    end
+  end
 
   # --- the settle ------------------------------------------------------------
 
@@ -713,9 +946,12 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
   defp take_lease(conn, heal, now, lease_until) do
     token = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
 
+    # A claim starts the diagnosis afresh: an owner's write before it is in
+    # the job the run reads, so the mark of one is cleared (JOB-12).
     sql = """
     UPDATE job_heals
-    SET state = 'diagnosing', lease_token = ?, lease_until = ?, updated_at = ?
+    SET state = 'diagnosing', lease_token = ?, lease_until = ?, updated_at = ?,
+        owner_wrote_at = NULL
     WHERE id = ?
     """
 
@@ -795,7 +1031,8 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
       {"note", bounded(plan.note, @note_max)},
       {"read_outside", flag(plan.read_outside)},
       {"change_json", change_json(plan.change)},
-      {"change_job_version", optional_stamp(Map.get(plan, :change_job_version))}
+      {"change_job_version", optional_stamp(Map.get(plan, :change_job_version))},
+      {"change_job_digest", Map.get(plan, :change_job_digest)}
     ]
   end
 
@@ -869,13 +1106,29 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
     with {:ok, rows} <- CuesSql.query_all(conn, sql, []), do: {:ok, Enum.map(rows, &heal_row/1)}
   end
 
-  # Each job's heal that is not closed, the latest opened when two hold its
-  # runs (its own and its provider's), keyed by job id.
+  # What `list_jobs` shows of each job's heals (M106 §5.4, §5.7): `open`, each
+  # job's heal not closed, the latest opened when two hold its runs (its own
+  # and its provider's), found through the runs it took; and `proposals`, each
+  # job's latest proposal still waiting, answered or closed within its quiet
+  # days, found by its own job id, so what became of it shows whatever else
+  # is open and whether or not its runs are still kept.
+  defp listed_by_job(conn, now) do
+    since = CuesSql.stamp(DateTime.add(now, -@listed_closed_days * 86_400, :second))
+
+    with {:ok, open} <- open_by_job(conn),
+         {:ok, proposals} <- proposals_by_job(conn, since) do
+      {:ok, %{open: open, proposals: proposals}}
+    end
+  end
+
+  @summary_columns "h.id, h.state, h.subject_kind, h.subject_id, h.failure_kind, h.opened_at, " <>
+                     "h.run_count, h.delivery_status, h.decision, h.note IS NOT NULL, " <>
+                     "h.change_json, h.rerun_outcome, h.tool_json, h.outcome, h.answer, " <>
+                     "h.answered_at, h.applied_at, h.closed_at, h.last_run_id"
+
   defp open_by_job(conn) do
     sql = """
-    SELECT DISTINCT r.job_id, h.id, h.state, h.subject_kind, h.subject_id, h.failure_kind,
-           h.opened_at, h.run_count, h.delivery_status, h.decision, h.note, h.change_json,
-           h.rerun_outcome, h.tool_json
+    SELECT DISTINCT r.job_id, #{@summary_columns}
     FROM job_heals h JOIN job_heal_runs r ON r.heal_id = h.id
     WHERE h.state <> 'closed'
     ORDER BY h.opened_at DESC, h.id
@@ -886,9 +1139,27 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
     end
   end
 
+  defp proposals_by_job(conn, since) do
+    sql = """
+    SELECT h.job_id, #{@summary_columns}
+    FROM job_heals h
+    WHERE h.job_id IS NOT NULL AND h.decision = 'propose'
+      AND (h.state <> 'closed' OR h.closed_at >= ?)
+    ORDER BY h.opened_at DESC, h.id
+    """
+
+    with {:ok, rows} <- CuesSql.query_all(conn, sql, [since]) do
+      {:ok, Enum.reduce(rows, %{}, &put_job_heal/2)}
+    end
+  end
+
+  # A heal as `list_jobs` shows it: Fermix's own facts, and of the diagnosis's
+  # note only whether there is one (its text is read with the run it took,
+  # through `get_job_run`, as outside content).
   defp put_job_heal([job_id | row], acc) do
     [id, state, kind, subject, failure, opened, count, delivery | diagnosis] = row
-    [decision, note, change, rerun, tool] = diagnosis
+    [decision, noted, change, rerun, tool | answer] = diagnosis
+    [outcome, given, answered_at, applied_at, closed_at, last_run_id] = answer
 
     summary = %{
       id: id,
@@ -900,13 +1171,34 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
       run_count: count,
       delivery_status: delivery,
       decision: decision,
-      note: note,
-      change: decode_change(change),
+      has_note: noted == 1,
+      last_run_id: last_run_id,
+      change: decode_change(id, change),
       rerun_outcome: rerun,
-      tool: decode_tool(id, tool)
+      tool: decode_tool(id, tool),
+      outcome: outcome,
+      answer: given,
+      answered_at: CuesSql.parse_stamp(answered_at),
+      applied_at: CuesSql.parse_stamp(applied_at),
+      closed_at: CuesSql.parse_stamp(closed_at)
     }
 
     Map.put_new(acc, job_id, summary)
+  end
+
+  # The heal's note for a run it took (M106 §9): the text a model wrote after
+  # reading outside content, which only `get_job_run` hands on, framed.
+  defp note_for_run(conn, run_id) do
+    sql = """
+    SELECT h.note FROM job_heals h JOIN job_heal_runs r ON r.heal_id = h.id
+    WHERE r.run_id = ? AND h.note IS NOT NULL
+    """
+
+    case CuesSql.query_all(conn, sql, [run_id]) do
+      {:ok, [[note]]} -> {:ok, note}
+      {:ok, []} -> {:ok, nil}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   # Fermix's own facts about a heal, for `Jobs.HealMessage`: no tool's output,
@@ -1017,13 +1309,33 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
     {tool_json, heal} = Map.pop(heal, :tool_json)
 
     heal
-    |> Map.put(:change, decode_change(change_json))
+    |> Map.put(:change, decode_change(heal.id, change_json))
     |> Map.put(:tool, decode_tool(heal.id, tool_json))
     |> Map.update!(:read_outside, &read_flag/1)
   end
 
-  defp decode_change(nil), do: nil
-  defp decode_change(json) when is_binary(json), do: Jason.decode!(json)
+  # A change as `HealDecision` stored it: each field with what it would
+  # become. One this engine cannot read reads as none, logged by the heal's
+  # id: the store's process never raises on a stored row.
+  defp decode_change(_heal_id, nil), do: nil
+
+  defp decode_change(heal_id, json) when is_binary(json) do
+    case Jason.decode(json) do
+      {:ok, change} when is_map(change) and map_size(change) > 0 ->
+        if Enum.all?(change, &change_field?/1), do: change, else: unreadable_change(heal_id)
+
+      _unreadable ->
+        unreadable_change(heal_id)
+    end
+  end
+
+  defp change_field?({field, value}),
+    do: is_binary(field) and is_map(value) and is_map_key(value, "to")
+
+  defp unreadable_change(heal_id) do
+    Logger.warning("Job heal #{heal_id}: its change could not be read, so it shows none")
+    nil
+  end
 
   # The tool a heal is about, as `tool_failure/1` wrote it: its name, its
   # failed calls per run and any plugin. One this engine cannot read (a later

@@ -882,6 +882,23 @@ monitored and never waited on. The run resolves the owner's inbox once
 `job_heal:<id>`, and on a failed send backs off by the harness ladder, a dead
 letter after 20 attempts, a day, or an error no wait clears. The reconcile pass
 closes a heal waiting 7 days as `expired`, and removing a job takes its heal.
+A failure's sentence is Fermix's own, one per kind on `Jobs.Failure`'s closed
+list (`Jobs.Failure.sentence/2`, built from the tagged reason: a limit in
+minutes naming the tool still running, a missing skill by name, a provider by
+name), never a generic line; the run's `error`, its job's `last_error`, the
+heal's `failure_text` and a guest's failure line carry it, and the message
+states it after the job's name. Only words someone else wrote are quoted, and
+introduced as theirs: a provider's, a tool's, and the text of a failure Fermix
+has no sentence for (`:other`, whose row keeps that text). A plugin's message
+names the jobs it affects and states no count or "since". The heal run's
+note, model text written after reading outside content, reaches the main
+agent only as outside text: the owner is sent it in the message, the copy
+written to the conversation's history leaves it out
+(`HealMessage.history_copy/2`; history is no outside source, and compaction
+would carry a frame's words on without the frame), `list_jobs` says only that
+a note exists and which run holds it, and `get_job_run`, whose every call
+counts as an outside source for its turn, hands it on framed (`heal_note`,
+source `job_heal_note`).
 
 A run that ends ok without working is taken the same way (M106 §6). The
 runner's watchdog keeps a tool tally for the whole run, stored with the run's
@@ -929,9 +946,20 @@ which the heal records it read. It may call exactly `skill_view`,
 `job_heal_respond`, whose only effect is to hand one decision and a short note
 to the heal run; the first is kept. A provider's heal, a plugin's, a kind no
 model can help with and a verdict run no model. `Jobs.HealDecision` checks the
-decision and the heal run carries it out after the loop has ended, each
-job write right after a write that proves the lease still its own (D4):
-`rerun` asks for one
+decision and the heal run carries it out after the loop has ended (D4), each
+job write and the decision's record in ONE transaction
+(`Jobs.Registry.heal_write/5`, `Memory.Repo.heal_job_write/5`) fenced on the
+heal's lease and on the job still being the version the decision was
+resolved against (`Jobs.HealDecision.job_version/1`, a digest of the job's
+definition: what an owner's edit, pause or resume can write, never what a
+run writes) and on no owner's write having marked the heal since its claim
+(`job_heals.owner_wrote_at`: every edit, pause or resume marks the job's
+`diagnosing` heal whatever value it leaves, and the claim clears it, so a
+write undone, which no compare by value can see, still counts, JOB-12; the
+digest sees what no mark can, a write outside the owner-write path and a
+proposal answered after its heal run), so an owner's change made while the
+diagnosis ran stands and the decision is recorded as `tell`, refused as
+`job_changed`: `rerun` asks for one
 run through the Scheduler's run now, by the name the Scheduler is registered
 under (a heal run outlives a Scheduler that restarts alone), after the
 concluding write that stamps `rerun_at`, and records what came of it in
@@ -946,7 +974,7 @@ upward and at most to the engine's default run limit
 (`Jobs.Runner.default_timeout_ms/0`), and anything past it becomes a proposal;
 `pause` pauses it through `Jobs.Registry`; `propose` is checked as an owner's
 edit is (`Tools.UpdateJob.change_attrs/2`, `Jobs.Registry.check_update/3`) and
-stored on the heal with the job's version, never applied; a job a watcher
+stored on the heal with the job's version, never applied by the heal run; a job a watcher
 wakes or a mandate names gets no edit, only a rerun, a pause or `tell`; a
 decision a check refuses is traced, logged and goes on as `tell`. The decision,
 the note and the change are recorded on `job_heals`; `Jobs.HealMessage` adds
@@ -958,12 +986,42 @@ and closed `still_failing`, whose quiet days keep a third failure silent; an ok
 run closes it `healed` and sends nothing; a heal watching 7 days expires as a
 waiting one does.
 
+A proposal is stated and stored (M106 §5.7, D5); the card that answers it is
+not built yet, and no model or chat reply can answer it. `Jobs.HealMessage`
+states it short: one line per changed field with its new value only, a task
+as its changed part, and one closing line saying Fermix has not made the
+change, with nothing on how to answer. `Jobs.HealAnswer` is the apply and the
+leave that card will call, with no production caller yet and no turn in it:
+given the heal, the surface the answer came from (`decided_from`) and, as
+data, the checks a heal run's decision takes, `apply_change/4` re-runs an
+owner's edit's checks (`Jobs.HealDecision.check_change/3`), holds the result
+to the recorded values field by field, and writes exactly the recorded change
+with the heal's move to `watching` through the same one transaction, only for
+the version the change was drawn for: a job that moved on gets nothing and the
+heal closes `superseded`; the Scheduler hears of a written change as of any
+edit, and the heal is then watched as after any move (a clean run closes it
+`healed`; a failure is the verdict, saying the change the owner approved did
+not fix it). `leave/3` closes it `skipped`, quiet for 7 days. Each returns
+Fermix's own sentence for the owner, of what it did or why it did nothing. An
+owner's edit, pause or resume that moves the job's definition closes its
+waiting proposal `superseded` in the edit's own transaction, an edit the owner
+asks for in chat among them. The proposal's digest, the answer, when, the
+surface it came from and when the change was applied are columns on
+`job_heals` (migration 74, with JOB-12's mark); `list_jobs` shows a proposal
+whole while it waits (the job's open heal), and as `last_proposal` what became
+of it for its 7 quiet days, whatever heal is open beside it and whether or not
+its runs are kept.
+
 Architecture Invariant: a heal run's model can cause only the decisions in
 `job_heal_respond`'s list, and only code carries one out. The run is offered
 no tool that changes, sends, runs a command or reaches the network; its one
 decision is checked by code, every job write it leads to is made by the heal
-run through the paths an owner's edit takes, fenced on the heal's lease, and a
-change to what the job does or where it reports is only ever stored.
+run through the paths an owner's edit takes, in one transaction with its
+record, fenced on the heal's lease and on the job's definition being the one
+the decision was resolved against, and a change to what the job does or where
+it reports is only ever stored. Only the owner's own answer on the
+proposal's card (not built yet; `Jobs.HealAnswer`) applies a stored change,
+and exactly as stored; no model can.
 
 ### `FermixCore.Cues`: Cues and Watchers
 

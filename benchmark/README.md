@@ -37,7 +37,11 @@ channels or realtime, and provide both `--confirm-daemon-isolated` and
 `--confirm-isolated-env`. Conventional pairs are `~/.fermix-eval` /
 `fermix-eval` for behavioral runs and `~/.fermix-capability-eval` /
 `fermix-capability-eval` for capability runs. The confirmations are operator
-attestations, not containment.
+attestations, not containment. An isolated behavioral run (`run_eval.py`) also needs
+the home's disposable workspace to be a git snapshot at this checkout's HEAD, and is
+refused otherwise; seed with `--workspace-snapshot` (in `FERMIX_CAP_SEED_ARGS` for
+`capability-daemon.sh up`), which copies this checkout in, `.git` included and
+`_build` and `deps` left out, as the CI eval box does.
 
 Judged runs use an **independent external judge** — the Claude API, called
 directly by the harness through the official `anthropic` SDK (no daemon or core
@@ -878,7 +882,7 @@ also need `--cue-mandates`, which adds the stub ticket plugin to every turn of t
 home, and are held out without it:
 
 ```sh
-FERMIX_CAP_SEED_ARGS="--cues --cue-mandates" bin/capability-daemon.sh up
+FERMIX_CAP_SEED_ARGS="--cues --cue-mandates --workspace-snapshot" bin/capability-daemon.sh up
 uv run bin/run_capability.py --candidates --suite cap_cues --trials 3 \
   --confirm-daemon-isolated --confirm-isolated-env
 FERMIX_EVAL_HOME=~/.fermix-capability-eval uv run bin/run_eval.py --suite cues \
@@ -910,6 +914,35 @@ a companion socket that never answers included, stops the run: the case is
 reported INCOMPLETE, the rest are left unrun, as an exhausted account does, and the
 banner names the harness. Reports redact every `drive_error` by default;
 `--include-content` keeps the text.
+
+### Auto Heal (M106)
+
+A failed or degraded job's heal runs outside every turn, so the capability candidate
+`cap_job_auto_heal` seeds each trial's jobs and runs (`checker.state`) and grades the
+heal from memory.db and the trace (and what stays true of a stored proposal nobody
+answered: `checkers/job_proposal.py`), and the behavioral suite `job_auto_heal` seeds
+each case's record (`state:`) and asks about it. Both need the local chat as the owner's
+inbox (`--owner-inbox-cli`; held out as NOT EVALUATED without it), and the behavioral
+run needs the workspace snapshot:
+
+```sh
+FERMIX_CAP_SEED_ARGS="--owner-inbox-cli --workspace-snapshot" bin/capability-daemon.sh up
+uv run bin/run_capability.py --candidates --suite cap_job_auto_heal --trials 3 --estimate
+uv run bin/run_capability.py --candidates --suite cap_job_auto_heal --trials 3 \
+  --confirm-daemon-isolated --confirm-isolated-env
+FERMIX_EVAL_HOME=~/.fermix-capability-eval uv run bin/run_eval.py --suite job_auto_heal \
+  --profile isolated_mutation --judge --dry-run
+FERMIX_EVAL_HOME=~/.fermix-capability-eval uv run bin/run_eval.py --suite job_auto_heal \
+  --profile isolated_mutation --judge --fail-retries 2 \
+  --confirm-daemon-isolated --confirm-isolated-env
+bin/capability-daemon.sh down
+```
+
+With `FERMIX_CAP_HOME` set to another home, give both runners the same home as
+`FERMIX_EVAL_HOME`. `--estimate` counts turns only: each diagnosed task also runs one
+diagnosis on the home's main model (at most six steps), and every turn is followed by
+the home's memory review. Seeded runs sit at their jobs' own fire times
+(`bin/seed_run_times.exs`).
 
 ### The Cues screen (`make capability-screen`)
 
@@ -1136,7 +1169,7 @@ no CI tier.
 
 ```sh
 # from benchmark/, the eval daemon DOWN; any scored provider but openai
-FERMIX_CAP_SEED_ARGS="--phone-calls" bin/capability-daemon.sh up
+FERMIX_CAP_SEED_ARGS="--phone-calls --workspace-snapshot" bin/capability-daemon.sh up
 # validate and plan, spending nothing
 FERMIX_EVAL_HOME=~/.fermix-capability-eval OPIK_PROJECT=fermix-capability-eval \
   uv run bin/run_eval.py --suite phone_call --profile isolated_mutation --judge \

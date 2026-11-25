@@ -498,7 +498,7 @@ defmodule FermixCore.Jobs.Runner do
   defp mark_failed(%{cue: cue} = state, status, reason)
        when not is_nil(cue) and status in ["error", "timeout"] do
     now = DateTime.utc_now()
-    error = persisted_error(status, reason)
+    error = run_error(state, reason)
     calls = run_calls!(state)
     outcome = CueRun.outcome(failure_result(status, reason), state.job, calls)
     text = cue_failure_text(state, status, reason, calls)
@@ -528,7 +528,7 @@ defmodule FermixCore.Jobs.Runner do
 
   defp mark_failed(state, status, reason) when status in ["error", "timeout"] do
     now = DateTime.utc_now()
-    error = persisted_error(status, reason)
+    error = run_error(state, reason)
     text = failure_delivery_text(state, status, reason)
 
     {:ok, output_ref} =
@@ -556,20 +556,31 @@ defmodule FermixCore.Jobs.Runner do
     finish_failure(failed_state, job, settlement, {status, now, text})
   end
 
-  # What a heal is told of the failure (M106 §5.4): the owner-facing sentence
-  # the failure line leads with, the provider's own words when it gave any,
-  # and the provider the failure names, from its reason or else the run's
-  # route.
-  defp heal_facts(state, status, reason) do
+  # What a heal is told of the failure (M106 §5.4, §5.8): Fermix's sentence
+  # for its kind (`Failure.sentence/2`), the words someone else gave (the
+  # provider's own, or the text of a failure Fermix has no sentence for), and
+  # the provider the failure names, from its reason or else the run's route.
+  defp heal_facts(state, _status, reason) do
     %{
-      failure_text: failure_sentence(status, reason),
-      failure_words: provider_words(reason),
+      failure_text: Failure.sentence(reason, in_flight: in_flight(state)),
+      failure_words: provider_words(reason) || other_words(reason),
       provider: failure_provider(reason) || route_provider(state.run)
     }
   end
 
-  defp failure_sentence("timeout", reason), do: persisted_error("timeout", reason)
-  defp failure_sentence("error", reason), do: job_error_sentence(reason)
+  defp other_words(reason) do
+    if Failure.kind(reason) == :other, do: Failure.other_text(reason), else: nil
+  end
+
+  # The tool still running when the run stopped: the newest call its timeline
+  # marks unfinished.
+  defp in_flight(%{run: %{tool_timeline: [_ | _] = timeline}}) do
+    timeline
+    |> Enum.reverse()
+    |> Enum.find_value(fn entry -> entry["status"] == "unfinished" && entry["name"] end)
+  end
+
+  defp in_flight(_state), do: nil
 
   defp provider_words({:provider_error, %{provider_words: words}}) when is_binary(words),
     do: words
@@ -671,17 +682,22 @@ defmodule FermixCore.Jobs.Runner do
     end
   end
 
-  # The ledger's machine-readable reason (run row, job row, telemetry): a
-  # watchdog timeout's reason is tagged, and its sentence is rendered from the
-  # tag; an error keeps the inspected term. A run with no route keeps the text
-  # it had before the reason was tagged.
-  defp persisted_error("timeout", {:time_limit, ms}), do: "wall-clock timeout after #{ms}ms"
-  defp persisted_error("timeout", {:idle_limit, ms}), do: "inactivity timeout after #{ms}ms"
-  defp persisted_error("error", {:no_route, message}), do: inspect(message)
-  defp persisted_error("error", {:skill_grants_nothing, sentence}), do: inspect(sentence)
-  defp persisted_error("error", {:cue_history_lost, sentence}), do: inspect(sentence)
-  defp persisted_error("error", {:tools_unavailable, sentence}), do: inspect(sentence)
-  defp persisted_error("error", reason), do: inspect(reason)
+  # What the run's row, its job's `last_error` and its telemetry keep, which
+  # people and models read (`get_job_run`, `list_job_runs`, `list_jobs`):
+  # Fermix's sentence for the failure's kind (M106 §5.8), and for a failure
+  # Fermix has no sentence for, that failure's own text (`Failure.other_text/1`).
+  defp run_error(state, reason) do
+    case Failure.kind(reason) do
+      :other -> Failure.other_text(reason)
+      _kind -> Failure.sentence(reason, in_flight: in_flight(state))
+    end
+  end
+
+  # The term itself, for the run's artifact and a guest's failure line: what
+  # Fermix's sentence was built from.
+  defp error_detail(reason) do
+    if Failure.kind(reason) == :other, do: Failure.other_text(reason), else: inspect(reason)
+  end
 
   defp finalize_delivery(state, text) do
     case Delivery.deliver_with_timeout(state.job, text, reply_delivery_opts(state)) do
@@ -1199,7 +1215,8 @@ defmodule FermixCore.Jobs.Runner do
   # A route that cannot be resolved (no provider to select, an unknown pinned
   # provider) is tagged, so a cue run tells "no route", a provider failure,
   # from its other setup failures (M60 §9.4). The ledger and the failure text
-  # read as they did before the tag (`persisted_error/2`, `job_error_sentence/1`).
+  # state its kind's sentence (`Jobs.Failure.sentence/2`), and the detail keeps
+  # the resolver's words.
   defp run_routing(state) do
     {:ok, resolve_run_routing(state)}
   rescue
@@ -1814,7 +1831,7 @@ defmodule FermixCore.Jobs.Runner do
   end
 
   # The reason is a term (`Jobs.Failure`); its sentence is rendered at the
-  # settle (`persisted_error/2`).
+  # settle (`run_error/2`, `Jobs.Failure.sentence/2`).
   defp handle_watchdog_timeout(pid, monitor_ref, activity_ref, watchdog) do
     now = watchdog.monotonic_ms.()
 
@@ -2073,7 +2090,7 @@ defmodule FermixCore.Jobs.Runner do
 
     ## Error
 
-    #{failure_artifact_error(status, reason)}
+    #{failure_artifact_error(state, status, reason)}
     """
   end
 
@@ -2105,10 +2122,10 @@ defmodule FermixCore.Jobs.Runner do
   defp outcome_label({:failed, :provider}), do: "failed on a provider failure"
   defp outcome_label({:failed, :other}), do: "failed"
 
-  defp failure_artifact_error("timeout", reason), do: persisted_error("timeout", reason)
+  defp failure_artifact_error(state, "timeout", reason), do: run_error(state, reason)
 
-  defp failure_artifact_error("error", reason) do
-    "#{job_error_sentence(reason)}\n\nDetail: #{persisted_error("error", reason)}"
+  defp failure_artifact_error(state, "error", reason) do
+    "#{job_error_sentence(state, reason)}\n\nDetail: #{error_detail(reason)}"
   end
 
   defp failure_delivery_text(state, "timeout", reason) do
@@ -2116,7 +2133,7 @@ defmodule FermixCore.Jobs.Runner do
     Scheduled job "#{state.job.name}" finished with timeout.
 
     Run ID: #{state.run.id}
-    Error: #{persisted_error("timeout", reason)}
+    Error: #{run_error(state, reason)}
     """
     |> String.trim()
   end
@@ -2126,25 +2143,25 @@ defmodule FermixCore.Jobs.Runner do
   defp failure_delivery_text(state, "error", reason) do
     """
     Scheduled job "#{state.job.name}" finished with error.
-    #{job_error_sentence(reason)}
+    #{job_error_sentence(state, reason)}
 
     Run ID: #{state.run.id}
-    Detail: #{persisted_error("error", reason)}
+    Detail: #{error_detail(reason)}
     """
     |> String.trim()
   end
 
-  defp job_error_sentence({:no_route, message}),
-    do: TurnRunner.error_reply(message, surface: :job)
+  # A failure line leads with Fermix's sentence for the kind (M106 §5.8); one
+  # Fermix has no kind sentence for is read as a reply reads it, and a cue's
+  # lost history keeps the sentence its check wrote.
+  defp job_error_sentence(_state, {:cue_history_lost, sentence}), do: sentence
 
-  defp job_error_sentence({:skill_grants_nothing, sentence}), do: sentence
-  defp job_error_sentence({:cue_history_lost, sentence}), do: sentence
-  defp job_error_sentence({:tools_unavailable, sentence}), do: sentence
-
-  defp job_error_sentence({:tool_start_unrecorded, _reason}),
-    do: Failure.sentence(:tool_start_unrecorded)
-
-  defp job_error_sentence(reason), do: TurnRunner.error_reply(reason, surface: :job)
+  defp job_error_sentence(state, reason) do
+    case Failure.kind(reason) do
+      :other -> TurnRunner.error_reply(reason, surface: :job)
+      _kind -> Failure.sentence(reason, in_flight: in_flight(state))
+    end
+  end
 
   defp job_config_snapshot(job, loop_input) do
     %{

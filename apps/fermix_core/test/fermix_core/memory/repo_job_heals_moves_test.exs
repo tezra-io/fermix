@@ -48,7 +48,8 @@ defmodule FermixCore.Memory.RepoJobHealsMovesTest do
       assert stored.state == "diagnosing"
     end
 
-    test "a run that lost its lease records nothing and holds nothing", %{repo: repo} do
+    # A heal run's job write under a lost lease is `RepoJobHealsAnswerTest`'s.
+    test "a run that lost its lease records nothing", %{repo: repo} do
       {_job, heal} = claimed!(repo, at(7, 10))
       {:ok, _retaken} = claim(repo, DateTime.add(at(7, 30), @lease_s, :second))
       plan = %{decision: "pause", note: "Pause it.", read_outside: true, change: nil}
@@ -56,7 +57,6 @@ defmodule FermixCore.Memory.RepoJobHealsMovesTest do
       assert {:error, :lease_lost} =
                call(repo, {:decided, heal.id, heal.lease_token, plan, at(7, 31)})
 
-      assert {:error, :lease_lost} = call(repo, {:hold, heal.id, heal.lease_token, at(7, 31)})
       assert {:ok, %{decision: nil}} = call(repo, {:get, heal.id})
     end
   end
@@ -230,7 +230,11 @@ defmodule FermixCore.Memory.RepoJobHealsMovesTest do
     assert {:ok, %{state: "closed", outcome: "expired"}} = call(repo, {:get, heal.id})
   end
 
-  test "each job's heal carries its decision, its note and its change", %{repo: repo} do
+  # The note's text is no fact `list_jobs` carries (stage S4, round two): only
+  # that there is one, and the run whose `get_job_run` shows it.
+  test "each job's heal carries its decision, that it has a note, and its change", %{
+    repo: repo
+  } do
     {job, heal} = claimed!(repo, at(7, 10))
 
     plan = %{
@@ -244,12 +248,15 @@ defmodule FermixCore.Memory.RepoJobHealsMovesTest do
     :ok = call(repo, {:decided, heal.id, heal.lease_token, plan, at(7, 31)})
     :ok = call(repo, {:delivered, heal.id, heal.lease_token, at(7, 32)})
 
-    assert {:ok, by_job} = call(repo, :open_by_job)
+    assert {:ok, %{open: by_job}} = call(repo, {:listed_by_job, at(7, 40)})
 
-    assert %{decision: "propose", note: "Point the task at the new page.", change: change} =
-             Map.fetch!(by_job, job.id)
-
+    assert %{decision: "propose", has_note: true, change: change} = listed = by_job[job.id]
+    assert listed.last_run_id == heal.last_run_id
+    refute Map.has_key?(listed, :note)
     assert change == plan.change
+
+    assert {:ok, "Point the task at the new page."} =
+             call(repo, {:note_for_run, heal.last_run_id})
   end
 
   # --- fixtures ------------------------------------------------------------------
