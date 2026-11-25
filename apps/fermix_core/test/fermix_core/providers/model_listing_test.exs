@@ -3,6 +3,7 @@ defmodule FermixCore.Providers.ModelListingTest do
 
   alias FermixCore.Auth.ChatGPT
   alias FermixCore.Providers.ModelListing
+  alias FermixTestSupport.TelemetryCapture
 
   describe "live?/1" do
     test "only ollama, openrouter, venice, vercel and openai_codex have live listings" do
@@ -232,18 +233,6 @@ defmodule FermixCore.Providers.ModelListingTest do
   # malformed one (`acme/no-name`, no name and no release date) and one with a
   # name and no release date (`openai/gpt-5-undated`).
   describe "live_models/2 — :vercel" do
-    test "reads the public listing at <base>/models with no key" do
-      Req.Test.stub(__MODULE__, fn conn ->
-        assert conn.request_path == "/v1/models"
-        assert conn.query_string == ""
-        assert Plug.Conn.get_req_header(conn, "authorization") == []
-        Req.Test.json(conn, vercel_listing())
-      end)
-
-      assert {:ok, [_ | _]} =
-               ModelListing.live_models(:vercel, req_options: [plug: {Req.Test, __MODULE__}])
-    end
-
     # With a key, the gateway judges each model against the team's own settings
     # (Zero Data Retention, allow lists, plan): the owner's team, with Zero Data
     # Retention on, was told 62 of the 257 models it would be offered were
@@ -282,6 +271,48 @@ defmodule FermixCore.Providers.ModelListingTest do
                )
 
       assert reason =~ "HTTP 401"
+    end
+
+    # A listing made with the person's own key is a call on that credential, so
+    # it rides the provider-call stream as the ChatGPT one does (M57 §9).
+    test "a listing with a key is a provider call on the vercel credential, ok or not" do
+      TelemetryCapture.attach([[:fermix, :provider, :call]], :emitter)
+      Req.Test.stub(__MODULE__, fn conn -> Req.Test.json(conn, vercel_availability_listing()) end)
+      opts = [api_key: "vck-team", req_options: [plug: {Req.Test, __MODULE__}]]
+
+      assert {:ok, models} = ModelListing.live_models(:vercel, opts)
+      count = length(models)
+
+      assert_receive {:telemetry, [:fermix, :provider, :call], _measurements,
+                      %{
+                        provider: :vercel,
+                        adapter: :model_listing,
+                        status: :ok,
+                        models_count: ^count
+                      }}
+
+      Req.Test.stub(__MODULE__, fn conn -> Plug.Conn.send_resp(conn, 401, "{}") end)
+      assert {:error, reason} = ModelListing.live_models(:vercel, opts)
+
+      assert_receive {:telemetry, [:fermix, :provider, :call], _measurements,
+                      %{provider: :vercel, status: :error, error: ^reason}}
+    end
+
+    # Mint refuses a header value with a character HTTP does not allow, and its
+    # error carries the whole value: for the authorization header, the key.
+    test "a key HTTP cannot carry fails without the key in the error" do
+      {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}])
+      on_exit(fn -> :gen_tcp.close(listener) end)
+      {:ok, port} = :inet.port(listener)
+
+      assert {:error, reason} =
+               ModelListing.live_models(:vercel,
+                 base_url: "http://127.0.0.1:#{port}/v1",
+                 api_key: "vck-pasted​key"
+               )
+
+      assert reason =~ "authorization header"
+      refute reason =~ "vck-pasted"
     end
 
     test "keeps tool-calling language models, by maker then newest, an undated one last" do

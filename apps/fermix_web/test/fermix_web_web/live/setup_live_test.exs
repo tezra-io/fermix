@@ -172,6 +172,23 @@ defmodule FermixWebWeb.SetupLiveTest do
       do: {:error, "unexpected response from https://api.openai.test/v1/models"}
   end
 
+  # Vercel AI Gateway's listing as the key asked with decides it (M105 §11.9):
+  # the public list with none, else one model named for the key's byte size.
+  defmodule VercelKeyedListing do
+    def live?(:vercel), do: true
+    def live?(_provider), do: false
+
+    def live_models(:vercel, opts) do
+      case Keyword.get(opts, :api_key) do
+        nil ->
+          {:ok, [%{id: "public/every-model", label: "Every Model", context_window: 200_000}]}
+
+        key ->
+          {:ok, [%{id: "team/key-#{byte_size(key)}", label: "Team", context_window: 200_000}]}
+      end
+    end
+  end
+
   setup %{conn: conn} do
     providers = Application.fetch_env(:fermix_core, :providers)
     personalization = Application.get_env(:fermix_core, :personalization, [])
@@ -4755,26 +4772,9 @@ defmodule FermixWebWeb.SetupLiveTest do
 
     # With a key, Vercel AI Gateway lists only what the key's team may use
     # (M105 §11.9), so the pane asks with the key as soon as it is entered,
-    # before it is saved. The key field reports on blur, so a key being typed
-    # sends no request per keystroke.
+    # before it is saved, and with the bytes a save would store. The key field
+    # reports on blur, so a key being typed sends no request per keystroke.
     test "vercel pane lists with the key being entered", %{conn: conn} do
-      defmodule VercelKeyedListing do
-        alias FermixCore.Providers.ModelListing
-
-        def live?(:vercel), do: ModelListing.live?(:vercel)
-        def live?(_provider), do: false
-
-        def live_models(:vercel, opts) do
-          case Keyword.get(opts, :api_key) do
-            "vck-entered" ->
-              {:ok, [%{id: "team/allowed-only", label: "Allowed Only", context_window: 200_000}]}
-
-            nil ->
-              {:ok, [%{id: "public/every-model", label: "Every Model", context_window: 200_000}]}
-          end
-        end
-      end
-
       Application.put_env(:fermix_web, :model_listing_impl, VercelKeyedListing)
 
       on_exit(fn ->
@@ -4793,15 +4793,136 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       [key_input] = Regex.run(~r/<input[^>]*name="provider_form\[vercel_api_key\]"[^>]*>/, html)
       assert key_input =~ ~s(phx-debounce="blur")
+      assert key_input =~ ~s(phx-update="ignore")
 
+      html =
+        render_change(form, provider_form: %{provider: "vercel", vercel_api_key: "vck-entered"})
+
+      assert html =~ "team/key-11"
+      refute html =~ "public/every-model"
+
+      # A save stores the key as pasted, spaces and all, so the listing asks
+      # with the same 13 bytes.
       html =
         render_change(form, provider_form: %{provider: "vercel", vercel_api_key: " vck-entered "})
 
-      assert html =~ "team/allowed-only"
-      refute html =~ "public/every-model"
+      assert html =~ "team/key-13"
 
       html = render_change(form, provider_form: %{provider: "vercel", vercel_api_key: "  "})
       assert html =~ "public/every-model"
+    end
+
+    # The key field is the browser's (`phx-update="ignore"`). The reply to the
+    # event its own blur sends would otherwise reset it to the blank it is
+    # rendered with, and a save would then keep the old key: headless Chrome
+    # showed exactly that (M105 §11.9). It is a new, empty element whenever the
+    # form is built again from the saved settings: another provider's pane, a
+    # save.
+    test "the key field is the browser's until the form is built again", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup?tab=provider")
+      form = form(view, "form[phx-submit=\"save_provider\"]")
+      key_field = fn html -> hd(Regex.run(~r/<input[^>]*type="password"[^>]*>/, html)) end
+      id_of = fn input -> hd(Regex.run(~r/ id="([^"]+)"/, input, capture: :all_but_first)) end
+
+      first = form |> render_change(provider_form: %{provider: "vercel"}) |> key_field.()
+      assert first =~ ~s(phx-update="ignore")
+
+      typed =
+        form
+        |> render_change(provider_form: %{provider: "vercel", vercel_api_key: "vck-typed"})
+        |> key_field.()
+
+      assert id_of.(typed) == id_of.(first)
+
+      other = form |> render_change(provider_form: %{provider: "openai"}) |> key_field.()
+      back = form |> render_change(provider_form: %{provider: "vercel"}) |> key_field.()
+      refute id_of.(back) in [id_of.(first), id_of.(other)]
+
+      saved =
+        form
+        |> render_submit(
+          provider_form: %{
+            provider: "vercel",
+            vercel_api_key: "vck-live",
+            default_model: "spacexai/grok-4.7"
+          }
+        )
+        |> key_field.()
+
+      # The page rebuilds the form for the configuration's current provider
+      # (OpenAI here): the same provider's key field as before, as a new element.
+      assert saved =~ ~s(name="provider_form[openai_api_key]")
+      refute id_of.(saved) == id_of.(other)
+    end
+
+    # Leaving the pane drops the key field, so the list on return is the
+    # configured key's again, not the team's of a key no longer entered.
+    test "back on the provider tab, the vercel list follows the empty key field", %{conn: conn} do
+      Application.put_env(:fermix_web, :model_listing_impl, VercelKeyedListing)
+
+      on_exit(fn ->
+        Application.put_env(
+          :fermix_web,
+          :model_listing_impl,
+          FermixWebWeb.TestSupport.StaticModelListing
+        )
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup?tab=provider")
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]")
+        |> render_change(provider_form: %{provider: "vercel", vercel_api_key: "vck-entered"})
+
+      assert html =~ "team/key-11"
+      render_click(view, "select_tab", %{"tab" => "search"})
+      html = render_click(view, "select_tab", %{"tab" => "provider"})
+      assert html =~ "public/every-model"
+      refute html =~ "team/key-11"
+    end
+
+    # A refused key or a team with no usable models leaves a typed model field.
+    # It reports on blur like the picker, or each letter of a model id would ask
+    # the gateway again with the same key.
+    test "vercel pane's typed model field after a refused key reports on blur", %{conn: conn} do
+      defmodule VercelRefusedListing do
+        alias FermixCore.Providers.ModelListing
+
+        def live?(:vercel), do: ModelListing.live?(:vercel)
+        def live?(_provider), do: false
+
+        def live_models(:vercel, opts) do
+          case Keyword.get(opts, :api_key) do
+            nil -> {:ok, [%{id: "public/every-model", label: "Every", context_window: 200_000}]}
+            "vck-refused" -> {:error, "HTTP 401 from https://ai-gateway.vercel.sh/v1/models"}
+            "vck-no-models" -> {:ok, []}
+          end
+        end
+      end
+
+      Application.put_env(:fermix_web, :model_listing_impl, VercelRefusedListing)
+
+      on_exit(fn ->
+        Application.put_env(
+          :fermix_web,
+          :model_listing_impl,
+          FermixWebWeb.TestSupport.StaticModelListing
+        )
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup?tab=provider")
+      form = form(view, "form[phx-submit=\"save_provider\"]")
+
+      for key <- ["vck-refused", "vck-no-models"] do
+        html = render_change(form, provider_form: %{provider: "vercel", vercel_api_key: key})
+
+        [model_input] =
+          Regex.run(~r/<input[^>]*name="provider_form\[default_model\]"[^>]*>/, html)
+
+        refute model_input =~ ~s(list=")
+        assert model_input =~ ~s(phx-debounce="blur")
+      end
     end
 
     # An empty live list is Ollama's "nothing pulled" only on the Ollama pane.

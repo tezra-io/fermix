@@ -295,7 +295,8 @@ defmodule FermixWebWeb.SetupLive do
      |> assign(:active_tab, active_tab)
      |> assign(:saved_flash, nil)
      |> refresh_cues_on(active_tab)
-     |> AlwaysOn.on_tab(active_tab)}
+     |> AlwaysOn.on_tab(active_tab)
+     |> relist_models_on(active_tab)}
   end
 
   def handle_event("next_step", _params, socket) do
@@ -1946,6 +1947,7 @@ defmodule FermixWebWeb.SetupLive do
         parse_effort_field(Map.get(params, "reasoning_effort"), current.reasoning_effort),
       fast: parse_fast_field(Map.get(params, "fast"), current.fast),
       auth_mode: parse_auth_mode_field(Map.get(params, "auth_mode"), current.auth_mode),
+      generation: current.generation,
       # Carry the plain setup fields (e.g. Ollama's base_url) across an in-place
       # edit; without this the re-render drops them and the input blanks out,
       # risking a saved value being wiped on the next submit (M12 §6.2).
@@ -1998,7 +2000,10 @@ defmodule FermixWebWeb.SetupLive do
       reasoning_effort: Keyword.get(provider_block, :reasoning_effort, default_effort(provider)),
       fast: Keyword.get(provider_block, :fast, false),
       auth_mode: Keyword.get(provider_block, :auth_mode, :api_key),
-      field_values: plain_field_values(provider, provider_block)
+      field_values: plain_field_values(provider, provider_block),
+      # Names this build of the form; the key field's id carries it, so a form
+      # built again from the saved settings gets a new, empty key field.
+      generation: System.unique_integer([:positive, :monotonic])
     }
   end
 
@@ -4716,6 +4721,14 @@ defmodule FermixWebWeb.SetupLive do
   # Static catalog options always; live listing (installed Ollama models /
   # the upstream OpenRouter catalog) layered on for the providers that
   # have one. Synchronous with a tight timeout — setup page only.
+  # The provider pane's key field is new and empty when the pane is shown
+  # again, so a list asked with a key entered before leaving (Vercel AI
+  # Gateway, M105 §11.9) is asked again with the configured one.
+  defp relist_models_on(socket, "provider"),
+    do: assign_model_sources(socket, socket.assigns.provider_form)
+
+  defp relist_models_on(socket, _tab), do: socket
+
   # `params` is the form as last posted, so a key being entered (not yet
   # saved) can ask for the listing it opens.
   defp assign_model_sources(socket, provider_form, params \\ %{}) do
@@ -4752,19 +4765,17 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   # Vercel AI Gateway lists only what a key's team may use (M105 §11.9), so a
-  # key entered in the pane is the one asked with, before it is saved; with the
+  # key entered in the pane is the one asked with, before it is saved, as the
+  # bytes a save stores (`maybe_put_string/3` keeps them as given); with the
   # field blank the listing uses the configured key, if any.
   defp listing_opts(:vercel, _provider_form, params) do
-    case params |> Map.get("vercel_api_key") |> trimmed() do
-      "" -> []
-      key -> [api_key: key]
+    case Map.get(params, "vercel_api_key") do
+      key when is_binary(key) -> if String.trim(key) == "", do: [], else: [api_key: key]
+      _absent -> []
     end
   end
 
   defp listing_opts(_provider, _provider_form, _params), do: []
-
-  defp trimmed(value) when is_binary(value), do: String.trim(value)
-  defp trimmed(_value), do: ""
 
   defp model_listing_impl do
     Application.get_env(:fermix_web, :model_listing_impl, ModelListing)

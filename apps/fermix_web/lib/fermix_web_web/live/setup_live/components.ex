@@ -711,6 +711,9 @@ defmodule FermixWebWeb.SetupLive.Components do
   # has a fix to name. From any other provider with a live listing it means
   # the provider listed none Fermix can use; the typed field takes any model id
   # either way.
+  # The typed field reports on blur too (here and when the listing failed):
+  # every change re-reads the listing, a keyed request for Vercel AI Gateway,
+  # so a model id typed letter by letter would ask again per letter.
   defp default_model_input(%{live_models: {:ok, []}} = assigns) do
     ~H"""
     <div class="space-y-1">
@@ -718,6 +721,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         type="text"
         name="provider_form[default_model]"
         value={@provider_form.default_model}
+        phx-debounce="blur"
         class="input input-bordered w-full bg-base-100 font-mono"
       />
       <p :if={@provider_form.provider == :ollama} class="text-xs text-warning">
@@ -739,6 +743,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         type="text"
         name="provider_form[default_model]"
         value={@provider_form.default_model}
+        phx-debounce="blur"
         class="input input-bordered w-full bg-base-100 font-mono"
       />
       <p class="text-xs text-warning">
@@ -814,6 +819,11 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   # The key field reports on blur: a provider whose listing depends on the key
   # (Vercel AI Gateway) is asked once the key is entered, not per keystroke.
+  # The field is the browser's (`phx-update="ignore"`): the reply to the event
+  # its blur sends would otherwise reset it to the blank it is rendered with,
+  # and a save would keep the old key. Its id changes with the provider and
+  # each time the form is built again from the saved settings (a save, another
+  # provider's pane), so the page then gets a new, empty field.
   attr :provider_form, :map, required: true
   attr :report, :map, required: true
 
@@ -830,9 +840,11 @@ defmodule FermixWebWeb.SetupLive.Components do
     >
       <span class="label pb-1 text-sm font-medium">{@secret_label}</span>
       <input
+        id={"provider-secret-#{@provider_form.provider}-#{@provider_form.generation}"}
         type="password"
         name={@secret_name}
         phx-debounce="blur"
+        phx-update="ignore"
         placeholder={secret_placeholder(api_key_set?(@report, @provider_form.provider))}
         class="input input-bordered w-full bg-base-100 font-mono"
         value=""

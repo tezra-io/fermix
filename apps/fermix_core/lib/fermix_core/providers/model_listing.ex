@@ -98,12 +98,12 @@ defmodule FermixCore.Providers.ModelListing do
   # key there is no team to ask, and the public listing is read. A key the
   # gateway refuses is that error, never the public listing.
   def live_models(:vercel, opts) do
-    {url, listing_opts} = vercel_listing_request(opts)
+    url = resolved_base_url(:vercel, opts) <> "/models"
+    key = Keyword.get(opts, :api_key) || Keyword.get(provider_config(:vercel), :api_key)
 
-    case get_json(url, listing_opts) do
-      {:ok, %{"data" => models}} when is_list(models) -> {:ok, vercel_entries(models)}
-      {:ok, _body} -> {:error, "unexpected response from #{url}"}
-      {:error, reason} -> {:error, reason}
+    case presence(key) do
+      nil -> vercel_listing(url, opts)
+      bearer -> vercel_team_listing(url <> "?include_availability=true", bearer, opts)
     end
   end
 
@@ -123,7 +123,7 @@ defmodule FermixCore.Providers.ModelListing do
         chatgpt_entries(body, url)
       end
 
-    emit_chatgpt_listing(result, System.monotonic_time(:millisecond) - started)
+    emit_listing_call(:openai_codex, result, System.monotonic_time(:millisecond) - started)
     result
   end
 
@@ -218,10 +218,10 @@ defmodule FermixCore.Providers.ModelListing do
 
   defp chatgpt_entry(_model), do: :error
 
-  # The listing is a call on the person's ChatGPT credential, so it rides the
-  # provider-call stream like the turns do (M57 §9). It has no run, so it
-  # carries no session id.
-  defp emit_chatgpt_listing(result, duration_ms) do
+  # A listing read with the person's own credential (the ChatGPT sign-in, a
+  # Vercel AI Gateway key) is a call on it, so it rides the provider-call stream
+  # like the turns do (M57 §9). It has no run, so it carries no session id.
+  defp emit_listing_call(provider, result, duration_ms) do
     metadata =
       case result do
         {:ok, models} -> %{status: :ok, models_count: length(models)}
@@ -229,7 +229,7 @@ defmodule FermixCore.Providers.ModelListing do
       end
 
     metadata
-    |> Map.merge(%{provider: :openai_codex, adapter: :model_listing, agent: "model_listing"})
+    |> Map.merge(%{provider: provider, adapter: :model_listing, agent: "model_listing"})
     |> ProviderTelemetry.emit_call(max(duration_ms, 0))
   end
 
@@ -341,6 +341,21 @@ defmodule FermixCore.Providers.ModelListing do
   defp venice_created(%{"created" => created}) when is_integer(created), do: created
   defp venice_created(_model), do: 0
 
+  defp vercel_team_listing(url, bearer, opts) do
+    started = System.monotonic_time(:millisecond)
+    result = vercel_listing(url, [{:bearer, bearer} | opts])
+    emit_listing_call(:vercel, result, System.monotonic_time(:millisecond) - started)
+    result
+  end
+
+  defp vercel_listing(url, opts) do
+    case get_json(url, opts) do
+      {:ok, %{"data" => models}} when is_list(models) -> {:ok, vercel_entries(models)}
+      {:ok, _body} -> {:error, "unexpected response from #{url}"}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   # Chat models that can call tools only, for the reason openrouter_entries/1
   # filters: Fermix sends `tools` on every request. The listing also carries
   # embedding, image, video, speech and other models, and one of another type
@@ -353,16 +368,6 @@ defmodule FermixCore.Providers.ModelListing do
   # is kept and sorts after its maker's dated ones, as Venice's undated models
   # do; one missing any other field the order or the label needs is dropped,
   # as the other listings drop a malformed one.
-  defp vercel_listing_request(opts) do
-    base = resolved_base_url(:vercel, opts) <> "/models"
-    key = Keyword.get(opts, :api_key) || Keyword.get(provider_config(:vercel), :api_key)
-
-    case presence(key) do
-      nil -> {base, opts}
-      bearer -> {base <> "?include_availability=true", Keyword.put(opts, :bearer, bearer)}
-    end
-  end
-
   defp vercel_entries(models) do
     models
     |> Enum.reject(&match?(%{"model_eligibility" => %{"status" => "ineligible"}}, &1))
@@ -434,6 +439,11 @@ defmodule FermixCore.Providers.ModelListing do
 
       {:error, %Req.TransportError{reason: :timeout}} ->
         {:error, "timed out reaching #{url}"}
+
+      # Mint's refusal carries the whole header value, which for authorization
+      # is the person's key; the sentence names the header only.
+      {:error, %Req.HTTPError{reason: {:invalid_header_value, name, _value}}} ->
+        {:error, "request to #{url} failed: its #{name} header holds a character HTTP refuses"}
 
       {:error, reason} ->
         {:error, "request to #{url} failed: #{inspect(reason)}"}
