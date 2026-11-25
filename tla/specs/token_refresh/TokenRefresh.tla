@@ -14,18 +14,18 @@
 (*    by an atomic tmp+rename, so a write is never torn: the rename puts   *)
 (*    back the whole map the read returned, with one entry replaced.       *)
 (*  - the two cross-VM lockfiles around it (Plugins.Dist.Lock): the store  *)
-(*    lock over each Store.write and delete_provider, and the profile lock *)
-(*    over one refresh, from its read of the entry to its write, and over  *)
-(*    a delete. The profile lock is always taken first.                    *)
+(*    lock over each Store.write, replace, remove and delete_provider, and *)
+(*    the profile lock over one refresh, from its read of the entry to its *)
+(*    write, and over a delete. The profile lock is always taken first.    *)
 (*  - after a 4xx, the status write every refresher makes: it writes back  *)
 (*    the entry read when the refresh began.                               *)
 (*  - a response lost after the provider rotated, retried by RefreshClient *)
 (*    with the same refresh token.                                         *)
 (*  - a logout that deletes the entry, then forgets the profile's tokens   *)
 (*    and stops its manager (plugin logout) or only forgets them (provider *)
-(*    sign-out). ChatGPT's sign-out writes its entry back with no token,   *)
-(*    which every reader takes for a deleted entry, then forgets and       *)
-(*    stops, as the plugin logout does.                                    *)
+(*    sign-out). ChatGPT's sign-out deletes its entry under the profile    *)
+(*    lock it takes for its revoke, then forgets and stops, as the plugin  *)
+(*    logout does.                                                         *)
 (*  - whether the manager's plugin child keeps its access-token file after *)
 (*    a logout (the token-file projection, TokenFile).                     *)
 (*  - a logout from a tree-less CLI VM: the same delete, then a notice     *)
@@ -48,7 +48,7 @@
 (*    lands before a refresh's read or after its write, never between; a   *)
 (*    lock still busy after the wait refuses it with nothing spent.        *)
 (*  - ChatGPT's revoke at sign-out. It runs under the profile lock, so no  *)
-(*    refresh of the profile is in flight, and after the sign-out's write  *)
+(*    refresh of the profile is in flight, and after the sign-out's delete *)
 (*    no stored entry holds the revoked token.                             *)
 (*  - a transport error, a 408 or a 429 before the provider acts: the      *)
 (*    retry is harmless.                                                   *)
@@ -77,9 +77,9 @@
 (* rename before it: either only enables or disables the other takers of   *)
 (* that lock, so it commutes with every step in between.                   *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/lib/fermix_core/auth/token_manager.ex @ 6d4919ab4a67
-\* SOURCE: apps/fermix_core/lib/fermix_core/auth/token_supervisor.ex @ 2e6da90246af
-\* SOURCE: apps/fermix_core/lib/fermix_core/auth/store.ex @ 5f5d2943f424
+\* SOURCE: apps/fermix_core/lib/fermix_core/auth/token_manager.ex @ f031202edfcd
+\* SOURCE: apps/fermix_core/lib/fermix_core/auth/token_supervisor.ex @ c1ed62e990f3
+\* SOURCE: apps/fermix_core/lib/fermix_core/auth/store.ex @ ac98d4c99741
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/refresh_client.ex @ 5ceb88dad81f
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/token_expiry.ex @ 8373575105e9
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/xai_login.ex @ 65d372661f4f
@@ -87,14 +87,14 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/oauth_flow.ex @ edf473580685
 \* SOURCE: apps/fermix_core/lib/fermix_core/plugins/auth.ex @ 0a984961a9de
 \* SOURCE: apps/fermix_core/lib/fermix_core/plugins/dist/lock.ex @ db28568d0c53
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/auth.ex @ 37a2d9211162
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/auth.ex @ 25634161ff01
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/chatgpt.ex#logout @ 2f34e631693b
-\* SOURCE: apps/fermix_core/lib/fermix_core/auth/chatgpt/login.ex @ ef73be00c278
-\* SOURCE: apps/fermix_core/lib/fermix_core/auth/chatgpt/logout.ex @ 53141064392c
+\* SOURCE: apps/fermix_core/lib/fermix_core/auth/chatgpt/login.ex @ 51be489cade5
+\* SOURCE: apps/fermix_core/lib/fermix_core/auth/chatgpt/logout.ex @ 419386679cbd
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/chatgpt/refresh.ex @ 235dc7b35088
-\* SOURCE: apps/fermix_core/lib/fermix_core/auth/chatgpt/registration.ex#read,signed_out,@profile @ 8a05570f216c
+\* SOURCE: apps/fermix_core/lib/fermix_core/auth/chatgpt/registration.ex#read,signed_in?,@profile @ 4283f894c7cf
 \* SOURCE: apps/fermix_core/lib/fermix/cli/plugins_command.ex @ be9afb0398a5
-\* SOURCE: apps/fermix_core/lib/fermix/cli/auth_command.ex @ 248ca48a51fc
+\* SOURCE: apps/fermix_core/lib/fermix/cli/auth_command.ex @ 464083735b2d
 \* SOURCE: apps/fermix_core/lib/fermix/cli/daemon.ex @ 5e9f53c9e8bd
 \* SOURCE: apps/fermix_core/lib/fermix/cli/daemon/client.ex @ d8237e7757e7
 EXTENDS Naturals, FiniteSets
@@ -115,15 +115,15 @@ CONSTANTS
     SignOutForgets,         \* that logout is the provider sign-out (forget), not the plugin logout (stop)
     \* Mechanism switches: what the code does about it. TRUE is the real code;
     \* each is switched off by at least one check to show a property needs it.
-    ReadsDiskBeforeRefresh, \* latest_entry re-reads auth.json before each refresh (token_manager.ex:501-505)
+    ReadsDiskBeforeRefresh, \* latest_entry re-reads auth.json before each refresh (token_manager.ex:502-506)
     OneCallbackPerManager,  \* one process per profile, one callback at a time (see "Who refreshes")
-    MergesOnWrite,          \* Store.write re-reads the file and replaces only its own entry (store.ex:469-477, :561-593)
-    LogoutReachesManager,   \* logout reaches the live manager: forget, then stop (plugin logout, ChatGPT sign-out), or forget (provider sign-out) (plugins/auth.ex:73, chatgpt/logout.ex:46, management/auth.ex:521)
-    PluginLogoutForgets,    \* the plugin logout forgets before it stops (plugins/auth.ex:73 -> token_supervisor.ex:161-165)
-    StoreLock,              \* auth.json.lock around every Store.write and delete_provider (store.ex:179-185, :195-203)
-    ProfileLock,            \* the profile's lock over one refresh, read to write, and over a delete (store.ex:220-226)
-    RefusesMissingEntry,    \* a manager whose entry is gone drops its tokens (token_manager.ex:320-328, :381-405)
-    CliLogoutReachesDaemon  \* a CLI logout then has a running daemon let go of the profile (auth_command.ex:405-420, plugins_command.ex:520-545, cli/daemon.ex:1331-1361)
+    MergesOnWrite,          \* Store.write re-reads the file and replaces only its own entry (store.ex:491-499, :583-615)
+    LogoutReachesManager,   \* logout reaches the live manager: forget, then stop (plugin logout, ChatGPT sign-out), or forget (provider sign-out) (plugins/auth.ex:73, chatgpt/logout.ex:51, management/auth.ex:521)
+    PluginLogoutForgets,    \* the plugin logout forgets before it stops (plugins/auth.ex:73 -> token_supervisor.ex:160-164)
+    StoreLock,              \* auth.json.lock around every Store.write, replace, remove and delete_provider (store.ex:179-198, :208-225)
+    ProfileLock,            \* the profile's lock over one refresh, read to write, and over a delete (store.ex:242-248)
+    RefusesMissingEntry,    \* a manager whose entry is gone drops its tokens (token_manager.ex:320-329, :382-406)
+    CliLogoutReachesDaemon  \* a CLI logout then has a running daemon let go of the profile (auth_command.ex:407-422, plugins_command.ex:520-545, cli/daemon.ex:1331-1361)
 
 ASSUME /\ CliProfile \in Profiles /\ LogoutProfile \in Profiles
        /\ MaxAttempts \in Nat \ {0} /\ Rounds \in Nat
@@ -141,8 +141,8 @@ Tok == Nat \cup {None}
 (* Who refreshes. <<"mgr", p, l>> is the manager of profile p;             *)
 (* <<"cli", CliProfile, 1>> is the CLI VM.                                 *)
 (* A profile has one manager process: TokenSupervisor registers children   *)
-(* in a Registry with keys: :unique (token_supervisor.ex:217) and answers  *)
-(* {:already_started, _} with the running one (:277). TokenManager has no  *)
+(* in a Registry with keys: :unique (token_supervisor.ex:216) and answers  *)
+(* {:already_started, _} with the running one (:276). TokenManager has no  *)
 (* default name, so no manager runs outside it (token_manager.ex:32-36).   *)
 (* Its mailbox runs one callback at a time, so concurrent callers of one   *)
 (* profile queue. Lane 2 is a second process refreshing the same profile   *)
@@ -184,7 +184,7 @@ VARIABLES
     tfile       \* disk: tfile[p] = p's manager keeps its plugin child's access-token file
                 \*   (TokenFile). Every profile starts with one, the pessimistic case;
                 \*   refuse/2 and drop_tokens/1 delete it (sync_token_file,
-                \*   token_manager.ex:431, :393-405, :455-463). No step writes a new one.
+                \*   token_manager.ex:432, :394-406, :456-464). No step writes a new one.
 
 vars == <<disk, issued, revoked, mgr, mem, pc, tok, got, tries, buf, rounds, lpc, lbuf, best,
           slock, plock, tfile>>
@@ -269,12 +269,12 @@ MgrMayStart(a) ==
 
 \* do_refresh's read finds no entry, or ChatGPT's entry with no token, which
 \* Store.read refuses as :missing_access_token (stored_entry_error,
-\* :320-328; store.ex:382-391).
+\* :320-329; store.ex:404-413).
 SignedOut(a) == RefusesMissingEntry /\ ReadsDiskBeforeRefresh /\ disk[Prof(a)] = None
 
 \* do_refresh takes the profile lock (Store.with_profile_lock, :285-288;
-\* store.ex:220-226); refresh_stored (token_manager.ex:313-318) reads the
-\* entry under it through latest_entry (:501-505) and refreshes the stored
+\* store.ex:242-248); refresh_stored (token_manager.ex:313-318) reads the
+\* entry under it through latest_entry (:502-506) and refreshes the stored
 \* token. Without RefusesMissingEntry, a read that finds no entry falls back
 \* to the in-memory tokens (the entry_from_state fallback TOKEN-5's fix
 \* removed).
@@ -291,7 +291,7 @@ MgrStart(a) ==
     /\ UNCHANGED <<disk, issued, revoked, mgr, mem, got, buf, lpc, lbuf, best, slock, tfile>>
 
 \* The entry is gone: a logout ran since the manager loaded its tokens.
-\* signed_out/2 (:381-389) drops them through drop_tokens/1 (:393-405),
+\* signed_out/2 (:382-390) drops them through drop_tokens/1 (:394-406),
 \* the state forget/1 builds (:196-199), which deletes its plugin child's
 \* token file, and sends and writes nothing. The profile lock is taken for
 \* the read and released at once.
@@ -307,10 +307,10 @@ MgrSignedOut(a) ==
                    slock, plock>>
 
 \* A tree-less CLI VM: TokenManager.refresh(profile) -> TokenSupervisor
-\* call_or_read finds no supervisor (token_supervisor.ex:224-230, :242-266)
+\* call_or_read finds no supervisor (token_supervisor.ex:223-229, :241-265)
 \* -> direct_refresh takes the profile lock, then Store.read and
-\* refresh_entry under it (:336-344). A tree-less get_token does the same
-\* once the entry it read is due (:303-313). A missing entry fails the read
+\* refresh_entry under it (:335-343). A tree-less get_token does the same
+\* once the entry it read is due (:302-312). A missing entry fails the read
 \* and nothing is refreshed.
 CliStart(a) ==
     /\ ~IsMgr(a)
@@ -368,13 +368,13 @@ SendLost(a) ==
 \* :146-147). ChatGPT's refresh reads the provider's code, and a terminal
 \* one, refresh_token_reused among them, is {:reconnect_needed, code}
 \* (chatgpt/refresh.ex:33-34, :81-92). A consumed token revokes the whole
-\* session (the rule in latest_entry's comment, token_manager.ex:496-500).
+\* session (the rule in latest_entry's comment, token_manager.ex:497-501).
 \* The manager refuses from now on (refresh_outcome/2 -> permanently_refused/2,
-\* :348-360, :370-375; refuse/2, :431), which deletes its plugin child's
+\* :349-361, :371-376; refuse/2, :432), which deletes its plugin child's
 \* token file. Every refresher goes on to mark_reauthorization_required, a
 \* Store.write of the entry read when this refresh began (token_manager.ex:
-\* 586-599; token_supervisor.ex:353-358, :372-373, :396-397, :427-428,
-\* :450-463), still under the profile lock.
+\* 587-600; token_supervisor.ex:352-357, :371-372, :395-396, :426-427,
+\* :449-462), still under the profile lock.
 SendRejected(a) ==
     /\ pc[a] = "send"
     /\ ~Valid(a)
@@ -388,9 +388,9 @@ SendRejected(a) ==
 
 -----------------------------------------------------------------------------
 (* Persisting: Store.write (store.ex:179-185), two steps each, under the    *)
-(* store lock (lock/4 and hold/4, :603-618).                                *)
+(* store lock (lock/4 and hold/4, :676-691).                                *)
 
-\* read_for_write (store.ex:469-472, :489-500) reads the whole file. Without
+\* read_for_write (store.ex:491-494, :511-522) reads the whole file. Without
 \* MergesOnWrite the writer would start from an empty document instead.
 ReadForWrite(a) == IF MergesOnWrite THEN disk ELSE EmptyDoc
 
@@ -402,13 +402,13 @@ WriteRead(a) ==
     /\ UNCHANGED <<disk, issued, revoked, mgr, mem, tok, got, tries, rounds, lpc, lbuf, best,
                    plock, tfile>>
 
-\* put_provider + atomic_write (store.ex:473-474, :561-593, :671-685): the map
+\* put_provider + atomic_write (store.ex:495-496, :583-615, :698-712): the map
 \* read above, with this profile's entry replaced (or created: put_provider
-\* merges into Map.get(providers, key, %{}), :522), renamed over auth.json.
+\* merges into Map.get(providers, key, %{}), :619), renamed over auth.json.
 \* Both locks are then released: the store lock as Store.write returns, the
 \* profile lock as the refresh's locked section returns. A manager then
 \* applies the entry in memory (apply_entry, token_manager.ex:291-292,
-\* :407-424). mgr is left alone: a refresh only runs while the manager is
+\* :408-425). mgr is left alone: a refresh only runs while the manager is
 \* serving (:185-187, :236-237).
 Rename(a) ==
     /\ pc[a] = "rename"
@@ -432,7 +432,7 @@ RejectRead(a) ==
 \* ...and rename half: %{entry | status: "reauthorization_required"}, whose
 \* tokens are the ones this refresh presented, over whatever another
 \* refresher renamed since. That status is not a quarantine the store reads
-\* back (store.ex:305-311); the damage is the consumed token on disk. Both
+\* back (store.ex:327-333); the damage is the consumed token on disk. Both
 \* locks are released.
 RejectRename(a) ==
     /\ pc[a] = "reject_rename"
@@ -452,24 +452,25 @@ RefreshStep(a) ==
 -----------------------------------------------------------------------------
 (* Logout, in the caller's process. Plugins.Auth.logout (plugins/auth.ex:  *)
 (* 66-89): Store.delete_provider, then TokenSupervisor.forget_signed_out.  *)
-(* ChatGPT's sign-out (chatgpt/logout.ex:35-49, :71-86) writes its entry   *)
-(* back with no token under the profile lock instead, then calls           *)
-(* forget_signed_out too. Every reader takes that entry for a deleted one  *)
-(* (SignedOut), so the delete below stands for both. The provider sign-out *)
-(* of anthropic and xai (management/auth.ex:519-523) deletes, then forgets.*)
+(* ChatGPT's sign-out (chatgpt/logout.ex:40-54, :76-99) deletes its entry  *)
+(* under the profile lock it takes for its revoke (Store.remove), then     *)
+(* calls forget_signed_out too, so the delete below stands for both. The   *)
+(* provider sign-out of anthropic and xai (management/auth.ex:519-523)     *)
+(* deletes, then forgets.                                                  *)
 
-\* delete_provider (store.ex:195-203) takes the profile lock, then the store
-\* lock, then read_existing (:437-441, :496-512). ChatGPT's sign-out takes
-\* the profile lock and reads its entry, revokes it, then Store.write takes
-\* the store lock and reads the file (read_for_write): its first read only
-\* finds the entry it then replaces, and nothing else writes that entry
-\* under the profile lock, so taking both locks at the file read is the
-\* same fold. With no entry, the in-daemon plugin logout fails and stops
-\* there (plugins/auth.ex:70-72, :84-88); the provider sign-out treats
-\* :provider_missing as done and goes on to forget (management/auth.ex:
-\* 411-420); ChatGPT's sign-out writes nothing and goes on to
-\* forget_signed_out (chatgpt/logout.ex:71-77); and both CLI logouts go on
-\* to their notice (auth_command.ex:333-335, :370-374, :432-435;
+\* delete_provider (store.ex:208-212) takes the profile lock, then the store
+\* lock (Store.remove), then read_existing (:501-504, :560-576). ChatGPT's
+\* sign-out takes the profile lock and reads its entry, revokes it, then
+\* Store.remove (store.ex:219-225) takes the store lock and reads the file
+\* (read_existing): its first read only finds the entry it then removes,
+\* and nothing else writes that entry under the profile lock, so taking
+\* both locks at the file read is the same fold. With no entry, the
+\* in-daemon plugin logout fails and stops there (plugins/auth.ex:70-72,
+\* :84-88); the provider sign-out treats :provider_missing as done and goes
+\* on to forget (management/auth.ex:528-537); ChatGPT's sign-out, finding
+\* no entry or one with no token, writes nothing and goes on to
+\* forget_signed_out (chatgpt/logout.ex:76-89); and both CLI logouts go on
+\* to their notice (auth_command.ex:335-337, :372-376, :434-437;
 \* plugins_command.ex:285-289). Init stores every entry, and with
 \* MergesOnWrite on (every check with LogoutFromCli) only the logout deletes
 \* one, so the entry is never already gone here: the LogoutFromCli disjunct
@@ -489,11 +490,10 @@ LogoutRead ==
     /\ UNCHANGED <<disk, issued, revoked, mgr, mem, pc, tok, got, tries, buf, rounds, best,
                    tfile>>
 
-\* remove_provider + atomic_write (store.ex:483-484, :603-613, :671-685),
+\* remove_provider + atomic_write (store.ex:505-506, :630-640, :698-712),
 \* then both locks are released. An entry that was already gone is not
-\* rewritten (remove_provider refuses, :566). ChatGPT's sign-out renames the
-\* entry with no token instead (put_provider of Registration.signed_out,
-\* chatgpt/logout.ex:82): the same map to every reader.
+\* rewritten (remove_provider refuses, :636). ChatGPT's sign-out removes
+\* its entry the same way (Store.remove, chatgpt/logout.ex:95).
 LogoutDelete ==
     /\ lpc = "read"
     /\ disk' = IF lbuf[LogoutProfile] = None THEN disk
@@ -512,35 +512,35 @@ Kill(f, v) == [b \in Actors |-> IF Killed(b) THEN v ELSE f[b]]
 Freed(h) == IF h \in Actors /\ Killed(h) THEN None ELSE h
 
 \* Four cases:
-\*  - forget_signed_out (token_supervisor.ex:161-165): forget, as below,
+\*  - forget_signed_out (token_supervisor.ex:160-164): forget, as below,
 \*    which also deletes the plugin child's token file, then stop_profile,
 \*    which by then finds the manager idle and refusing. One step: after
 \*    the forget nothing can run in that manager but the stop. Three
 \*    logouts end in it:
 \*    - A CLI VM has no TokenSupervisor tree (plugins_command.ex:5-8), so
 \*      its own forget_signed_out or stop_profile does nothing
-\*      (token_supervisor.ex:135-141, :175-182, :184-199). After its delete
-\*      or its write, every CLI logout tells a running daemon to let go of
-\*      the profile (plugins_command.ex:278, :520-545; auth_command.ex:
-\*      321-354, :361-379, :405-420): an `auth_forget` request on the
-\*      control socket (cli/daemon/client.ex:70-84), answered by
+\*      (token_supervisor.ex:135-141, :174-181, :183-198). After its delete,
+\*      ChatGPT's sign-out's included, every CLI logout tells a running
+\*      daemon to let go of the profile (plugins_command.ex:278, :520-545;
+\*      auth_command.ex:322-356, :363-381, :407-422): an `auth_forget`
+\*      request on the control socket (cli/daemon/client.ex:70-84), answered by
 \*      forget_signed_out (cli/daemon.ex:1088, :1331-1361). Without
 \*      CliLogoutReachesDaemon, or when the daemon does not answer "ok"
 \*      (the CLI then exits non-zero), nothing reaches the manager.
 \*    - The in-daemon plugin logout calls it right after its delete
 \*      (plugins/auth.ex:73).
-\*    - ChatGPT's sign-out calls it once its write is done and the profile
-\*      lock released (chatgpt/logout.ex:45-48).
+\*    - ChatGPT's sign-out calls it once its delete is done and the profile
+\*      lock released (chatgpt/logout.ex:50-53).
 \*  - stop_profile alone, the plugin logout without PluginLogoutForgets
-\*    (token_supervisor.ex:184-199): DynamicSupervisor.terminate_child sends
+\*    (token_supervisor.ex:183-198): DynamicSupervisor.terminate_child sends
 \*    :shutdown; TokenManager does not trap exits and has no terminate/2, so
 \*    it dies at once, mid-callback if one is running, and its plugin
 \*    child's token file stays on disk.
 \*  - forget, the provider sign-out of anthropic and xai (management/auth.ex:
-\*    404, :429 -> token_supervisor.ex:135-141 -> token_manager.ex:72,
+\*    521, :546 -> token_supervisor.ex:135-141 -> token_manager.ex:72,
 \*    :196-199): a GenServer.call, so it waits behind any refresh callback in
 \*    flight, then drops the tokens and sets state.refusal (drop_tokens,
-\*    :393-405).
+\*    :394-406).
 \*  - neither, with LogoutReachesManager off.
 LogoutStop ==
     /\ lpc = "deleted"
@@ -626,7 +626,7 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 -----------------------------------------------------------------------------
 (* PROPERTIES *)
 
-\* token_manager.ex:496-500: "Refresh from the newest persisted entry, not
+\* token_manager.ex:497-501: "Refresh from the newest persisted entry, not
 \* the in-memory copy. Another refresher (a CLI/doctor probe, or a prior
 \* refresh) may have rotated the refresh token in the store; a provider may
 \* revoke the whole session when a rotated (consumed) refresh token is
