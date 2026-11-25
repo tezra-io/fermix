@@ -6,6 +6,15 @@ defmodule Fermix.MixProject do
       apps_path: "apps",
       version: "0.20.0",
       start_permanent: Mix.env() == :prod,
+      # The dev daemon recompiles edited sources inside its running VM
+      # (`code_reloader`). With consolidated protocols on that VM's path, a
+      # recompiled struct that derives a protocol warns that its
+      # implementation has no effect, the reload fails under
+      # `warnings_as_errors`, and Mix replays the recorded warning on every
+      # later compile, so the daemon no longer starts (docs/lessons.md,
+      # Replayed compile warnings). Dev therefore dispatches protocols
+      # unconsolidated; test and release builds consolidate as before.
+      consolidate_protocols: Mix.env() != :dev,
       deps: deps(),
       aliases: aliases(),
       releases: releases(),
