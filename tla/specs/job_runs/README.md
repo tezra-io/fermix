@@ -13,11 +13,13 @@ times out does not stop the Scheduler: it takes that call's error branch.
 Since M106 the settle also decides the job's retry in that transaction, and
 the due scan claims a pending retry through the same claim. A failure no
 retry takes goes to a heal and sends nothing, unless the job was set up by a
-guest. The heal's own rows are left out; its run's one move on the job (a
-pause, a raised time limit or a "run now") takes the owner's own path, which
-the spec models. Checks 61 to 72 cover retries; see "Retries (M106)" below,
-"Re-read for M106 retries and heals" and "Re-read for the heal's diagnosis
-and moves".
+guest. Since M106 §6 an ok run whose tool never once worked, as in the
+job's two runs before it, goes to a heal too, its own row ok and its text
+delivered. The heal's own rows are left out; its run's one move on the job
+(a pause, a raised time limit or a "run now") takes the owner's own path,
+which the spec models. Checks 61 to 72 cover retries; see "Retries (M106)"
+below, "Re-read for M106 retries and heals", "Re-read for the heal's
+diagnosis and moves" and "Re-read for runs that end ok without working".
 
 With cues on (M60) the Scheduler also admits cue runs, and the one job can be
 a watcher's task: a job that runs on cues, claimed by admission from its
@@ -214,7 +216,7 @@ checks listed under it):
 - `RetriesOnlyUnsent`: a send is retried only when it never reached the
   platform (`channel_send.ex:140-143`, `:194-202`). This is the mechanism for
   platforms that do not dedupe. The runner tags its send with the proactive
-  key `job:<run id>` (`runner.ex:1647`). The mobile channel keeps one row per
+  key `job:<run id>` (`runner.ex:1668`). The mobile channel keeps one row per
   key (`mobile_sql.ex:44-46`), so a retry there would not show twice. Check 04.
 - `ReconcilesRuns`: at init and every 60 s the Scheduler reaps unsettled runs
   with no live runner and adopts live ones (`scheduler.ex:235`, `:270-540`).
@@ -226,7 +228,7 @@ checks listed under it):
   `delivery_timeout_ms` (`channel_send.ex:219-241`). Check 05.
 - `AtomicSettle`: a run's final row and its job's release are one
   transaction, `Repo.settle_job_run` (`repo.ex:2563-2566`, `:7015-7031`, `:7091-7138`), used by
-  the runner (`runner.ex:344`, `:490`) and the reaper (`scheduler.ex:1038-1054`).
+  the runner (`runner.ex:362`, `:508`) and the reaper (`scheduler.ex:1038-1054`).
   The release is a column-targeted `UPDATE` that turns `running` back into
   `scheduled` and keeps any other state. Switched off, the spec runs the code
   before the fix: the run row alone, then a read and a whole-row upsert of the
@@ -245,7 +247,7 @@ checks listed under it):
   field list `:8096-8134`). Switched off, pause and `update_job` upsert the
   whole row they read. Check 27.
 - `LoopDiesWithRunner`: a runner's AgentLoop is spawned linked to it and
-  reports its own crash as a value (`runner.ex:1285-1289`, `:1301-1318`), so a
+  reports its own crash as a value (`runner.ex:1305-1309`, `:1321-1338`), so a
   restart that kills the runner kills its loop. Switched off, the code before
   the fix: the loop was only monitored, and a daemon crash (which stands for
   a restart of the job subtree) leaves a runner's loop running as a stray
@@ -269,8 +271,8 @@ checks listed under it):
   reap. Check 67.
 - `StampsToolStart`: a run's first tool start is on its row before the tool
   runs. AgentLoop calls the runner's gate in the loop's own process ahead of
-  each call (`gate_tool`, `agent_loop.ex:1388-1423`), and the gate stores the
-  start in one Repo call (`put_tool_start_store`, `runner.ex:1683-1722`); a
+  each call (`gate_tool`, `agent_loop.ex:1396-1457`), and the gate stores the
+  start in one Repo call (`put_tool_start_store`, `runner.ex:1711-1750`); a
   start it cannot store runs no tool. Switched off, the order before JOB-9's
   fix: the tool runs, and the runner stores its start when it handles the
   loop's message. Check 62.
@@ -1602,18 +1604,18 @@ No modelled step changed:
    runs one diagnosis (`Jobs.HealDiagnosis`), turns its decision into a plan
    (`Jobs.HealDecision`, which only reads) and carries it out itself. It
    writes each move right after a write on `job_heals` that proves its lease
-   still holds (`fenced`, `heal_run.ex:283-290`):
-   - `pause`: `Registry.pause_job` (`heal_run.ex:278-279`), the owner's
+   still holds (`fenced`, `heal_run.ex:284-291`):
+   - `pause`: `Registry.pause_job` (`heal_run.ex:279-280`), the owner's
      pause: `Pause`.
    - `raise_limit`: `Registry.update_job` with `timeout_seconds` alone
-     (`heal_run.ex:270-276`). `prepare_update` reads the job and
+     (`heal_run.ex:271-277`). `prepare_update` reads the job and
      `apply_job_update` writes that one column through
      `Repo.update_scheduled_job_fields` (`registry.ex:143-173`, `:279-287`;
      `timeout_patch`, `:342-354`). No step reads that column: `UpdateRead`,
      then `UpdateWrite`.
    - `rerun`: once the concluding write has made the heal `watching`,
      `Registry.check_run_now` and then `Scheduler.run_now`
-     (`heal_run.ex:425-463`), as the owner's `run_job_now` does
+     (`heal_run.ex:426-464`), as the owner's `run_job_now` does
      (`run_job_now.ex:71-77`): `ManualRun`. Its claim refuses a paused,
      running or claimed job in its own transaction.
    - `propose`, `tell` and no decision write only `job_heals`.
@@ -1641,7 +1643,7 @@ No modelled step changed:
      stays in the Scheduler's mailbox. `Scheduler.run_now/3` now takes the
      wait as `:timeout` (`scheduler.ex:183-186`), and the heal passes the
      same 5 s. Since JOB-10's fix the heal records such a call as
-     `unanswered` and keeps watching (`heal_run.ex:425-601`), so the run
+     `unanswered` and keeps watching (`heal_run.ex:426-602`), so the run
      that may still start is the one it watches.
    - **A Scheduler that restarted: JOB-10, fixed in this stage.** The heal
      run used to reach the Scheduler that started it by pid. A heal run
@@ -1658,7 +1660,7 @@ No modelled step changed:
    - **Its diagnosis loop: JOB-11, fixed in this stage.** The loop was
      started with `spawn_monitor`, unlinked. It is now linked and
      monitored in one call, as a runner's loop has been since JOB-8
-     (`heal_diagnosis.ex:248-268`). Its four tools (`skill_view`,
+     (`heal_diagnosis.ex:251-271`). Its four tools (`skill_view`,
      `list_job_runs`, `get_job_run`, `job_heal_respond`) read job and run
      rows or send a message, so even a stray loop wrote nothing modelled.
 2. **The S2 properties hold with a heal run as a caller.**
@@ -1675,22 +1677,22 @@ No modelled step changed:
      `handle_call` (`:276-279`), and the rerun's runner's own DOWN.
 3. **The settle's new branch and the wider expiry: not modelled.**
    - A failure that finds its job's heal `watching` now reopens the heal
-     for a verdict (`verdict`, `job_heals_sql.ex:339-366`) instead of
+     for a verdict (`verdict`, `job_heals_sql.ex:535-563`) instead of
      joining it. Both write only `job_heals` and `job_heal_runs`.
    - An ok run closes a watching heal `healed`, as it closes any other.
    - The new outcome `{:verdict, id}` takes the runner's branch for a
-     failure a heal took (`finish_failure/4`, `runner.ex:599-602`: the
+     failure a heal took (`finish_failure/4`, `runner.ex:617-620`: the
      delivery is `skipped`). The reaper's crash settle does not branch on
      it, so the run is the failed run the spec already has (`GuestJob`
      FALSE).
    - The expiry now also closes a heal that has been `watching` for seven
-     days (`expire_waiting`, `job_heals_sql.ex:604`). It is the same Repo
+     days (`expire_waiting`, `job_heals_sql.ex:827`). It is the same Repo
      call in init and in the reconcile tick.
    - The diagnosis columns (migration 72) are on `job_heals`.
 4. **What JOB-10's fix added: not modelled.**
    - The heal records what came of the rerun once, in
      `job_heals.rerun_outcome` (`rerun_outcome`,
-     `job_heals_sql.ex:547-567`): `started`, `running` (a run already held
+     `job_heals_sql.ex:770-790`): `started`, `running` (a run already held
      the job), `refused` or `unanswered`. The write comes after the
      concluding write has released the lease.
    - The outcome comes from `HealRun.rerun_outcome/2`. `refused` is only
@@ -1712,7 +1714,7 @@ No modelled step changed:
    - Every column the write touches is on `job_heals`, and no step reads
      them.
    - The message now says "Fermix has asked for it to run again now"
-     (`heal_message.ex:110`), which holds whatever the Scheduler answers.
+     (`heal_message.ex:166`), which holds whatever the Scheduler answers.
 
 Citations:
 - The `registry.ex` ones moved with `check_update` and `prepare_update`
@@ -1739,6 +1741,104 @@ New `SOURCE` pins:
 No check was added or changed. All 72 keep their verdicts and every `holds`
 check its state count from the M106 re-read above; the `needs` checks'
 counts move with the order TLC explores in, as before.
+
+## Re-read for runs that end ok without working (M106, 2026-11-24)
+
+M106's §6 (S5) staled `runner.ex`, `agent_loop.ex#run_tool_call`,
+the heal settle's functions in `job_heals_sql.ex`, `repo.ex`'s
+`@unsettled_job_runs_sql` and `heal_run.ex` (comments only). Every pinned
+function that changed was re-read against the code, point by point. No
+modelled step changed:
+
+1. **An ok run's settle reads and writes heals: not modelled.**
+   - The settle runs as before, in its one `BEGIN IMMEDIATE`
+     (`settle_job_run_in_tx`, `repo.ex:8629`): the active and not-cue
+     checks, the run row with its facts, the job's release, the retry
+     reset, then the heals.
+   - The run passed to the heals is the row read back
+     (`upsert_job_run_row` → `fetch_job_run`), its tally read through
+     `JobHealsSql.run_tally/2` (`job_heals_sql.ex:294`). A tally this engine
+     cannot read is none and is logged, so nothing raises in the Repo.
+   - For an operator's job, `degraded/3` (`:396`) reads the tallies of the
+     job's two newest other settled non-cue runs (`earlier_tallies`,
+     `:406`). Those are `job_runs` and `job_run_facts` rows with a final
+     status, read through the `(job_id, created_at)` index.
+     `Jobs.Degraded.decide/1` (pure) says whether a tool never once
+     succeeded in all three.
+   - `settle_ok` (`:422`) then either closes the heals the run proves
+     (`close_proven`, `:442`), or closes the provider's heal and takes the
+     tool's failure (`take_failure`). Both write only `job_heals` and
+     `job_heal_runs`.
+   - The run row stays ok with no failure kind. The release and the retry
+     reset are unchanged, and so is the delivery: `mark_completed`
+     (`runner.ex:380`) and `complete_run` are unchanged, and read the
+     settlement only for telemetry.
+   - The new reads take place inside the settle's transaction on the
+     Repo's one connection, so nothing they read can change under them. A
+     claim, a retry's claim and the reaper's settle are separate Repo
+     requests, served before or after it, as the model's one `Settle` step
+     has them.
+   - Under single flight (`OneActiveRun`) no other run of the job is
+     active then, and the read takes only final statuses. It feeds
+     nothing but heal rows.
+   - A new query that fails rolls the settle back, like any SQLite error,
+     which the spec leaves out.
+2. **A heal an ok run leaves open: no new interleaving.** A heal an ok run
+   leaves open is claimed by the same heal pass as one a failed run leaves,
+   in the same callbacks (the S3 re-read above). Its heal run's moves are
+   the owner's, which the spec takes at any time. A plugin's heal has no
+   job: it is never diagnosed (`diagnosable?` needs a job subject,
+   `heal_run.ex:215`), so it makes no move.
+3. **The runner: the JOB-9 gate, the stored first start and the watchdog's
+   order are unchanged.**
+   - `run_agent_loop` still adds the gate (`put_tool_start_store`,
+     `runner.ex:1719-1727`).
+   - The watchdog handles `:tool_start` as before (`in_flight`,
+     `last_activity_at`, `first_tool_at`, `:1882`) and adds a per-tool
+     tally in the same step.
+   - A name the run was not offered is `(no such tool)` for both its start
+     and its finish (`recorded_name`, `:1936`), so `in_flight` still pairs
+     them.
+   - `put_run_facts` still takes `tools_started_at` from `first_tool_at`,
+     and adds the tally beside the timeline.
+   - The runner asks for a failed call's error words (`maybe_put(
+     :activity_error_chars, ...)`, `:1660`; 500 characters, none for a cue
+     run, `:1700-1701`). Those ride the call's `:tool_finish`, after the
+     tool has run.
+4. **`AgentLoop`: only after the tool.**
+   - In `run_tool_call` (`agent_loop.ex:1396`) the gate still runs before
+     `:tool_start`. Only the finish's detail changed (`finish_detail`,
+     `:1422-1428`).
+   - A bad `activity_error_chars` fails the run's start in `build_state`,
+     inside the runner's `report_loop`.
+   - `error_result/3` (`:1569`) interpolates the tool's words as the old
+     frame already did, so it raises nowhere new.
+   - `agent_loop.ex` is pinned only here: `turn_queue` and
+     `companion_session` pin `turn_runner.ex`.
+5. **The reaper reads the tally too.** `@unsettled_job_runs_sql`
+   (`repo.ex:2854`) selects `tool_tally_json`. The crash settle writes the
+   stored tally back unchanged (`upsert_job_run_facts`, `repo.ex:9010`,
+   keeps a stored value) and is an error settle, which never reads
+   tallies.
+
+`cue_inbox` is not stale and was re-read as well. A cue run asks for no
+error words, `earlier_tallies` skips trigger `cue`, and a cue run's settle
+(`settle_cue_run`) still calls neither `JobRetriesSql` nor `JobHealsSql`.
+
+New `SOURCE` pins:
+- the ok settle's functions in `job_heals_sql.ex` (`degraded`,
+  `earlier_tallies`, `settle_ok`, `close_proven`, `open_for`,
+  `query_open_for`, `close_ids`, `run_tally`), with `close_healed` gone;
+- `degraded.ex` whole, the pure trigger the settle calls.
+
+Citations:
+- the `runner.ex`, `agent_loop.ex`, `failure.ex`, `heal_run.ex`,
+  `heal_diagnosis.ex`, `heal_message.ex` and `job_heals_sql.ex` ones that
+  moved were updated, in the spec and in this README's sections on the
+  current code;
+- the `repo.ex` ones were left as before.
+
+No check was added or changed, and no finding came of the re-read.
 
 ## Re-read for events drawn as cards (2026-11-13)
 
@@ -1845,7 +1945,7 @@ moved up by two with the code.
   left there (a process the loop links to itself killing the loop, and through
   the link the runner) leaves the rows the `Loop` step and then a crash at
   `complete` or `fail` leave.
-  - The `{:ok, _} = write_run_artifact` writes (`runner.ex:318`, `:476`) are
+  - The `{:ok, _} = write_run_artifact` writes (`runner.ex:336`, `:494`) are
     folded into the final write, so they share the `complete` and `fail`
     crash points.
   - After a loop error, the memory-source calls between the settle and the
@@ -1896,7 +1996,9 @@ moved up by two with the code.
   freshness window, dropped by the scan, is left out with the stale-skip.
 - A heal's rows (M106 §5.4) are outside the model: see "Re-read for M106
   retries and heals" for why none of the settle's heal writes touches a job
-  row, a run row or the claim. A heal run's one move on the job is the
+  row, a run row or the claim, and "Re-read for runs that end ok without
+  working" for an ok run's, which also reads the job's earlier runs' tool
+  tallies in the same transaction. A heal run's one move on the job is the
   owner's pause, edit or "run now" (see "Re-read for the heal's diagnosis and
   moves"), so `intent` is the last pause or resume any caller made, and
   `OwnerMoves`, `OwnerEdits` and `ManualRuns` bound a heal run's moves with

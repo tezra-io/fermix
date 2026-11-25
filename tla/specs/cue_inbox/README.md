@@ -682,7 +682,7 @@ M106's quiet retry (§5.3) and heal (§5.4) staled the `scheduler.ex` and
 `runner.ex` pins: `init`, `handle_info`, `mark_run_error` and the runner's
 `mark_failed`. Each was re-read for what this spec models:
 - **A cue run's settle is unchanged.** The cue clauses of `mark_failed`
-  (`runner.ex:484-513`) and `mark_run_error` (`scheduler.ex:1134-1152`) still
+  (`runner.ex:502-531`) and `mark_run_error` (`scheduler.ex:1134-1152`) still
   settle through `CueAdmission.settle/3` → `Repo.settle_cue_run`, which never
   calls `JobRetriesSql` or `JobHealsSql`; only the clauses for every other
   run gained the retry and the heal. `settle_cue_run` and the delivery's move
@@ -724,5 +724,21 @@ the Scheduler, as the owner's is (`Registry.check_run_now`). It still
 writes no delivery and no run row. The `scheduler.ex` citations above
 "Findings" and in the M106 re-read moved with the stage's other lines
 and were updated; the findings cite the code as it was then.
+
+No step, variable or check changed.
+
+## Re-read for runs that end ok without working (M106, 2026-11-24)
+
+M106's §6 (S5) changed none of this spec's pinned functions, so it was not
+stale. It was re-read for what it models:
+- A cue run's settle (`settle_cue_run`) still calls neither
+  `JobRetriesSql` nor `JobHealsSql`. So an ok cue run never reads tallies
+  or opens a heal, and the trigger's read of a job's earlier runs skips
+  trigger `cue`.
+- The runner asks for no error words for a cue run, so a cue run's tally
+  counts its calls with no words.
+- `Jobs.CueRun.present_runs/3` now frames every other run's reply, error
+  and prompt inside a heal run's tools. That changes what a model reads,
+  not a delivery or a run row.
 
 No step, variable or check changed.

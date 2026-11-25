@@ -744,7 +744,7 @@ RunActive(r) == RunSettleFenced => rstatus[r] = "active"
 Exit(r, kind) == IF r \in monitors THEN kind ELSE "none"
 
 \* The runner's settle: complete_run/2 -> mark_cue_completed/4 or
-\* mark_failed/3 (runner.ex:241, :353, :441; the settle :372, :463) ->
+\* mark_failed/3 (runner.ex:259, :371, :459; the settle :390, :481) ->
 \* CueAdmission.settle/3. Its attrs are the run as the runner read it at
 \* start, with tools_started_at nil, so the column survives only through the
 \* upsert's coalesce. `{:ok, ...} =` on {:error, :run_not_active} raises: the

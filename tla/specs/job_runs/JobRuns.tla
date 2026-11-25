@@ -68,9 +68,10 @@
 (* start (ToolStarts), and a start the store refuses runs no tool and ends *)
 (* the loop in an error no retry takes. Without StampsToolStart, the order *)
 (* before JOB-9's fix: the tool runs first and the runner stores its start *)
-(* when it handles the loop's message (StampsTool). The row with the       *)
-(* failure's kind and the tool timeline the settle writes beside the run   *)
-(* row moves no job or run between the states here and is left out.       *)
+(* when it handles the loop's message (StampsTool). The row the settle     *)
+(* writes beside the run row, with the failure's kind, the tool timeline   *)
+(* and the tool tally (M106 6), moves no job or run between the states     *)
+(* here and is left out.                                                   *)
 (*                                                                         *)
 (* A failed run's retry (M106 5.3) is modelled: the settle, the runner's   *)
 (* and the reaper's, decides it in its own transaction from the run row as *)
@@ -87,24 +88,29 @@
 (* (M106 5.4) and sends nothing, unless the job was set up by a guest      *)
 (* (GuestJob), whose failure text is sent as before. The heal's rows       *)
 (* (job_heals, job_heal_runs) are not modelled: the settle writes them in  *)
-(* its transaction beside rows here (it opens, joins or closes a heal, or  *)
-(* reopens a watching one for its verdict), and no step here reads them.   *)
-(* Jobs.HealRun, a child of the RunnerSupervisor that the Scheduler        *)
-(* starts, monitors in a map of its own and adopts after a restart, sends  *)
-(* the heal's message. For a job's heal it first runs a diagnosis, whose   *)
-(* loop reads the job and its runs and writes nothing, then makes at most  *)
-(* one move on the job through the owner's own paths (M106 5.5): a pause   *)
-(* (Registry.pause_job), a raised time limit (Registry.update_job, a       *)
-(* column no step reads) or, once its message is out, a "run now"          *)
-(* (Registry.check_run_now, then Scheduler.run_now). Those are Pause,      *)
-(* UpdateRead with UpdateWrite, and ManualRun below, which the spec takes  *)
-(* at any time, so a heal run is one more caller of them, within the same  *)
-(* bounds. The Scheduler's heal claim and its expiry of waiting and        *)
-(* watching heals are Repo calls on those tables inside callbacks modelled *)
-(* here, where a timeout changes nothing modelled and a crash is           *)
-(* SchedulerCrash; and a heal run is no run for the admission ceiling or   *)
-(* the cue share, which count runs by the run id each publishes            *)
-(* (active_run_count, scheduler.ex:713-717).                               *)
+(* its transaction beside rows here, and no step here reads them. A failed *)
+(* run's settle opens, joins or closes a heal, or reopens a watching one   *)
+(* for its verdict. Since M106 6 an ok run's settle does the same when a   *)
+(* tool it called never succeeded, as in the job's two runs before it      *)
+(* (Jobs.Degraded): it reads those runs' tool tallies in the same          *)
+(* transaction, and its own row stays ok and its text is delivered as      *)
+(* before. Jobs.HealRun, a child of the RunnerSupervisor that the          *)
+(* Scheduler starts, monitors in a map of its own and adopts after a       *)
+(* restart, sends the heal's message. For a job's heal it first runs a     *)
+(* diagnosis, whose loop reads the job and its runs and writes nothing,    *)
+(* then makes at most one move on the job through the owner's own paths    *)
+(* (M106 5.5): a pause (Registry.pause_job), a raised time limit           *)
+(* (Registry.update_job, a column no step reads) or, once its message is   *)
+(* out, a "run now" (Registry.check_run_now, then Scheduler.run_now).      *)
+(* Those are Pause, UpdateRead with UpdateWrite, and ManualRun below,      *)
+(* which the spec takes at any time, so a heal run is one more caller of   *)
+(* them, within the same bounds. A plugin's heal has no job and makes no   *)
+(* move. The Scheduler's heal claim and its expiry of waiting and watching *)
+(* heals are Repo calls on those tables inside callbacks modelled here,    *)
+(* where a timeout changes nothing modelled and a crash is SchedulerCrash; *)
+(* and a heal run is no run for the admission ceiling or the cue share,    *)
+(* which count runs by the run id each publishes (active_run_count,        *)
+(* scheduler.ex:713-717).                                                  *)
 (* The access gate is not modelled either. A run's access-sensitive tool   *)
 (* call that its job row does not name is refused inside the one loop      *)
 (* step, since a scheduled run never parks a call for the owner            *)
@@ -158,7 +164,7 @@
 (* RunnerSupervisor itself: under :rest_for_one each restarts the          *)
 (* RunnerSupervisor with its runners and the Scheduler                     *)
 (* (application.ex:209). A runner's send helper (REMIND-2,                 *)
-(* channel_send.ex:219-224) and its AgentLoop (JOB-8, runner.ex:1419-1423) *)
+(* channel_send.ex:219-224) and its AgentLoop (JOB-8, runner.ex:1439-1443) *)
 (* are linked to it, so the restart kills them too. With                   *)
 (* LoopDiesWithRunner off (the code before JOB-8's fix, an unlinked        *)
 (* spawn_monitor) the loop outlives it (strayLoops). Process-local values  *)
@@ -211,12 +217,12 @@
 (*   RearmsOnDown)                                                          *)
 (***************************************************************************)
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/scheduler.ex @ a471050804a5
-\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/runner.ex @ 710fca090a37
+\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/runner.ex @ 45d59955e7ee
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/runner_supervisor.ex @ 6a21dfe6cfad
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/delivery.ex @ b1dd0422b409
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/registry.ex @ f05b3184f9a7
 \* SOURCE: apps/fermix_core/lib/fermix_core/delivery/channel_send.ex @ 9b06289e25ae
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,request_message,deadline_after,deadline_passed?,call_or_timeout_error,request_name,periodic_opts,claim_due_job,claim_job_now,claim_due_job_tx,claim_in_tx,claim_job_now_tx,transact_claim,fetch_claimable_due_job,finish_job_claim,rollback_job_claim,upsert_scheduled_job_row,upsert_job_run_row,ensure_no_active_job_run,fetch_claimable_job,settle_job_run,settle_job_run_tx,settle_job_run_in_tx,ensure_job_run_active,release_settled_job,finish_job_settle,rollback_job_settle,unsettled_job_runs,fetch_unsettled_job_runs,@unsettled_job_runs_sql,update_scheduled_job_fields,update_scheduled_job_fields_row,scheduled_job_field_assignments!,scheduled_job_field_assignment!,@owner_text_fields,due_scheduled_jobs,fetch_due_scheduled_jobs,next_scheduled_job,fetch_next_scheduled_job,upsert_job_run,upsert_scheduled_job,get_job_run,get_scheduled_job,upsert_memory,claim_retry_job,claim_retry_job_tx,fetch_claimable_retry_job,then_in_claim,scheduled_job_with_retry,@earliest_wakeup_sql @ 5e5ab9620072
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,request_message,deadline_after,deadline_passed?,call_or_timeout_error,request_name,periodic_opts,claim_due_job,claim_job_now,claim_due_job_tx,claim_in_tx,claim_job_now_tx,transact_claim,fetch_claimable_due_job,finish_job_claim,rollback_job_claim,upsert_scheduled_job_row,upsert_job_run_row,ensure_no_active_job_run,fetch_claimable_job,settle_job_run,settle_job_run_tx,settle_job_run_in_tx,ensure_job_run_active,release_settled_job,finish_job_settle,rollback_job_settle,unsettled_job_runs,fetch_unsettled_job_runs,@unsettled_job_runs_sql,update_scheduled_job_fields,update_scheduled_job_fields_row,scheduled_job_field_assignments!,scheduled_job_field_assignment!,@owner_text_fields,due_scheduled_jobs,fetch_due_scheduled_jobs,next_scheduled_job,fetch_next_scheduled_job,upsert_job_run,upsert_scheduled_job,get_job_run,get_scheduled_job,upsert_memory,claim_retry_job,claim_retry_job_tx,fetch_claimable_retry_job,then_in_claim,scheduled_job_with_retry,@earliest_wakeup_sql @ 62587394f196
 \* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,supervision_children,jobs_scheduler_opts @ 55d9a796413f
 \* SOURCE: apps/fermix_core/lib/fermix_core/timeouts.ex#expired,repo_call,@repo_call_ms @ 05d3e6ea2142
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/cue_admission.ex @ b98563b66ad5
@@ -227,10 +233,11 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_follow_up_sql.ex#claimable,mark_started,refuse_starting @ 0b00297833af
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/retry.ex @ 29a81ebd67c8
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/job_retries_sql.ex @ d45d0abed8ea
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/job_heals_sql.ex#settle,take_failure,not_closed,verdict,join,open_or_quiet,open,link_run,close_healed,close_rows,expire_waiting,expire_rows,rerun_outcome @ bb60a7c463ae
-\* SOURCE: apps/fermix_core/lib/fermix_core/agent_loop.ex#run,run_tool_call,gate_tool,trace_unexecuted @ 71c2476e4386
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/job_heals_sql.ex#settle,take_failure,not_closed,verdict,join,open_or_quiet,open,link_run,close_rows,expire_waiting,expire_rows,rerun_outcome,degraded,earlier_tallies,settle_ok,close_proven,open_for,query_open_for,close_ids,run_tally @ 51af797760a4
+\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/degraded.ex @ a44077b00219
+\* SOURCE: apps/fermix_core/lib/fermix_core/agent_loop.ex#run,run_tool_call,gate_tool,trace_unexecuted @ fb2d6fbb7f69
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/failure.ex#provider_failure? @ e1cc6a876455
-\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/heal_run.ex @ d8224d20804c
+\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/heal_run.ex @ 7032c107729a
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/heal_diagnosis.ex#@allowed_tools,supervise_loop,await_loop,report_loop,release_loop,kill_loop @ 4c906da777a9
 EXTENDS Naturals, FiniteSets
 
@@ -288,7 +295,7 @@ CONSTANTS
     OwnerWritesColumns,       \* pause, resume and update_job write only the columns they own
                               \* (registry.ex:264-287; repo.ex:2506-2509, :7286-7293, :8260-8298)
     LoopDiesWithRunner,       \* a runner's AgentLoop is linked to it, so a restart that kills
-                              \* the runner kills its loop too (runner.ex:1419-1423)
+                              \* the runner kills its loop too (runner.ex:1439-1443)
     TicksAdmit,               \* the due and reconcile ticks run cue admission after their due
                               \* scan (handle_info(:due_tick | :reconcile_tick), scheduler.ex
                               \* :263-281), so a cue whose wake found nothing to claim is still
@@ -302,8 +309,8 @@ CONSTANTS
                               \* (handle_info({:DOWN, ...}), scheduler.ex:335-362)
     StampsToolStart,          \* a run's first tool start is on its row before the tool runs: the
                               \* loop calls the runner's gate ahead of each call (gate_tool,
-                              \* agent_loop.ex:1388-1423; put_tool_start_store, runner.ex
-                              \* :1683-1722), so a run the Scheduler settles after a crash has it
+                              \* agent_loop.ex:1396-1457; put_tool_start_store, runner.ex
+                              \* :1711-1750), so a run the Scheduler settles after a crash has it
     RetryNeedsNoTool,         \* Retry.decide retries only a run in which no tool had started
                               \* (retried?, retry.ex:88-89)
     OwnerClearsRetry,         \* the owner's pause, resume and edit (update_scheduled_job_fields_row,
@@ -313,14 +320,14 @@ CONSTANTS
     ToolsCanStart,            \* a run's AgentLoop may start a tool before it ends; FALSE: every
                               \* run ends before any tool
     ProviderCanFail,          \* a loop error may be one waiting can clear, the provider's
-                              \* (failure_settle_by, runner.ex:585-587), which the runner's
+                              \* (failure_settle_by, runner.ex:603-605), which the runner's
                               \* settle retries; FALSE: no loop error is the provider's
     StampCanFail,             \* the store refuses a run's first tool start (an error, or no
                               \* answer within the Repo's bound); FALSE: it always records it
     GuestJob                  \* the job was set up at guest trust: a failure no retry takes
-                              \* sends its failure text (finish_failure, runner.ex:598-601);
+                              \* sends its failure text (finish_failure, runner.ex:616-619);
                               \* FALSE: the owner's job, whose failure a heal takes, sending
-                              \* nothing (:603-606)
+                              \* nothing (:621-624)
 
 Runs == 1..NumRuns
 
@@ -568,11 +575,11 @@ SettleDecidesRetry == AtomicSettle /\ ~CueTask
 RunsAgain == ~WatcherJob /\ jobEnabled /\ jobState \in {"running", "scheduled"}
 
 \* The runner's own settle of a failed run: {:failed, :provider} only when the
-\* provider failed (failure_settle_by, runner.ex:585-587), so never after a
+\* provider failed (failure_settle_by, runner.ex:603-605), so never after a
 \* start the store refused (tool_start_unrecorded, which is no provider's
-\* failure: provider_failure?, failure.ex:194). `tool` is what the runner
+\* failure: provider_failure?, failure.ex:213). `tool` is what the runner
 \* knows: it handled every message of the loop's before its result
-\* (watch_loop, :1754-1762, put_run_facts, :1905-1912).
+\* (watch_loop, :1782-1790, put_run_facts, :1977-1985).
 RunnerRetries(r) ==
     IF /\ SettleDecidesRetry /\ pc[r] = "fail" /\ ProviderCanFail /\ RunsAgain
        /\ tool[r] /= "refused"
@@ -643,8 +650,8 @@ OwnerQuiet == <<runStatus, delivery, waiting, starting, tool, runnerVars, helper
 \* The write and the deletion of the job's retry are one BEGIN IMMEDIATE
 \* (update_scheduled_job_fields_row, repo.ex:8820-8834), and so for resume
 \* and update_job below (OwnerLeavesRetry). A heal run's pause (M106 5.5,
-\* heal_run.ex:278-279) is this same call, made right after a write on
-\* job_heals that proves its lease (:283-290): this step too.
+\* heal_run.ex:279-280) is this same call, made right after a write on
+\* job_heals that proves its lease (:284-291): this step too.
 Pause ==
     /\ OwnerWritesColumns
     /\ oPc = "idle" /\ movesLeft > 0
@@ -704,7 +711,7 @@ Resume ==
 \* Registry.update_job (registry.ex:143-151 -> prepare_update :167-173):
 \* Repo.get_scheduled_job, whose row the edit is computed from
 \* (normalize_update_attrs) ... A heal run's raised limit (M106 5.5,
-\* heal_run.ex:270-276, fenced as its pause is) is this edit with
+\* heal_run.ex:271-277, fenced as its pause is) is this edit with
 \* timeout_seconds alone (timeout_patch, registry.ex:342-354), a column no
 \* step reads.
 UpdateRead ==
@@ -845,7 +852,7 @@ HandleExit(r) ==
 \* run_job_now.ex:71, registry.ex:106-110), and a job's kind never changes.
 \* A follow-up does: check_run_now refuses only the cue kind, since a run of
 \* a follow-up is not the run of one item (registry.ex:100-111).
-\* A heal run's rerun (M106 5.5, heal_run.ex:425-463) takes the same path,
+\* A heal run's rerun (M106 5.5, heal_run.ex:426-464) takes the same path,
 \* check_run_now then Scheduler.run_now, once its message is out. Its call
 \* waits behind whatever callback runs and is served here: the Scheduler
 \* never waits on a heal run (its init/1 does no work, and its heal id is
@@ -906,7 +913,7 @@ ReconcileRows ==
                    reapQ, sSnap, cuePending, admit, fQ, fClaimed, exits, sBy>>
 
 \* live_runner_pids: DynamicSupervisor.which_children + the run id each
-\* runner published in its init (scheduler.ex:498, :548-562; runner.ex:181).
+\* runner published in its init (scheduler.ex:498, :548-562; runner.ex:191).
 \* Live runs are adopted: monitored if not already (adopt_live_run, scheduler.ex:523-531;
 \* the monitor call is folded in: monitoring a pid that just died delivers
 \* DOWN at once, the same outcome as reaping it). A runner past its settle and
@@ -1071,7 +1078,7 @@ Claim ==
 
 \* start_or_mark_failed (scheduler.ex:866-876): RunnerSupervisor.start_run
 \* runs Runner.init synchronously (runner_supervisor.ex:20-23), which
-\* publishes the run id (runner.ex:181); then Process.monitor. No Repo call.
+\* publishes the run id (runner.ex:191); then Process.monitor. No Repo call.
 Start ==
     /\ sPc = "start"
     /\ pc' = [pc EXCEPT ![sRun] = "start"]
@@ -1463,7 +1470,7 @@ SchedTimeout ==
 Move(r, s) == pc' = [pc EXCEPT ![r] = s]
 RunnerQuiet == <<jobVars, ownerVars, envVars, schedVars>>
 
-\* handle_continue(:run) -> mark_running (runner.ex:187-195, :275-292):
+\* handle_continue(:run) -> mark_running (runner.ex:197-205, :293-310):
 \* Repo.upsert_job_run with status "running".
 MarkRunning(r) ==
     /\ pc[r] = "start"
@@ -1473,7 +1480,7 @@ MarkRunning(r) ==
                    outcome, helperVars>>
 
 \* The whole AgentLoop, run in a process linked to the runner that the runner
-\* watches (runner.ex:218, :1394-1426): final text, [SILENT], or an
+\* watches (runner.ex:231, :1414-1446): final text, [SILENT], or an
 \* error/timeout (a crash of the loop included, reported as a value).
 Loop(r) ==
     /\ pc[r] = "loop"
@@ -1488,15 +1495,15 @@ Loop(r) ==
 
 \* Inside the loop the first tool starts. AgentLoop calls the runner's gate in
 \* the loop's own process ahead of the call (gate_tool, agent_loop.ex
-\* :1388-1423), and the gate stores the start on the run row in one Repo call
+\* :1396-1457), and the gate stores the start on the run row in one Repo call
 \* before the tool can run (put_tool_start_store, store_tool_start,
-\* runner.ex:1683-1722): the start and its stamp are one step. A start the
+\* runner.ex:1711-1750): the start and its stamp are one step. A start the
 \* store refuses (StampCanFail: an error, or no answer within the Repo's
 \* bound) runs no tool: the call is traced unexecuted and the loop ends in
-\* {:tool_start_unrecorded, _} (run/1's catch, agent_loop.ex:182-192), an
+\* {:tool_start_unrecorded, _} (run/1's catch, agent_loop.ex:189-199), an
 \* error the runner settles as any other. Only for a job that can be
 \* retried: a cue run has no gate, its first tool is its mandate gate's
-\* (tools_started_stamp, runner.ex:1675-1681; tla/specs/cue_inbox), and a
+\* (tools_started_stamp, runner.ex:1703-1709; tla/specs/cue_inbox), and a
 \* follow-up is never retried. Without StampsToolStart, the order before
 \* JOB-9's fix: the loop announces the start by a message and runs the tool
 \* at once, so its effect may already have happened while the row says
@@ -1531,7 +1538,7 @@ StampsTool(r) ==
 \* delivery "pending", or "skipped" for [SILENT] (Delivery.initial_status,
 \* delivery.ex:24-31). After a loop error: status "error" with delivery
 \* "pending" for the failure text. With AtomicSettle the job release lands in
-\* the same transaction (Repo.settle_job_run, runner.ex:344 / :490).
+\* the same transaction (Repo.settle_job_run, runner.ex:362 / :508).
 RunnerWrite(r) ==
     /\ runStatus' = [runStatus EXCEPT ![r] = IF pc[r] = "complete" THEN "ok" ELSE "error"]
     /\ delivery' = [delivery EXCEPT ![r] =
@@ -1543,33 +1550,33 @@ RunnerWrite(r) ==
 \* queued/running row may be settled. The split write has no guard.
 Settleable(r) == ~AtomicSettle \/ runStatus[r] \in {"queued", "running"}
 
-\* mark_completed (runner.ex:316-347) / mark_failed (:471-495) with
+\* mark_completed (runner.ex:334-365) / mark_failed (:489-513) with
 \* AtomicSettle: write output.md or error.md (folded in), then
 \* Repo.settle_job_run (repo.ex:2563-2566, :7015-7031, :7091-7138): the run row and the job's
 \* release in one transaction. After a success the memory write comes next;
-\* after a loop error the memory-source update (runner.ex:493, folded in) and then the
+\* after a loop error the memory-source update (runner.ex:511, folded in) and then the
 \* send, so that runner goes straight to its send. A settle the guard refuses
 \* fails the {:ok, _} match and kills the runner; that branch is unreachable,
 \* since the reaper only settles a run whose runner is dead.
 \* A cue run settles through CueAdmission.settle/3 -> Repo.settle_cue_run
-\* (runner.ex:353-376, :441-469; settle_job_run refuses it, repo.ex:7023-7031,
+\* (runner.ex:371-394, :459-487; settle_job_run refuses it, repo.ex:7023-7031,
 \* :6895-6901): the same row and release, and its delivery in the same
 \* transaction. A completed one acks it and goes on as above, with no summary
-\* memory (complete_run, runner.ex:241-250). A failed one puts it back (Retries) and
+\* memory (complete_run, runner.ex:259-268). A failed one puts it back (Retries) and
 \* then only marks its delivery "skipped", sending none of its text and leaving
-\* the memory source alone (finish_cue_failure, runner.ex:521-527; a retried
+\* the memory source alone (finish_cue_failure, runner.ex:539-545; a retried
 \* provider failure first sends the once-a-day :task_provider_down watcher
-\* notice, notify_provider_down, :496-516, which is not modelled), or ends it
+\* notice, notify_provider_down, :514-534, which is not modelled), or ends it
 \* and sends its failure text as above. A follow-up's run settles as a cron
 \* run does (complete_run's and mark_failed's cue clauses match a cue run
 \* alone); its trigger and its watcher's name, read at its start
-\* (load_follow_up, runner.ex:298-306), add a line to its prompt and its
+\* (load_follow_up, runner.ex:316-324), add a line to its prompt and its
 \* trace; a read that fails fails the run as a loop error does, and one that
 \* times out kills the runner, a crash at "start".
 \* M106: a run that is not a cue run's also has its job's retry decided in
 \* the settle's transaction (RunnerRetries, SettledRetry). A failure retried,
 \* and one a heal took (a job not set up by a guest), only mark the delivery
-\* "skipped" (finish_failure, runner.ex:589-606); only a guest's job sends its
+\* "skipped" (finish_failure, runner.ex:607-624); only a guest's job sends its
 \* failure text. The settle carries the run's first tool start, which the
 \* row keeps (the upsert's coalesce), and nothing here reads it again.
 Settle(r) ==
@@ -1619,11 +1626,11 @@ MarkFailed(r) ==
     /\ UNCHANGED <<ownerVars, envVars, schedVars, resp, finSnap, outcome, helperVars,
                    waiting, starting, retryAt, tool>>
 
-\* persist_run_summary_memory (runner.ex:256, :398-435): Repo.upsert_memory
-\* (skipped for [SILENT]), then the memory-source update (:256, :592-606,
+\* persist_run_summary_memory (runner.ex:274, :416-453): Repo.upsert_memory
+\* (skipped for [SILENT]), then the memory-source update (:274, :610-624,
 \* whose failures are logged), folded in. No modelled row changes; it is a
 \* crash point. With AtomicSettle
-\* finalize_delivery (:257, :556-564) follows: a pending delivery spawns the
+\* finalize_delivery (:275, :574-582) follows: a pending delivery spawns the
 \* monitored send helper (Delivery.deliver_with_timeout ->
 \* ChannelSend.with_timeout, delivery.ex:53-78, channel_send.ex:219-224); a
 \* skipped one is immediate. Without it the split job write comes first.
@@ -1668,14 +1675,14 @@ GotResult(r) ==
     /\ Move(r, "mark")
     /\ UNCHANGED <<RunnerQuiet, rowVars, resp, finSnap, tries, delivered, report>>
 
-\* mark_delivery (runner.ex:682-703): Repo.upsert_job_run with the result,
+\* mark_delivery (runner.ex:700-721): Repo.upsert_job_run with the result,
 \* then {:stop, :normal}. A Scheduler that monitors the runner gets its DOWN
 \* :normal, which now waits in its mailbox (HandleExit): since M106 5.3 its
 \* handler re-arms the due timer, a Repo call, so it is no longer folded in.
 \* The monitor is dropped here all the same: nothing reads a dead runner's
 \* monitor but the cue share, which never binds one job.
 \* A refused write exits the runner with the outcome and its error in its
-\* reason (:692-702): that is RunnerCrash at "mark".
+\* reason (:710-720): that is RunnerCrash at "mark".
 MarkDelivery(r) ==
     /\ pc[r] = "mark"
     /\ delivery' = [delivery EXCEPT ![r] =
@@ -1696,18 +1703,18 @@ RunnerStep(r) ==
 
 \* The runner dies at one of its Repo calls and the call never lands (a
 \* kill, a failed {:ok, _} match, or mark_delivery's exit on a refused
-\* write, runner.ex:583-589). A failed output.md/error.md write also
-\* kills it ({:ok, _} match, runner.ex:318, :476); that write is folded into
+\* write, runner.ex:601-607). A failed output.md/error.md write also
+\* kills it ({:ok, _} match, runner.ex:336, :494); that write is folded into
 \* the final write, so it is the crash at "complete"/"fail". The
 \* memory-source calls after the split job upsert are a crash point with no
 \* pc of their own: a crash there leaves the rows a crash at "mark" leaves,
 \* minus the send. It raises nowhere while it waits on a send. While it
 \* waits on its loop, the loop reports its own crash as a value
-\* (runner.ex:1428-1445); the one death left there, a process the loop links
+\* (runner.ex:1448-1465); the one death left there, a process the loop links
 \* to itself killing the loop and through the link the runner, leaves the
 \* rows the Loop step and then a crash at "complete" or "fail" leave, so it
 \* needs no step of its own. Its supervisor does not restart it
-\* (restart: :temporary, runner.ex:131); a Scheduler that monitors it gets a
+\* (restart: :temporary, runner.ex:141); a Scheduler that monitors it gets a
 \* DOWN.
 RunnerCrash(r) ==
     /\ RunnerCanCrash
@@ -1780,7 +1787,7 @@ HelperSend(r) ==
                   /\ tries' = [tries EXCEPT ![r] = 0]
     /\ UNCHANGED <<RunnerQuiet, rowVars, runnerVars, report>>
 
-\* The runner's own delivery timer (delivery_timeout_ms, runner.ex:1774):
+\* The runner's own delivery timer (delivery_timeout_ms, runner.ex:1802):
 \* no result yet, so it kills the helper and returns {:error,
 \* :delivery_timeout} (channel_send.ex:238-239, :284-300). It cannot tell whether the
 \* platform already took the message.
@@ -1906,7 +1913,7 @@ SchedulerCrashLate ==
 \* survive. On boot the Scheduler's init reconciles. The same step stands for
 \* a restart of the job subtree, which the loop of a runner inside its
 \* AgentLoop outlives unless it is linked to that runner (LoopDiesWithRunner,
-\* runner.ex:1412-1416; spawn_monitor before JOB-8's fix).
+\* runner.ex:1432-1436; spawn_monitor before JOB-8's fix).
 DaemonCrash ==
     /\ DaemonCanCrash /\ ~daemonCrashed
     /\ daemonCrashed' = TRUE
