@@ -323,7 +323,7 @@ defmodule FermixWebWeb.SetupLive do
     {:noreply,
      socket
      |> assign(:provider_form, form)
-     |> assign_model_sources(form)}
+     |> assign_model_sources(form, params)}
   end
 
   def handle_event("save_provider", %{"provider_form" => params} = root, socket) do
@@ -4716,40 +4716,55 @@ defmodule FermixWebWeb.SetupLive do
   # Static catalog options always; live listing (installed Ollama models /
   # the upstream OpenRouter catalog) layered on for the providers that
   # have one. Synchronous with a tight timeout — setup page only.
-  defp assign_model_sources(socket, provider_form) do
+  # `params` is the form as last posted, so a key being entered (not yet
+  # saved) can ask for the listing it opens.
+  defp assign_model_sources(socket, provider_form, params \\ %{}) do
     provider = provider_form.provider
 
     socket
     |> assign(:provider_models, models_for_safe(provider))
-    |> assign_live_listing(provider, provider_form)
+    |> assign_live_listing(provider, provider_form, params)
   end
 
-  defp assign_live_listing(socket, provider, provider_form) do
+  defp assign_live_listing(socket, provider, provider_form, params) do
     impl = model_listing_impl()
 
     if impl.live?(provider) do
-      assign(socket, :live_models, live_listing(impl, provider, provider_form))
+      assign(socket, :live_models, live_listing(impl, provider, provider_form, params))
     else
       assign(socket, :live_models, nil)
     end
   end
 
   # A live listing calls the provider; a device shows why it has none.
-  defp live_listing(impl, provider, provider_form) do
+  defp live_listing(impl, provider, provider_form, params) do
     case admit_provider_action() do
-      :ok -> impl.live_models(provider, listing_opts(provider, provider_form))
+      :ok -> impl.live_models(provider, listing_opts(provider, provider_form, params))
       {:error, {:device_role, sentence}} -> {:error, sentence}
     end
   end
 
-  defp listing_opts(:ollama, provider_form) do
+  defp listing_opts(:ollama, provider_form, _params) do
     case Map.get(provider_form.field_values || %{}, :ollama_base_url) do
       url when is_binary(url) and url != "" -> [base_url: url]
       _absent -> []
     end
   end
 
-  defp listing_opts(_provider, _provider_form), do: []
+  # Vercel AI Gateway lists only what a key's team may use (M105 §11.9), so a
+  # key entered in the pane is the one asked with, before it is saved; with the
+  # field blank the listing uses the configured key, if any.
+  defp listing_opts(:vercel, _provider_form, params) do
+    case params |> Map.get("vercel_api_key") |> trimmed() do
+      "" -> []
+      key -> [api_key: key]
+    end
+  end
+
+  defp listing_opts(_provider, _provider_form, _params), do: []
+
+  defp trimmed(value) when is_binary(value), do: String.trim(value)
+  defp trimmed(_value), do: ""
 
   defp model_listing_impl do
     Application.get_env(:fermix_web, :model_listing_impl, ModelListing)

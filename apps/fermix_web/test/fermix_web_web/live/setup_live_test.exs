@@ -4753,6 +4753,57 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ "<datalist"
     end
 
+    # With a key, Vercel AI Gateway lists only what the key's team may use
+    # (M105 §11.9), so the pane asks with the key as soon as it is entered,
+    # before it is saved. The key field reports on blur, so a key being typed
+    # sends no request per keystroke.
+    test "vercel pane lists with the key being entered", %{conn: conn} do
+      defmodule VercelKeyedListing do
+        alias FermixCore.Providers.ModelListing
+
+        def live?(:vercel), do: ModelListing.live?(:vercel)
+        def live?(_provider), do: false
+
+        def live_models(:vercel, opts) do
+          case Keyword.get(opts, :api_key) do
+            "vck-entered" ->
+              {:ok, [%{id: "team/allowed-only", label: "Allowed Only", context_window: 200_000}]}
+
+            nil ->
+              {:ok, [%{id: "public/every-model", label: "Every Model", context_window: 200_000}]}
+          end
+        end
+      end
+
+      Application.put_env(:fermix_web, :model_listing_impl, VercelKeyedListing)
+
+      on_exit(fn ->
+        Application.put_env(
+          :fermix_web,
+          :model_listing_impl,
+          FermixWebWeb.TestSupport.StaticModelListing
+        )
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup?tab=provider")
+      form = form(view, "form[phx-submit=\"save_provider\"]")
+
+      html = render_change(form, provider_form: %{provider: "vercel"})
+      assert html =~ "public/every-model"
+
+      [key_input] = Regex.run(~r/<input[^>]*name="provider_form\[vercel_api_key\]"[^>]*>/, html)
+      assert key_input =~ ~s(phx-debounce="blur")
+
+      html =
+        render_change(form, provider_form: %{provider: "vercel", vercel_api_key: " vck-entered "})
+
+      assert html =~ "team/allowed-only"
+      refute html =~ "public/every-model"
+
+      html = render_change(form, provider_form: %{provider: "vercel", vercel_api_key: "  "})
+      assert html =~ "public/every-model"
+    end
+
     # An empty live list is Ollama's "nothing pulled" only on the Ollama pane.
     # Any other provider with a listing names itself and keeps the typed field;
     # the default-model field is read alone, since the provider cards above it

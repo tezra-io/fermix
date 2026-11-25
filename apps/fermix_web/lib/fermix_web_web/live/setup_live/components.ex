@@ -812,6 +812,8 @@ defmodule FermixWebWeb.SetupLive.Components do
     Enum.reject(Descriptor.fetch!(provider).setup_fields, & &1.secret?)
   end
 
+  # The key field reports on blur: a provider whose listing depends on the key
+  # (Vercel AI Gateway) is asked once the key is entered, not per keystroke.
   attr :provider_form, :map, required: true
   attr :report, :map, required: true
 
@@ -830,6 +832,7 @@ defmodule FermixWebWeb.SetupLive.Components do
       <input
         type="password"
         name={@secret_name}
+        phx-debounce="blur"
         placeholder={secret_placeholder(api_key_set?(@report, @provider_form.provider))}
         class="input input-bordered w-full bg-base-100 font-mono"
         value=""

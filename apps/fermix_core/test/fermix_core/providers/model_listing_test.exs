@@ -235,12 +235,53 @@ defmodule FermixCore.Providers.ModelListingTest do
     test "reads the public listing at <base>/models with no key" do
       Req.Test.stub(__MODULE__, fn conn ->
         assert conn.request_path == "/v1/models"
+        assert conn.query_string == ""
         assert Plug.Conn.get_req_header(conn, "authorization") == []
         Req.Test.json(conn, vercel_listing())
       end)
 
       assert {:ok, [_ | _]} =
                ModelListing.live_models(:vercel, req_options: [plug: {Req.Test, __MODULE__}])
+    end
+
+    # With a key, the gateway judges each model against the team's own settings
+    # (Zero Data Retention, allow lists, plan): the owner's team, with Zero Data
+    # Retention on, was told 62 of the 257 models it would be offered were
+    # `ineligible` for `zero_data_retention`, the Claude Fable models among them
+    # (M105 §11.9). A model it cannot judge is `unknown`, and is kept.
+    test "with a key, asks for the team's availability and leaves out what it may not use" do
+      Req.Test.stub(__MODULE__, fn conn ->
+        assert conn.request_path == "/v1/models"
+        assert conn.query_string == "include_availability=true"
+        assert Plug.Conn.get_req_header(conn, "authorization") == ["Bearer vck-team"]
+        Req.Test.json(conn, vercel_availability_listing())
+      end)
+
+      assert {:ok, models} =
+               ModelListing.live_models(:vercel,
+                 api_key: "vck-team",
+                 req_options: [plug: {Req.Test, __MODULE__}]
+               )
+
+      ids = Enum.map(models, & &1.id)
+      refute "anthropic/claude-fable-5.2" in ids
+      assert "openai/gpt-6-luna" in ids
+      assert "anthropic/claude-sonnet-4.6" in ids
+      assert length(ids) == 6
+    end
+
+    test "a key the gateway refuses is that error, not the public listing" do
+      Req.Test.stub(__MODULE__, fn conn ->
+        Plug.Conn.send_resp(conn, 401, ~s({"error":{"type":"authentication_error"}}))
+      end)
+
+      assert {:error, reason} =
+               ModelListing.live_models(:vercel,
+                 api_key: "vck-revoked",
+                 req_options: [plug: {Req.Test, __MODULE__}]
+               )
+
+      assert reason =~ "HTTP 401"
     end
 
     test "keeps tool-calling language models, by maker then newest, an undated one last" do
@@ -465,6 +506,29 @@ defmodule FermixCore.Providers.ModelListingTest do
     |> File.read!()
     |> Jason.decode!()
   end
+
+  # The same entries with the `model_eligibility` verdict an authenticated
+  # `?include_availability=true` adds to each, in the live answer's shapes.
+  defp vercel_availability_listing do
+    Map.update!(vercel_listing(), "data", fn models ->
+      Enum.map(models, fn model ->
+        Map.put(model, "model_eligibility", eligibility(model["id"]))
+      end)
+    end)
+  end
+
+  defp eligibility("anthropic/claude-fable-5.2"),
+    do: %{
+      "category" => "policy",
+      "evaluated_runtime" => "http",
+      "reason" => "zero_data_retention",
+      "status" => "ineligible"
+    }
+
+  defp eligibility("openai/gpt-6-luna"),
+    do: %{"evaluated_runtime" => "http", "status" => "unknown"}
+
+  defp eligibility(_id), do: %{"evaluated_runtime" => "http", "status" => "eligible"}
 
   defp venice_models do
     [

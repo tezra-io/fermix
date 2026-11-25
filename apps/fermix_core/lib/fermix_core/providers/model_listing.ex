@@ -91,10 +91,16 @@ defmodule FermixCore.Providers.ModelListing do
     end
   end
 
+  # With a key (`:api_key`, else the configured one) the gateway answers for the
+  # key's team: `?include_availability=true` marks each model `eligible`,
+  # `ineligible` or `unknown` against the team's settings (Zero Data Retention,
+  # allow lists, plan), and an ineligible one is left out (M105 §11.9). Without a
+  # key there is no team to ask, and the public listing is read. A key the
+  # gateway refuses is that error, never the public listing.
   def live_models(:vercel, opts) do
-    url = resolved_base_url(:vercel, opts) <> "/models"
+    {url, listing_opts} = vercel_listing_request(opts)
 
-    case get_json(url, opts) do
+    case get_json(url, listing_opts) do
       {:ok, %{"data" => models}} when is_list(models) -> {:ok, vercel_entries(models)}
       {:ok, _body} -> {:error, "unexpected response from #{url}"}
       {:error, reason} -> {:error, reason}
@@ -347,8 +353,19 @@ defmodule FermixCore.Providers.ModelListing do
   # is kept and sorts after its maker's dated ones, as Venice's undated models
   # do; one missing any other field the order or the label needs is dropped,
   # as the other listings drop a malformed one.
+  defp vercel_listing_request(opts) do
+    base = resolved_base_url(:vercel, opts) <> "/models"
+    key = Keyword.get(opts, :api_key) || Keyword.get(provider_config(:vercel), :api_key)
+
+    case presence(key) do
+      nil -> {base, opts}
+      bearer -> {base <> "?include_availability=true", Keyword.put(opts, :bearer, bearer)}
+    end
+  end
+
   defp vercel_entries(models) do
     models
+    |> Enum.reject(&match?(%{"model_eligibility" => %{"status" => "ineligible"}}, &1))
     |> Enum.flat_map(&vercel_sortable/1)
     |> Enum.sort_by(fn {maker, released, id, _entry} -> {maker, -released, id} end)
     |> Enum.map(fn {_maker, _released, _id, entry} -> entry end)
