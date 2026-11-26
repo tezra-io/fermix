@@ -296,7 +296,9 @@ defmodule FermixCore.Jobs.HealDecision do
     end
   end
 
-  defp propose(change, job, checks, plan) do
+  defp propose(asked, job, checks, plan) do
+    change = with_job_provider(asked, job)
+
     with {:ok, attrs} <- check_change(change, job, checks),
          {:ok, diff} <- diff(change, attrs, job) do
       %{
@@ -310,6 +312,17 @@ defmodule FermixCore.Jobs.HealDecision do
       {:error, reason} -> refuse(plan, {:invalid_change, reason})
     end
   end
+
+  # A pin is a pair (`Tools.JobRegistrySupport.validate_route_pin/1`). A look
+  # that names only the new model of a job already pinned means that
+  # provider's model, so the change keeps the job's own provider. A model for
+  # a job with no pin, and a provider with no model, name no pair and are
+  # refused as any edit is.
+  defp with_job_provider(%{"model" => model} = change, %{provider: provider})
+       when is_binary(model) and is_binary(provider) and not is_map_key(change, "provider"),
+       do: Map.put(change, "provider", provider)
+
+  defp with_job_provider(change, _job), do: change
 
   # An owner's edit made from no chat: a delivery to "the origin" has none to
   # resolve, so it is refused as one from a context without a conversation.

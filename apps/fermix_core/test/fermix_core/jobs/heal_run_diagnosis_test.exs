@@ -787,6 +787,45 @@ defmodule FermixCore.Jobs.HealRunDiagnosisTest do
       end
     end
 
+    # Found on a live server: the look named only the new model for a job
+    # pinned to a mistyped one, the pair check refused the change, and the
+    # owner got a message where a card was due.
+    test "a new model alone for a pinned job keeps the job's provider and is offered", ctx do
+      start_channel(ctx, [:ok])
+      {job, heal} = claimed_heal!(ctx, provider: "openai", model: "retired-model-9")
+      decision = %{"decision" => "propose", "note" => @note, "change" => %{"model" => "tide-9"}}
+
+      run!(ctx, heal, script([respond(decision)]))
+
+      assert {:ok, %{state: "waiting", decision: "propose", change: change}} =
+               get_heal(ctx, heal.id)
+
+      assert change == %{
+               "provider" => %{"from" => "openai", "to" => "openai"},
+               "model" => %{"from" => "retired-model-9", "to" => "tide-9"}
+             }
+
+      assert {:ok, %{provider: "openai", model: "retired-model-9"}} =
+               Repo.get_scheduled_job(job.id, server: ctx.repo)
+    end
+
+    test "half a pin that code cannot complete is still told, not offered", ctx do
+      start_channel(ctx, [:ok, :ok])
+
+      # No pin to take the provider from, and no model for a new provider.
+      for {opts, change} <- [
+            {[], %{"model" => "tide-9"}},
+            {[provider: "openai", model: "retired-model-9"], %{"provider" => "anthropic"}}
+          ] do
+        {_job, heal} = claimed_heal!(ctx, opts)
+        decision = %{"decision" => "propose", "note" => @note, "change" => change}
+
+        {_result, _log} = with_log(fn -> run!(ctx, heal, script([respond(decision)])) end)
+
+        assert {:ok, %{decision: "tell", change: nil}} = get_heal(ctx, heal.id)
+      end
+    end
+
     test "a job a watcher wakes gets no proposal: the decision is kept as tell", ctx do
       start_channel(ctx, [:ok])
       {job, heal} = claimed_heal!(ctx)
