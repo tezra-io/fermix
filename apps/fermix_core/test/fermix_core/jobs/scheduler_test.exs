@@ -406,9 +406,10 @@ defmodule FermixCore.Jobs.SchedulerTest do
   defmodule InjectBeforeJobWriteRepo do
     @moduledoc false
     # A transparent proxy in front of the real Repo. Before forwarding the
-    # first request that writes the job row after a run (a whole-row upsert, or
-    # the run's settle), it runs `inject` against the real Repo: an owner
-    # action landing in the release's window, forced rather than raced.
+    # first request that writes the job row (a whole-row upsert, a run's
+    # settle, or the Scheduler's own stale skip, expiry or disable), it runs
+    # `inject` against the real Repo: an owner action landing in that write's
+    # window, forced rather than raced.
     use GenServer
 
     def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -432,8 +433,16 @@ defmodule FermixCore.Jobs.SchedulerTest do
       end
     end
 
+    @job_row_writes [
+      :upsert_scheduled_job,
+      :settle_job_run,
+      :advance_stale_scheduled_job,
+      :expire_scheduled_job,
+      :disable_scheduled_job
+    ]
+
     defp job_row_write?(request) when is_tuple(request),
-      do: elem(request, 0) in [:upsert_scheduled_job, :settle_job_run]
+      do: elem(request, 0) in @job_row_writes
 
     defp job_row_write?(_request), do: false
   end
@@ -465,7 +474,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
     # A transparent proxy in front of the real Repo GenServer that injects a
     # `{:error, :injected_fault}` reply for exactly one request tag and forwards
     # everything else. Lets a scheduler tick fail on a chosen path (scan, expiry
-    # lookup, stale-skip store, claim) with no host-state mutation.
+    # write, stale-skip write, claim) with no host-state mutation.
     use GenServer
 
     def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -1294,6 +1303,135 @@ defmodule FermixCore.Jobs.SchedulerTest do
     end
   end
 
+  # The Scheduler's own writes of a job: an owner's pause, edit or removal
+  # lands after the due scan read the job and just before the Scheduler's
+  # write of it reaches the Repo, forced there by the proxy. The owner's write
+  # is kept, and a removed job stays gone.
+  describe "an owner's write landing before the Scheduler's own write of the job" do
+    test "a stale skip keeps a pause", %{repo: repo, runner_supervisor: runner_supervisor} do
+      {:ok, job} = seed_recurring_job(repo, "Paused Before Its Skip")
+
+      race_scheduler_write(repo, runner_supervisor, ~U[2026-05-02 16:00:00Z], fn ->
+        pause_job!(repo, job.id)
+      end)
+
+      assert {:ok, current} = Registry.get_job(job.id, repo: repo)
+      assert %{state: "paused", enabled?: false} = current
+      assert current.next_run_at == ~U[2026-05-02 14:15:00Z]
+    end
+
+    test "a stale skip keeps an edit", %{repo: repo, runner_supervisor: runner_supervisor} do
+      {:ok, job} = seed_recurring_job(repo, "Edited Before Its Skip")
+      edit = %{schedule: "every 30 minutes", description: "Edited before the skip"}
+
+      race_scheduler_write(repo, runner_supervisor, ~U[2026-05-02 16:00:00Z], fn ->
+        update_job!(repo, job.id, edit, ~U[2026-05-02 16:00:00Z])
+      end)
+
+      assert {:ok, current} = Registry.get_job(job.id, repo: repo)
+      assert current.schedule_expr == "every 30 minutes"
+      assert current.description == "Edited before the skip"
+      assert current.next_run_at == ~U[2026-05-02 16:30:00Z]
+    end
+
+    test "a stale skip keeps a removed job gone", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      {:ok, job} = seed_recurring_job(repo, "Removed Before Its Skip")
+
+      race_scheduler_write(repo, runner_supervisor, ~U[2026-05-02 16:00:00Z], fn ->
+        remove_job!(repo, job.id)
+      end)
+
+      assert {:error, :not_found} = Registry.get_job(job.id, repo: repo)
+    end
+
+    test "an expiry keeps a pause", %{repo: repo, runner_supervisor: runner_supervisor} do
+      job = seed_expiring_job(repo, "Paused Before Its Expiry")
+
+      race_scheduler_write(repo, runner_supervisor, ~U[2026-05-02 14:10:00Z], fn ->
+        pause_job!(repo, job.id)
+      end)
+
+      assert {:ok, current} = Registry.get_job(job.id, repo: repo)
+      assert %{state: "paused", enabled?: false, last_status: nil} = current
+
+      assert {:ok, %{status: "paused"}} =
+               Registry.get_memory_source(job.memory_source_id, repo: repo)
+    end
+
+    test "an expiry keeps an edit", %{repo: repo, runner_supervisor: runner_supervisor} do
+      job = seed_expiring_job(repo, "Edited Before Its Expiry")
+      edit = %{task_prompt: "Send the last quote.", description: "Edited before the expiry"}
+
+      race_scheduler_write(repo, runner_supervisor, ~U[2026-05-02 14:10:00Z], fn ->
+        update_job!(repo, job.id, edit, ~U[2026-05-02 14:09:00Z])
+      end)
+
+      assert {:ok, current} = Registry.get_job(job.id, repo: repo)
+      assert current.task_prompt == "Send the last quote."
+      assert current.description == "Edited before the expiry"
+      assert %{state: "completed", enabled?: false, last_status: "expired"} = current
+    end
+
+    test "an expiry keeps a removed job gone", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      job = seed_expiring_job(repo, "Removed Before Its Expiry")
+
+      race_scheduler_write(repo, runner_supervisor, ~U[2026-05-02 14:10:00Z], fn ->
+        remove_job!(repo, job.id)
+      end)
+
+      assert {:error, :not_found} = Registry.get_job(job.id, repo: repo)
+
+      assert {:ok, %{status: "removed"}} =
+               Registry.get_memory_source(job.memory_source_id, repo: repo)
+    end
+
+    test "a disable keeps a pause", %{repo: repo, runner_supervisor: runner_supervisor} do
+      broken = seed_broken_schedule_job(repo, next_run_at: ~U[2026-05-02 14:10:00Z])
+
+      race_scheduler_write(repo, runner_supervisor, ~U[2026-05-02 14:15:00Z], fn ->
+        pause_job!(repo, broken.id)
+      end)
+
+      assert {:ok, current} = Registry.get_job(broken.id, repo: repo)
+      assert %{state: "paused", enabled?: false, last_error: nil} = current
+    end
+
+    test "a disable keeps the owner's fix of the schedule", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      broken = seed_broken_schedule_job(repo, next_run_at: ~U[2026-05-02 14:10:00Z])
+
+      race_scheduler_write(repo, runner_supervisor, ~U[2026-05-02 14:15:00Z], fn ->
+        update_job!(repo, broken.id, %{schedule: "every 30 minutes"}, ~U[2026-05-02 14:15:00Z])
+      end)
+
+      assert {:ok, current} = Registry.get_job(broken.id, repo: repo)
+      assert %{state: "scheduled", enabled?: true, last_error: nil} = current
+      assert current.schedule_expr == "every 30 minutes"
+      assert current.next_run_at == ~U[2026-05-02 14:45:00Z]
+    end
+
+    test "a disable keeps a removed job gone", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      broken = seed_broken_schedule_job(repo, next_run_at: ~U[2026-05-02 14:10:00Z])
+
+      race_scheduler_write(repo, runner_supervisor, ~U[2026-05-02 14:15:00Z], fn ->
+        remove_job!(repo, broken.id)
+      end)
+
+      assert {:error, :not_found} = Registry.get_job(broken.id, repo: repo)
+    end
+  end
+
   # These assert the timer re-arm. The scheduler computes its delay against the
   # real clock, so the due times are real-clock-relative: the seeded job is
   # genuinely past-due now. That keeps the scheduler's own init auto-tick (fired
@@ -1312,13 +1450,13 @@ defmodule FermixCore.Jobs.SchedulerTest do
       assert_due_timer_backoff(scheduler)
     end
 
-    test "an expiry-lookup failure re-arms the due timer at the backoff floor", %{
+    test "an expiry write failure re-arms the due timer at the backoff floor", %{
       repo: repo,
       runner_supervisor: runner_supervisor
     } do
       now = DateTime.utc_now()
       seed_due_job(repo, name: "Expiry Fault", expires_at: DateTime.add(now, -60, :second))
-      fault = start_fault_repo(repo, :get_scheduled_job)
+      fault = start_fault_repo(repo, :expire_scheduled_job)
       scheduler = start_scheduler(fault, runner_supervisor, timer_enabled: true)
 
       assert :ok = Scheduler.tick(scheduler, now: DateTime.utc_now())
@@ -1330,9 +1468,9 @@ defmodule FermixCore.Jobs.SchedulerTest do
       runner_supervisor: runner_supervisor
     } do
       now = DateTime.utc_now()
-      # Two hours past due → stale-skip branch; the advance store faults.
+      # Two hours past due → stale-skip branch; the advance write faults.
       seed_due_job(repo, name: "Stale Fault", due_at: DateTime.add(now, -7200, :second))
-      fault = start_fault_repo(repo, :upsert_scheduled_job)
+      fault = start_fault_repo(repo, :advance_stale_scheduled_job)
 
       scheduler =
         start_scheduler(fault, runner_supervisor,
@@ -2342,6 +2480,56 @@ defmodule FermixCore.Jobs.SchedulerTest do
       now: ~U[2026-05-02 14:00:00Z]
     )
   end
+
+  # Due at 14:15 and expiring at 14:10, so a tick at 14:10 expires it.
+  defp seed_expiring_job(repo, name) do
+    {:ok, job} =
+      Registry.create_job(
+        %{
+          created_by_trust: "operator",
+          name: name,
+          schedule: "every 15 minutes",
+          task_prompt: "Send a temporary quote.",
+          expires_at: ~U[2026-05-02 14:10:00Z]
+        },
+        repo: repo,
+        now: ~U[2026-05-02 14:00:00Z]
+      )
+
+    job
+  end
+
+  # One tick at `now`, with `competing_write` run against the real Repo just
+  # before the first job row write the tick sends on, after the due scan read
+  # the job. The tick fails the test unless that write was reached.
+  defp race_scheduler_write(repo, runner_supervisor, now, competing_write) do
+    proxy = start_inject_before_job_write_repo(repo)
+    scheduler = start_scheduler(proxy, runner_supervisor, run_freshness_window_seconds: 3600)
+    test = self()
+
+    :ok =
+      InjectBeforeJobWriteRepo.arm(proxy, fn ->
+        :ok = competing_write.()
+        send(test, :competing_write_landed)
+        :ok
+      end)
+
+    assert :ok = Scheduler.tick(scheduler, now: now)
+    assert_received :competing_write_landed
+  end
+
+  defp pause_job!(repo, job_id) do
+    {:ok, %{state: "paused"}} = Registry.pause_job(job_id, repo: repo, scheduler: nil)
+    :ok
+  end
+
+  defp update_job!(repo, job_id, attrs, now) do
+    {:ok, _edited} = Registry.update_job(job_id, attrs, repo: repo, scheduler: nil, now: now)
+    :ok
+  end
+
+  defp remove_job!(repo, job_id),
+    do: :ok = Registry.remove_job(job_id, repo: repo, scheduler: nil)
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)

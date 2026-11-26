@@ -2763,6 +2763,72 @@ defmodule FermixCore.Memory.Repo do
     )
   end
 
+  @doc """
+  The Scheduler's stale skip of `job`, the job as its due scan read it: the
+  next run moves from the stale instant read (`job.next_run_at`) to
+  `next_run_at`, and `updated_at` to `now`, in one guarded `UPDATE` of those
+  two columns, only while the job is still enabled, `scheduled` and due at
+  that instant. `last_run_at` and `last_status` are left as they are, since
+  no run happened.
+
+  This, `expire_scheduled_job/3` and `disable_scheduled_job/4` are the
+  Scheduler's own writes of a job: none is a whole row from an earlier read,
+  and none inserts a job. A write that landed since the scan (an owner's
+  pause, edit or removal, a heal's write, a run's claim or settle) keeps what
+  it wrote: one that moved what the guard reads leaves this write changing
+  no row, `{:ok, :unchanged}`, and any other keeps the columns this write
+  does not set. They are the engine's moves, not the owner's: none marks a
+  diagnosing heal written-under or supersedes a waiting proposal
+  (`update_scheduled_job_fields/3`). `{:ok, job}` is the row as written.
+  """
+  @spec advance_stale_scheduled_job(scheduled_job_row(), DateTime.t(), DateTime.t(), keyword()) ::
+          {:ok, scheduled_job_row() | :unchanged} | {:error, term()}
+  def advance_stale_scheduled_job(
+        %{id: id, next_run_at: %DateTime{} = stale_at},
+        %DateTime{} = next_run_at,
+        %DateTime{} = now,
+        opts \\ []
+      )
+      when is_binary(id) do
+    call({:advance_stale_scheduled_job, id, stale_at, next_run_at, now}, opts)
+  end
+
+  @doc """
+  The Scheduler's expiry of job `id`: it is left disabled and `completed`,
+  with no next run, `last_status` `"expired"`, no `last_error` and
+  `updated_at` `now`, in one guarded `UPDATE` of those columns, only while
+  the job is still enabled and `scheduled` and its `expires_at` has passed as
+  of `now`. One of the Scheduler's own writes of a job, with the outcomes
+  `advance_stale_scheduled_job/4` gives.
+  """
+  @spec expire_scheduled_job(String.t(), DateTime.t(), keyword()) ::
+          {:ok, scheduled_job_row() | :unchanged} | {:error, term()}
+  def expire_scheduled_job(id, %DateTime{} = now, opts \\ []) when is_binary(id) do
+    call({:expire_scheduled_job, id, now}, opts)
+  end
+
+  @doc """
+  The Scheduler's disable of `job`, the job as its due scan read it, whose
+  schedule no longer parses: it is left `disabled` and not enabled, with
+  `last_error` and `updated_at` `now`, in one guarded `UPDATE` of those
+  columns, only while the job is still enabled and `scheduled` and still
+  carries the `schedule_expr` and `timezone` read, so an owner who fixed the
+  schedule since keeps the fix. One of the Scheduler's own writes of a job,
+  with the outcomes `advance_stale_scheduled_job/4` gives.
+  """
+  @spec disable_scheduled_job(scheduled_job_row(), String.t(), DateTime.t(), keyword()) ::
+          {:ok, scheduled_job_row() | :unchanged} | {:error, term()}
+  def disable_scheduled_job(
+        %{id: id, schedule_expr: schedule_expr, timezone: timezone},
+        last_error,
+        %DateTime{} = now,
+        opts \\ []
+      )
+      when is_binary(id) and is_binary(schedule_expr) and is_binary(timezone) and
+             is_binary(last_error) do
+    call({:disable_scheduled_job, id, schedule_expr, timezone, last_error, now}, opts)
+  end
+
   @spec get_scheduled_job(String.t(), keyword()) ::
           {:ok, scheduled_job_row()} | {:error, :not_found | term()}
   def get_scheduled_job(id, opts \\ []) when is_binary(id) do
@@ -5032,6 +5098,32 @@ defmodule FermixCore.Memory.Repo do
 
   def handle_call({:heal_job_write, heal_id, job_id, assignments, claim}, _from, state) do
     reply = with_connection(state, &heal_job_write_tx(&1, heal_id, job_id, assignments, claim))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:advance_stale_scheduled_job, id, stale_at, next_run_at, now}, _from, state) do
+    reply =
+      with_connection(state, &advance_stale_scheduled_job_row(&1, id, stale_at, next_run_at, now))
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:expire_scheduled_job, id, now}, _from, state) do
+    reply = with_connection(state, &expire_scheduled_job_row(&1, id, now))
+    {:reply, reply, state}
+  end
+
+  def handle_call(
+        {:disable_scheduled_job, id, schedule_expr, timezone, last_error, now},
+        _from,
+        state
+      ) do
+    reply =
+      with_connection(
+        state,
+        &disable_scheduled_job_row(&1, id, {schedule_expr, timezone}, last_error, now)
+      )
+
     {:reply, reply, state}
   end
 
@@ -9225,6 +9317,68 @@ defmodule FermixCore.Memory.Repo do
          {:ok, heal} <- JobHealsSql.claim_written(conn, heal_id, claim),
          {:ok, job} <- fetch_scheduled_job(conn, job_id) do
       {:ok, {:written, job, heal}}
+    end
+  end
+
+  # The Scheduler's own writes of a job (`advance_stale_scheduled_job/4`,
+  # `expire_scheduled_job/3`, `disable_scheduled_job/4`): each one UPDATE of
+  # the columns it moves, guarded on what the due scan read, and so one
+  # statement with no transaction around it. `RETURNING *` reads the row as
+  # written in that statement; no row returned is a write that landed first.
+  # None goes through `write_scheduled_job_fields/3`: an owner's write clears
+  # the job's retry and a stale follow-up approval, and these leave both.
+  defp advance_stale_scheduled_job_row(conn, id, stale_at, next_run_at, now) do
+    guarded_scheduled_job_write(
+      conn,
+      """
+      UPDATE scheduled_jobs
+      SET next_run_at = ?, updated_at = ?
+      WHERE id = ? AND enabled = 1 AND state = 'scheduled' AND next_run_at = ?
+      RETURNING *
+      """,
+      [timestamp_string(next_run_at), timestamp_string(now), id, timestamp_string(stale_at)]
+    )
+  end
+
+  # The expiry compares instants (`julianday`), as the Scheduler's own check
+  # does: a stored `expires_at` and `now` can differ in their fraction digits,
+  # and as text "…:00Z" sorts after "…:00.5Z".
+  defp expire_scheduled_job_row(conn, id, now) do
+    stamp = timestamp_string(now)
+
+    guarded_scheduled_job_write(
+      conn,
+      """
+      UPDATE scheduled_jobs
+      SET enabled = 0, state = 'completed', next_run_at = NULL, last_status = 'expired',
+          last_error = NULL, updated_at = ?
+      WHERE id = ? AND enabled = 1 AND state = 'scheduled'
+        AND expires_at IS NOT NULL AND julianday(expires_at) <= julianday(?)
+      RETURNING *
+      """,
+      [stamp, id, stamp]
+    )
+  end
+
+  defp disable_scheduled_job_row(conn, id, {schedule_expr, timezone}, last_error, now) do
+    guarded_scheduled_job_write(
+      conn,
+      """
+      UPDATE scheduled_jobs
+      SET state = 'disabled', enabled = 0, last_error = ?, updated_at = ?
+      WHERE id = ? AND enabled = 1 AND state = 'scheduled'
+        AND schedule_expr = ? AND timezone = ?
+      RETURNING *
+      """,
+      [last_error, timestamp_string(now), id, schedule_expr, timezone]
+    )
+  end
+
+  defp guarded_scheduled_job_write(conn, update, params) do
+    case query_all(conn, update, params) do
+      {:ok, [row]} -> {:ok, scheduled_job_row(row)}
+      {:ok, []} -> {:ok, :unchanged}
+      {:error, reason} -> {:error, reason}
     end
   end
 

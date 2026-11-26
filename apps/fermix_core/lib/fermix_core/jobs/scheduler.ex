@@ -757,42 +757,27 @@ defmodule FermixCore.Jobs.Scheduler do
     end
   end
 
-  # Re-fetch and guard on the live state (mirrors expiry) so an edit/pause that
-  # lands between the due scan and here is not clobbered. Only next_run_at moves;
-  # last_status/last_run_at stay untouched because no run actually happened.
+  # One guarded write, only while the job is still enabled, scheduled and due
+  # at the instant the scan read (`Repo.advance_stale_scheduled_job/4`): a
+  # pause, edit or removal landing since the scan keeps what it wrote, and the
+  # job is left to it this tick. Only next_run_at moves; last_status and
+  # last_run_at stay untouched because no run actually happened.
   defp advance_stale_job(job, next_run_at, now, state) do
-    case Repo.get_scheduled_job(job.id, state.repo_opts) do
-      {:ok, %{enabled?: true, state: "scheduled"} = current} ->
+    case Repo.advance_stale_scheduled_job(job, next_run_at, now, state.repo_opts) do
+      {:ok, :unchanged} ->
+        {:ok, state}
+
+      {:ok, _advanced} ->
         Logger.info(
           "Scheduled job #{job.id} skipped a stale run due at " <>
             "#{DateTime.to_iso8601(job.next_run_at)}; next run at #{DateTime.to_iso8601(next_run_at)}"
         )
 
-        outcome_state(store_advanced_run_at(current, next_run_at, now, state.repo_opts), state)
-
-      {:ok, _job} ->
         {:ok, state}
-
-      {:error, :not_found} ->
-        {:ok, state}
-
-      {:error, reason} ->
-        Logger.error("Scheduled job #{job.id} stale-skip lookup failed: #{inspect(reason)}")
-        {:error, state}
-    end
-  end
-
-  defp store_advanced_run_at(job, next_run_at, now, repo_opts) do
-    job
-    |> Map.merge(%{next_run_at: next_run_at, updated_at: now})
-    |> Repo.upsert_scheduled_job(repo_opts)
-    |> case do
-      {:ok, _job} ->
-        :ok
 
       {:error, reason} ->
         Logger.error("Scheduled job #{job.id} stale-skip advance failed: #{inspect(reason)}")
-        :error
+        {:error, state}
     end
   end
 
@@ -898,87 +883,46 @@ defmodule FermixCore.Jobs.Scheduler do
     DateTime.compare(now, expires_at) != :lt
   end
 
+  # One guarded write, only while the job is still enabled and scheduled and
+  # its expiry has passed (`Repo.expire_scheduled_job/3`): a pause, edit or
+  # removal landing since the due scan keeps what it wrote. Its memory source
+  # follows only a job this write expired.
   defp expire_job(job_id, now, state) do
-    case Repo.get_scheduled_job(job_id, state.repo_opts) do
-      {:ok, %{enabled?: true, state: "scheduled"} = job} ->
-        outcome_state(expire_scheduled_job(job, now, state.repo_opts), state)
-
-      {:ok, _job} ->
+    case Repo.expire_scheduled_job(job_id, now, state.repo_opts) do
+      {:ok, :unchanged} ->
         {:ok, state}
 
-      {:error, :not_found} ->
+      {:ok, expired_job} ->
+        _ = mark_source_expired(expired_job, now, state.repo_opts)
         {:ok, state}
 
       {:error, reason} ->
-        Logger.error("Scheduled job #{job_id} expiry lookup failed: #{inspect(reason)}")
+        Logger.error("Scheduled job #{job_id} expiry update failed: #{inspect(reason)}")
         {:error, state}
     end
   end
 
-  defp expire_scheduled_job(job, now, repo_opts) do
-    if expired?(job, now) do
-      job
-      |> Map.merge(%{
-        enabled?: false,
-        state: "completed",
-        next_run_at: nil,
-        last_status: "expired",
-        last_error: nil,
-        updated_at: now
-      })
-      |> Repo.upsert_scheduled_job(repo_opts)
-      |> case do
-        {:ok, updated_job} ->
-          _ = mark_source_expired(updated_job, now, repo_opts)
-          :ok
-
-        {:error, reason} ->
-          Logger.error("Scheduled job #{job.id} expiry update failed: #{inspect(reason)}")
-          :error
-      end
-    else
-      :ok
-    end
-  end
-
   # Terminal state for a job whose schedule no longer parses (claim time or the
-  # stale-skip recompute). Re-fetch and guard on the live row (mirrors expiry) so
-  # an edit/pause landing between the due scan and here is not clobbered. The
+  # stale-skip recompute). One guarded write, only while the job is still
+  # enabled, scheduled and carrying the schedule that failed to parse
+  # (`Repo.disable_scheduled_job/4`), so a pause, an edit that fixed the
+  # schedule, or a removal landing since the due scan keeps what it wrote. The
   # `state = 'scheduled'` due-scan filter then keeps a disabled job off every
   # future tick; `resume` re-parses and fails loudly if the schedule is still
   # broken.
   defp disable_job(job, error, now, state) do
-    case Repo.get_scheduled_job(job.id, state.repo_opts) do
-      {:ok, %{enabled?: true, state: "scheduled"} = current} ->
-        current
-        |> Map.merge(%{state: "disabled", enabled?: false, last_error: error, updated_at: now})
-        |> Repo.upsert_scheduled_job(state.repo_opts)
-        |> case do
-          {:ok, _updated} ->
-            {:ok, state}
-
-          {:error, reason} ->
-            Logger.error("Scheduled job #{job.id} disable update failed: #{inspect(reason)}")
-            {:error, state}
-        end
-
-      {:ok, _job} ->
-        {:ok, state}
-
-      {:error, :not_found} ->
+    case Repo.disable_scheduled_job(job, error, now, state.repo_opts) do
+      {:ok, _disabled_or_unchanged} ->
         {:ok, state}
 
       {:error, reason} ->
-        Logger.error("Scheduled job #{job.id} disable lookup failed: #{inspect(reason)}")
+        Logger.error("Scheduled job #{job.id} disable update failed: #{inspect(reason)}")
         {:error, state}
     end
   end
 
   defp schedule_error_message(:no_future_run), do: "schedule has no future occurrence"
   defp schedule_error_message(reason), do: "schedule no longer parses: #{inspect(reason)}"
-
-  defp outcome_state(:ok, state), do: {:ok, state}
-  defp outcome_state(:error, state), do: {:error, state}
 
   defp start_or_mark_failed(job, run, state) do
     case start_runner(job, run, state) do
