@@ -29,8 +29,12 @@ defmodule FermixChannels.Bench.Runner do
   alias FermixCore.Telemetry
 
   @default_output "bench/current.json"
-  @sample_reply_timeout_ms 2_000
-  @batch_reply_timeout_ms 30_000
+  # How long a run waits for a turn's reply, or for a batch of turns to end,
+  # before it fails: the bound on a turn that hangs, never a measurement. A
+  # turn of the mock provider takes microseconds, but the first turn of a VM
+  # that has loaded nothing yet takes seconds on a machine whose cores are all
+  # busy, and at 2 s the bound failed such a run before it took one sample.
+  @reply_timeout_ms 30_000
   @multi_conversation_count 100
 
   @events [
@@ -80,6 +84,10 @@ defmodule FermixChannels.Bench.Runner do
     adapter = AdapterRunner.list_scenarios()
     Enum.sort(shared ++ adapter)
   end
+
+  @doc "The bound on a turn that never replies, for the channel scenarios too."
+  @spec reply_timeout_ms() :: pos_integer()
+  def reply_timeout_ms, do: @reply_timeout_ms
 
   @spec stage_order() :: [String.t()]
   def stage_order, do: Enum.map(@events, fn {_event, stage} -> stage end)
@@ -215,7 +223,7 @@ defmodule FermixChannels.Bench.Runner do
     |> Enum.chunk_every(@multi_conversation_count)
     |> Enum.reduce(0, fn indexes, count ->
       refs = Enum.map(indexes, &dispatch_sample!(env, spec, &1, :sample))
-      wait_until_idle_or_deadline(env.queue, @batch_reply_timeout_ms)
+      wait_until_idle_or_deadline(env.queue, @reply_timeout_ms)
       count + await_replies!(env, refs)
     end)
   end
@@ -327,8 +335,8 @@ defmodule FermixChannels.Bench.Runner do
         raise "#{env.name}: a benchmark turn replied #{inspect(part)}; " <>
                 "its scenario defines #{inspect(reply)}"
     after
-      @sample_reply_timeout_ms ->
-        raise "#{env.name}: a benchmark turn sent no reply within #{@sample_reply_timeout_ms} ms"
+      @reply_timeout_ms ->
+        raise "#{env.name}: a benchmark turn sent no reply within #{@reply_timeout_ms} ms"
     end
   end
 
@@ -367,7 +375,7 @@ defmodule FermixChannels.Bench.Runner do
   end
 
   defp wait_until_idle!(agent) do
-    deadline = System.monotonic_time(:millisecond) + @batch_reply_timeout_ms
+    deadline = System.monotonic_time(:millisecond) + @reply_timeout_ms
     wait_until_idle!(agent, deadline)
   end
 

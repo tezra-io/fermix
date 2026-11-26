@@ -16,6 +16,10 @@ defmodule FermixChannels.Bench.BootTest do
   alias FermixTestSupport.SafeRm
 
   @moduletag :subprocess
+  # A child `mix` boots inside each test. With every core busy that boot alone
+  # takes about a minute, so the default 60 s would fail a run that is only
+  # slow; this is the bound on a child that hangs.
+  @moduletag timeout: 300_000
 
   @probe ~S"""
   alias FermixChannels.Bench.Boot
@@ -186,6 +190,18 @@ defmodule FermixChannels.Bench.BootTest do
     refute result.raised_home.used == home
     refute result.raised_home.exists_after
     assert result.raised_home.restored
+  end
+
+  # Every VM's counters start alike, so a home named by one was the same name
+  # in every run: a run killed before it removed its home stopped every run
+  # after it, and two runs at once took each other's (M107).
+  test "names each home by random bytes, so no two runs can pick the same one",
+       %{result: result} do
+    for used <- [result.home.used, result.raised_home.used] do
+      assert Path.basename(used) =~ ~r/\Afermix-bench-home-[0-9a-f]{16}\z/
+    end
+
+    refute result.home.used == result.raised_home.used
   end
 
   defp run_probe!(probe, home) do

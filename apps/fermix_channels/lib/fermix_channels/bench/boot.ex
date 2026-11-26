@@ -43,7 +43,7 @@ defmodule FermixChannels.Bench.Boot do
   """
   @spec with_home((-> result)) :: result when result: term()
   def with_home(fun) when is_function(fun, 0) do
-    home = Path.join(System.tmp_dir!(), "fermix-bench-home-#{System.unique_integer([:positive])}")
+    home = Path.join(System.tmp_dir!(), "fermix-bench-home-#{random_suffix()}")
     File.mkdir!(home)
     caller_home = System.get_env("FERMIX_HOME")
     System.put_env("FERMIX_HOME", home)
@@ -112,6 +112,12 @@ defmodule FermixChannels.Bench.Boot do
   end
 
   defp stop_process(pid), do: :ok = GenServer.stop(pid)
+
+  # Random, never a counter: every VM's counters start alike, so a counter
+  # names the same home in every run. A run killed before it removed its home
+  # would then stop every run after it, and two runs at once would take each
+  # other's.
+  defp random_suffix, do: Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
 
   defp restore_home_variable(nil), do: System.delete_env("FERMIX_HOME")
   defp restore_home_variable(home), do: System.put_env("FERMIX_HOME", home)

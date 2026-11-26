@@ -3,6 +3,7 @@ defmodule FermixChannels.Bench.AdapterRunner do
 
   require Logger
 
+  alias FermixChannels.Bench.Runner
   alias FermixChannels.Channels.Discord
   alias FermixChannels.Channels.IMessage
   alias FermixChannels.Channels.Signal
@@ -24,7 +25,6 @@ defmodule FermixChannels.Bench.AdapterRunner do
 
   @http_stub :fermix_bench_http
   @agent_adapter_opts [bench_script: :text, model: "bench-mock"]
-  @reply_timeout_ms 2_000
   @adapter_samples 200
   @media_samples 50
   @e2e_samples 200
@@ -514,12 +514,12 @@ defmodule FermixChannels.Bench.AdapterRunner do
         raise "#{env.name}: a benchmark turn replied #{inspect(part)}; " <>
                 "its scenario defines #{inspect(reply)}"
     after
-      @reply_timeout_ms -> raise "#{env.name}: adapter e2e reply timed out"
+      Runner.reply_timeout_ms() -> raise "#{env.name}: adapter e2e reply timed out"
     end
   end
 
   defp wait_until_idle!(agent) do
-    deadline = System.monotonic_time(:millisecond) + @reply_timeout_ms
+    deadline = System.monotonic_time(:millisecond) + Runner.reply_timeout_ms()
     wait_until_idle!(agent, deadline)
   end
 

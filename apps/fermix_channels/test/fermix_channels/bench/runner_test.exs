@@ -284,6 +284,14 @@ defmodule FermixChannels.Bench.RunnerTest do
              Runner.run(scenarios: ["missing"], samples: 1, warmup: 0, output: nil)
   end
 
+  # The wait for a turn's reply bounds a turn that hangs; it measures nothing.
+  # At 2 s it failed the first turn of a cold VM on a runner whose cores were
+  # all busy (M107), so it stays at or above the suite's own floor for a named
+  # wait (AGENTS.md, Tests under load).
+  test "waits at least ten seconds for a turn's reply before it fails the run" do
+    assert Runner.reply_timeout_ms() >= 10_000
+  end
+
   defp stage_count(report, scenario, stage) do
     case report.scenarios[scenario].stages[stage] do
       nil -> 0

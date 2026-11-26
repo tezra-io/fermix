@@ -27,6 +27,10 @@ defmodule Mix.Tasks.FermixBenchTest do
   alias FermixTestSupport.SafeRm
 
   @moduletag :subprocess
+  # A child `mix` boots inside each test. With every core busy that boot alone
+  # takes about a minute, so the default 60 s would fail a run that is only
+  # slow; this is the bound on a child that hangs.
+  @moduletag timeout: 300_000
 
   @samples 2
   @warmup 1
