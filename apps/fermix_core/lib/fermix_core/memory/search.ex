@@ -334,7 +334,12 @@ defmodule FermixCore.Memory.Search do
     end
   end
 
+  # History is the conversation's chat messages. A compaction's checkpoint
+  # row sits beside them in the same table, and the compacted transcript
+  # already holds that summary as a message, so the row would only repeat it.
   defp repo_search_messages(repo, search_term, selector, limit) do
+    selector = Map.put(selector, :kind, "chat_message")
+
     case Repo.search_messages(search_term, selector: selector, limit: limit, server: repo) do
       {:ok, results} -> results
       {:error, :disabled} -> []

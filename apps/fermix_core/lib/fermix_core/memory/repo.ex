@@ -1499,9 +1499,27 @@ defmodule FermixCore.Memory.Repo do
     call({:message_count, selector}, opts)
   end
 
+  @doc """
+  Deletes every row of the selector's conversation whatever its kind: a
+  `kind` in the selector is not read. A cleared conversation keeps no
+  checkpoint for the next one to inherit.
+  """
   @spec delete_messages(message_selector(), keyword()) :: :ok | {:error, term()}
   def delete_messages(selector, opts \\ []) when is_map(selector) do
     call({:delete_messages, selector}, opts)
+  end
+
+  @doc """
+  Replaces the conversation's rows of the selector's `kind`, which a replace
+  requires, with `rows` in order, in one `BEGIN IMMEDIATE` transaction: any
+  failure rolls it back and leaves the stored rows exactly as they were. Rows
+  of other kinds, such as a compaction's `checkpoint_summary`, are kept.
+  """
+  @spec replace_messages(message_selector(), [message_attrs()], keyword()) ::
+          :ok | {:error, term()}
+  def replace_messages(%{kind: kind} = selector, rows, opts \\ [])
+      when is_binary(kind) and is_list(rows) do
+    call({:replace_messages, selector, rows}, opts)
   end
 
   # SQLite integers are signed 64-bit, and Exqlite raises on a wider bind
@@ -4365,6 +4383,11 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call({:replace_messages, selector, rows}, _from, state) do
+    reply = with_connection(state, &replace_message_rows_tx(&1, selector, rows))
+    {:reply, reply, state}
+  end
+
   def handle_call({:append_mobile_timeline, attrs}, _from, state) do
     reply = with_connection(state, &MobileSql.append(&1, attrs))
     {:reply, reply, state}
@@ -7205,31 +7228,34 @@ defmodule FermixCore.Memory.Repo do
   defp insert_message_row(conn, attrs) do
     message = normalize_message_attrs(attrs)
 
-    with :ok <-
-           execute(
-             conn,
-             """
-             INSERT INTO messages (
-               agent_id,
-               owner_id,
-               channel,
-               chat_id,
-               thread_scope,
-               sender,
-               role,
-               kind,
-               content,
-               metadata_json,
-               created_at
-             )
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             """,
-             message_insert_params(message)
-           ),
+    with :ok <- execute_message_insert(conn, message),
          {:ok, [row]} <-
            query_all(conn, "SELECT * FROM messages WHERE id = last_insert_rowid()", []) do
       {:ok, message_row(row)}
     end
+  end
+
+  defp execute_message_insert(conn, message) do
+    execute(
+      conn,
+      """
+      INSERT INTO messages (
+        agent_id,
+        owner_id,
+        channel,
+        chat_id,
+        thread_scope,
+        sender,
+        role,
+        kind,
+        content,
+        metadata_json,
+        created_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      """,
+      message_insert_params(message)
+    )
   end
 
   defp fetch_messages(conn, selector, limit) do
@@ -7288,6 +7314,74 @@ defmodule FermixCore.Memory.Repo do
         message_selector.thread_scope
       ]
     )
+  end
+
+  # A conversation's rows of one kind rewritten in one BEGIN IMMEDIATE: the
+  # delete and every insert commit together or not at all, so a refused row or
+  # a VM that dies midway leaves the stored rows as they were. The rows are
+  # normalized before the transaction opens. A BEGIN that fails (`:busy`) never
+  # opened the transaction, so it returns as is; every failure inside it rolls
+  # the whole replace back.
+  defp replace_message_rows_tx(conn, selector, rows) do
+    message_selector =
+      selector
+      |> normalize_message_selector()
+      |> Map.put(:kind, fetch_string!(selector, :kind))
+
+    messages = Enum.map(rows, &normalize_message_attrs/1)
+
+    with :ok <- execute(conn, "BEGIN IMMEDIATE", []) do
+      conn
+      |> replace_message_rows_in_tx(message_selector, messages)
+      |> finish_message_replace(conn)
+    end
+  end
+
+  defp replace_message_rows_in_tx(conn, message_selector, messages) do
+    with :ok <- delete_message_rows_of_kind(conn, message_selector) do
+      insert_message_rows(conn, messages)
+    end
+  end
+
+  # In order, stopping at the first row the database refuses.
+  defp insert_message_rows(conn, messages) do
+    Enum.reduce_while(messages, :ok, fn message, :ok ->
+      case execute_message_insert(conn, message) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp delete_message_rows_of_kind(conn, message_selector) do
+    execute(
+      conn,
+      """
+      DELETE FROM messages
+      WHERE agent_id = ? AND channel = ? AND chat_id = ? AND thread_scope = ? AND kind = ?
+      """,
+      [
+        message_selector.agent_id,
+        message_selector.channel,
+        message_selector.chat_id,
+        message_selector.thread_scope,
+        message_selector.kind
+      ]
+    )
+  end
+
+  defp finish_message_replace(:ok, conn) do
+    case execute(conn, "COMMIT", []) do
+      :ok -> :ok
+      {:error, reason} -> rollback_message_replace(conn, reason)
+    end
+  end
+
+  defp finish_message_replace({:error, reason}, conn), do: rollback_message_replace(conn, reason)
+
+  defp rollback_message_replace(conn, reason) do
+    _rollback_result = execute(conn, "ROLLBACK", [])
+    {:error, reason}
   end
 
   defp upsert_memory_row(conn, attrs) do

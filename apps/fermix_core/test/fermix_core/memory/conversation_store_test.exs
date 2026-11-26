@@ -51,31 +51,57 @@ defmodule FermixCore.Memory.ConversationStoreTest do
 
     @impl true
     def init(opts) do
-      {:ok, %{test_pid: Keyword.fetch!(opts, :test_pid), next_id: 0}}
+      {:ok, %{test_pid: Keyword.fetch!(opts, :test_pid)}}
     end
 
     @impl true
     def handle_call(:enabled?, _from, state), do: {:reply, true, state}
 
-    def handle_call({:delete_messages, selector}, _from, state) do
-      send(state.test_pid, {:delete_started, self(), selector})
+    def handle_call({:replace_messages, selector, rows}, _from, state) do
+      send(state.test_pid, {:replace_started, self(), selector})
 
       receive do
-        :continue_delete -> :ok
+        :continue_replace -> :ok
       end
 
+      send(state.test_pid, {:replaced, Enum.map(rows, & &1.content)})
       {:reply, :ok, state}
     end
+  end
 
-    def handle_call({:insert_message, attrs}, _from, state) do
-      next_id = state.next_id + 1
-      send(state.test_pid, {:insert_message, attrs.content})
-      {:reply, {:ok, Map.put(attrs, :id, next_id)}, %{state | next_id: next_id}}
+  # Answers a read at once and holds each write, telling the test which one it
+  # holds, until the test sends `:release`: a Repo busy behind other work.
+  defmodule HoldingRepo do
+    use GenServer
+
+    def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+    @impl true
+    def init(opts), do: {:ok, %{test_pid: Keyword.fetch!(opts, :test_pid), held: nil}}
+
+    @impl true
+    def handle_call({:get_messages, _selector, _limit}, _from, state),
+      do: {:reply, {:ok, []}, state}
+
+    def handle_call(write, from, %{held: nil} = state) do
+      send(state.test_pid, {:held, elem(write, 0)})
+      {:noreply, %{state | held: {write, from}}}
     end
+
+    @impl true
+    def handle_info(:release, %{held: {write, from}} = state) do
+      GenServer.reply(from, answer(write))
+      {:noreply, %{state | held: nil}}
+    end
+
+    defp answer({:insert_message, attrs}), do: {:ok, Map.put(attrs, :id, 1)}
+    defp answer(_history_write), do: :ok
   end
 
   @key {"telegram", "chat_123", :root}
   @key2 {"discord", "chat_456", :root}
+  # SQLite work behind a loaded runner's file-server queue.
+  @durable_write_wait_ms 10_000
 
   setup do
     name = :"conv_store_#{System.unique_integer([:positive])}"
@@ -579,7 +605,7 @@ defmodule FermixCore.Memory.ConversationStoreTest do
           )
         end)
 
-      assert_receive {:delete_started, ^repo, _selector}
+      assert_receive {:replace_started, ^repo, _selector}
 
       result_before_release = Task.yield(task, 100)
 
@@ -588,11 +614,10 @@ defmodule FermixCore.Memory.ConversationStoreTest do
                "new"
              ]
 
-      send(repo, :continue_delete)
+      send(repo, :continue_replace)
       _result_after_release = result_before_release || Task.await(task, 1_000)
 
-      assert_receive {:insert_message, "Conversation checkpoint summary:\nold"}
-      assert_receive {:insert_message, "new"}
+      assert_receive {:replaced, ["Conversation checkpoint summary:\nold", "new"]}
 
       assert result_before_release == {:ok, :ok}
     end
@@ -724,6 +749,65 @@ defmodule FermixCore.Memory.ConversationStoreTest do
 
       assert log =~ "conversation durable write failed; retrying attempt 2/2"
     end
+
+    # A Repo call that timed out still runs when the Repo reaches it, so a step
+    # that timed out and retried would write twice. Each durable step waits its
+    # turn instead: the test sees the deadline its Repo call carries, from a
+    # trace session of its own (no VM-wide trace state), while the Repo holds
+    # the answer, and the held write is the only one the Repo is ever sent.
+    test "a durable step waits for a busy repo with no deadline, and writes once" do
+      repo = start_supervised!({HoldingRepo, test_pid: self()})
+      tasks = start_supervised!({Task.Supervisor, []})
+      trace_repo_calls_from(tasks)
+      store = :"conversation_store_holding_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {ConversationStore,
+         name: store,
+         max_messages: 5,
+         repo: repo,
+         durable_task_supervisor: tasks,
+         agent_id: "main",
+         owner_id: "default"},
+        id: store
+      )
+
+      :ok = ConversationStore.add_message(@key, "user", "the 07:40 ferry", server: store)
+      assert_waits_without_deadline(repo, tasks, :insert_message)
+
+      history = ConversationStore.get_history(@key, server: store)
+      :ok = ConversationStore.replace_history(@key, history, server: store)
+      assert_waits_without_deadline(repo, tasks, :replace_messages)
+
+      :ok = ConversationStore.clear(@key, server: store)
+      assert_waits_without_deadline(repo, tasks, :delete_messages)
+
+      refute_received {:held, _write}
+    end
+  end
+
+  # Every process the durable steps' supervisor starts reports its
+  # `GenServer.call/3`s to the test, through a session only this test uses.
+  defp trace_repo_calls_from(tasks) do
+    session = :trace.session_create(:conversation_store_repo_calls, self(), [])
+    on_exit(fn -> :trace.session_destroy(session) end)
+    1 = :trace.function(session, {GenServer, :call, 3}, true, [:local])
+    1 = :trace.process(session, tasks, true, [:call, :set_on_spawn])
+  end
+
+  defp assert_waits_without_deadline(repo, tasks, write) do
+    assert_receive {:held, ^write}, @durable_write_wait_ms
+
+    assert_receive {:trace, step, :call, {GenServer, :call, [^repo, request, timeout]}},
+                   @durable_write_wait_ms
+
+    assert elem(request, 0) == write
+    assert timeout == :infinity
+    assert step in Task.Supervisor.children(tasks)
+
+    ref = Process.monitor(step)
+    send(repo, :release)
+    assert_receive {:DOWN, ^ref, :process, ^step, :normal}, @durable_write_wait_ms
   end
 
   # Bounded poll until the supervisor has no live children — i.e. every durable

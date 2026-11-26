@@ -563,7 +563,7 @@ defmodule FermixCore.Memory.ConversationStore do
     %{
       operation: operation,
       repo: repo,
-      selector: chat_selector(state, key, opts),
+      selector: history_selector(operation, state, key, opts),
       attrs: attrs,
       max_attempts: state.durable_max_attempts,
       retry_initial_ms: state.durable_retry_initial_ms
@@ -681,14 +681,25 @@ defmodule FermixCore.Memory.ConversationStore do
     end
   end
 
+  # A durable step is a background task nobody waits on, so its Repo call
+  # waits its turn in the Repo's queue with no deadline: a call that timed out
+  # would still run when the Repo reached it (`Repo.periodic_opts/2`), and the
+  # retry would write it a second time. A Repo that is down or dies mid-call
+  # still exits the call, and the bounded retry covers it.
   defp safe_insert_message(repo, attrs) do
-    Repo.insert_message(attrs, server: repo)
+    Repo.insert_message(attrs, server: repo, timeout: :infinity)
   catch
     :exit, reason -> {:error, {:exit, reason}}
   end
 
   defp safe_delete_messages(repo, selector) do
-    Repo.delete_messages(selector, server: repo)
+    Repo.delete_messages(selector, server: repo, timeout: :infinity)
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  defp safe_replace_messages(repo, selector, rows) do
+    Repo.replace_messages(selector, rows, server: repo, timeout: :infinity)
   catch
     :exit, reason -> {:error, {:exit, reason}}
   end
@@ -713,18 +724,7 @@ defmodule FermixCore.Memory.ConversationStore do
   end
 
   defp safe_history_operation(%{operation: :replace} = ctx) do
-    with :ok <- safe_delete_messages(ctx.repo, ctx.selector) do
-      insert_replacement_attrs(ctx.repo, ctx.attrs)
-    end
-  end
-
-  defp insert_replacement_attrs(repo, attrs) do
-    Enum.reduce_while(attrs, :ok, fn attrs, :ok ->
-      case safe_insert_message(repo, attrs) do
-        {:ok, _row} -> {:cont, :ok}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
+    safe_replace_messages(ctx.repo, ctx.selector, ctx.attrs)
   end
 
   defp retry_or_log_persist_failure(ctx, attempt, reason) do
@@ -805,13 +805,20 @@ defmodule FermixCore.Memory.ConversationStore do
     }
   end
 
-  defp chat_selector(state, key, opts) do
+  # A clear deletes every row of the conversation, its compaction checkpoints
+  # too (`Repo.delete_messages/2` reads no kind); a replace rewrites only its
+  # chat messages, so the checkpoint a compaction wrote beside them survives.
+  defp history_selector(:delete, state, key, opts), do: conversation_selector(state, key, opts)
+
+  defp history_selector(:replace, state, key, opts),
+    do: Map.put(conversation_selector(state, key, opts), :kind, "chat_message")
+
+  defp conversation_selector(state, key, opts) do
     %{
       agent_id: Keyword.get(opts, :agent_id, state.agent_id),
       channel: elem(key, 0),
       chat_id: elem(key, 1),
-      thread_scope: elem(key, 2),
-      kind: "chat_message"
+      thread_scope: elem(key, 2)
     }
   end
 

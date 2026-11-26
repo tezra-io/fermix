@@ -15,12 +15,21 @@ defmodule FermixCore.Memory.ConversationStoreDurableOrderTest do
 
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
+  alias Exqlite.Sqlite3
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
+
+  require Logger
 
   @key {"telegram", "harbour-chat", :root}
   @check_in "A check-in: did the Port Alder ferry work out on Saturday?"
   @summary "Conversation checkpoint summary:\nThe owner is taking the Saturday ferry from Port Alder."
+  @checkpoint "The owner is taking the Saturday ferry from Port Alder."
+  # The one row the database refuses in the all-or-nothing case: a trigger the
+  # test installs aborts its insert, as a full disk or a constraint would.
+  @refused "The Port Alder ferry was cancelled for the season."
 
   # Invented, with absolute timestamps so the stored order is fixed.
   @stored [
@@ -85,6 +94,9 @@ defmodule FermixCore.Memory.ConversationStoreDurableOrderTest do
     defp report({:delete_messages, _selector}, test_pid),
       do: send(test_pid, {:applied, :delete, nil})
 
+    defp report({:replace_messages, _selector, rows}, test_pid),
+      do: Enum.each(rows, &send(test_pid, {:applied, :insert, &1.content}))
+
     defp report(_read, _test_pid), do: :ok
   end
 
@@ -102,7 +114,7 @@ defmodule FermixCore.Memory.ConversationStoreDurableOrderTest do
     end)
 
     seed(repo, @stored)
-    %{repo: repo, tasks: tasks}
+    %{repo: repo, tasks: tasks, db_path: db_path}
   end
 
   describe "a write right after a replace or a clear" do
@@ -182,6 +194,51 @@ defmodule FermixCore.Memory.ConversationStoreDurableOrderTest do
     end
   end
 
+  describe "what a replace and a clear leave of the stored rows" do
+    test "a compaction's checkpoint row outlives the replace, and a clear removes it", ctx do
+      store = start_store(ctx, ctx.repo)
+      store_checkpoint(ctx.repo, @checkpoint)
+
+      last = List.last(ConversationStore.get_history(@key, server: store))
+      compacted = [%{role: "system", content: @summary, timestamp: last.timestamp}, last]
+      :ok = ConversationStore.replace_history(@key, compacted, server: store)
+      await_durable_writes(ctx.tasks)
+
+      assert durable_contents(ctx) == [@summary, last.content]
+      assert checkpoint_contents(ctx) == [@checkpoint]
+
+      :ok = ConversationStore.clear(@key, server: store)
+      await_durable_writes(ctx.tasks)
+
+      assert durable_contents(ctx) == []
+      assert checkpoint_contents(ctx) == []
+    end
+
+    test "a replace the database refuses a row of leaves every stored row as it was", ctx do
+      refuse_inserts_of(ctx.db_path, @refused)
+      store = start_store(ctx, ctx.repo)
+      [first | _rest] = ConversationStore.get_history(@key, server: store)
+
+      replacement = [
+        %{role: "system", content: @summary, timestamp: first.timestamp},
+        %{role: "assistant", content: @refused, timestamp: ~U[2026-03-14 09:02:00Z]}
+      ]
+
+      log =
+        capture_log(fn ->
+          :ok = ConversationStore.replace_history(@key, replacement, server: store)
+          await_durable_writes(ctx.tasks)
+          Logger.flush()
+        end)
+
+      # The replace ran and was refused, not skipped.
+      assert log =~ "conversation durable replace failed after 3 attempts"
+      assert log =~ "row refused by the test"
+      assert durable_contents(ctx) == stored_contents(@stored)
+      assert restarted_contents(ctx) == stored_contents(@stored)
+    end
+  end
+
   defp recording_repo(ctx) do
     start_supervised!({RecordingRepo, repo: ctx.repo, test_pid: self()})
   end
@@ -238,9 +295,58 @@ defmodule FermixCore.Memory.ConversationStoreDurableOrderTest do
     contents(ConversationStore.get_history(@key, server: store))
   end
 
+  # Every durable write starts as a child of the test's task supervisor inside
+  # the store's own call, so once that call returns, its write is listed there
+  # or has already finished.
+  defp await_durable_writes(tasks) do
+    Enum.each(Task.Supervisor.children(tasks), fn pid ->
+      ref = Process.monitor(pid)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, @durable_write_wait_ms
+    end)
+  end
+
   defp durable_contents(ctx) do
     {:ok, rows} = Repo.get_messages(selector(), limit: 100, server: ctx.repo)
     contents(rows)
+  end
+
+  defp checkpoint_contents(ctx) do
+    checkpoints = %{selector() | kind: "checkpoint_summary"}
+    {:ok, rows} = Repo.get_messages(checkpoints, limit: 100, server: ctx.repo)
+    contents(rows)
+  end
+
+  # The row a compaction writes beside the history it compacted.
+  defp store_checkpoint(repo, summary) do
+    {:ok, _row} =
+      Repo.insert_message(
+        Map.merge(selector(), %{
+          owner_id: "default",
+          sender: "compactor",
+          role: "system",
+          kind: "checkpoint_summary",
+          content: summary,
+          created_at: ~U[2026-03-14 09:01:30Z]
+        }),
+        server: repo
+      )
+  end
+
+  # Through a second connection to the test's own database file: from now on
+  # the database aborts any insert of a row with `content`.
+  defp refuse_inserts_of(db_path, content) do
+    {:ok, conn} = Sqlite3.open(db_path)
+
+    try do
+      :ok =
+        Sqlite3.execute(conn, """
+        CREATE TRIGGER refuse_test_row BEFORE INSERT ON messages
+        WHEN NEW.content = '#{content}'
+        BEGIN SELECT RAISE(ABORT, 'row refused by the test'); END;
+        """)
+    after
+      :ok = Sqlite3.close(conn)
+    end
   end
 
   defp seed(repo, rows) do
