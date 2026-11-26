@@ -23,6 +23,7 @@ defmodule FermixChannels.Bench.AdapterRunner do
   alias FermixCore.Telemetry
 
   @http_stub :fermix_bench_http
+  @agent_adapter_opts [bench_script: :text, model: "bench-mock"]
   @reply_timeout_ms 2_000
   @adapter_samples 200
   @media_samples 50
@@ -147,7 +148,7 @@ defmodule FermixChannels.Bench.AdapterRunner do
 
     {result, wall_time_us} =
       Telemetry.timed_us(fn ->
-        with_env(spec, fn env -> run_samples(spec, env, samples, warmup, events) end)
+        with_env(name, spec, opts, fn env -> run_samples(spec, env, samples, warmup, events) end)
       end)
 
     %{
@@ -161,6 +162,10 @@ defmodule FermixChannels.Bench.AdapterRunner do
     }
   end
 
+  # The warmup takes indexes 1..warmup and the measured samples the ones after
+  # it, so no index repeats within a pass (`Runner` numbers its samples the
+  # same way). A sample's identity is minted from its index and the pass's
+  # `run_id` (`sample_id/2`).
   defp run_samples(spec, env, samples, warmup, events) do
     Enum.each(1..warmup//1, &run_sample!(spec, env, &1))
 
@@ -168,7 +173,7 @@ defmodule FermixChannels.Bench.AdapterRunner do
 
     try do
       processed =
-        Enum.reduce(1..samples//1, 0, fn index, count ->
+        Enum.reduce((warmup + 1)..(warmup + samples)//1, 0, fn index, count ->
           run_sample!(spec, env, index)
           count + 1
         end)
@@ -197,7 +202,7 @@ defmodule FermixChannels.Bench.AdapterRunner do
   end
 
   defp run_sample!(%{kind: :send_media, channel: channel}, env, index) do
-    :ok = send_media(channel, reply_target(channel), media_part(env.media_path, index), env)
+    :ok = send_media(channel, reply_target(channel), media_part(env, index), env)
   end
 
   defp run_sample!(%{kind: :e2e, channel: channel}, env, index) do
@@ -206,23 +211,23 @@ defmodule FermixChannels.Bench.AdapterRunner do
     parent = self()
 
     reply_fn = fn
-      {:text, text} ->
+      {:text, text} = part ->
         result = send_text(channel, message.reply_target, text, env)
-        send(parent, {:adapter_e2e_reply, ref, result})
+        send(parent, {:adapter_e2e_reply, ref, part, result})
         result
 
-      {:media, media_part} ->
+      {:media, media_part} = part ->
         result = send_media(channel, message.reply_target, media_part, env)
-        send(parent, {:adapter_e2e_reply, ref, result})
+        send(parent, {:adapter_e2e_reply, ref, part, result})
         result
 
       {:react, _emoji} ->
         {:error, :reaction_unsupported}
 
       # One-tap approval degrades to the prompt text (which carries `/confirm`).
-      {:approval_prompt, text, _token} ->
+      {:approval_prompt, text, _token} = part ->
         result = send_text(channel, message.reply_target, text, env)
-        send(parent, {:adapter_e2e_reply, ref, result})
+        send(parent, {:adapter_e2e_reply, ref, part, result})
         result
     end
 
@@ -235,46 +240,45 @@ defmodule FermixChannels.Bench.AdapterRunner do
         reply_fn: reply_fn
       )
 
-    await_e2e_reply!(ref)
+    await_e2e_reply!(env, ref)
     wait_until_idle!(env.queue)
   end
 
   defp run_sample!(%{kind: :webhook_idempotency, channel: channel}, env, index) do
-    :fresh = Idempotency.check_and_record(channel, "bench-webhook-#{env.run_id}-#{index}")
+    :fresh = Idempotency.check_and_record(channel, "bench-webhook-#{sample_id(env, index)}")
     :ok
   end
 
-  defp with_env(spec, fun) when is_function(fun, 1) do
+  defp with_env(name, spec, opts, fun) when is_function(fun, 1) do
     # This mutates Application env for channel adapters; adapter scenarios must
     # stay sequential at this layer.
     old_env = snapshot_channel_env()
-    {:ok, _apps} = Application.ensure_all_started(:req)
     Req.Test.set_req_test_to_shared()
     stub_http()
-    idempotency_pid = ensure_idempotency_started()
-    env = build_env(spec)
+    env = build_env(name, spec, opts)
 
     try do
       fun.(env)
     after
       stop_env(env)
-      maybe_stop_idempotency(idempotency_pid)
       restore_channel_env(old_env)
     end
   end
 
-  defp build_env(%{kind: :e2e}) do
-    base_env()
-    |> Map.merge(start_agent_env!())
+  defp build_env(name, %{kind: :e2e}, opts) do
+    name
+    |> base_env()
+    |> Map.merge(start_agent_env!(Keyword.get(opts, :provider, MockProvider)))
   end
 
-  defp build_env(_spec), do: base_env()
+  defp build_env(name, _spec, _opts), do: base_env(name)
 
-  defp base_env do
+  defp base_env(name) do
     put_bench_channel_env()
     media_path = write_media_file!()
 
     %{
+      name: name,
       media_path: media_path,
       imessage_home: make_imessage_home!(),
       run_id: System.unique_integer([:positive]),
@@ -286,7 +290,7 @@ defmodule FermixChannels.Bench.AdapterRunner do
     }
   end
 
-  defp start_agent_env! do
+  defp start_agent_env!(provider) do
     unique = System.unique_integer([:positive])
     task_supervisor = :"adapter_bench_task_supervisor_#{unique}"
     conversation_store = :"adapter_bench_conversation_store_#{unique}"
@@ -302,13 +306,13 @@ defmodule FermixChannels.Bench.AdapterRunner do
     {:ok, agent_pid} =
       MainAgent.start_link(
         name: agent,
-        provider: MockProvider,
+        provider: provider,
         capability_registry: capability_registry,
         conversation_store: conversation_store,
         task_supervisor: task_supervisor,
         extraction_enabled: false,
         memory_repo: nil,
-        adapter_opts: [bench_script: :text, model: "bench-mock"]
+        adapter_opts: @agent_adapter_opts
       )
 
     {:ok, queue_pid} =
@@ -323,6 +327,7 @@ defmodule FermixChannels.Bench.AdapterRunner do
       conversation_store: conversation_store,
       agent: agent,
       queue: queue,
+      reply: {:text, MockProvider.final_text(@agent_adapter_opts)},
       setup: %{
         environments_started: 1,
         history_conversations_seeded: 0,
@@ -348,20 +353,6 @@ defmodule FermixChannels.Bench.AdapterRunner do
   end
 
   defp stop_pid(_pid), do: :ok
-
-  defp ensure_idempotency_started do
-    case Process.whereis(Idempotency) do
-      nil ->
-        {:ok, pid} = Idempotency.start_link()
-        pid
-
-      _pid ->
-        nil
-    end
-  end
-
-  defp maybe_stop_idempotency(nil), do: :ok
-  defp maybe_stop_idempotency(pid), do: stop_pid(pid)
 
   defp put_bench_channel_env do
     Application.put_env(:fermix_channels, :telegram,
@@ -487,13 +478,20 @@ defmodule FermixChannels.Bench.AdapterRunner do
   defp reply_target(:cli), do: "cli"
   defp reply_target(:imessage), do: "+15551234567"
 
-  defp media_part(path, index) do
+  # One sample's identity in this VM: an id the webhook store records, the
+  # media a send claims. `run_id` is minted for each pass, so a later pass
+  # (`--runs`) never repeats an earlier one's, and the index never repeats
+  # within a pass (`run_samples/5`). A repeat is refused as a duplicate event,
+  # or skipped as media already sent while still counted as a sample.
+  defp sample_id(env, index), do: "#{env.run_id}-#{index}"
+
+  defp media_part(env, index) do
     %{
       kind: :image,
-      path: path,
-      filename: "bench-#{index}.png",
+      path: env.media_path,
+      filename: "bench-#{sample_id(env, index)}.png",
       mime_type: "image/png",
-      caption: "bench media #{index}"
+      caption: "bench media #{sample_id(env, index)}"
     }
   end
 
@@ -502,15 +500,21 @@ defmodule FermixChannels.Bench.AdapterRunner do
     String.duplicate(paragraph, 450)
   end
 
-  defp await_e2e_reply!(ref) do
+  # The turn must end with its scenario's reply, delivered (M107): a turn that
+  # replies with anything else fails the run like a send that fails.
+  defp await_e2e_reply!(%{reply: reply} = env, ref) do
     receive do
-      {:adapter_e2e_reply, ^ref, :ok} ->
+      {:adapter_e2e_reply, ^ref, ^reply, :ok} ->
         :ok
 
-      {:adapter_e2e_reply, ^ref, {:error, reason}} ->
-        raise "adapter e2e failed: #{inspect(reason)}"
+      {:adapter_e2e_reply, ^ref, ^reply, {:error, reason}} ->
+        raise "#{env.name}: adapter e2e failed: #{inspect(reason)}"
+
+      {:adapter_e2e_reply, ^ref, part, _result} when part != reply ->
+        raise "#{env.name}: a benchmark turn replied #{inspect(part)}; " <>
+                "its scenario defines #{inspect(reply)}"
     after
-      @reply_timeout_ms -> raise "adapter e2e reply timed out"
+      @reply_timeout_ms -> raise "#{env.name}: adapter e2e reply timed out"
     end
   end
 

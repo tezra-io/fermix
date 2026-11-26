@@ -42,6 +42,14 @@ defmodule FermixCore.BootProfile do
     do: Application.put_env(:fermix_core, :boot_profile, profile)
 
   @doc """
+  Forgets the profile `remember/1` recorded: for a process that booted no
+  engine and recorded one for a run of its own (`mix fermix.bench`), which
+  leaves none behind.
+  """
+  @spec forget() :: :ok
+  def forget, do: Application.delete_env(:fermix_core, :boot_profile)
+
+  @doc """
   The profile boot selected. Raises when boot recorded none: a reader outside
   a started application has no build to describe.
   """

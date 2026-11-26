@@ -314,6 +314,17 @@ defmodule FermixCore.Home.Role do
     end
   end
 
+  @doc """
+  Erases the record `remember!/2` made: for a process that booted no engine
+  and recorded a role for a run of its own (`mix fermix.bench`), which leaves
+  none behind. `booted/0` reads `nil` again afterwards.
+  """
+  @spec forget() :: :ok
+  def forget do
+    _erased? = :persistent_term.erase(@record_key)
+    :ok
+  end
+
   @doc "The record this boot made. Raises in a process whose engine never booted."
   @spec recorded() :: record()
   def recorded do

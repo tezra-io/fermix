@@ -25,6 +25,16 @@ defmodule FermixCore.Bench.MockProviderTest do
     assert second.tool_calls == []
   end
 
+  test "ends a text turn with the final text its options name" do
+    for opts <- [[bench_script: :text], [bench_script: :text, bench_response: "another reply"]] do
+      assert {:ok, turn} = MockProvider.chat([%{role: "user", content: "hello"}], [], opts)
+      assert turn.content == MockProvider.final_text(opts)
+    end
+
+    assert MockProvider.final_text([]) == "bench final"
+    assert MockProvider.final_text(bench_response: "another reply") == "another reply"
+  end
+
   test "emits provider call and tool schema telemetry" do
     test_pid = self()
     handler_id = "bench-mock-provider-#{System.unique_integer()}"

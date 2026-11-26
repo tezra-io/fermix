@@ -82,6 +82,14 @@ defmodule FermixCore.HostFacts do
   def remember, do: Application.put_env(:fermix_core, :host_facts, read_here())
 
   @doc """
+  Forgets the facts `remember/0` recorded: for a process that booted no engine
+  and recorded them for a run of its own (`mix fermix.bench`), which leaves
+  none behind.
+  """
+  @spec forget() :: :ok
+  def forget, do: Application.delete_env(:fermix_core, :host_facts)
+
+  @doc """
   Reads this host's facts now, through the configured reader, as `remember/0`
   does at boot: for a process that booted no engine and so recorded none (a
   tree-less verb asking `Home.AlwaysOn.here?/1`). Needs the boot profile,

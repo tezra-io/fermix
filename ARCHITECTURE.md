@@ -1688,7 +1688,10 @@ verifies.
 capabilities) for the daemon socket, the management `overview.get` method, and
 the web home page. `FermixCore.Bench` and `FermixChannels.Bench` are latency
 tooling that drives scenarios through the real gateway and queue with a mock
-provider.
+provider. The Mix tasks start no tree, so `FermixChannels.Bench.Boot` gives a run
+a home of its own, the boot facts and the processes a turn calls by name, and
+removes them however the run ends; a turn that does not end with its scenario's
+reply fails the run.
 
 Architecture Invariant: only `run` and `service run` start the daemon tree
 (`setup` and `memory` start it only when needed); every other verb halts before
