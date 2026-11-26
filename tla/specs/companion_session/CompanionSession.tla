@@ -207,7 +207,7 @@
 (* One step = one callback of one process, one Memory.Repo call, or one    *)
 (* thing a client or the environment does.                                 *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ 2b50f1188848
+\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ a7bf4423ee9a
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/requests.ex#request,cancel,claim_and_run,acquire_and_run,run_started,ingest_span,settle_after_ingest,settle_unless_handed_off,handoff_settlement,fail_attempt,report_failure,settle_failed,append_user,after_user_append,settle_inline,ingest_gateway,approval_resolution_fn,history,fit_page,cut_page,take_within,accepted_event,history_event,emit,best_effort_emit @ 97be58f8e741
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/turns.ex @ 028bd206fc14
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex#text_done,turn_error,row,timeline_message,approval,approval_resolved,persist_text,persist_output,complete_request,fail_request @ 28a393bb68d2
@@ -267,8 +267,9 @@ CONSTANTS
                          \* coordinator starts no second attempt of a request running,
                          \* completed or failed (acquire_and_run, requests.ex:268-290)
     SeqCursor,           \* the client keeps the last server_seq it shows, pulls
-                         \* history_pull{after_seq: cursor} after server_hello, while a
-                         \* page says more and on a gap, and applies a live row only at
+                         \* history_pull from its cursor or below it after server_hello,
+                         \* while a page says more (from no lower than that page's last
+                         \* row) and on a gap, and applies a live row only at
                          \* cursor + 1 (PROTOCOL.md "Keeping a client's timeline")
     SubscribeBeforePull, \* the Connection joins the registry before it writes
                          \* server_hello (join, connection.ex:638-656)
@@ -458,6 +459,20 @@ MaxOf(S) == IF S = {} THEN 0 ELSE CHOOSE x \in S : \A y \in S : y <= x
 
 \* The client's cursor: the last server_seq it shows.
 Cursor(c) == IF view[c] = <<>> THEN 0 ELSE view[c][Len(view[c])]
+
+\* Where a pull may start (PROTOCOL.md "Keeping a client's timeline"): at the
+\* cursor, or below it, so that one page brings held rows again together with
+\* the rows after the cursor (the Mac reads the rows on screen again this way
+\* after a reconnect). OnPage shows only the rows past the cursor, whatever
+\* the page starts with.
+PullStarts(c) == 0..Cursor(c)
+
+\* Where the pull after a page that says more may start: no lower than that
+\* page's last row (its next_after_seq), so every pull of a catch-up reads past
+\* the one before it, and no higher than the cursor `cur` the page left.
+NextStarts(pg, cur) ==
+    LET last == pg.rows[Len(pg.rows)]
+    IN (IF last < cur THEN last ELSE cur)..cur
 
 \* The per-profile counter, read and bumped inside the insert's transaction
 \* (next_server_seq, increment_server_seq, mobile_sql.ex:1078, :1084-1093).
@@ -747,12 +762,12 @@ Cancel(c, m) ==
 
 \* server_hello: the client drops every approval card it shows, since only
 \* the cards the daemon sends after it still wait (DropsCardsAtHello), and
-\* pulls after its cursor (SeqCursor).
+\* pulls from its cursor, or below it (SeqCursor, PullStarts).
 OnServerHello(c, rest) ==
     /\ link' = [link EXCEPT ![c] = "up"]
     /\ prompt' = IF DropsCardsAtHello THEN [prompt EXCEPT ![c] = FALSE] ELSE prompt
     /\ pulling' = [pulling EXCEPT ![c] = SeqCursor]
-    /\ IF SeqCursor THEN Pull(c, rest, Cursor(c))
+    /\ IF SeqCursor THEN \E a \in PullStarts(c) : Pull(c, rest, a)
        ELSE wire' = [wire EXCEPT ![c] = rest] /\ UNCHANGED <<sub, reading>>
     /\ UNCHANGED <<composed, outbox, sentOn, view, resent>>
 
@@ -768,19 +783,20 @@ OnRow(c, s, rest) ==
        THEN /\ wire' = [wire EXCEPT ![c] = rest]
             /\ UNCHANGED <<view, pulling, sub, reading>>
        ELSE /\ pulling' = [pulling EXCEPT ![c] = TRUE]
-            /\ Pull(c, rest, Cursor(c))
+            /\ \E a \in PullStarts(c) : Pull(c, rest, a)
             /\ UNCHANGED view
     /\ UNCHANGED <<link, composed, outbox, sentOn, prompt, resent>>
 
 \* history_page: show the rows past the cursor (the page starts right after
-\* the after_seq its pull named, and the cursor has not gone back since, so
-\* they follow it with no gap), and pull again while the page says more.
+\* the after_seq its pull named, which was at or below the cursor, and the
+\* cursor has not gone back since, so the rows past it follow it with no gap),
+\* and pull again while the page says more.
 OnPage(c, pg, rest) ==
     LET v == view[c] \o SelectSeq(pg.rows, LAMBDA s : s > Cursor(c))
         cur == IF v = <<>> THEN 0 ELSE v[Len(v)]
     IN /\ view' = [view EXCEPT ![c] = v]
        /\ IF pg.more
-          THEN Pull(c, rest, cur) /\ UNCHANGED pulling
+          THEN (\E a \in NextStarts(pg, cur) : Pull(c, rest, a)) /\ UNCHANGED pulling
           ELSE /\ pulling' = [pulling EXCEPT ![c] = FALSE]
                /\ wire' = [wire EXCEPT ![c] = rest]
                /\ UNCHANGED <<sub, reading>>
