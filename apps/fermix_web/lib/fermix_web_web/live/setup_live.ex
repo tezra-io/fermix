@@ -45,7 +45,6 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Plugins.Status, as: PluginStatus
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
-  alias FermixCore.Providers.ModelListing
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Providers.ReasoningEffort
   alias FermixCore.Providers.Selection
@@ -68,6 +67,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixWebWeb.SetupLive.AlwaysOn
   alias FermixWebWeb.SetupLive.Components
   alias FermixWebWeb.SetupLive.CuesState
+  alias FermixWebWeb.SetupLive.ModelSource
   alias FermixWebWeb.SetupLive.Phone
   alias FermixWebWeb.SetupLive.PhoneCalls
 
@@ -258,6 +258,7 @@ defmodule FermixWebWeb.SetupLive do
       |> Accessories.watch()
       |> assign(:phone_calls, PhoneCalls.initial())
       |> PhoneCalls.load()
+      |> ModelSource.init()
       |> assign_report(report)
       |> AlwaysOn.watch()
       |> AlwaysOn.on_tab(active_tab)
@@ -292,21 +293,20 @@ defmodule FermixWebWeb.SetupLive do
 
     {:noreply,
      socket
-     |> assign(:active_tab, active_tab)
+     |> assign_tab(active_tab)
      |> assign(:saved_flash, nil)
      |> refresh_cues_on(active_tab)
-     |> AlwaysOn.on_tab(active_tab)
-     |> relist_models_on(active_tab)}
+     |> AlwaysOn.on_tab(active_tab)}
   end
 
   def handle_event("next_step", _params, socket) do
     {:noreply,
-     assign(socket, :active_tab, adjacent_tab(socket.assigns.tabs, socket.assigns.active_tab, 1))}
+     assign_tab(socket, adjacent_tab(socket.assigns.tabs, socket.assigns.active_tab, 1))}
   end
 
   def handle_event("previous_step", _params, socket) do
     {:noreply,
-     assign(socket, :active_tab, adjacent_tab(socket.assigns.tabs, socket.assigns.active_tab, -1))}
+     assign_tab(socket, adjacent_tab(socket.assigns.tabs, socket.assigns.active_tab, -1))}
   end
 
   def handle_event("provider_changed", %{"provider_form" => params}, socket) do
@@ -324,8 +324,12 @@ defmodule FermixWebWeb.SetupLive do
     {:noreply,
      socket
      |> assign(:provider_form, form)
-     |> assign_model_sources(form, params)}
+     |> ModelSource.sync(params)}
   end
+
+  # The picker's Refresh: the provider's list read again for the same source.
+  def handle_event("refresh_models", _params, socket),
+    do: {:noreply, ModelSource.refresh(socket)}
 
   def handle_event("save_provider", %{"provider_form" => params} = root, socket) do
     case maybe_store_anthropic_setup_token(params) do
@@ -1129,6 +1133,9 @@ defmodule FermixWebWeb.SetupLive do
   def handle_async({:always_on, _what} = key, result, socket),
     do: {:noreply, AlwaysOn.handle_async(key, result, socket)}
 
+  def handle_async({:model_source, _source} = key, result, socket),
+    do: {:noreply, ModelSource.handle_async(key, result, socket)}
+
   def handle_async(:doctor_provider_probe, {:ok, result}, socket) do
     {:noreply, finish_doctor_provider_probe(socket, result)}
   end
@@ -1309,6 +1316,7 @@ defmodule FermixWebWeb.SetupLive do
       provider_form={@provider_form}
       provider_models={@provider_models}
       live_models={@live_models}
+      model_refresh?={@model_refresh?}
       provider_statuses={@provider_statuses}
       plugin_auth_url={@plugin_auth_url}
       plugin_summary={@plugin_summary}
@@ -1373,16 +1381,20 @@ defmodule FermixWebWeb.SetupLive do
     """
   end
 
-  defp assign_report(socket, report) do
+  defp assign_report(socket, report),
+    do: assign_report(socket, report, build_provider_form(report.wizard.config_snapshot))
+
+  # `provider_form` is the form the page shows afterwards: one built from these
+  # settings, or the one in progress a sign-in finished under.
+  defp assign_report(socket, report, provider_form) do
     snapshot = report.wizard.config_snapshot
-    provider_form = build_provider_form(snapshot)
 
     socket
     |> assign(:report, report)
     |> assign(:tabs, shown_tabs(socket.assigns.embed?))
     |> assign_config_banner()
     |> assign(:provider_form, provider_form)
-    |> assign_model_sources(provider_form)
+    |> ModelSource.sync()
     |> assign(:provider_statuses, build_provider_statuses(snapshot))
     |> assign(:xai_auth, xai_auth_summary())
     |> assign(:chatgpt_auth, ChatGPT.summary())
@@ -1932,10 +1944,17 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   defp maybe_advance(socket, "next") do
-    assign(socket, :active_tab, adjacent_tab(socket.assigns.tabs, socket.assigns.active_tab, 1))
+    assign_tab(socket, adjacent_tab(socket.assigns.tabs, socket.assigns.active_tab, 1))
   end
 
   defp maybe_advance(socket, _nav), do: socket
+
+  # Every move to another tab. The Provider pane shown afresh asks for its
+  # model list when that list's source is one the page has not read.
+  defp assign_tab(socket, tab) do
+    previous = socket.assigns.active_tab
+    socket |> assign(:active_tab, tab) |> ModelSource.shown(previous)
+  end
 
   defp edited_provider_form(current, params) do
     %{
@@ -4183,12 +4202,9 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   defp refresh_report_preserving_provider_form(socket, message) do
-    provider_form = socket.assigns.provider_form
-
     socket
-    |> refresh_report(message)
-    |> assign(:provider_form, provider_form)
-    |> assign_model_sources(provider_form)
+    |> assign_report(Wizard.report(), socket.assigns.provider_form)
+    |> flash_info(message)
   end
 
   # --- xAI (Grok) loopback OAuth ---------------------------------------------
@@ -4404,7 +4420,7 @@ defmodule FermixWebWeb.SetupLive do
 
   # The web's listing seam feeds the one model check every sign-in door runs.
   defp ensure_codex_model(wizard) do
-    impl = model_listing_impl()
+    impl = ModelSource.listing_impl()
 
     case admit_provider_action() do
       :ok -> LiveModel.ensure(:openai_codex, listing: &impl.live_models/2, wizard: wizard)
@@ -4716,77 +4732,6 @@ defmodule FermixWebWeb.SetupLive do
     snapshot
     |> get_fermix_core(:providers)
     |> Keyword.get(provider, [])
-  end
-
-  # Static catalog options always; live listing (installed Ollama models /
-  # the upstream OpenRouter catalog) layered on for the providers that
-  # have one. Synchronous with a tight timeout — setup page only.
-  # The provider pane's key field is new and empty when the pane is shown
-  # again, so a list asked with a key entered before leaving (Vercel AI
-  # Gateway, M105 §11.9) is asked again with the configured one.
-  defp relist_models_on(socket, "provider"),
-    do: assign_model_sources(socket, socket.assigns.provider_form)
-
-  defp relist_models_on(socket, _tab), do: socket
-
-  # `params` is the form as last posted, so a key being entered (not yet
-  # saved) can ask for the listing it opens.
-  defp assign_model_sources(socket, provider_form, params \\ %{}) do
-    provider = provider_form.provider
-
-    socket
-    |> assign(:provider_models, models_for_safe(provider))
-    |> assign_live_listing(provider, provider_form, params)
-  end
-
-  defp assign_live_listing(socket, provider, provider_form, params) do
-    impl = model_listing_impl()
-
-    if impl.live?(provider) do
-      assign(socket, :live_models, live_listing(impl, provider, provider_form, params))
-    else
-      assign(socket, :live_models, nil)
-    end
-  end
-
-  # A live listing calls the provider; a device shows why it has none.
-  defp live_listing(impl, provider, provider_form, params) do
-    case admit_provider_action() do
-      :ok -> impl.live_models(provider, listing_opts(provider, provider_form, params))
-      {:error, {:device_role, sentence}} -> {:error, sentence}
-    end
-  end
-
-  defp listing_opts(:ollama, provider_form, _params) do
-    case Map.get(provider_form.field_values || %{}, :ollama_base_url) do
-      url when is_binary(url) and url != "" -> [base_url: url]
-      _absent -> []
-    end
-  end
-
-  # Vercel AI Gateway lists only what a key's team may use (M105 §11.9), so a
-  # key entered in the pane is the one asked with, before it is saved, as the
-  # bytes a save stores (`maybe_put_string/3` keeps them as given); with the
-  # field blank the listing uses the configured key, if any.
-  defp listing_opts(:vercel, _provider_form, params) do
-    case Map.get(params, "vercel_api_key") do
-      key when is_binary(key) -> if String.trim(key) == "", do: [], else: [api_key: key]
-      _absent -> []
-    end
-  end
-
-  defp listing_opts(_provider, _provider_form, _params), do: []
-
-  defp model_listing_impl do
-    Application.get_env(:fermix_web, :model_listing_impl, ModelListing)
-  end
-
-  defp models_for_safe(provider) do
-    if provider in Descriptor.ids() do
-      ModelCatalog.models_for(provider)
-    else
-      ModelCatalog.models_for(:openai)
-    end
   end
 
   defp secret_set?(config, key), do: config |> Keyword.get(key) |> present?()

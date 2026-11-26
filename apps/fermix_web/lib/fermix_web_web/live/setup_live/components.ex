@@ -46,6 +46,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :provider_form, :map, required: true
   attr :provider_models, :list, required: true
   attr :live_models, :any, default: nil
+  attr :model_refresh?, :boolean, default: false
   attr :plugin_auth_url, :map, default: nil
   attr :plugin_summary, :map, required: true
   attr :oauth_modal, :map, default: nil
@@ -177,6 +178,7 @@ defmodule FermixWebWeb.SetupLive.Components do
               provider_form={@provider_form}
               provider_models={@provider_models}
               live_models={@live_models}
+              model_refresh?={@model_refresh?}
               provider_statuses={@provider_statuses}
               plugin_auth_url={@plugin_auth_url}
               plugin_summary={@plugin_summary}
@@ -338,6 +340,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :provider_form, :map, required: true
   attr :provider_models, :list, required: true
   attr :live_models, :any, default: nil
+  attr :model_refresh?, :boolean, default: false
   attr :plugin_auth_url, :map, default: nil
   attr :plugin_summary, :map, required: true
   attr :oauth_modal, :map, default: nil
@@ -431,23 +434,30 @@ defmodule FermixWebWeb.SetupLive.Components do
         <div class={provider_grid_class(@provider_form.provider)}>
           <section class="min-w-0 space-y-5">
             <div class="grid gap-4 lg:grid-cols-2">
-              <label class="form-control w-full">
-                <span class="label pb-1 text-sm font-medium">
-                  Default model <.model_info provider={@provider_form.provider} />
-                </span>
-                <.default_model_input
+              <div class="min-w-0 space-y-1">
+                <label class="form-control w-full">
+                  <span class="label pb-1 text-sm font-medium">
+                    Default model <.model_info provider={@provider_form.provider} />
+                  </span>
+                  <.default_model_input
+                    :if={model_picker_open?(@provider_form.provider, @chatgpt_auth)}
+                    provider_form={@provider_form}
+                    provider_models={@provider_models}
+                    live_models={@live_models}
+                  />
+                  <p
+                    :if={!model_picker_open?(@provider_form.provider, @chatgpt_auth)}
+                    class="text-xs text-base-content/60"
+                  >
+                    Connect ChatGPT with plan usage on to choose a model from your plan.
+                  </p>
+                </label>
+                <.refresh_models
                   :if={model_picker_open?(@provider_form.provider, @chatgpt_auth)}
-                  provider_form={@provider_form}
-                  provider_models={@provider_models}
                   live_models={@live_models}
+                  refresh?={@model_refresh?}
                 />
-                <p
-                  :if={!model_picker_open?(@provider_form.provider, @chatgpt_auth)}
-                  class="text-xs text-base-content/60"
-                >
-                  Connect ChatGPT with plan usage on to choose a model from your plan.
-                </p>
-              </label>
+              </div>
               <%!-- Sub-agent model is a single GLOBAL setting (sub-agents run on the
                     primary provider), so it is shown only on the primary's pane to avoid
                     looking per-provider. Cross-provider sub-agents are a runtime/on-the-fly
@@ -658,7 +668,8 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   # Which options the default-model picker shows: the static catalog for
   # most providers; the LIVE source for providers that have one (installed
-  # Ollama models, the upstream OpenRouter catalog). A failed live fetch
+  # Ollama models, the upstream OpenRouter catalog), read by
+  # `SetupLive.ModelSource` off the page's process. A failed live fetch
   # renders a free-form input plus a loud warning — never a silent
   # fall-back to catalog guesses the server may not serve.
   defp default_model_input(%{live_models: nil} = assigns) do
@@ -707,13 +718,35 @@ defmodule FermixWebWeb.SetupLive.Components do
     """
   end
 
+  # The list is asked and not yet answered. The field is the same element the
+  # answer's picker patches, holding the form's model, so a model typed while
+  # it loads stays as typed.
+  defp default_model_input(%{live_models: :loading} = assigns) do
+    ~H"""
+    <div class="space-y-1">
+      <input
+        type="text"
+        name="provider_form[default_model]"
+        value={@provider_form.default_model}
+        phx-debounce="blur"
+        placeholder="Search or type a model id…"
+        class="input input-bordered w-full bg-base-100 font-mono"
+      />
+      <p id="live-models-loading" class="flex items-center gap-1.5 text-xs text-base-content/55">
+        <span class="loading loading-spinner loading-xs" />
+        Asking {provider_label(@provider_form.provider)} for its models…
+      </p>
+    </div>
+    """
+  end
+
   # An empty list from Ollama means nothing is pulled on that server, and that
   # has a fix to name. From any other provider with a live listing it means
   # the provider listed none Fermix can use; the typed field takes any model id
   # either way.
-  # The typed field reports on blur too (here and when the listing failed):
-  # every change re-reads the listing, a keyed request for Vercel AI Gateway,
-  # so a model id typed letter by letter would ask again per letter.
+  # The typed field reports on blur too (here, while loading and when the
+  # listing failed), as the picker's does: a model id typed letter by letter is
+  # one change, not one per letter, and no list is asked again for it.
   defp default_model_input(%{live_models: {:ok, []}} = assigns) do
     ~H"""
     <div class="space-y-1">
@@ -753,6 +786,30 @@ defmodule FermixWebWeb.SetupLive.Components do
     """
   end
 
+  attr :live_models, :any, default: nil
+  attr :refresh?, :boolean, default: false
+
+  # The page asks for a provider's list only when what the list is read from
+  # changes, so a model pulled into Ollama since, or one the provider added,
+  # appears once this asks again. Drawn beside an answered list the page can
+  # ask again by itself: not while it loads, nor while it is the answer for a
+  # key typed in the pane, which the page does not keep.
+  defp refresh_models(%{live_models: {answered, _list}, refresh?: true} = assigns)
+       when answered in [:ok, :error] do
+    ~H"""
+    <button
+      type="button"
+      phx-click="refresh_models"
+      class="btn btn-ghost btn-xs gap-1"
+      aria-label="Refresh the model list"
+    >
+      <.icon name="hero-arrow-path" class="size-3.5" /> Refresh
+    </button>
+    """
+  end
+
+  defp refresh_models(assigns), do: ~H""
+
   defp live_model_option(%{label: label, id: id, context_window: nil}) when label == id, do: id
 
   defp live_model_option(%{label: label, id: id, context_window: nil}), do: "#{label} (#{id})"
@@ -791,12 +848,15 @@ defmodule FermixWebWeb.SetupLive.Components do
     """
   end
 
+  # Nothing while the list is loading: the picker says it is being asked.
   defp ollama_status_banner(assigns), do: ~H""
 
   attr :provider_form, :map, required: true
 
   # Non-secret descriptor setup fields (e.g. Ollama's base_url) render as
   # plain text inputs prefilled with the saved value or descriptor default.
+  # They report on blur, as the key field does: the model list is read from
+  # Ollama's base URL, so it is asked once the URL is entered, not per letter.
   defp provider_plain_fields(assigns) do
     assigns = assign(assigns, :plain_fields, plain_field_specs(assigns.provider_form.provider))
 
@@ -807,6 +867,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         type="text"
         name={"provider_form[#{field.key}]"}
         value={Map.get(@provider_form.field_values || %{}, field.key)}
+        phx-debounce="blur"
         class="input input-bordered w-full bg-base-100 font-mono"
       />
     </label>

@@ -4757,10 +4757,11 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       {:ok, view, _html} = live(conn, "/setup?tab=provider")
 
-      html =
-        view
-        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "vercel"})
-        |> render_change()
+      view
+      |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "vercel"})
+      |> render_change()
+
+      html = render_async(view)
 
       assert html =~ "vendor/brand-new"
       assert html =~ "Brand New"
@@ -4788,28 +4789,27 @@ defmodule FermixWebWeb.SetupLiveTest do
       {:ok, view, _html} = live(conn, "/setup?tab=provider")
       form = form(view, "form[phx-submit=\"save_provider\"]")
 
-      html = render_change(form, provider_form: %{provider: "vercel"})
+      render_change(form, provider_form: %{provider: "vercel"})
+      html = render_async(view)
       assert html =~ "public/every-model"
 
       [key_input] = Regex.run(~r/<input[^>]*name="provider_form\[vercel_api_key\]"[^>]*>/, html)
       assert key_input =~ ~s(phx-debounce="blur")
       assert key_input =~ ~s(phx-update="ignore")
 
-      html =
-        render_change(form, provider_form: %{provider: "vercel", vercel_api_key: "vck-entered"})
+      render_change(form, provider_form: %{provider: "vercel", vercel_api_key: "vck-entered"})
+      html = render_async(view)
 
       assert html =~ "team/key-11"
       refute html =~ "public/every-model"
 
       # A save stores the key as pasted, spaces and all, so the listing asks
       # with the same 13 bytes.
-      html =
-        render_change(form, provider_form: %{provider: "vercel", vercel_api_key: " vck-entered "})
+      render_change(form, provider_form: %{provider: "vercel", vercel_api_key: " vck-entered "})
+      assert render_async(view) =~ "team/key-13"
 
-      assert html =~ "team/key-13"
-
-      html = render_change(form, provider_form: %{provider: "vercel", vercel_api_key: "  "})
-      assert html =~ "public/every-model"
+      render_change(form, provider_form: %{provider: "vercel", vercel_api_key: "  "})
+      assert render_async(view) =~ "public/every-model"
     end
 
     # The key field is the browser's (`phx-update="ignore"`). The reply to the
@@ -4870,21 +4870,21 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       {:ok, view, _html} = live(conn, "/setup?tab=provider")
 
-      html =
-        view
-        |> form("form[phx-submit=\"save_provider\"]")
-        |> render_change(provider_form: %{provider: "vercel", vercel_api_key: "vck-entered"})
+      view
+      |> form("form[phx-submit=\"save_provider\"]")
+      |> render_change(provider_form: %{provider: "vercel", vercel_api_key: "vck-entered"})
 
-      assert html =~ "team/key-11"
+      assert render_async(view) =~ "team/key-11"
       render_click(view, "select_tab", %{"tab" => "search"})
-      html = render_click(view, "select_tab", %{"tab" => "provider"})
+      render_click(view, "select_tab", %{"tab" => "provider"})
+      html = render_async(view)
       assert html =~ "public/every-model"
       refute html =~ "team/key-11"
     end
 
     # A refused key or a team with no usable models leaves a typed model field.
-    # It reports on blur like the picker, or each letter of a model id would ask
-    # the gateway again with the same key.
+    # It reports on blur like the picker, so a model id typed letter by letter
+    # is one change rather than one per letter.
     test "vercel pane's typed model field after a refused key reports on blur", %{conn: conn} do
       defmodule VercelRefusedListing do
         alias FermixCore.Providers.ModelListing
@@ -4915,7 +4915,8 @@ defmodule FermixWebWeb.SetupLiveTest do
       form = form(view, "form[phx-submit=\"save_provider\"]")
 
       for key <- ["vck-refused", "vck-no-models"] do
-        html = render_change(form, provider_form: %{provider: "vercel", vercel_api_key: key})
+        render_change(form, provider_form: %{provider: "vercel", vercel_api_key: key})
+        html = render_async(view)
 
         [model_input] =
           Regex.run(~r/<input[^>]*name="provider_form\[default_model\]"[^>]*>/, html)
@@ -4957,6 +4958,7 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       for provider <- [:vercel, :openrouter, :venice] do
         provider_pane_html(view, Atom.to_string(provider))
+        render_async(view)
         field = view |> element("label.form-control", "Default model") |> render()
         label = Descriptor.fetch!(provider).label
 
@@ -4967,6 +4969,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       end
 
       provider_pane_html(view, "ollama")
+      render_async(view)
       field = view |> element("label.form-control", "Default model") |> render()
 
       assert field =~
@@ -5043,10 +5046,11 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       {:ok, view, _html} = live(conn, "/setup?tab=provider")
 
-      html =
-        view
-        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "ollama"})
-        |> render_change()
+      view
+      |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "ollama"})
+      |> render_change()
+
+      html = render_async(view)
 
       assert html =~ "Ollama server detected"
       assert html =~ "2 installed model(s)"
@@ -5079,10 +5083,11 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       {:ok, view, _html} = live(conn, "/setup?tab=provider")
 
-      html =
-        view
-        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "ollama"})
-        |> render_change()
+      view
+      |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "ollama"})
+      |> render_change()
+
+      html = render_async(view)
 
       assert html =~ "No Ollama server responded"
       assert html =~ "ollama serve"
@@ -5122,10 +5127,11 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       {:ok, view, _html} = live(conn, "/setup?tab=provider")
 
-      html =
-        view
-        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "openrouter"})
-        |> render_change()
+      view
+      |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "openrouter"})
+      |> render_change()
+
+      html = render_async(view)
 
       assert html =~ "vendor/brand-new"
       assert html =~ "Brand New"
@@ -5581,7 +5587,8 @@ defmodule FermixWebWeb.SetupLiveTest do
       :ok = Store.write("chatgpt", chatgpt_entry())
       Application.put_env(:fermix_web, :model_listing_impl, CodexListing)
 
-      {view, html} = open_codex_card(conn)
+      {view, _html} = open_codex_card(conn)
+      html = render_async(view)
 
       assert html =~ "mara@example.test · Connected · Using ChatGPT plan"
 

@@ -53,6 +53,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   now handled on its own, up to eight at once, and messages within a chat
   still reach Fermix in the order you sent them.
 
+- **The setup page asks a provider for its model list once.** It asked again on
+  every page load, whichever tab was open, and on every edit to the provider
+  form, and the page waited each time, for up to two seconds when the provider
+  could not be reached. It now asks when the Provider tab shows a provider,
+  server address, key or ChatGPT sign-in it has not read yet, without holding
+  up the page, and a **Refresh** button beside the list asks again (after
+  `ollama pull`, for example).
+
 ### Fixed
 
 - **The first phone you pair can be on any network.** Turning phone access on
