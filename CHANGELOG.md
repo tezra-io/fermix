@@ -119,6 +119,36 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   refused with "the browser turn … could not be held here". It now starts a
   fresh one, as any later request does.
 
+- **Fermix no longer loses the start of a long conversation.** When a
+  conversation outgrows its limit, Fermix summarizes the older turns and keeps
+  the summary. Saving the shortened conversation also deleted the stored copy
+  of that summary, so the next summary was written without it, and everything
+  from before the previous one was dropped. The summary is now kept and each
+  new one builds on it. The shortened conversation is also saved in one step,
+  so a failure partway through cannot leave part of it behind.
+
+- **Starting Fermix twice on one home no longer disturbs the one that is
+  running.** A second engine started on a home already in use (a second
+  `fermix run`, or two services pointed at one home) was refused only at the
+  end of its startup. By then it had marked the running engine's scheduled
+  runs failed, reset reminders that were being sent so they went out twice,
+  ended its coding runs as interrupted and failed its meetings. It is now
+  refused before it reads or changes anything in the home.
+
+- **A job you pause, edit or remove stays that way.** When Fermix skipped a
+  run that was too old to start, expired a job, or switched off one whose
+  schedule no longer read, it wrote the whole job back from a copy it had read
+  a moment earlier. A pause or an edit made in that moment was undone, and a
+  job removed in that moment came back and ran. Each of those writes now
+  changes only its own fields, and only while the job is still as it was read.
+
+- **Stop on the screen indicator holds for the request it interrupts.** While
+  Fermix used your computer, Stop was recorded against the request that first
+  opened the session. Pressed during a later request in the same conversation,
+  it ended the session, and that request opened a new one and carried on. Stop
+  now holds the request that was acting when you pressed it, until you ask
+  again.
+
 ## [0.20.0] - 2026-11-15
 
 ### Security
