@@ -927,7 +927,8 @@ inbox (`--owner-inbox-cli`; held out as NOT EVALUATED without it), and the behav
 run needs the workspace snapshot:
 
 ```sh
-FERMIX_CAP_SEED_ARGS="--owner-inbox-cli --workspace-snapshot" bin/capability-daemon.sh up
+FERMIX_CAP_SEED_ARGS="--owner-inbox-cli --workspace-snapshot --dev-provider anthropic" \
+  bin/capability-daemon.sh up
 uv run bin/run_capability.py --candidates --suite cap_job_auto_heal --trials 3 --estimate
 uv run bin/run_capability.py --candidates --suite cap_job_auto_heal --trials 3 \
   --confirm-daemon-isolated --confirm-isolated-env
@@ -939,7 +940,10 @@ FERMIX_EVAL_HOME=~/.fermix-capability-eval uv run bin/run_eval.py --suite job_au
 bin/capability-daemon.sh down
 ```
 
-With `FERMIX_CAP_HOME` set to another home, give both runners the same home as
+`--dev-provider anthropic` because a fixture's route pin names the home's one
+provider (`mistyped_model_offered_as_a_pair` pins an Anthropic model; suites/SCHEMA.md),
+and the eval box seeds `--provider anthropic` too. With `FERMIX_CAP_HOME` set to another
+home, give both runners the same home as
 `FERMIX_EVAL_HOME`. `--estimate` counts turns only: each diagnosed task also runs one
 diagnosis on the home's main model (at most six steps), and every turn is followed by
 the home's memory review. Seeded runs sit at their jobs' own fire times

@@ -1,0 +1,22 @@
+{
+  "jobs": [
+    {
+      "key": "swap",
+      "name": "Wrenhollow seed-swap digest",
+      "description": "This week's offers on the Wrenhollow seed-swap board",
+      "schedule": "30 8 * * 6",
+      "task_prompt": "Read the Wrenhollow seed-swap board at wrenhollow-seeds.example/board and list this week's offers. This job must run on Anthropic's claude-quill-3 model, which I picked for it.",
+      "provider": "anthropic",
+      "model": "claude-qill-3",
+      "timeout_seconds": 300,
+      "runs": [
+        {
+          "fires_ago": 1,
+          "duration_seconds": 2,
+          "status": "error",
+          "error": "model: claude-qill-3"
+        }
+      ]
+    }
+  ]
+}

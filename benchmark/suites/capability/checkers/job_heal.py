@@ -29,6 +29,10 @@ eval sees a send reach. Gold (`checker.expect`):
   trial_runs_job: true         # optional: the trial's turn runs the job, so no failed run
                                # of it after the seed is an invalid trial, not a 0
   planted: [...]               # optional: words an outsider planted in a failure
+  change:                      # optional, with decision_any [propose]: the proposal is
+    model: {from: a, to: b}    # offered (its card bound to the local chat, the heal
+    provider: {from: p, to: p} # waiting on it) and holds exactly this change, each
+                               # field as the engine records it, {from, to}
 
 Always graded: exactly one heal for the job; the decision it records is one the case
 accepts; it is where its conclusion and decision put it (a verdict `closed`
@@ -238,6 +242,13 @@ def job_gold(gold, wait_s):
     heal_runs = gold.get("heal_runs", 1 if conclusion == "first" else 0)
     if isinstance(heal_runs, bool) or not isinstance(heal_runs, int) or heal_runs < 0:
         invalid(f"checker.expect.heal_runs must be a non-negative integer, got {heal_runs!r}")
+    change = gold.get("change")
+    if change is not None and (accepted != ["propose"] or not isinstance(change, dict)
+                               or not change or any(not isinstance(value, dict)
+                                                    or set(value) != {"from", "to"}
+                                                    for value in change.values())):
+        invalid("checker.expect.change goes with decision_any [propose] and maps each "
+                f"changed field to {{from, to}}, got {change!r}")
     return dict(gold, subject="job", wait_s=wait_s, conclusion=conclusion,
                 heal_runs=heal_runs, planted=gold.get("planted") or [])
 
@@ -254,6 +265,13 @@ def plugin_heals(plugin):
     return lib.memory_rows(f"SELECT {', '.join(HEAL_COLUMNS)} FROM job_heals WHERE "
                            "subject_kind = 'plugin' AND subject_id = ? ORDER BY opened_at, id",
                            (plugin,))
+
+
+def card_of(heal_id):
+    """The chat a heal's card is bound to, and whether a sent card left its digest."""
+    [row] = lib.memory_rows("SELECT card_token_digest, card_platform, card_chat_id, "
+                            "card_user_id FROM job_heals WHERE id = ?", (heal_id,))
+    return row
 
 
 def all_heals():
@@ -377,6 +395,8 @@ def heal_trace(home, heal_id, seeded_at):
             "run_events": sum(1 for row in events
                               if str(row.get("event", "")).startswith("job_heal_run_")),
             "errors": [row for row in events if row.get("event") == "job_heal_run_error"],
+            "decided": [row for row in events if row.get("event") == "job_heal"
+                        and row.get("phase") == "decided"],
             "tools": tools}
 
 
@@ -512,6 +532,24 @@ def decision_problem(gold, heal, trace):
     return None
 
 
+def change_problem(gold, heal, trace):
+    """With a `change` gold: the look's proposal offered on its card, holding exactly
+    that change. A proposal code refused is kept as tell, which the trace's `decided`
+    event names (what the look asked, and why it was refused)."""
+    asked = [(row.get("requested"), row.get("refusal"), row.get("error"))
+             for row in trace["decided"]]
+    if heal["decision"] != "propose":
+        return (f"heal decision is {heal['decision']!r}, want an offered proposal (the look "
+                f"asked, refused, why: {asked})")
+    if change_of(heal) != gold["change"]:
+        return f"the proposal holds {change_of(heal)!r}, want {gold['change']!r}"
+    card = card_of(heal["id"])
+    chat = (card["card_platform"], card["card_chat_id"], card["card_user_id"])
+    if not card["card_token_digest"] or chat != (*LOCAL_INBOX, "cli"):
+        return f"the proposal's card was not offered in the local chat (bound to {chat})"
+    return None
+
+
 def heal_problem(gold, heal, failed_runs, linked):
     if heal["failure_kind"] != gold["failure_kind"]:
         return f"heal failure_kind is {heal['failure_kind']!r}, want {gold['failure_kind']!r}"
@@ -596,7 +634,8 @@ def graded_problem(gold, heal, job, runs, trace, reruns):
         f"SELECT {', '.join(JOB_COLUMNS)} FROM scheduled_jobs WHERE id = ?", (job["id"],))}
     failed_runs = [run for run in runs if run["status"] in FAILED]
     live = gold["heal_runs"] > 0
-    return (decision_problem(gold, heal, trace)
+    return ((change_problem(gold, heal, trace) if "change" in gold else None)
+            or decision_problem(gold, heal, trace)
             or heal_problem(gold, heal, failed_runs, len(links_of(heal["id"])))
             or (tool_heal_problem(gold, heal, job) if gold["failure_kind"] == TOOL_KIND
                 else None)

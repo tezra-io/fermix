@@ -1090,6 +1090,16 @@ pass, within its 60 s reconcile; for a kind a model could help with its heal run
 diagnoses it first, one model run on the home's main route, and code carries out the
 decision, then sends its message. A seeded ok run after it closes the heal as healed.
 A spec's failed `runs` therefore seed what the owner was told, not only rows.
+
+A job may be pinned to a route as `update_job` pins one: `provider` and `model`
+together, or neither (one alone, or an empty one, is refused before the reset). The
+engine's own check takes any provider its model catalogue knows, configured or not,
+but a pin to a provider the home has no settings for is a job that could not run
+there, so the seed also refuses a provider the home's config.toml does not configure.
+An eval home configures exactly one provider, its primary: `anthropic` on the eval
+box (`--provider anthropic`, eval-box.yml) and in the README's Auto Heal recipe
+(`--dev-provider anthropic`), so a fixture's pin names `anthropic`, with an invented
+model id; a home seeded with another provider refuses that fixture by name.
 `checkers/job_heal.py` grades that heal (its docstring has the gold), and
 `checkers/job_proposal.py` what became of a stored proposal and its card; both need
 a home seeded with `--owner-inbox-cli`, the one eval inbox a send reaches.

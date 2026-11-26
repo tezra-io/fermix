@@ -50,8 +50,10 @@
 # that dies does, so its lease has run out and the daemon's next pass claims it, resolves
 # the owner's inbox itself, and sends it (for a proposal, its card), with no model.
 # Nothing is sent and the job is not touched otherwise: the spec states the job as the
-# decision left it (a raised limit already raised, a proposal not applied). Every job and
-# run is checked before the reset, so a refused spec leaves the home as it was.
+# decision left it (a raised limit already raised, a proposal not applied). A job may be
+# pinned to a route (`provider` and `model`, both or neither, the provider one the home
+# configures). Every job and run is checked before the reset, so a refused spec leaves
+# the home as it was.
 #
 # It runs in its own BEAM beside the eval daemon; SQLite (WAL, busy_timeout)
 # serialises the two writers. Every value a spec carries is invented.
@@ -222,7 +224,14 @@ defmodule SeedState do
     jobs =
       Keyword.merge(Application.get_env(:fermix_core, :jobs, []), Keyword.fetch!(core, :jobs))
 
-    %{zone: zone, personalization: personalization, jobs: jobs}
+    %{zone: zone, personalization: personalization, jobs: jobs, providers: configured(core)}
+  end
+
+  # The providers this home's config.toml sets anything for (the snapshot lists every
+  # provider the engine knows, those it was given nothing for empty): an eval home
+  # configures one, its primary.
+  defp configured(core) do
+    for {id, settings} <- Keyword.get(core, :providers, []), settings != [], do: to_string(id)
   end
 
   # --- reset -------------------------------------------------------------------
@@ -354,6 +363,8 @@ defmodule SeedState do
       allowed_tools: [],
       capability_policy: [],
       timeout_seconds: Map.get(spec, "timeout_seconds"),
+      provider: Map.get(spec, "provider"),
+      model: Map.get(spec, "model"),
       expires_at: expires_at(spec, now),
       delivery_mode: "channel",
       delivery_target: Map.new(Keyword.fetch!(config.jobs, :default_delivery_target)),
@@ -666,6 +677,26 @@ defmodule SeedState do
     :ok
   end
 
+  # A job's route pin, as `update_job` takes one (`Tools.JobRegistrySupport`): the
+  # provider and the model together or neither, the provider one this home configures,
+  # so the pin is one its runs could take and its heal's look reads it as the owner's.
+  defp check_route_pin!(key, spec, config) do
+    pin = Map.take(spec, ["provider", "model"])
+
+    unless pin == %{} or
+             (map_size(pin) == 2 and Enum.all?(Map.values(pin), &(is_binary(&1) and &1 != ""))),
+           do:
+             raise(
+               "jobs #{key}: a route pin names its provider and its model together, or neither, got #{inspect(pin)}"
+             )
+
+    unless pin == %{} or pin["provider"] in config.providers,
+      do:
+        raise(
+          "jobs #{key}: the pin's provider #{inspect(pin["provider"])} is not one this home configures (#{inspect(config.providers)}); seed the home with that provider"
+        )
+  end
+
   defp runs(spec), do: Map.get(spec, "runs", [])
   defp failed?(run), do: Map.get(run, "status") != "ok"
   defp job_zone(spec, config), do: Map.get(spec, "timezone", config.zone)
@@ -709,6 +740,7 @@ defmodule SeedState do
 
   defp check_job_runs!(spec, config, now) do
     key = Map.get(spec, "key")
+    check_route_pin!(key, spec, config)
     runs = runs(spec)
     starts = SeedRunTimes.starts!(spec, job_zone(spec, config), now)
     :ok = SeedRunTimes.check_order!(key, runs, starts, now)

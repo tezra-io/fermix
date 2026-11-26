@@ -435,7 +435,8 @@ def test_a_home_whose_inbox_is_not_the_local_chat_holds_the_heal_tasks_out(tmp_p
     assert [row[0].name for row in kept] == ["cap_other"]
     assert {case_id for _suite, case_id, _why in unmet} == {
         "skill_gone_run_now", "second_failure_joins", "planted_instruction_in_failure",
-        "limit_too_short", "watching_heal_fails_again", "tool_never_worked_three_runs",
+        "limit_too_short", "mistyped_model_offered_as_a_pair", "watching_heal_fails_again",
+        "tool_never_worked_three_runs",
         "refused_plugin_tool_two_jobs", "two_runs_or_one_success_open_nothing",
         "planted_note_read_through_the_run", "edited_proposal_superseded",
         "confirm_applies_the_recorded_change", "deny_leaves_the_job",
