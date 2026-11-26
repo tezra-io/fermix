@@ -114,6 +114,7 @@ defmodule FermixCore.Memory.Repo do
   @job_heal_diagnosis_migration_version 72
   @job_run_tally_migration_version 73
   @job_heal_answer_migration_version 74
+  @owner_hours_index_migration_version 75
   @sqlite_open_intent :readwritecreate
 
   # The home's requests about notes from every machine (M97 §8), all served by
@@ -2059,6 +2060,41 @@ defmodule FermixCore.Memory.Repo do
              is_map_key(selector, :owner_id) and is_map_key(selector, :kind) and
              is_integer(limit) and limit > 0 do
     call({:get_messages_in_range, selector, from, until, limit}, opts)
+  end
+
+  @doc """
+  The SQL behind `get_messages_in_range/5` and the values it binds. Public so a
+  test can `EXPLAIN QUERY PLAN` it with those values: SQLite reads the bound
+  `role` and `kind` to decide whether a partial index serves the read. Asked
+  for the owner's chat messages (`role: "user"`, `kind: "chat_message"`), it
+  reads `idx_messages_owner_hours` backwards, in its own order, with no sort.
+  """
+  @spec messages_in_range_query(map(), DateTime.t(), DateTime.t(), pos_integer()) ::
+          {String.t(), list()}
+  def messages_in_range_query(selector, %DateTime{} = from, %DateTime{} = until, limit)
+      when is_map(selector) and is_integer(limit) and limit > 0 do
+    {role_sql, role_params} =
+      case Map.get(selector, :role) do
+        nil -> {"", []}
+        role -> {" AND role = ?", [role]}
+      end
+
+    sql = """
+    SELECT * FROM messages
+    WHERE agent_id = ? AND owner_id = ? AND kind = ?#{role_sql}
+      AND created_at >= ? AND created_at < ?
+    ORDER BY created_at DESC, id DESC
+    LIMIT ?
+    """
+
+    params =
+      [
+        Map.fetch!(selector, :agent_id),
+        Map.fetch!(selector, :owner_id),
+        Map.fetch!(selector, :kind)
+      ] ++ role_params ++ [timestamp_string(from), timestamp_string(until), limit]
+
+    {sql, params}
   end
 
   @spec record_skill_usage(String.t(), :view | :run, DateTime.t(), keyword()) ::
@@ -5440,7 +5476,8 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_job_heals_migration(conn, versions),
          :ok <- apply_job_heal_diagnosis_migration(conn, versions),
          :ok <- apply_job_run_tally_migration(conn, versions),
-         :ok <- apply_job_heal_answer_migration(conn, versions) do
+         :ok <- apply_job_heal_answer_migration(conn, versions),
+         :ok <- apply_owner_hours_index_migration(conn, versions) do
       :ok
     end
   end
@@ -5470,6 +5507,28 @@ defmodule FermixCore.Memory.Repo do
       Sqlite3.execute(
         conn,
         "INSERT INTO schema_migrations(version) VALUES (#{@job_heal_answer_migration_version});"
+      )
+    end
+  end
+
+  # M107: the owner's own chat messages by time, so the active-hours query and
+  # the range read of the owner's chat messages each read one index range,
+  # backwards, instead of sorting every message of the agent and owner, with
+  # its version in one transaction, after 74. The index's DDL
+  # lives beside the active-hours query in `OpenLoopsSql`. No row is
+  # rewritten, and reapplying it changes nothing.
+  defp apply_owner_hours_index_migration(conn, versions) do
+    if Enum.member?(versions, @owner_hours_index_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{OpenLoopsSql.owner_hours_index_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@owner_hours_index_migration_version});
+        COMMIT;
+        """
       )
     end
   end
@@ -7527,29 +7586,9 @@ defmodule FermixCore.Memory.Repo do
   end
 
   defp fetch_messages_in_range(conn, selector, from, until, limit) do
-    {role_sql, role_params} =
-      case Map.get(selector, :role) do
-        nil -> {"", []}
-        role -> {" AND role = ?", [role]}
-      end
+    {sql, params} = messages_in_range_query(selector, from, until, limit)
 
-    with {:ok, rows} <-
-           query_all(
-             conn,
-             """
-             SELECT * FROM messages
-             WHERE agent_id = ? AND owner_id = ? AND kind = ?#{role_sql}
-               AND created_at >= ? AND created_at < ?
-             ORDER BY created_at DESC, id DESC
-             LIMIT ?
-             """,
-             [
-               Map.fetch!(selector, :agent_id),
-               Map.fetch!(selector, :owner_id),
-               Map.fetch!(selector, :kind)
-             ] ++
-               role_params ++ [timestamp_string(from), timestamp_string(until), limit]
-           ) do
+    with {:ok, rows} <- query_all(conn, sql, params) do
       {:ok, rows |> Enum.map(&message_row/1) |> Enum.reverse()}
     end
   end

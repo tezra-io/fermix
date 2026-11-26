@@ -138,7 +138,11 @@ defmodule FermixCore.Home.ReadableTest do
     # keep their widths. A change the owner approved is a value in a column
     # that engine already reads, written as an owner's edit is: the format
     # stays.
-    @migrations Enum.to_list(1..39) ++ [41, 42, 43] ++ Enum.to_list(45..74)
+    # 75 (M107, the active-hours index) adds a partial index on `messages`, a
+    # table that engine reads and writes. SQLite keeps the index on every
+    # write whichever engine makes it, and every read that engine runs returns
+    # the rows it did: the format stays.
+    @migrations Enum.to_list(1..39) ++ [41, 42, 43] ++ Enum.to_list(45..75)
     @manifest_keys ~w(created_at engine_version files format home_format home_root host links
                       primary_epoch)
     @entry_keys ~w(bytes mode path sha256)

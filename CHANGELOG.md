@@ -65,6 +65,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in the last 2 MB of the log to show 200 of them; it now formats only the
   entries it shows.
 
+- **Open-loop check-ins and skill curation no longer sort your whole chat
+  history.** Working out your active hours, and reading your recent messages
+  when skills are reviewed, each sorted every message you have sent. They now
+  read an index, which an existing home gains the first time it starts.
+
 ### Fixed
 
 - **The first phone you pair can be on any network.** Turning phone access on
