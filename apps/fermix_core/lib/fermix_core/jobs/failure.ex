@@ -211,14 +211,38 @@ defmodule FermixCore.Jobs.Failure do
 
   @doc """
   The text a failure Fermix has no sentence for keeps (`:other`): its own
-  sentence when the reason is one, or tags one (`{tag, sentence}`), and the
-  term as Elixir writes it otherwise. The run's row stores it, and a heal
-  quotes it beside `sentence/2`'s line as the error's own words.
+  sentence when the reason is one, or tags one (`{tag, sentence}`); a
+  provider's refusal's message, a failover chain's being its last route's;
+  and the term as Elixir writes it otherwise. The run's row stores it, and a
+  heal quotes it beside `sentence/2`'s line as the error's own words.
   """
   @spec other_text(term()) :: String.t()
   def other_text(reason) when is_binary(reason), do: reason
   def other_text({tag, text}) when is_atom(tag) and is_binary(text), do: text
+
+  def other_text({:provider_error, %{message: message}})
+      when is_binary(message) and message != "",
+      do: message
+
+  def other_text({:all_routes_failed, [_ | _] = attempts} = reason) do
+    case List.last(attempts) do
+      {_provider, last_reason} -> other_text(last_reason)
+      _no_attempt -> inspect(reason)
+    end
+  end
+
   def other_text(reason), do: inspect(reason)
+
+  # A key or sign-in the provider answered no to, or one Fermix never sent:
+  # with no HTTP exchange (`Providers.Error.auth/3`) the provider refused
+  # nothing, so the sentence does not say it did.
+  defp told(:provider_auth, reason, _tool) do
+    name = provider_name(reason)
+
+    if unsent?(reason),
+      do: "Fermix has no usable key or sign-in for #{name}.",
+      else: provider_sentence(:provider_auth, name)
+  end
 
   defp told(kind, reason, _tool) when kind in @provider_kinds,
     do: provider_sentence(kind, provider_name(reason))
@@ -309,6 +333,19 @@ defmodule FermixCore.Jobs.Failure do
     do: attempts |> List.last() |> elem(1) |> provider_name()
 
   defp provider_name(_reason), do: "the model provider"
+
+  # Whether the failure is a call that was never sent; a failover chain's is
+  # its last route's.
+  defp unsent?({:provider_error, %{status: nil}}), do: true
+
+  defp unsent?({:all_routes_failed, [_ | _] = attempts}) do
+    case List.last(attempts) do
+      {_provider, last_reason} -> unsent?(last_reason)
+      _no_attempt -> false
+    end
+  end
+
+  defp unsent?(_reason), do: false
 
   defp sentence_case(<<first::utf8, rest::binary>>), do: String.upcase(<<first::utf8>>) <> rest
 

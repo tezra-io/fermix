@@ -24,6 +24,9 @@ defmodule FermixCore.Jobs.FailureTest do
      }}
   end
 
+  defp put_message({:provider_error, error}, message),
+    do: {:provider_error, %{error | message: message}}
+
   # Finch's own words when its pool has no connection to give.
   @pool_empty %RuntimeError{
     message:
@@ -293,6 +296,47 @@ defmodule FermixCore.Jobs.FailureTest do
 
       assert Failure.other_text(:context_overflow_after_compaction) ==
                ":context_overflow_after_compaction"
+    end
+
+    # Found on a live server: a job pinned to a model its provider does not
+    # have was told to its owner as the Elixir term of the error.
+    test "a provider's refusal with no sentence keeps the provider's message, never the term" do
+      message = "The model `gpt-lantern-0` does not exist or you do not have access to it."
+      reason = api(404, %{"error" => %{"code" => "model_not_found", "message" => message}})
+
+      assert Failure.kind(reason) == :other
+      assert Failure.other_text(reason) == message
+
+      chain = {:all_routes_failed, [{:anthropic, api(429)}, {:openai, reason}]}
+      assert Failure.kind(chain) == :other
+      assert Failure.other_text(chain) == message
+
+      # A provider error with nothing to quote, and a chain of no shape, keep the term.
+      assert Failure.other_text(hand_built_api(:provider, 404) |> put_message("")) =~
+               "provider_error"
+
+      assert Failure.other_text({:all_routes_failed, [:not_an_attempt]}) =~ "all_routes_failed"
+    end
+
+    # Found on the same server, which held no Anthropic key or sign-in at all:
+    # the owner was told Anthropic had refused one.
+    test "a key or sign-in Fermix never had is not said to be refused" do
+      assert Failure.sentence(api(401)) == "OpenAI refused the key or sign-in Fermix uses."
+
+      unsent = ProviderError.auth(:anthropic, :messages, "No API key is configured.")
+      assert Failure.kind(unsent) == :provider_auth
+      assert Failure.sentence(unsent) == "Fermix has no usable key or sign-in for Anthropic."
+
+      chain = {:all_routes_failed, [{:openai, api(429)}, {:anthropic, unsent}]}
+      assert Failure.sentence(chain) == "Fermix has no usable key or sign-in for Anthropic."
+
+      # A chain whose last route did answer is that route's refusal.
+      answered = {:all_routes_failed, [{:anthropic, unsent}, {:openai, api(403)}]}
+      assert Failure.sentence(answered) == "OpenAI refused the key or sign-in Fermix uses."
+
+      # The kind named with a reason of no shape keeps its plainest sentence.
+      assert Failure.kind_sentence(:provider_auth, :whatever) ==
+               "The model provider refused the key or sign-in Fermix uses."
     end
   end
 

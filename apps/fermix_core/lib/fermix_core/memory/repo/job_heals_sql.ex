@@ -97,7 +97,8 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
   Fermix app's cards (M106 §8) are read from the record, never from a held
   token: those still answerable in the app's chat with what each shows
   (`{:app_cards, origin}`), and, for telling a chat a card ended, the chat
-  each of some heals' cards went to (`{:cards_among, ids}`) and the cards a
+  each of some heals' cards went to (`{:cards_among, ids}`, or
+  `{:unapplied_cards_among, ids}` for the ones never approved) and the cards a
   job's removal ends (`{:waiting_cards_of_job, job_id}`). These are reads; no
   write is added for the app.
   """
@@ -616,14 +617,15 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
   # The cards among heals `ids` and the chat each was bound to: whose end the
   # chat that shows it is told (M106 §8).
   def handle(_conn, {:cards_among, []}), do: {:ok, []}
+  def handle(conn, {:cards_among, ids}) when is_list(ids), do: cards_among(conn, ids, "")
 
-  def handle(conn, {:cards_among, ids}) when is_list(ids) do
-    sql =
-      "SELECT id, card_platform, card_chat_id, card_user_id FROM job_heals " <>
-        "WHERE card_token_digest IS NOT NULL AND id IN (#{placeholders(ids)}) ORDER BY id"
+  # The same, less the cards whose change was made: the chat was told
+  # `approved` when the owner said yes, so a later end of that heal (its next
+  # clean run, a fix that did not hold) is no second end of its card.
+  def handle(_conn, {:unapplied_cards_among, []}), do: {:ok, []}
 
-    with {:ok, rows} <- CuesSql.query_all(conn, sql, ids), do: {:ok, Enum.map(rows, &card_ref/1)}
-  end
+  def handle(conn, {:unapplied_cards_among, ids}) when is_list(ids),
+    do: cards_among(conn, ids, "applied_at IS NULL AND ")
 
   # The cards of `job_id`'s proposals still waiting for an answer: the ones
   # removing the job ends, read before the removal takes their rows with it.
@@ -634,6 +636,14 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
 
     with {:ok, rows} <- CuesSql.query_all(conn, sql, [job_id]),
          do: {:ok, Enum.map(rows, &card_ref/1)}
+  end
+
+  defp cards_among(conn, ids, only) do
+    sql =
+      "SELECT id, card_platform, card_chat_id, card_user_id FROM job_heals " <>
+        "WHERE card_token_digest IS NOT NULL AND #{only}id IN (#{placeholders(ids)}) ORDER BY id"
+
+    with {:ok, rows} <- CuesSql.query_all(conn, sql, ids), do: {:ok, Enum.map(rows, &card_ref/1)}
   end
 
   @doc "Whether `claim` is a `claim()` of a well-formed shape."

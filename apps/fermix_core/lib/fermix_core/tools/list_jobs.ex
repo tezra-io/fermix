@@ -71,7 +71,7 @@ defmodule FermixCore.Tools.ListJobs do
           state -> Keyword.put(opts, :state, state)
         end
 
-      now = Map.get(context, :now_fn, &DateTime.utc_now/0).()
+      now = now(context)
 
       with {:ok, jobs} <- Registry.list_jobs(opts),
            {:ok, heals} <- Repo.job_heals_call({:listed_by_job, now}, server: opts[:repo]) do
@@ -81,6 +81,11 @@ defmodule FermixCore.Tools.ListJobs do
       end
     end)
   end
+
+  # A turn's context carries the seam as nil when no clock was injected
+  # (`Agents.TurnRunner`), so the key being there says nothing.
+  defp now(%{now_fn: now_fn}) when is_function(now_fn, 0), do: now_fn.()
+  defp now(_context), do: DateTime.utc_now()
 
   defp listed_job(job, %{open: open, proposals: proposals}, repo) do
     heal = Map.get(open, job.id)

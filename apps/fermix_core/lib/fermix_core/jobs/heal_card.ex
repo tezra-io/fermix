@@ -199,6 +199,9 @@ defmodule FermixCore.Jobs.HealCard do
   @doc """
   Tells the app that each of heals `ids` whose card is bound to it ended
   with `outcome` (`approved`, `denied`, or `expired` for every other end).
+  An approved card is told so once: its heal ending later, on a clean run or
+  a fix that did not hold, is no second end of the card, so `expired` is
+  told only of a card whose change was not made.
   A chat's card is told nothing: its own answer is its line. Never raises,
   and never fails its caller: what could not be read or told is logged, and
   an app offered the card again after its next hello no longer sees it.
@@ -211,11 +214,14 @@ defmodule FermixCore.Jobs.HealCard do
   def announce_ended([], outcome, _opts) when outcome in @outcomes, do: :ok
 
   def announce_ended(ids, outcome, opts) when is_list(ids) and outcome in @outcomes do
-    case read({:cards_among, ids}, opts) do
+    case read({cards_read(outcome), ids}, opts) do
       {:ok, cards} -> announce(cards, outcome, opts)
       {:error, reason} -> log_untold(ids, outcome, reason)
     end
   end
+
+  defp cards_read(:expired), do: :unapplied_cards_among
+  defp cards_read(answer) when answer in [:approved, :denied], do: :cards_among
 
   @doc """
   The cards of `job_id`'s proposals still waiting, read before the job is

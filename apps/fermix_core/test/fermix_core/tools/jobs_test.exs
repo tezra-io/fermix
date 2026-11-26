@@ -189,6 +189,17 @@ defmodule FermixCore.Tools.JobsTest do
     assert jobs[quiet_id]["heal"] == nil
   end
 
+  # Found on a live server: a real turn's tool context carries its clock seam
+  # as nil (`Agents.TurnRunner`), and list_jobs called it, so it raised on
+  # every call an owner's turn made.
+  test "list_jobs lists on the real clock in a turn whose clock seam is nil", %{context: context} do
+    turn_context = Map.put(context, :now_fn, nil)
+
+    assert {:ok, %{success: true, output: output}} = ListJobs.execute(%{}, turn_context)
+    assert %{"jobs" => jobs} = Jason.decode!(output)
+    assert is_list(jobs)
+  end
+
   test "main-agent job tools create, list, pause, resume, and remove jobs", %{context: context} do
     assert {:ok, created} =
              ScheduleJob.execute(

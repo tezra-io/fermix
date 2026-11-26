@@ -407,6 +407,22 @@ defmodule FermixCore.Jobs.HealCardTest do
       assert {:error, :not_found} = get_heal(ctx, gone.id)
     end
 
+    # Found on a live server: a card the owner approved was told to the app a
+    # second time, as expired, when the job's next clean run closed its heal.
+    test "a clean run after the owner's yes tells the app nothing more", ctx do
+      opts = [repo: ctx.repo, scheduler: nil, app_card_listener: listener()]
+      %{job: job, heal: heal} = HealCards.waiting_card!(ctx.repo, @app)
+
+      assert {:ok, _sentence} = Proposals.confirm(heal.id, @app, opts)
+      assert_received {:card_ended, "main", id, :approved}
+      assert id == heal.id
+
+      {:ok, {_run, _job, %{healed: ids}}} = HealCards.settle_ok!(ctx.repo, job, ctx.now)
+      assert heal.id in ids
+      :ok = HealCard.announce_ended(ids, :expired, opts)
+      refute_received {:card_ended, _profile, _id, _outcome}
+    end
+
     test "a chat's card ending tells the app nothing", ctx do
       opts = ctx.opts ++ [app_card_listener: listener()]
       %{heal: heal} = HealCards.waiting_card!(ctx.repo, @owner)
