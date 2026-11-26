@@ -383,11 +383,13 @@ class _Session:
                 raise CompanionError(f"attach_file refused: {reply.get('message')!r}")
             self._route(reply)
 
-    def command(self, client_msg_id: str, name: str) -> TurnWire:
+    def command(self, client_msg_id: str, name: str, args: str | None = None) -> TurnWire:
+        """A slash command; `args` the rest of its line, as an approval's route sends it."""
         turn = TurnWire(client_msg_id, command=True)
         self.turns[client_msg_id] = turn
-        self.conn.send({"type": "command", "client_msg_id": client_msg_id,
-                        "profile_id": PROFILE, "name": name})
+        event = {"type": "command", "client_msg_id": client_msg_id, "profile_id": PROFILE,
+                 "name": name}
+        self.conn.send(event if args is None else {**event, "args": args})
         return turn
 
     def cancel(self, turn: TurnWire) -> None:

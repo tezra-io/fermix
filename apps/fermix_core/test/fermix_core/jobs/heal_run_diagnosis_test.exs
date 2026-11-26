@@ -80,6 +80,26 @@ defmodule FermixCore.Jobs.HealRunDiagnosisTest do
     defp next([head | tail]), do: {head, tail}
   end
 
+  # The Fermix app's two channels (M106 §8, stage S6): the Mac chat names its
+  # inbox, which IS this module's named Agent, so its row and its card are
+  # observed as every other send here; the phones' channel has a phone whose
+  # pairing completed, so the app is the owner's inbox.
+  @app_channel :heal_diag_app_inbox
+
+  defmodule AppChannel do
+    @moduledoc false
+    def send_message(destination, text, opts),
+      do: ScriptedChannel.send_message(destination, text, opts)
+
+    def owner_inbox, do: {:ok, "heal_diag_app_inbox"}
+  end
+
+  defmodule PairedPhone do
+    @moduledoc false
+    def send_message(_destination, _text, _opts), do: :ok
+    def phone_paired?, do: true
+  end
+
   # The provider seam: a scripted turn list, no network. Each turn is plain
   # text, a list of `job_heal_respond` calls, one `{:call, name, args}` of any
   # tool, `{:error, reason}` (the provider failing), `:crash` (the loop's
@@ -1016,6 +1036,98 @@ defmodule FermixCore.Jobs.HealRunDiagnosisTest do
     end
   end
 
+  # Stage S6 (M106 §8, D12): with a phone paired the app is the owner's inbox.
+  # A card there is no message that stays, so the proposal is a row as a told
+  # message is, and its card stands beside it, routed by the heal's id and
+  # bound to the app's one origin, answered from there and nowhere else.
+  describe "the proposal in the Fermix app" do
+    test "is a row as a told message is, and a card beside it routed by the heal's id", ctx do
+      app = %{ctx | channel: @app_channel}
+      start_channel(app, [:ok, :ok])
+      {job, heal} = claimed_heal!(ctx)
+      run!(ctx, heal, script([respond(propose_schedule())]) ++ [inbox_opts: app_inbox_opts()])
+
+      assert [%{text: row, opts: row_opts}, %{spec: spec, inbox: inbox}] = calls(app)
+      assert inbox.platform == "companion"
+      assert row =~ ~s(Job "#{job.name}" failed on)
+      assert row =~ "Fermix's reading: " <> @note
+      assert row =~ ~s(- Schedule: "every 2 hours"\nFermix has not made this change.)
+
+      assert String.ends_with?(
+               row,
+               "\nAnswer it on its card: Approve makes the change, Deny leaves the job as it is."
+             )
+
+      assert Keyword.fetch!(row_opts, :proactive_key) == "job_heal:" <> heal.id
+      assert Keyword.fetch!(row_opts, :origin) == %{"kind" => "job", "name" => job.name}
+
+      assert %{kind: :job_change, token: token, ttl_s: 604_800, lines: lines} = spec
+      assert token == heal.id
+      assert lines == [~s(Change job "#{job.name}"?), ~s(- Schedule: "every 2 hours")]
+      assert spec.actions == %{confirm: "Approve", deny: "Deny"}
+
+      assert spec.detail ==
+               "Details: each change in full\nSchedule now: every 1 hour\n" <>
+                 "Schedule after the change: every 2 hours"
+
+      destination = Atom.to_string(@app_channel)
+      origin = %{platform: "companion", chat_id: destination, user_id: "app"}
+
+      assert {:ok, %{state: "waiting", inbox_platform: "companion"} = stored} =
+               get_heal(ctx, heal.id)
+
+      assert {stored.card_platform, stored.card_chat_id, stored.card_user_id} ==
+               {"companion", destination, "app"}
+
+      assert stored_token(ctx, heal.id) == nil
+
+      # Its conversation keeps the card's lines and detail, the note left out.
+      assert [%{role: "assistant", content: kept}] =
+               ConversationStore.get_history({"companion", destination, :root},
+                 server: ctx.store
+               )
+
+      assert kept =~ "Schedule after the change: every 2 hours"
+      refute kept =~ @note
+
+      opts = [
+        repo: ctx.repo,
+        now: @now,
+        scheduler: nil,
+        capability_registry: ctx.caps,
+        skill_registry: ctx.skills
+      ]
+
+      telegram = %{platform: "telegram", chat_id: "40017", user_id: "40017"}
+
+      assert {:error, "That card is not waiting in this chat; nothing ran."} =
+               Proposals.confirm(token, telegram, opts)
+
+      assert {:ok, _sentence} = Proposals.confirm(token, origin, opts)
+
+      assert {:ok, %{schedule_expr: "every 2 hours"}} =
+               Repo.get_scheduled_job(job.id, server: ctx.repo)
+    end
+
+    test "a row that went before a card that failed is sent again under its key", ctx do
+      app = %{ctx | channel: @app_channel}
+      start_channel(app, [:ok, {:error, {:transport, :timeout}}, :ok, :ok])
+      {_job, heal} = claimed_heal!(ctx)
+      run!(ctx, heal, script([respond(propose_schedule())]) ++ [inbox_opts: app_inbox_opts()])
+
+      assert {:ok, %{state: "open", delivery_attempts: 1, next_delivery_at: due}} =
+               get_heal(ctx, heal.id)
+
+      {:ok, again} = claim(ctx, due)
+      run!(ctx, again, clock: fn -> due end, inbox_opts: app_inbox_opts())
+
+      assert [%{text: row}, %{spec: first}, %{text: again_row}, %{spec: second}] = calls(app)
+      assert again_row == row
+      assert first == second
+      assert {:ok, %{state: "waiting", delivery_status: "delivered"}} = get_heal(ctx, heal.id)
+    end
+  end
+
   describe "a run that ends with no decision still sends Fermix's facts" do
     for {label, steps, timeout_ms} <- [
           {"no decision", [{:text, "I am not sure."}], nil},
@@ -1389,6 +1501,13 @@ defmodule FermixCore.Jobs.HealRunDiagnosisTest do
 
   defp script(steps), do: [adapter_opts: [test_pid: self(), script: steps]]
   defp respond(decision), do: {:respond, [Jason.encode!(decision)]}
+
+  # A home with a Telegram DM and a paired phone: the app comes first.
+  defp app_inbox_opts,
+    do: [
+      jobs_config: [delivery_channels: %{"companion" => AppChannel, "mobile" => PairedPhone}],
+      configured_owners: %{"telegram" => "40017"}
+    ]
 
   defp start_channel(ctx, script) do
     start_supervised!(%{

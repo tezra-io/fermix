@@ -31,6 +31,7 @@ defmodule FermixCore.Jobs.Runner do
   alias FermixCore.Jobs.CueSurface
   alias FermixCore.Jobs.Delivery
   alias FermixCore.Jobs.Failure
+  alias FermixCore.Jobs.HealCard
   alias FermixCore.Jobs.MediaBridge
   alias FermixCore.Jobs.Telemetry, as: JobTelemetry
   alias FermixCore.Memory.Config, as: MemoryConfig
@@ -164,6 +165,8 @@ defmodule FermixCore.Jobs.Runner do
       job: Keyword.fetch!(opts, :job),
       run: Keyword.fetch!(opts, :run),
       notify: Keyword.get(opts, :notify),
+      # `Jobs.HealCard.announce_ended/3`'s listener seam (tests).
+      heal_card_opts: Keyword.get(opts, :heal_card_opts, []),
       adapter: Keyword.get(opts, :adapter),
       adapter_opts: Keyword.get(opts, :adapter_opts, []),
       delivery_adapter: Keyword.get(opts, :delivery_adapter),
@@ -400,6 +403,14 @@ defmodule FermixCore.Jobs.Runner do
     {:ok, {run, job, settlement}} = Repo.settle_job_run(attrs, :ok, server: state.repo)
     JobTelemetry.run_complete(state.job, telemetry_run(state, run), result)
     JobTelemetry.heal_settled(state.job, run, settlement)
+    # A heal this clean run closed may have a card the Fermix app shows: it
+    # is told the proposal expired (M106 §8). A failed run closes none.
+    HealCard.announce_ended(
+      settlement.healed,
+      :expired,
+      [repo: state.repo] ++ state.heal_card_opts
+    )
+
     {run, job}
   end
 

@@ -153,6 +153,20 @@ defmodule FermixCore.Meetings.DeliveryTest do
       assert state().owner_calls == 1
     end
 
+    # M106 §8: the meeting takes whatever inbox the rule answers; with a phone
+    # paired that is the Fermix app's chat (`Delivery.OwnerInboxTest`).
+    test "an owner inbox in the Fermix app gets the notes in the app's chat" do
+      put(
+        :owner_inbox,
+        {:ok, %{platform: "companion", destination: "main", thread_scope: "root"}}
+      )
+
+      meeting = %{@meeting | origin_session_id: nil}
+
+      assert {:ok, :sent} = deliver(meeting)
+      assert [%{platform: "companion", destination: "main", send_opts: []}] = calls()
+    end
+
     test "no owner inbox is a terminal :no_delivery_target and nothing is sent" do
       put(:owner_inbox, :no_delivery_target)
       meeting = %{@meeting | origin_session_id: nil}

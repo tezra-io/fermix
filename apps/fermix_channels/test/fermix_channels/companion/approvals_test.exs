@@ -141,6 +141,69 @@ defmodule FermixChannels.Companion.ApprovalsTest do
     assert length(Approvals.pending(server, "main", :mobile)) == 64
   end
 
+  # M106 §8, D12 (stage S6): a card asked in the app with no turn is answered
+  # from the Mac chat or a paired phone, so it belongs to both.
+  test "a card asked in the app is kept for both transports, and resolved to both", %{
+    server: server
+  } do
+    card = card("INBOX")
+
+    assert :ok = Approvals.announce(server, "main", card, :all)
+    assert_received {:announced, "main", ^card, :all}
+    assert [%{"approval_id" => id}] = Approvals.pending(server, "main", :companion)
+    assert [%{"approval_id" => ^id}] = Approvals.pending(server, "main", :mobile)
+
+    # Answered on the phone: its end reaches both, as the card did.
+    resolved = %{"t" => "approval_resolved", "approval_id" => id, "outcome" => "approved"}
+    assert :ok = Approvals.resolve(server, "main", resolved, :mobile)
+    assert_received {:announced, "main", ^resolved, :all}
+    assert Approvals.pending(server, "main", :companion) == []
+  end
+
+  test "a heal's card is offered to both transports and never kept", %{server: server} do
+    card = job_change_card("jhl_0a1b2c3d4e5f6a7b")
+
+    assert :ok = Approvals.offer(server, "main", card)
+    assert_received {:announced, "main", ^card, :all}
+    refute_received {:scheduled, _message, _delay_ms}
+    assert Approvals.pending(server, "main", :mobile) == []
+  end
+
+  test "after a hello a heal's cards are read again, after the cards in memory", %{
+    clock: clock
+  } do
+    heal = job_change_card("jhl_0a1b2c3d4e5f6a7b")
+    server = store(clock, fn "main" -> {:ok, [heal]} end)
+
+    assert :ok = Approvals.announce(server, "main", card("TOKEN"), :companion)
+
+    assert [%{"kind" => "sandbox"}, ^heal] = Approvals.pending(server, "main", :companion)
+    assert [^heal] = Approvals.pending(server, "main", :mobile)
+  end
+
+  test "a source that fails, or answers what is no card, still lets the cards in memory out",
+       %{clock: clock} do
+    kept = card("TOKEN")
+    heal = job_change_card("jhl_0a1b2c3d4e5f6a7b")
+
+    for {answer, offered} <- [
+          {{:error, :repo_timeout}, []},
+          {:not_a_reply, []},
+          {{:ok, [%{"t" => "row"}, heal, %{"t" => "approval", "ttl_s" => 0}]}, [heal]}
+        ] do
+      server = store(clock, fn "main" -> answer end)
+      assert :ok = Approvals.announce(server, "main", kept, :companion)
+
+      log =
+        capture_log(fn ->
+          assert Approvals.pending(server, "main", :companion) ==
+                   [Map.put(kept, "ttl_s", 60) | offered]
+        end)
+
+      assert log =~ "heal card"
+    end
+  end
+
   test "announce refuses anything but an approval card", %{server: server} do
     assert_raise FunctionClauseError, fn ->
       Approvals.announce(server, "main", %{"t" => "text_done", "text" => "hi"}, :mobile)
@@ -152,4 +215,33 @@ defmodule FermixChannels.Companion.ApprovalsTest do
   end
 
   defp card(token), do: Output.approval(%{kind: :sandbox, text: "Allow?", token: token})
+
+  defp job_change_card(heal_id) do
+    Output.approval(%{
+      kind: :job_change,
+      text: "the whole card",
+      lines: [~s(Change job "Harbour tide table"?), ~s(- Schedule: "every 2 hours")],
+      detail: "Details: each change in full",
+      token: heal_id,
+      ttl_s: 604_800
+    })
+  end
+
+  # A store of the test's own, its heal cards read from `durable`.
+  defp store(clock, durable) do
+    test_pid = self()
+
+    start_supervised!(
+      {Approvals,
+       name: nil,
+       clock: fn -> Agent.get(clock, & &1) end,
+       schedule: fn _message, _delay_ms -> make_ref() end,
+       announce: fn profile, event, audience ->
+         send(test_pid, {:announced, profile, event, audience})
+         :ok
+       end,
+       durable: durable},
+      id: {:durable_store, System.unique_integer([:positive])}
+    )
+  end
 end

@@ -7,13 +7,14 @@ a `file: location` prefix, so a malformed suite never reaches the daemon.
 from __future__ import annotations
 
 import glob
+import json
 import os
 import re
 from dataclasses import dataclass, field
 
 import yaml
 
-from . import companion, cue_drive, voice
+from . import app_drive, companion, cue_drive, voice
 from .fixture_server import (FIXTURE_URL_PLACEHOLDER, case_uses_fixture,
                              clause_problems)
 from .rubric import numbered_requirements
@@ -32,8 +33,11 @@ _TOP_KEYS = {
 # `phone_calls`: with --phone-calls (phone calls on, reaching the runners'
 # simulated GPT-Live endpoint; evallib/phone_sim.py); `owner_inbox_cli`: with
 # --owner-inbox-cli (the owner's inbox is the local cli chat, which a message to
-# the owner reaches; evallib/owner_inbox.py).
-REQUIREMENTS = ("cues", "computers", "coding_signed_out", "phone_calls", "owner_inbox_cli")
+# the owner reaches; evallib/owner_inbox.py); `owner_inbox_app`: with
+# --owner-inbox-app (the owner's inbox is the Fermix app's chat on the companion
+# socket; evallib/owner_inbox.py, evallib/app_drive.py).
+REQUIREMENTS = ("cues", "computers", "coding_signed_out", "phone_calls", "owner_inbox_cli",
+                "owner_inbox_app")
 # A phone case's turn may instead be the call's own report (`await: call_report`:
 # no query, the out-of-turn turn Fermix starts when the call ends), or wait for
 # every call of the attempt to end before its query (`after: call_end`).
@@ -50,7 +54,7 @@ PLATFORMS = ("linux", "macos")
 _CASE_KEYS = {
     "id", "query", "turns", "expect", "rubric", "judge", "timeout_ms", "drive",
     "image", "images", "score", "checker", "requires_tools", "requires_tools_all",
-    "cross_session", "companion", "watch", "voice", "cue", "requires", "state",
+    "cross_session", "companion", "watch", "voice", "cue", "requires", "state", "app",
     "command",
 }
 _TURN_KEYS = {"query", "expect", "await", "after"}
@@ -128,8 +132,12 @@ EXPECT_SPEC: dict[str, tuple] = {
 # posts cues to the eval daemon's door and is capability-tier only
 # (evallib/cue_drive.py); `owner_command` sends each turn as a command the owner
 # types (`/confirm`, `/deny`), which the gateway answers with no model, in the
-# owner's own chat, and is capability-tier only.
-DRIVES = ("ask", "companion", "telegram_operator", "voice", "cue", "owner_command")
+# owner's own chat, and is capability-tier only; `app` is the Fermix app's chat on the
+# companion socket as the owner's inbox (M106 §8): the runner seeds the case's state
+# with the socket open, then runs its `app.steps` (wait for a heal's card or row,
+# answer the card as the app does, reconnect, type in the terminal chat, say
+# something), and is capability-tier only (evallib/app_drive.py).
+DRIVES = ("ask", "companion", "telegram_operator", "voice", "cue", "owner_command", "app")
 # The chats an `owner_command` case may type in: the owner's inbox chat (`fermix
 # ask`'s default session, where a card bound to the local CLI inbox answers from), or
 # the trial's own session, which is another chat.
@@ -199,6 +207,8 @@ class Case:
     #   the runner posts to the door; evallib/cue_drive.py.
     command: dict = field(default_factory=dict)  # drive: owner_command — `chat`, where
     #   the owner types: `inbox` (default) or `trial`. COMMAND_CHATS.
+    app: dict = field(default_factory=dict)  # drive: app — the `steps` the runner takes
+    #   on the companion socket once the state is seeded; evallib/app_drive.py.
     requires: tuple[str, ...] = ()  # what the eval home must be seeded with for this case
     #   beyond its suite's `requires` (REQUIREMENTS); run_eval.py holds it out without.
     phone_calls: bool = False       # its suite or itself requires `phone_calls`: its calls
@@ -822,6 +832,38 @@ def _cue_spec(cs: dict, drive: str, case_expect: dict, suite_name: str, cloc: st
     return {} if found else spec
 
 
+def _app_spec(cs: dict, drive: str, case_expect: dict, suite_name: str, cloc: str,
+              problems: list[str]) -> dict:
+    """Validate a case's `app:` map. An app case's outcome is what reached the app and
+    the rows its answers left, so it is a capability case whose json checker grades its
+    seeded state (`checker.state`) and the socket's events, and nothing else."""
+    if drive != "app":
+        if "app" in cs:
+            problems.append(f"{cloc}: `app` needs `drive: app`")
+        return {}
+    spec = cs.get("app")
+    if spec is None:
+        problems.append(f"{cloc}: `drive: app` needs an `app` map with its `steps`")
+        return {}
+    found = app_drive.spec_problems(spec, cloc)
+    if not suite_name.startswith(CAPABILITY_SUITE_PREFIX):
+        found.append(f"{cloc}: `drive: app` belongs to a capability suite (cap_*): its "
+                     "outcome is rows and events a checker grades, not a reply")
+    checker_spec = cs.get("checker")
+    if not isinstance(checker_spec, dict) or checker_spec.get("mode") != "json" \
+            or not checker_spec.get("state"):
+        found.append(f"{cloc}: a `drive: app` case is graded by a json-mode `checker` over "
+                     "its seeded `checker.state`")
+    for key in ("score", "rubric", "image", "images", "cross_session"):
+        if cs.get(key):
+            found.append(f"{cloc}: a `drive: app` case takes no `{key}`")
+    if case_expect:
+        found.append(f"{cloc}: a `drive: app` case declares what it requires in "
+                     f"`checker.expect`, not in `expect` ({sorted(case_expect)})")
+    problems.extend(found)
+    return {} if found else spec
+
+
 def _validate_watch(raw, rubric: str | None, cloc: str, problems: list[str]
                     ) -> tuple[tuple[int, str], ...]:
     """`watch: [{n, reason}]` on a numbered rubric. A watched requirement is still
@@ -996,9 +1038,10 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
                 drive = "ask"
             has_query = "query" in cs
             has_turns = "turns" in cs
-            if drive in ("voice", "cue"):
+            if drive in ("voice", "cue", "app"):
                 if has_query or has_turns:
-                    what = "says its `voice.clips`" if drive == "voice" else "posts its `cue.posts`"
+                    what = {"voice": "says its `voice.clips`", "cue": "posts its `cue.posts`",
+                            "app": "takes its `app.steps`"}[drive]
                     problems.append(f"{cloc}: a `drive: {drive}` case {what}; "
                                     "drop `query` and `turns`")
             elif has_query == has_turns:
@@ -1109,6 +1152,10 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
             cue_spec = _cue_spec(cs, drive, case_expect, str(name), cloc, problems)
             if cue_spec:
                 turns = [Turn(query=text, expect={}) for text in cue_drive.turn_texts(cue_spec)]
+            app_spec = _app_spec(cs, drive, case_expect, str(name), cloc, problems)
+            if app_spec:
+                turns = [Turn(query=json.dumps(step, sort_keys=True), expect={})
+                         for step in app_spec["steps"]]
 
             # `image: <path>` (single) or `images: [<path>...]` (multi-image /
             # album) names known local fixtures. `drive: ask` passes each one to
@@ -1161,6 +1208,7 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
                         requires_tools=requires_tools, cross_session=cross_session,
                         requires_tools_all=tuple(requires_all), companion=companion_spec,
                         watch=watch, voice=voice_spec, cue=cue_spec, command=command_spec,
+                        app=app_spec,
                         requires=case_requires,
                         phone_calls="phone_calls" in (*suite_requires, *case_requires),
                         state=state)
@@ -1201,8 +1249,8 @@ def _case_requirements(cs: dict, suite_name: str, where: str,
     """A case's own `requires:`, for a case whose suite runs without that seed.
 
     A capability suite may not declare it: `run_capability.py` holds a task out by
-    its suite's `cues` and `owner_inbox_cli` only, so the case would be driven on a
-    home that cannot measure it."""
+    its suite's `cues`, `owner_inbox_cli` and `owner_inbox_app` only, so the case
+    would be driven on a home that cannot measure it."""
     if "requires" not in cs:
         return ()
     if suite_name.startswith(CAPABILITY_SUITE_PREFIX):

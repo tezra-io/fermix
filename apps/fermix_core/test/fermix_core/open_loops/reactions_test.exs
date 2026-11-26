@@ -554,11 +554,50 @@ defmodule FermixCore.OpenLoops.ReactionsTest do
                  sent_opts(ctx, false)
                )
 
-      # The same inbox for a loop said elsewhere is still one whose reply is lost.
-      elsewhere = %{said_in_app | source_channel: "cli", source_chat_id: "session-7"}
+      # A loop said where no reply is captured (the terminal) is still skipped
+      # when its check-in goes to such an inbox.
+      elsewhere = %{loop | source_channel: "cli", source_chat_id: "session-7"}
+      to_slack = %{elsewhere | delivery_platform: "slack", delivery_destination: "U0RIVERA"}
 
       assert {:skipped, :reply_uncapturable} =
-               Reactions.record_sent(elsewhere, "How did it go?", @raised, sent_opts(ctx, false))
+               Reactions.record_sent(to_slack, "How did it go?", @raised, sent_opts(ctx, false))
+    end
+
+    # M106 §8 (stage S6): a loop said elsewhere is checked in on in the
+    # owner's inbox, the Fermix app's chat first while a phone is paired. The
+    # Mac's turns run in that conversation and a phone's join it, so the
+    # owner's reply typed on either is captured there.
+    test "a check-in in the Fermix app for a loop said elsewhere takes the reply typed there",
+         ctx do
+      # Noted in the terminal with a phone paired: the registry's ladder puts
+      # the check-in in the app's chat.
+      paired =
+        Keyword.merge(ctx.opts, FermixTestSupport.AppInbox.opts(%{"telegram" => FakeChannel}))
+
+      terminal = turn(ctx, %{conversation_key: {"cli", "session-7", :root}})
+
+      params = %{
+        "intention" => "Hear back from the Larchmont pottery residency",
+        "matters_by" => %{"type" => "date", "date" => "2031-06-10"},
+        "reach" => "message"
+      }
+
+      assert {:ok, %{loop: said_elsewhere}} = Registry.note(params, terminal, paired)
+
+      assert {said_elsewhere.source_channel, said_elsewhere.delivery_platform,
+              said_elsewhere.delivery_destination} == {"cli", "companion", "main"}
+
+      assert {:ok, %{rung: 2, source_channel: "companion", source_chat_id: "main"} = sent} =
+               Reactions.record_sent(
+                 said_elsewhere,
+                 "How did it go?",
+                 @raised,
+                 sent_opts(ctx, false)
+               )
+
+      app = turn(ctx, %{conversation_key: {"companion", "main", :root}, session_id: "sess_app"})
+      assert {:ok, 1} = Reactions.capture(app, "They said yes", later(@raised, @hour))
+      assert %{outcome: "replied", reply_text: "They said yes"} = row(ctx, sent.id)
     end
 
     # A check-in run that read outside content (a loop noted after it, a

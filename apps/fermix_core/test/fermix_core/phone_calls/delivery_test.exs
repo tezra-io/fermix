@@ -145,6 +145,12 @@ defmodule FermixCore.PhoneCalls.DeliveryTest do
       assert snapshot.delivery_mode == "channel"
       assert {snapshot.platform, snapshot.destination} == {"signal", "+14155550111"}
 
+      # M106 §8, D3: with a phone paired the report goes to the app's chat.
+      app = [owner_inbox: FermixTestSupport.AppInbox.opts()]
+
+      assert {:ok, %{origin_kind: "voice", platform: "companion", destination: "main"}} =
+               Delivery.snapshot(%{conversation_key: {"voice", "u-1", :root}}, true, app)
+
       none = [owner_inbox: [jobs_config: [], configured_owners: %{}]]
       assert {:error, :no_owner_inbox} = Delivery.snapshot(%{}, true, none)
     end

@@ -493,6 +493,69 @@ defmodule FermixChannels.Gateway.Commands.SandboxTest do
     end
   end
 
+  # M106 §8, D12 (stage S6): a heal's card in the Fermix app is answered by
+  # the heal's id from the Mac chat or a paired phone, the app's one origin,
+  # and from no other place, and never from a client Fermix itself started.
+  describe "a heal's card in the Fermix app" do
+    setup do
+      heal_card_setup(OwnerInbox.app_origin("main"))
+    end
+
+    test "the Mac chat's Approve makes the recorded change", ctx do
+      assert :ok = dispatch_proposal(app_message("companion", "/confirm #{ctx.heal.id}"), ctx)
+      assert_receive {:sandbox_reply, "Fermix made the change it proposed to job " <> _rest}
+      assert {:ok, %{schedule_expr: "every 2 hours"}} = job(ctx)
+
+      assert {:ok, %{decided_from: "companion:main:app", state: "watching"}} =
+               Repo.job_heals_call({:get, ctx.heal.id}, server: ctx.repo)
+    end
+
+    test "a paired phone's Deny leaves the job as it is", ctx do
+      assert :ok = dispatch_proposal(app_message("mobile", "/deny #{ctx.heal.id}"), ctx)
+      assert_receive {:sandbox_reply, "Job " <> rest}
+      assert rest =~ "is left as it is"
+
+      assert {:ok, %{state: "closed", outcome: "skipped"}} =
+               Repo.job_heals_call({:get, ctx.heal.id}, server: ctx.repo)
+    end
+
+    test "a DM or the cli chat cannot answer it, and it still waits", ctx do
+      {:ok, [cli]} = FermixChannels.CLI.parse_input("/confirm #{ctx.heal.id}", session_id: "main")
+
+      for elsewhere <- [dm("/confirm #{ctx.heal.id}"), cli] do
+        assert :ok = dispatch_proposal(elsewhere, ctx)
+        assert_receive {:sandbox_reply, "That card is not waiting in this chat; nothing ran."}
+      end
+
+      assert {:ok, %{schedule_expr: "every 1 hour"}} = job(ctx)
+
+      assert {:ok, %{state: "waiting", answer: nil}} =
+               Repo.job_heals_call({:get, ctx.heal.id}, server: ctx.repo)
+    end
+
+    test "a client Fermix started cannot answer it", ctx do
+      started = app_message("companion", "/confirm #{ctx.heal.id}", caller: :daemon_descendant)
+
+      assert {:error, :unauthorized} = dispatch_proposal(started, ctx)
+      assert_receive {:sandbox_reply, "This command must come from the owner in person" <> _rest}
+      assert {:ok, %{schedule_expr: "every 1 hour"}} = job(ctx)
+    end
+  end
+
+  # M19 §9.5: a card a turn raised stays its own transport's, though the
+  # Fermix app's two transports share one inbox for the cards no turn raised.
+  test "a grant a phone's turn proposed is confirmed from the phone alone", %{root: root} do
+    assert :ok = dispatch(app_message("mobile", "/grant path #{root}"))
+    assert_receive {:sandbox_approval, %{token: token}}
+    assert_receive {:sandbox_reply, _confirm_text}
+
+    assert :ok = dispatch(app_message("companion", "/confirm #{token}"))
+    assert_receive {:sandbox_reply, "Confirmation failed: :origin_mismatch"}
+
+    assert :ok = dispatch(app_message("mobile", "/confirm #{token}"))
+    assert_receive {:sandbox_reply, "Sandbox updated." <> _rest}
+  end
+
   # The eval home's inbox is the local cli chat: a card held to it is
   # answered by a `/confirm` typed there, as `fermix ask` types it, with no
   # model; another session of the cli is another chat.
@@ -720,6 +783,21 @@ defmodule FermixChannels.Gateway.Commands.SandboxTest do
 
   defp proposal_args, do: %{"owner" => "example-org", "repo" => "ops", "title" => "Phoenix 2.0"}
 
+  # A command typed in the Fermix app: on the Mac chat (`companion`) or a
+  # paired phone (`mobile`), in the app's chat `main`, with no user id, each
+  # transport authenticated by itself (the phone's device stands in here).
+  defp app_message(channel, content, metadata \\ []) do
+    Message.new!(%{
+      id: "app-#{System.unique_integer([:positive])}",
+      content: content,
+      sender: "Companion owner",
+      channel: channel,
+      chat_id: "main",
+      reply_target: "main",
+      metadata: Map.new(metadata)
+    })
+  end
+
   defp dm(content, owner \\ "owner-1") do
     %{message(content, user_id: owner) | chat_id: owner, reply_target: owner}
   end
@@ -766,6 +844,11 @@ defmodule FermixChannels.Gateway.Commands.SandboxTest do
       2_000 -> flunk("no confirm reply within 2s")
     end
   end
+
+  # A phone's command is the operator's by its paired device, which the
+  # transport proves and this test stands in for.
+  defp build_authorization(%Message{channel: "mobile"}),
+    do: %FermixChannels.Gateway.Authorization{role: :operator, trust: :operator}
 
   defp build_authorization(message) do
     case message |> Map.from_struct() |> Source.from_message() |> Authorizer.resolve() do

@@ -255,6 +255,36 @@ defmodule FermixChannels.Gateway.Commands.SkillsTest do
     assert denied =~ "/skills unpark #{row.token}"
   end
 
+  # M106 §8: with a phone paired a proposal is delivered to the Fermix app's
+  # chat, one conversation the Mac chat and the phone share: an answer typed
+  # on either is the owner's, by the one rule for an answer typed in the app.
+  test "a proposal delivered to the app is answered from the Mac chat or a paired phone", ctx do
+    for {stamped, answered} <- [{"companion", "mobile"}, {"mobile", "companion"}] do
+      row = insert_proposal!(ctx, %{skill_name: "tide_#{stamped}", task_signature: stamped})
+
+      {:ok, _} =
+        Proposals.stamp_origin(row.token, stamped, "main", ~U[2026-07-01 11:00:00Z],
+          repo: ctx.repo
+        )
+
+      assert :ok = dispatch("/skills deny #{row.token}", ctx, channel: answered, chat_id: "main")
+      assert_receive {:skills_reply, denied}
+      assert denied =~ "won't suggest that again"
+    end
+
+    # Any other chat is still another place.
+    row = insert_proposal!(ctx, %{skill_name: "tide_dm", task_signature: "dm"})
+
+    {:ok, _} =
+      Proposals.stamp_origin(row.token, "companion", "main", ~U[2026-07-01 11:00:00Z],
+        repo: ctx.repo
+      )
+
+    assert :ok = dispatch("/skills deny #{row.token}", ctx, chat_id: "owner-1")
+    assert_receive {:skills_reply, refusal}
+    assert refusal =~ "different chat"
+  end
+
   test "deny then unpark clears the disposition", ctx do
     row = insert_proposal!(ctx, %{})
 

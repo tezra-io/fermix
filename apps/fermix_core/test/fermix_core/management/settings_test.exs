@@ -275,6 +275,33 @@ defmodule FermixCore.Management.SettingsTest do
       assert %{"restart" => true} = row("personalization", "open_loops_enabled")
     end
 
+    # M106 §8: the footer names where suggestions arrive: the Fermix app as a
+    # place, never its internal word; a DM by its platform's word as before.
+    test "the skill-curation footer names the Fermix app as a place, a DM as it always did" do
+      jobs = Application.fetch_env(:fermix_core, :jobs)
+      telegram = Application.fetch_env(:fermix_channels, :telegram)
+
+      on_exit(fn ->
+        restore_fetched(:fermix_core, :jobs, jobs)
+        restore_fetched(:fermix_channels, :telegram, telegram)
+      end)
+
+      Application.delete_env(:fermix_channels, :telegram)
+
+      Application.put_env(:fermix_core, :jobs,
+        delivery_channels: FermixTestSupport.AppInbox.channels()
+      )
+
+      assert %{"footer" => "Suggestions arrive in the Fermix app."} =
+               row("personalization", "skill_curation_enabled")
+
+      Application.put_env(:fermix_core, :jobs, delivery_channels: %{})
+      Application.put_env(:fermix_channels, :telegram, owner_user_id: "40017")
+
+      assert %{"footer" => "Suggestions arrive in telegram."} =
+               row("personalization", "skill_curation_enabled")
+    end
+
     test "every channel section carries its credentials and a real enable toggle" do
       for channel <- Readiness.channels() do
         rows = rows("channels.#{channel}")
@@ -2800,4 +2827,7 @@ defmodule FermixCore.Management.SettingsTest do
 
   defp restore(app, key, nil), do: Application.delete_env(app, key)
   defp restore(app, key, value), do: Application.put_env(app, key, value)
+
+  defp restore_fetched(app, key, :error), do: Application.delete_env(app, key)
+  defp restore_fetched(app, key, {:ok, value}), do: Application.put_env(app, key, value)
 end

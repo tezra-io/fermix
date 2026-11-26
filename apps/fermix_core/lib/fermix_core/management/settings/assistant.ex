@@ -13,6 +13,7 @@ defmodule FermixCore.Management.Settings.Assistant do
   are what a client may offer inline, never the whole value space.
   """
 
+  alias FermixCore.Delivery.OwnerInbox
   alias FermixCore.Management.Settings.Row
   alias FermixCore.Management.Settings.Source
   alias FermixCore.Memory.CompactionConfig
@@ -195,7 +196,7 @@ defmodule FermixCore.Management.Settings.Assistant do
 
   defp skill_curation_footer do
     case SkillCurationDelivery.resolve_target() do
-      {:ok, target} -> "Suggestions arrive in #{target.platform}."
+      {:ok, target} -> "Suggestions arrive in #{OwnerInbox.place(target)}."
       :no_delivery_target -> "Suggestions wait until a channel owner is configured."
     end
   end

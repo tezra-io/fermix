@@ -5,6 +5,7 @@ defmodule FermixCore.Setup.Wizard do
 
   alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
   alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
+  alias FermixCore.Delivery.OwnerInbox
   alias FermixCore.Management.Settings.Channels.Inventory
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Net.Egress
@@ -656,14 +657,19 @@ defmodule FermixCore.Setup.Wizard do
     ]
   end
 
-  # MILESTONE_26_SKILL_CURATION §6.1: the personalization yes/no names where
-  # proposals will actually arrive, resolved from the same ladder delivery
-  # uses — pure config reads, safe at wizard time.
-  defp skill_curation_label do
+  @doc """
+  The setup question for `[fermix_core.skill_curation] enabled`
+  (MILESTONE_26_SKILL_CURATION §6.1): it names where proposals will actually
+  arrive, resolved from the same ladder delivery uses, the Fermix app by its
+  place name (M106 §8, `Delivery.OwnerInbox.place/1`). Pure config reads,
+  safe at wizard time.
+  """
+  @spec skill_curation_label() :: String.t()
+  def skill_curation_label do
     destination =
       case SkillCurationDelivery.resolve_target() do
         {:ok, target} ->
-          "Proposals will arrive in #{target.platform}."
+          "Proposals will arrive in #{OwnerInbox.place(target)}."
 
         :no_delivery_target ->
           "Proposals will wait in /skills proposals until a channel owner is configured."

@@ -13,8 +13,10 @@ defmodule FermixCore.Jobs.HealRun do
   The run, every write holding the lease:
 
     1. resolves the owner's inbox once, if the heal holds none, with
-       `Delivery.OwnerInbox.for_approval/1`, and stores it; with no inbox the
-       delivery is a dead letter, the heal waits, and nothing else is tried;
+       `Delivery.OwnerInbox.for_approval/2` for an approval card (the Fermix
+       app first while a phone is paired, M106 §8), and stores it; a stored
+       inbox never moves; with no inbox the delivery is a dead letter, the
+       heal waits, and nothing else is tried;
     2. diagnoses a heal on its first conclusion whose subject is its job and
        whose kind a model could help with (`Jobs.Failure.model_cannot_help?/1`
        false) and that holds no decision yet: one isolated loop
@@ -41,7 +43,10 @@ defmodule FermixCore.Jobs.HealRun do
     4. sends it once: a proposal on its first conclusion as its card, bound
        first to the inbox's chat under a `cp_` token that every retry of the
        send carries (`{:bind_card, ...}`), through the answer rail's one card
-       sender (`Cues.Proposals.send_card/3`); anything else through
+       sender (`Cues.Proposals.send_card/3`); in the Fermix app the message
+       goes first as a row, as a told one does, and then its card, routed by
+       the heal's id (`Jobs.HealCard`: a card the app is offered again from
+       the record); anything else through
        `Delivery.ChannelSend`, naming the job as its origin, link previews
        off. Each send carries its message's key (`HealMessage.send_key/1`):
        `job_heal:<id>` for the first message, its card form and every retry
@@ -55,8 +60,9 @@ defmodule FermixCore.Jobs.HealRun do
        writes the message to that conversation's history (for a card, its
        lines and its detail), every line of it but the note, which a model
        wrote after reading outside content (`HealMessage.history_copy/2`),
-       only for an inbox
-       keyed as a turn there is (`OwnerInbox.dm_origin/1`), and THEN asks for
+       only for an inbox keyed as a turn there is
+       (`OwnerInbox.history_conversation/1`: a DM, or the app's
+       conversation), and THEN asks for
        a rerun's one run through the path "run now" takes, once per heal (the
        ask stamped by that same write), recording what came of it
        (`rerun_outcome/2`): started, already running, refused (only what
@@ -140,7 +146,7 @@ defmodule FermixCore.Jobs.HealRun do
   `:repo`, `:conversation_store`, `:delivery_opts` (`ChannelSend`'s `:adapter`
   or `:channels`), `:card_sender` (the card sender `Cues.Proposals.send_card/3`
   takes as `:proposal_sender`; the registered one otherwise), `:inbox_opts`
-  (`OwnerInbox.for_approval/1`'s seams), `:clock`
+  (`OwnerInbox.for_approval/2`'s seams), `:clock`
   and `:clock_opts` (`FermixCore.Clock`'s); for the diagnosis
   `:capability_registry`, `:skill_registry`, `:scheduler` (the name the
   Scheduler a rerun's "run now" asks is registered under, never a pid, so a
@@ -208,7 +214,7 @@ defmodule FermixCore.Jobs.HealRun do
   end
 
   defp inbox(state) do
-    case OwnerInbox.for_approval(state.inbox_opts) do
+    case OwnerInbox.for_approval(:approval_card, state.inbox_opts) do
       {:ok, inbox} ->
         with :ok <- write(state, {:put_inbox, state.heal.id, token(state), inbox, now(state)}),
              do: {:ok, inbox}
@@ -440,20 +446,40 @@ defmodule FermixCore.Jobs.HealRun do
        )
        when is_map(change) do
     case OwnerInbox.answer_origin(inbox) do
-      {:ok, origin} -> card_out(state, origin, text, change)
+      {:ok, origin} -> card_out(state, inbox, origin, text, change)
       :error -> {:ok, {:text, text}}
     end
   end
 
   defp outgoing(_state, _inbox, text), do: {:ok, {:text, text}}
 
-  defp card_out(state, origin, text, change) do
+  # The bind records the chat the card's answer must come from, by the
+  # token's digest, for a chat's card and an app's alike. A chat's card
+  # carries that token; an app's is routed by the heal's id (`app_out/4`).
+  defp card_out(state, inbox, origin, text, change) do
     candidate = Proposals.new_token()
     card = %{token: candidate, digest: Proposals.digest(candidate), origin: origin}
 
     with {:ok, token} <- write_card(state, card) do
       shown = text |> String.split("\n") |> HealCard.card(change)
-      {:ok, {:card, shown, HealCard.spec(shown, token, state.heal)}}
+
+      if OwnerInbox.app?(inbox),
+        do: app_out(state, shown, text, change),
+        else: {:ok, {:card, shown, HealCard.spec(shown, token, state.heal)}}
+    end
+  end
+
+  # In the Fermix app (M106 §8, D12) a card is no message that stays: it
+  # vanishes when it resolves, and it is offered again from the record after
+  # every hello and restart, where no token is kept. So the message goes as a
+  # row, as a told one does, saying it waits on its card, and the card beside
+  # it stands alone (its job by name, the change's lines) and is routed by the
+  # heal's id, for its full seven days.
+  defp app_out(state, shown, text, change) do
+    with {:ok, job} <- Repo.get_scheduled_job(state.heal.job_id, server: state.repo) do
+      card = HealCard.app_card(job.name, change)
+      spec = HealCard.app_spec(card, state.heal.id, HealCard.card_ttl_s())
+      {:ok, {:app_card, shown, HealCard.app_row(text), spec}}
     end
   end
 
@@ -465,6 +491,14 @@ defmodule FermixCore.Jobs.HealRun do
 
   defp history_text({:text, text}), do: text
   defp history_text({:card, card, _spec}), do: HealCard.history_text(card)
+  defp history_text({:app_card, card, _row, _spec}), do: HealCard.history_text(card)
+
+  # In the app, the row and then the card: a retry sends the row again under
+  # its key, which the app's timeline answers as already sent.
+  defp send_once(state, inbox, {:app_card, card, row, spec}) do
+    with :ok <- send_once(state, inbox, {:text, row}),
+         do: send_once(state, inbox, {:card, card, spec})
+  end
 
   # The card through the answer rail's one sender, watched as a text is.
   defp send_once(state, inbox, {:card, _card, spec}) do
@@ -531,17 +565,17 @@ defmodule FermixCore.Jobs.HealRun do
   # (`HealMessage.history_copy/2`): the owner was sent it, and the main agent
   # reads it only through `get_job_run`, as outside content.
   defp record_history(state, inbox, text) do
-    case OwnerInbox.dm_origin(inbox) do
-      {:ok, _origin} -> add_history(state, inbox, HealMessage.history_copy(text, note(state)))
+    case OwnerInbox.history_conversation(inbox) do
+      {:ok, key} -> add_history(state, key, HealMessage.history_copy(text, note(state)))
       :error -> :ok
     end
   end
 
   defp note(%{heal: heal}), do: Map.get(heal, :note)
 
-  defp add_history(state, inbox, text) do
+  defp add_history(state, key, text) do
     :ok =
-      ConversationStore.add_message({inbox.platform, inbox.destination, :root}, "assistant", text,
+      ConversationStore.add_message(key, "assistant", text,
         kind: "chat_message",
         metadata: %{job_heal: state.heal.id},
         server: state.conversation_store

@@ -4044,6 +4044,19 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.status == :ok
       assert result.detail =~ "telegram:owner-1"
     end
+
+    # M106 §8: the Fermix app's inbox is named as a place, never its word.
+    test "names the Fermix app as a place when proposals deliver there" do
+      result =
+        Checks.skill_curation(
+          skill_curation_enabled: true,
+          memory_enabled: true,
+          delivery_target: {:ok, %{platform: "companion", destination: "main"}}
+        )
+
+      assert result.status == :ok
+      assert result.detail == "proposals deliver to the Fermix app"
+    end
   end
 
   describe "harness/1" do

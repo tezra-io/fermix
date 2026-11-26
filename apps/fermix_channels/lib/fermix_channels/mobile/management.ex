@@ -438,6 +438,54 @@ defmodule FermixChannels.Mobile.Management do
   def apply_iroh(on?, opts \\ []) when is_boolean(on?) and is_list(opts),
     do: MobileSupervisor.switch_iroh(on?, Keyword.take(opts, [:parent]))
 
+  @doc """
+  Whether a phone is paired here (M106 §8, D3): the phones' channel is on,
+  and its paired devices hold a phone whose pairing completed. The home's
+  computers are no phones. A phone approved that never said `hello` is a
+  pairing still in progress (the store replaces such a row when the same
+  phone is approved again), so it does not count; a phone not seen for weeks
+  does, since a row written while it is away reaches it at its next
+  connection. The one answer for the daemon and a tree-less CLI alike: the
+  running store while the channel runs, the stored file while it does not.
+  A store that cannot be read answers false and is logged. Seams: `:config`,
+  `:root`, `:whereis`, `:device_store`, `:list_devices`.
+  """
+  @spec phone_paired?(keyword()) :: boolean()
+  def phone_paired?(opts \\ []) when is_list(opts) do
+    enabled?(mobile_config(opts)) and
+      any_device?(
+        opts,
+        &(phone?(&1) and not is_nil(value(&1, :last_seen))),
+        "whether a phone is paired"
+      )
+  end
+
+  @doc """
+  Whether a computer of this home is linked here (M106 §8, D9): the phones'
+  channel is on, since a computer's link runs on it, and its paired devices
+  hold a computer, connected now or not, since a row written while it is
+  away reaches the Mac chat at its next connection. These rows are the home's
+  own record of its computers (`Home.Link.computer_rows/0` reads the same
+  ones, with whether each is connected). Read as `phone_paired?/1` reads, so
+  the daemon and a tree-less CLI give one answer; seams as there.
+  """
+  @spec computer_linked?(keyword()) :: boolean()
+  def computer_linked?(opts \\ []) when is_list(opts) do
+    enabled?(mobile_config(opts)) and
+      any_device?(opts, &(value(&1, :kind) == :desktop), "whether a computer is linked")
+  end
+
+  defp any_device?(opts, counts?, question) do
+    case paired_devices(opts) do
+      {:ok, devices} ->
+        Enum.any?(devices, counts?)
+
+      {:error, reason} ->
+        Logger.warning("#{question} could not be read, so none counts: #{inspect(reason)}")
+        false
+    end
+  end
+
   @doc "Fail-closed health for the runtime mobile channel adapter."
   @spec health() :: {:ok, map()} | {:error, term()}
   def health, do: health([])

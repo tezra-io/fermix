@@ -29,6 +29,36 @@ defmodule FermixCore.Delivery.OwnerInboxTest do
     def owner_inbox, do: :unavailable
   end
 
+  # The phones' channel with a phone whose pairing completed (M106 §8, D3).
+  defmodule PairedPhoneAdapter do
+    def send_message(_destination, _text, _opts), do: :ok
+    def owner_inbox, do: {:ok, "main"}
+    def phone_paired?, do: true
+  end
+
+  # The phones' channel running with no phone paired: on, and nobody to read.
+  defmodule UnpairedPhoneAdapter do
+    def send_message(_destination, _text, _opts), do: :ok
+    def owner_inbox, do: {:ok, "main"}
+    def phone_paired?, do: false
+  end
+
+  # The phones' channel of an Always On server: no phone, and a computer of
+  # the home linked to it (the owner's Mac, which tunnels the chat).
+  defmodule LinkedComputerAdapter do
+    def send_message(_destination, _text, _opts), do: :ok
+    def owner_inbox, do: {:ok, "main"}
+    def phone_paired?, do: false
+    def computer_linked?, do: true
+  end
+
+  # An adapter that answers the question with something it is not.
+  defmodule ConfusedPhoneAdapter do
+    def send_message(_destination, _text, _opts), do: :ok
+    def owner_inbox, do: {:ok, "main"}
+    def phone_paired?, do: :maybe
+  end
+
   @channels %{
     "telegram" => RemoteAdapter,
     "slack" => RemoteAdapter,
@@ -37,6 +67,11 @@ defmodule FermixCore.Delivery.OwnerInboxTest do
     "mobile" => AwayTransportAdapter,
     "cli" => RemoteAdapter
   }
+
+  @paired Map.put(@channels, "mobile", PairedPhoneAdapter)
+  @unpaired Map.put(@channels, "mobile", UnpairedPhoneAdapter)
+  @linked Map.put(@channels, "mobile", LinkedComputerAdapter)
+  @app %{platform: "companion", destination: "main", thread_scope: "root"}
 
   describe "on_platform/2" do
     test "a remote platform's inbox is the owner DM its owner id derives" do
@@ -169,7 +204,7 @@ defmodule FermixCore.Delivery.OwnerInboxTest do
     end
   end
 
-  describe "for_approval/1 (M97 §14: a sleeping Mac is no inbox for a prompt that waits)" do
+  describe "for_approval/2 (M97 §14: a sleeping Mac is no inbox for a prompt that waits)" do
     @owners %{"imessage" => "+15550104477", "telegram" => "owner-t"}
     @imessage_target [
       default_delivery_target: %{"channel" => "imessage", "chat_id" => "+15550104477"}
@@ -187,6 +222,7 @@ defmodule FermixCore.Delivery.OwnerInboxTest do
     test "iMessage on this Mac keeps its place, configured first" do
       assert {:ok, %{platform: "imessage", source: :configured}} =
                OwnerInbox.for_approval(
+                 :approval_card,
                  configured_owners: @owners,
                  jobs_config: @imessage_target,
                  imessage_carrier: :here
@@ -196,6 +232,7 @@ defmodule FermixCore.Delivery.OwnerInboxTest do
     test "iMessage a computer carries comes after a channel that lives on the server" do
       assert {:ok, %{platform: "telegram", source: :derived}} =
                OwnerInbox.for_approval(
+                 :approval_card,
                  configured_owners: @owners,
                  jobs_config: @imessage_target,
                  imessage_carrier: carried(true)
@@ -205,6 +242,7 @@ defmodule FermixCore.Delivery.OwnerInboxTest do
     test "iMessage a connected computer carries is chosen when it is the only inbox" do
       assert {:ok, %{platform: "imessage", destination: "+15550104477"}} =
                OwnerInbox.for_approval(
+                 :approval_card,
                  configured_owners: %{"imessage" => "+15550104477"},
                  jobs_config: [],
                  imessage_carrier: carried(true)
@@ -215,6 +253,7 @@ defmodule FermixCore.Delivery.OwnerInboxTest do
       for carrier <- [carried(false), :none, {:conflict, []}] do
         assert :no_delivery_target =
                  OwnerInbox.for_approval(
+                   :approval_card,
                    configured_owners: %{"imessage" => "+15550104477"},
                    jobs_config: @imessage_target,
                    imessage_carrier: carrier
@@ -225,10 +264,217 @@ defmodule FermixCore.Delivery.OwnerInboxTest do
     test "the carrier is not read when no iMessage inbox is a candidate" do
       assert {:ok, %{platform: "telegram"}} =
                OwnerInbox.for_approval(
+                 :approval_card,
                  configured_owners: %{"telegram" => "owner-t"},
                  jobs_config: [],
                  imessage_carrier: :not_read
                )
+    end
+  end
+
+  # M106 §8, D3, D9, D12: the Fermix app is the owner's inbox, first while a
+  # phone is paired and last when nothing else is, for telling and for asking
+  # on an approval card. A watcher's proposal card never goes there.
+  describe "the Fermix app's inbox" do
+    @dm %{"telegram" => "owner-t"}
+
+    test "a paired phone puts the app first, before every DM, for a tell and an ask" do
+      opts = [configured_owners: @dm, jobs_config: [delivery_channels: @paired]]
+
+      assert OwnerInbox.resolve(opts) == {:ok, Map.put(@app, :source, :derived)}
+      assert OwnerInbox.for_approval(:approval_card, opts) == OwnerInbox.resolve(opts)
+    end
+
+    test "without a paired phone the DM comes first, though the phones' channel is on" do
+      for channels <- [@unpaired, @channels, Map.delete(@channels, "mobile")] do
+        opts = [configured_owners: @dm, jobs_config: [delivery_channels: channels]]
+
+        assert {:ok, %{platform: "telegram", destination: "owner-t"}} = OwnerInbox.resolve(opts)
+
+        assert {:ok, %{platform: "telegram"}} =
+                 OwnerInbox.for_approval(:approval_card, opts ++ [app_surface?: true])
+      end
+    end
+
+    test "the Mac chat alone is an inbox, last, on an engine with an app (D9)" do
+      alone = [configured_owners: %{}, jobs_config: [delivery_channels: @unpaired]]
+
+      assert {:ok, %{platform: "companion", destination: "main"}} =
+               OwnerInbox.resolve(alone ++ [app_surface?: true])
+
+      assert {:ok, %{platform: "companion"}} =
+               OwnerInbox.for_approval(:approval_card, alone ++ [app_surface?: true])
+
+      assert :no_delivery_target = OwnerInbox.resolve(alone ++ [app_surface?: false])
+
+      assert :no_delivery_target =
+               OwnerInbox.for_approval(:approval_card, alone ++ [app_surface?: false])
+
+      with_dm = [configured_owners: @dm, jobs_config: [delivery_channels: @unpaired]]
+
+      assert {:ok, %{platform: "telegram"}} =
+               OwnerInbox.resolve(with_dm ++ [app_surface?: true])
+    end
+
+    # D9 on an Always On server (M106 §8): the home lives on an engine that is
+    # no app's, and the owner's Mac reaches the chat through its computer's
+    # link. A computer of the home is enough, connected or not.
+    test "on an engine that is no app's, a linked computer makes the Mac chat the inbox, last" do
+      server = [configured_owners: %{}, jobs_config: [delivery_channels: @linked]]
+
+      for opts <- [server ++ [app_surface?: false], server] do
+        assert {:ok, %{platform: "companion", destination: "main", source: :derived}} =
+                 OwnerInbox.resolve(opts)
+
+        assert {:ok, %{platform: "companion", destination: "main"}} =
+                 OwnerInbox.for_approval(:approval_card, opts)
+      end
+
+      with_dm = [configured_owners: @dm, jobs_config: [delivery_channels: @linked]]
+      assert {:ok, %{platform: "telegram"}} = OwnerInbox.resolve(with_dm)
+      assert {:ok, %{platform: "telegram"}} = OwnerInbox.for_approval(:approval_card, with_dm)
+
+      no_computer = [configured_owners: %{}, jobs_config: [delivery_channels: @unpaired]]
+      assert :no_delivery_target = OwnerInbox.resolve(no_computer ++ [app_surface?: false])
+
+      assert :no_delivery_target =
+               OwnerInbox.for_approval(:approval_card, no_computer ++ [app_surface?: false])
+    end
+
+    # The watcher cards' reach keeps its own, narrower question (ruling 3).
+    test "a linked computer changes nothing for a watcher's proposal card" do
+      assert :no_delivery_target =
+               OwnerInbox.for_approval(:proposal_card,
+                 configured_owners: %{},
+                 jobs_config: [delivery_channels: @linked]
+               )
+
+      assert {:ok, %{platform: "telegram"}} =
+               OwnerInbox.for_approval(:proposal_card,
+                 configured_owners: @dm,
+                 jobs_config: [delivery_channels: @linked]
+               )
+    end
+
+    test "a configured target still wins over a paired phone" do
+      opts = [
+        configured_owners: @dm,
+        jobs_config: [
+          delivery_channels: @paired,
+          default_delivery_target: [channel: "telegram", chat_id: "owner-t"]
+        ]
+      ]
+
+      assert {:ok, %{platform: "telegram", source: :configured}} = OwnerInbox.resolve(opts)
+      assert {:ok, %{platform: "telegram"}} = OwnerInbox.for_approval(:approval_card, opts)
+    end
+
+    test "a configured target naming the phone or the Mac chat is the app's inbox" do
+      for platform <- ["mobile", "companion"] do
+        opts = [
+          configured_owners: @dm,
+          jobs_config: [
+            delivery_channels: @unpaired,
+            default_delivery_target: [channel: platform, chat_id: "main"]
+          ]
+        ]
+
+        configured = Map.put(@app, :source, :configured)
+        assert OwnerInbox.resolve(opts) == {:ok, configured}
+        assert OwnerInbox.for_approval(:approval_card, opts) == {:ok, configured}
+      end
+
+      # A chat that is not the app's inbox is no inbox of the owner's.
+      other_chat = [
+        configured_owners: @dm,
+        jobs_config: [
+          delivery_channels: @unpaired,
+          default_delivery_target: [channel: "companion", chat_id: "work"]
+        ]
+      ]
+
+      assert {:ok, %{platform: "telegram", source: :derived}} = OwnerInbox.resolve(other_chat)
+    end
+
+    test "a watcher's proposal card goes where it went: a paired phone changes nothing" do
+      paired = [configured_owners: @dm, jobs_config: [delivery_channels: @paired]]
+
+      assert OwnerInbox.for_approval(:proposal_card, paired) ==
+               OwnerInbox.for_approval(:proposal_card,
+                 configured_owners: @dm,
+                 jobs_config: [delivery_channels: @channels]
+               )
+
+      assert {:ok, %{platform: "telegram", source: :derived}} =
+               OwnerInbox.for_approval(:proposal_card, paired)
+
+      # No DM: the app is no chat for it, paired, configured or alone.
+      app_target = [
+        delivery_channels: @paired,
+        default_delivery_target: [channel: "companion", chat_id: "main"]
+      ]
+
+      for opts <- [
+            [configured_owners: %{}, jobs_config: [delivery_channels: @paired]],
+            [configured_owners: %{}, jobs_config: app_target, app_surface?: true]
+          ] do
+        assert :no_delivery_target = OwnerInbox.for_approval(:proposal_card, opts)
+      end
+    end
+
+    test "a reminder's derived rung never holds the app" do
+      assert [%{platform: "telegram"}] =
+               OwnerInbox.derived_candidates(
+                 configured_owners: @dm,
+                 jobs_config: [delivery_channels: @paired]
+               )
+    end
+
+    test "a phones' channel that answers the question with no boolean fails loud" do
+      opts = [
+        configured_owners: @dm,
+        jobs_config: [delivery_channels: Map.put(@channels, "mobile", ConfusedPhoneAdapter)]
+      ]
+
+      assert_raise CaseClauseError, fn -> OwnerInbox.resolve(opts) end
+    end
+
+    test "the app's inbox is answered from the app's one origin, and kept in its conversation" do
+      origin = %{platform: "companion", chat_id: "main", user_id: "app"}
+
+      assert OwnerInbox.answer_origin(@app) == {:ok, origin}
+      assert OwnerInbox.app_origin("main") == origin
+      assert OwnerInbox.history_conversation(@app) == {:ok, {"companion", "main", :root}}
+
+      dm = %{platform: "signal", destination: "+15550100", thread_scope: "root"}
+      assert OwnerInbox.history_conversation(dm) == {:ok, {"signal", "+15550100", :root}}
+
+      for elsewhere <- [
+            %{platform: "slack", destination: "U1"},
+            %{platform: "cli", destination: "cli"},
+            %{platform: "mobile", destination: "main"}
+          ] do
+        assert OwnerInbox.history_conversation(elsewhere) == :error
+      end
+    end
+
+    test "an answer typed on the Mac chat or a paired phone is the app's, and nowhere else's" do
+      origin = %{platform: "companion", chat_id: "main", user_id: "app"}
+
+      assert OwnerInbox.answered_in_app("companion", "main") == {:ok, origin}
+      assert OwnerInbox.answered_in_app("mobile", "main") == {:ok, origin}
+
+      for platform <- ~w(telegram signal whatsapp imessage cli daemon slack voice) do
+        assert OwnerInbox.answered_in_app(platform, "main") == :error
+      end
+    end
+
+    test "a display names the app's inbox as a place, and every other as it always has" do
+      assert OwnerInbox.place(@app) == "the Fermix app"
+
+      for platform <- ~w(telegram signal whatsapp imessage slack discord cli) do
+        assert OwnerInbox.place(%{platform: platform, destination: "x"}) == platform
+      end
     end
   end
 

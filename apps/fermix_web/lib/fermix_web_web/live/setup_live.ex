@@ -19,6 +19,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.ComputerHistory.InstalledApps
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.SidecarInstaller
+  alias FermixCore.Delivery.OwnerInbox
   alias FermixCore.Harness.SignIn, as: HarnessSignIn
   alias FermixCore.Harness.Vendors, as: HarnessVendors
   alias FermixCore.Home.Role
@@ -2797,7 +2798,7 @@ defmodule FermixWebWeb.SetupLive do
   # delivery pass uses, pure config reads.
   defp skill_curation_destination do
     case SkillCurationDelivery.resolve_target() do
-      {:ok, target} -> "Proposals arrive in #{target.platform}."
+      {:ok, target} -> "Proposals arrive in #{OwnerInbox.place(target)}."
       :no_delivery_target -> "Proposals wait in /skills proposals until a channel owner is set."
     end
   end

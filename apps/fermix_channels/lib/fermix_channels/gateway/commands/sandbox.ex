@@ -12,6 +12,7 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   alias FermixChannels.Gateway.Message
   alias FermixCore.Capabilities.AccessGate
   alias FermixCore.Cues.Proposals
+  alias FermixCore.Delivery.OwnerInbox
   alias FermixCore.Harness.Ledger
   alias FermixCore.Sandbox.Config
   alias FermixCore.Sandbox.ConfigMutation
@@ -653,15 +654,23 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   defp held_title(%{mutation: {:add_allowed_root, path}}), do: "Access to #{path}"
   defp held_title(_record), do: "A sandbox change"
 
-  # Who answered, and where: core accepts the answer only from the owner's DM
-  # the proposal was sent to (platform, chat and user), so a group chat or
-  # another platform is refused there.
+  # Who answered, and where: core accepts the answer only from the chat the
+  # card was sent to (platform, chat and user), so a group chat or another
+  # platform is refused there. An answer typed in the Fermix app, on the Mac
+  # chat or a paired phone, is the app's one origin (M106 §8), by core's one
+  # rule for it (`OwnerInbox.answered_in_app/2`).
   defp proposal_origin(message) do
-    %{
-      platform: message.channel,
-      chat_id: message.chat_id,
-      user_id: stable_user_id(message.metadata || %{})
-    }
+    case OwnerInbox.answered_in_app(message.channel, message.chat_id) do
+      {:ok, app} ->
+        app
+
+      :error ->
+        %{
+          platform: message.channel,
+          chat_id: message.chat_id,
+          user_id: stable_user_id(message.metadata || %{})
+        }
+    end
   end
 
   # Core's seams for a test that runs the command against its own repo; the
@@ -782,10 +791,24 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
     }
   end
 
+  # A record a turn raised is answered from that turn's own chat and person.
+  # One bound to the Fermix app's inbox (an access confirmation that had no
+  # chat of its own, `Gateway.OwnerInboxApproval`) is answered from the app's
+  # one origin, which a message typed on the Mac chat or on a paired phone
+  # carries (`OwnerInbox.answered_in_app/2`); a turn's record never holds it.
   defp same_origin?(record, message) do
-    record.channel == message.channel and record.chat_id == message.chat_id and
-      record.thread_ts == message.thread_ts and
-      record.user_id == stable_user_id(message.metadata || %{})
+    {record.channel, record.chat_id, record.thread_ts, record.user_id} in answer_origins(message)
+  end
+
+  defp answer_origins(message) do
+    own =
+      {message.channel, message.chat_id, message.thread_ts,
+       stable_user_id(message.metadata || %{})}
+
+    case OwnerInbox.answered_in_app(message.channel, message.chat_id) do
+      {:ok, app} -> [own, {app.platform, app.chat_id, nil, app.user_id}]
+      :error -> [own]
+    end
   end
 
   defp token do

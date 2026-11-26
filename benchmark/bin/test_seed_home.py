@@ -984,6 +984,31 @@ def test_a_seed_without_owner_inbox_cli_puts_the_telegram_target_back(tmp_path, 
     assert "--owner-inbox-cli" in seed.owner_inbox.home_problem(str(home))
 
 
+def test_owner_inbox_app_makes_the_apps_chat_the_default_target(tmp_path, monkeypatch, capsys):
+    # M106 S6: a configured target naming the app's chat is the owner's own inbox, the
+    # companion socket's conversation `main`.
+    home = tmp_path / "x-eval"
+    on = _seed_main(monkeypatch, home, "--owner-inbox-app")
+    assert on["fermix_core"]["jobs"]["default_delivery_target"] == {"platform": "companion",
+                                                                     "chat_id": "main"}
+    manifest = json.loads((home / seed.owner_inbox.MANIFEST).read_text())
+    assert manifest == {"default_delivery_target": {"platform": "companion", "chat_id": "main"},
+                        "adapter": "FermixChannels.Channels.Companion"}
+    assert seed.owner_inbox.home_problem(str(home), "owner_inbox_app") is None
+    # The terminal chat's tasks are held out of this home, by the flag that seeds them.
+    assert "--owner-inbox-cli" in seed.owner_inbox.home_problem(str(home))
+    assert "owner inbox: the Fermix app's chat" in capsys.readouterr().out
+    off = _seed_main(monkeypatch, home)
+    assert off["fermix_core"]["jobs"]["default_delivery_target"]["platform"] == "telegram"
+    assert "--owner-inbox-app" in seed.owner_inbox.home_problem(str(home), "owner_inbox_app")
+
+
+def test_the_owner_has_one_inbox(tmp_path, monkeypatch):
+    with pytest.raises(SystemExit):
+        _seed_main(monkeypatch, tmp_path / "x-eval", "--owner-inbox-cli", "--owner-inbox-app")
+    assert not (tmp_path / "x-eval" / "config.toml").exists()
+
+
 def _throwaway_checkout(root):
     """A small git checkout with a commit, a _build and a deps dir, standing in for the
     harness's own checkout. Every git call names this repo."""

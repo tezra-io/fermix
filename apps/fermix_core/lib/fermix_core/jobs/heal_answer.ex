@@ -24,9 +24,12 @@ defmodule FermixCore.Jobs.HealAnswer do
   that nothing was and why, which the rail shows the owner. A recorded answer
   is the heal's `answered` phase, with the kind of surface it came from as its
   `platform` (the label's first part), and a heal it closed its `closed`
-  phase (`Jobs.Telemetry`).
+  phase (`Jobs.Telemetry`). Beside each, a card the Fermix app shows is told
+  how it ended (`Jobs.HealCard.announce_ended/3`): approved, denied, or
+  expired for an apply that found the job moved on.
   """
 
+  alias FermixCore.Jobs.HealCard
   alias FermixCore.Jobs.HealDecision
   alias FermixCore.Jobs.HealMessage
   alias FermixCore.Jobs.Registry
@@ -65,8 +68,9 @@ defmodule FermixCore.Jobs.HealAnswer do
 
   @doc """
   Applies the change heal `heal_id` proposed, answered from `decided_from`
-  (`companion`, `mobile:<device>`, a chat's platform) at `checks.now`.
-  `opts`: `:scheduler`, the Scheduler the edit is announced to.
+  (the rail's label for the chat it came from, `<platform>:<chat>:<user>`)
+  at `checks.now`. `opts`: `:scheduler`, the Scheduler the edit is announced
+  to, and `:app_card_listener` (`Jobs.HealCard`'s seam).
   """
   @spec apply_change(String.t(), String.t(), HealDecision.checks(), keyword()) :: result()
   def apply_change(heal_id, decided_from, checks, opts \\ [])
@@ -83,17 +87,19 @@ defmodule FermixCore.Jobs.HealAnswer do
 
   @doc """
   Leaves the change heal `heal_id` proposed unmade, answered from
-  `decided_from` at `checks.now`: the heal closes skipped.
+  `decided_from` at `checks.now`: the heal closes skipped. `opts`:
+  `:app_card_listener`.
   """
-  @spec leave(String.t(), String.t(), HealDecision.checks()) :: result()
-  def leave(heal_id, decided_from, checks)
+  @spec leave(String.t(), String.t(), HealDecision.checks(), keyword()) :: result()
+  def leave(heal_id, decided_from, checks, opts \\ [])
       when is_binary(heal_id) and is_binary(decided_from) and decided_from != "" and
-             is_map(checks) do
+             is_map(checks) and is_list(opts) do
     with {:ok, heal, job} <- waiting(heal_id, checks) do
       case Repo.job_heals_call({:leave, heal.id, answer(decided_from, checks)}, repo(checks)) do
         {:ok, _closed} ->
           trace_answer(job, heal, "leave", false, decided_from)
           trace_closed(job, heal, "skipped")
+          HealCard.announce_ended([heal.id], :denied, card_opts(checks, opts))
 
           {:ok, :left,
            "Job #{job_words(job.name)} is left as it is: the change Fermix proposed was not " <>
@@ -267,11 +273,13 @@ defmodule FermixCore.Jobs.HealAnswer do
     case Registry.heal_write(heal.id, job.id, {:update, attrs}, {:answer, answer}, registry_opts) do
       {:ok, {:written, written, _moved}} ->
         trace_answer(job, heal, "apply", true, answer.decided_from)
+        HealCard.announce_ended([heal.id], :approved, card_opts(checks, opts))
         {:ok, :applied, applied(written, heal.change)}
 
       {:ok, {:moved_on, _closed}} ->
         trace_answer(job, heal, "apply", false, answer.decided_from)
         trace_closed(job, heal, "superseded")
+        HealCard.announce_ended([heal.id], :expired, card_opts(checks, opts))
         superseded(job)
 
       {:error, :not_waiting} ->
@@ -293,6 +301,9 @@ defmodule FermixCore.Jobs.HealAnswer do
   # --- shared ------------------------------------------------------------------------
 
   defp answer(decided_from, checks), do: %{at: checks.now, decided_from: decided_from}
+
+  defp card_opts(checks, opts),
+    do: [repo: checks.repo] ++ Keyword.take(opts, [:app_card_listener])
 
   # Where the answer came from, as a trace may say it: the surface's kind
   # (`telegram`, `companion`), never a chat or a user.

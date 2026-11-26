@@ -40,6 +40,25 @@ defmodule FermixCore.Jobs.HealRunTest do
     defp next([head | tail]), do: {head, tail}
   end
 
+  # The Fermix app's two channels (M106 §8, stage S6): the Mac chat names its
+  # inbox, which IS this module's named Agent, so its send is observed as
+  # every other here; the phones' channel has a phone whose pairing completed.
+  @app_channel :job_heal_run_app_inbox
+
+  defmodule AppChannel do
+    @moduledoc false
+    def send_message(destination, text, opts),
+      do: ScriptedChannel.send_message(destination, text, opts)
+
+    def owner_inbox, do: {:ok, "job_heal_run_app_inbox"}
+  end
+
+  defmodule PairedPhone do
+    @moduledoc false
+    def send_message(_destination, _text, _opts), do: :ok
+    def phone_paired?, do: true
+  end
+
   # The model a job's heal is diagnosed with (stage S3), here one that gives
   # no decision, so every run sends the message from Fermix's facts alone,
   # as this stage's sends are tested; the decisions have their own tests
@@ -189,6 +208,45 @@ defmodule FermixCore.Jobs.HealRunTest do
 
       assert [%{text: ^text}, %{text: ^text}] = calls(ctx)
       assert {:ok, %{inbox_destination: ^first, state: "waiting"}} = get_heal(ctx, heal.id)
+    end
+
+    # M106 §8, D3: with a phone paired the app is the owner's inbox; the heal's
+    # message is a row in its timeline and a history row in its conversation,
+    # where the Mac's and the phone's turns run.
+    test "with a phone paired, the message is a row in the app and kept in its conversation",
+         ctx do
+      app = %{ctx | channel: @app_channel}
+      start_channel(app, [:ok])
+      {job, heal} = claimed_heal!(ctx)
+
+      run!(ctx, heal, inbox_opts: app_inbox_opts())
+
+      assert [%{text: text, opts: opts}] = calls(app)
+      assert text =~ ~s(Job "#{job.name}")
+      assert Keyword.fetch!(opts, :proactive_key) == "job_heal:#{heal.id}"
+      assert Keyword.fetch!(opts, :origin) == %{"kind" => "job", "name" => job.name}
+
+      assert {:ok, %{inbox_platform: "companion", inbox_destination: destination}} =
+               get_heal(ctx, heal.id)
+
+      assert destination == Atom.to_string(@app_channel)
+
+      assert [%{role: "assistant", content: ^text}] =
+               ConversationStore.get_history({"companion", destination, :root}, server: ctx.store)
+    end
+
+    test "an inbox stored as a DM is kept after a phone is paired", ctx do
+      start_channel(ctx, [{:error, {:transport, :timeout}}, :ok])
+      {_job, heal} = claimed_heal!(ctx)
+      run!(ctx, heal)
+
+      assert {:ok, %{inbox_platform: "telegram", state: "open"}} = get_heal(ctx, heal.id)
+
+      {:ok, reclaimed} = claim(ctx, DateTime.add(@now, 30, :second))
+      run!(ctx, reclaimed, inbox_opts: app_inbox_opts())
+
+      assert [%{text: text}, %{text: text}] = calls(ctx)
+      assert {:ok, %{inbox_platform: "telegram", state: "waiting"}} = get_heal(ctx, heal.id)
     end
 
     test "an inbox not keyed as a turn is gets the message and no history row", ctx do
@@ -368,6 +426,13 @@ defmodule FermixCore.Jobs.HealRunTest do
 
   defp owners_on(platform, destination),
     do: [jobs_config: [], configured_owners: %{platform => destination}]
+
+  # A home with a Telegram DM and a paired phone: the app comes first.
+  defp app_inbox_opts,
+    do: [
+      jobs_config: [delivery_channels: %{"companion" => AppChannel, "mobile" => PairedPhone}],
+      configured_owners: %{"telegram" => "40017"}
+    ]
 
   defp run!(ctx, heal, overrides \\ []) do
     pid = start_heal_run!(ctx, heal, overrides)

@@ -776,9 +776,12 @@ defmodule FermixCore.Cues.Mandates do
       else: {:error, :repo_not_running}
   end
 
+  # Where a mandate's proposal card is asked: a chat, never the app, which
+  # shows it on its own proposal surface (`app_surface?/1`).
   defp owner_inbox(opts),
     do:
       OwnerInbox.for_approval(
+        :proposal_card,
         Keyword.take(opts, [:jobs_config, :configured_owners, :imessage_carrier])
       )
 

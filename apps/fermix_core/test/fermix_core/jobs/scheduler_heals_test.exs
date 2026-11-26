@@ -15,6 +15,7 @@ defmodule FermixCore.Jobs.SchedulerHealsTest do
   alias FermixCore.Jobs.Scheduler
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
+  alias FermixTestSupport.HealCards
   alias FermixTestSupport.SafeRm
   alias FermixTestSupport.TelemetryCapture
 
@@ -324,6 +325,31 @@ defmodule FermixCore.Jobs.SchedulerHealsTest do
     assert {:ok, %{state: "waiting"}} = get_heal(ctx, recent)
   end
 
+  # M106 §8 (stage S6): a proposal's card in the Fermix app is told it
+  # expired when the pass closes its heal; a chat's card is told nothing.
+  test "the pass that expires a proposal tells the app its card expired", ctx do
+    test_pid = self()
+    app = %{platform: "companion", chat_id: "main", user_id: "app"}
+    %{heal: in_app} = HealCards.waiting_card!(ctx.repo, app)
+    %{heal: in_chat} = HealCards.waiting_card!(ctx.repo, %{app | platform: "telegram"})
+    listener = fn profile, id, outcome -> send(test_pid, {:card_ended, profile, id, outcome}) end
+    days_on = DateTime.add(HealCards.delivered_at(), 7 * 86_400, :second)
+
+    _scheduler =
+      start_scheduler(ctx,
+        clock: fn -> days_on end,
+        heal_card_opts: [app_card_listener: listener]
+      )
+
+    for id <- [in_app.id, in_chat.id] do
+      assert {:ok, %{state: "closed", outcome: "expired"}} = get_heal(ctx, id)
+    end
+
+    assert_receive {:card_ended, "main", id, :expired}
+    assert id == in_app.id
+    refute_received {:card_ended, _profile, _id, _outcome}
+  end
+
   defp start_scheduler(ctx, opts) do
     name = :"scheduler_heals_#{System.unique_integer([:positive])}"
 
@@ -347,6 +373,7 @@ defmodule FermixCore.Jobs.SchedulerHealsTest do
            :delivery_adapter,
            :conversation_store,
            :heal_inbox_opts,
+           :heal_card_opts,
            :max_active_runs
          ])}
 

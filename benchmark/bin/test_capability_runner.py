@@ -446,8 +446,31 @@ def test_a_home_whose_inbox_is_not_the_local_chat_holds_the_heal_tasks_out(tmp_p
 
     manifest = home / rc.owner_inbox.MANIFEST
     manifest.parent.mkdir(parents=True)
-    manifest.write_text("{}")
+    manifest.write_text(json.dumps({"default_delivery_target": rc.owner_inbox.TARGET}))
     assert rc._hold_out_unseeded_inbox(cfg, rows) == (rows, [])
+
+
+def test_the_app_inbox_tasks_need_a_home_whose_inbox_is_the_app(tmp_path, capsys):
+    # M106 S6: a home seeded for the terminal chat holds the app's tasks out, and the
+    # app's home the terminal chat's, each NOT EVALUATED with the flag that seeds it.
+    cap_dir = os.path.join(os.path.dirname(HERE), "suites", "capability")
+    loaded = {s.name: s for s in suites.load_all(cap_dir, include_candidates=True)}
+    app, cli = loaded["cap_job_heal_app_inbox"], loaded["cap_job_auto_heal"]
+    rows = [(suite, scn, case) for suite in (app, cli) for scn in suite.scenarios
+            for case in scn.cases]
+    home = tmp_path / "x-eval"
+    manifest = home / rc.owner_inbox.MANIFEST
+    manifest.parent.mkdir(parents=True)
+    cfg = SimpleNamespace(daemon=SimpleNamespace(fermix_home=str(home)))
+    for target, kept_suite, flag in ((rc.owner_inbox.TARGET, "cap_job_auto_heal",
+                                      "--owner-inbox-app"),
+                                     (rc.owner_inbox.APP_TARGET, "cap_job_heal_app_inbox",
+                                      "--owner-inbox-cli")):
+        manifest.write_text(json.dumps({"default_delivery_target": target}))
+        kept, unmet = rc._hold_out_unseeded_inbox(cfg, rows)
+        assert {row[0].name for row in kept} == {kept_suite}
+        assert unmet and all(flag in why for _suite, _case, why in unmet)
+    assert "NOT EVALUATED" in capsys.readouterr().out
 
 
 def test_all_shipped_capability_scenarios_declare_a_risk():
@@ -1838,6 +1861,57 @@ def test_an_owner_command_with_no_reply_is_an_invalid_trial(tmp_path, monkeypatc
     trial, _trace, _models = rc._command_trial(cfg, SimpleNamespace(name="cap_x"), case, "run",
                                                0, "task", root, str(tmp_path))
     assert trial.status == "not_running" and not trial.valid and "evidence" not in seen
+
+
+def _app_case(steps=("await_card", {"answer": "approve"})):
+    return SimpleNamespace(
+        id="approve_on_the_app_card", drive="app", app={"steps": list(steps)},
+        timeout_ms=1000, turns=[SimpleNamespace(query=json.dumps(s), expect={}) for s in steps],
+        checker_spec={"script": "chk.py", "mode": "json", "reset": [],
+                      "state": "fixtures/state/holds.json", "expect": {"job": "holds"}})
+
+
+def test_an_app_trial_seeds_with_the_socket_open_and_hands_the_checker_its_events(
+        tmp_path, monkeypatch):
+    # M106 S6: the drive opens the socket, then asks the runner to seed, so the heal's
+    # live row and card reach it; a terminal command goes through `fermix ask`.
+    cfg, root, order, seen = _command_world(tmp_path, monkeypatch, ["Not from here."])
+    app = {"connections": [{"hello": [], "events": [{"type": "approval"}]}],
+           "card": {"token": "jhl_1"}, "steps": [],
+           "replies": [{"command": "/confirm jhl_1", "session": "cli", "reply": "x"}]}
+
+    def fake_app_drive(home, spec, marker, seed, cli, timeout_s):
+        order.append("connect")
+        seed()
+        order.append(("cli", cli("/confirm jhl_1")))
+        assert home == cfg.daemon.fermix_home and marker.startswith("e2e-app")
+        return app, None
+
+    monkeypatch.setattr(rc.app_drive, "drive", fake_app_drive)
+    trial, trace_id, models = rc._app_trial(cfg, SimpleNamespace(name="cap_x"), _app_case(),
+                                            "run", 0, "task", root, str(tmp_path))
+    assert order == ["connect", "seed", (rc.OWNER_CHAT, "/confirm jhl_1"),
+                     ("cli", "Not from here.")]
+    assert seen["evidence"]["app"] == app and seen["evidence"]["state"] == {"now": "x"}
+    assert seen["evidence"]["replies"] == app["replies"] and seen["reply"] == "x"
+    assert trial.status == "ok" and trial.effective_success == 1.0 and trial.safety_ok is True
+    assert trace_id is None and models == [] and trial.cost_known is False
+
+
+def test_an_app_trial_whose_socket_refused_is_invalid(tmp_path, monkeypatch):
+    cfg, root, _order, seen = _command_world(tmp_path, monkeypatch, [])
+    monkeypatch.setattr(rc.app_drive, "drive",
+                        lambda *_a, **_k: ({"connections": []}, "cannot connect to x"))
+    trial, _trace, _models = rc._app_trial(cfg, SimpleNamespace(name="cap_x"), _app_case(),
+                                           "run", 0, "task", root, str(tmp_path))
+    assert trial.status == "not_running" and not trial.valid and "evidence" not in seen
+
+
+def test_planned_turns_prices_an_app_case_by_what_the_owner_says():
+    cases = [(SimpleNamespace(name="s"), None, _app_case()),
+             (SimpleNamespace(name="s"), None,
+              _app_case(steps=("await_card", {"say": "move it to 6:45"})))]
+    assert rc._planned_turns(cases) == 1
 
 
 def test_planned_turns_prices_no_typed_owner_command():

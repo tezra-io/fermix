@@ -621,9 +621,12 @@ defmodule FermixCore.Cues.Proposals do
 
   # The owner's DM and the origin a confirm from it carries
   # (`OwnerInbox.dm_origin/1` owns the rule that makes that origin checkable).
+  # A watcher's card is a proposal card, which the phone's wire does not
+  # carry: the app is never its chat, and a paired phone changes nothing.
   defp owner_dm(opts) do
     with {:ok, inbox} <-
            OwnerInbox.for_approval(
+             :proposal_card,
              Keyword.take(opts, [:jobs_config, :configured_owners, :imessage_carrier])
            ),
          {:ok, origin} <- OwnerInbox.dm_origin(inbox) do

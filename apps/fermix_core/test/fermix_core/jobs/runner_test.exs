@@ -2009,7 +2009,8 @@ defmodule FermixCore.Jobs.RunnerTest do
         inactivity_timeout_ms: Keyword.get(opts, :inactivity_timeout_ms),
         delivery_adapter: Keyword.get(opts, :delivery_adapter),
         delivery_opts: Keyword.get(opts, :delivery_opts, []),
-        delivery_timeout_ms: Keyword.get(opts, :delivery_timeout_ms)
+        delivery_timeout_ms: Keyword.get(opts, :delivery_timeout_ms),
+        heal_card_opts: Keyword.get(opts, :heal_card_opts, [])
       )
 
     assert_receive {:EXIT, ^pid, :normal}, Keyword.get(opts, :exit_timeout_ms, @runner_exit_ms)
@@ -3600,6 +3601,47 @@ defmodule FermixCore.Jobs.RunnerTest do
         assert {:ok, %{state: "closed", outcome: "healed"}} =
                  Repo.job_heals_call({:get, id}, server: repo)
       end
+    end
+
+    # M106 §8 (stage S6): a proposal's card in the Fermix app is told it
+    # expired when the job's next run is clean and closes its heal.
+    test "an ok run that closes a proposal's heal tells the app its card expired", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      test_pid = self()
+      app = %{platform: "companion", chat_id: "main", user_id: "app"}
+      %{job: job, heal: heal} = FermixTestSupport.HealCards.waiting_card!(repo, app)
+      now = DateTime.utc_now()
+
+      {:ok, {_job, run}} =
+        Repo.claim_job_now(
+          job.id,
+          %{state: "running", updated_at: now},
+          claim_run_attrs(job, now, "manual"),
+          server: repo
+        )
+
+      assert_runner_exits_normally(job, run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir,
+        delivery_adapter: RecordingDelivery,
+        delivery_opts: [test_pid: test_pid],
+        script: [%{content: "Tides fetched."}],
+        heal_card_opts: [
+          app_card_listener: fn profile, id, outcome ->
+            send(test_pid, {:card_ended, profile, id, outcome})
+          end
+        ]
+      )
+
+      assert {:ok, %{state: "closed", outcome: "healed"}} =
+               Repo.job_heals_call({:get, heal.id}, server: repo)
+
+      assert_received {:card_ended, "main", id, :expired}
+      assert id == heal.id
     end
 
     test "the fourth provider failure in a row is exhausted: a heal on its provider, no line", %{

@@ -337,4 +337,5 @@ def main():
                  f"{heal['answer']}), the job as that leaves it", safety_ok=True)
 
 
-main()
+if __name__ == "__main__":
+    main()

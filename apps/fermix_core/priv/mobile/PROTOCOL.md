@@ -887,32 +887,54 @@ that already ended changes nothing.
 
 ## Approvals
 
-When a tool needs the owner's approval, the daemon sends `approval`. Its
-`kind` is `sandbox` or `soul`. The client answers by sending one of the routes
-as a `command`: drop the leading `/`, the first word is `name` and the rest is
-`args`. `/confirm TOKEN` is `command{name:"confirm", args:"TOKEN"}`, and
-`/soul apply TOKEN` is `command{name:"soul", args:"apply TOKEN"}`. The token is
-submitted, never rendered.
+When the owner's approval is needed, the daemon sends `approval`: for a tool
+a turn is waiting on, or for something Fermix asks the owner in the app with
+no turn (below). Its `kind` is `sandbox`, `soul` or `job_change`; a client
+draws a kind it does not know as it draws any other card. The client answers
+by sending one of the routes as a `command`: drop the leading `/`, the first
+word is `name` and the rest is `args`. `/confirm TOKEN` is
+`command{name:"confirm", args:"TOKEN"}`, and `/soul apply TOKEN` is
+`command{name:"soul", args:"apply TOKEN"}`. The token is submitted, never
+rendered.
 
-- A card belongs to the transport whose turn raised it, the only one its token
-  resolves from: a phone's turn's card goes to phones only, and a Mac's to the
-  Mac only. Its re-send, expiry and resolution go to that transport too.
+- A card a turn raised belongs to the transport whose turn raised it, the
+  only one its token resolves from: a phone's turn's card goes to phones only,
+  and a Mac's to the Mac only. Its re-send, expiry and resolution go to that
+  transport too.
+- A card Fermix asks in the app with no turn, while the app is the owner's
+  inbox (a paired phone makes it so), goes to the phones and the Mac alike, is
+  answered from either, and its re-send and resolution go to both: an access
+  confirmation that had no chat of its own, and a change a heal proposes for
+  a scheduled job (`kind` `job_change`, whose `text` is the job and each
+  changed field, and whose `detail` holds every changed field whole).
 - `approval_resolved{approval_id, outcome}` withdraws it: `approved` or
-  `denied` when the owner answered, `expired` when its `ttl_s` ran out.
+  `denied` when the owner answered, `expired` when its `ttl_s` ran out or it
+  can no longer be answered.
 - Right after `hello_ack`, in the same push, the daemon sends again every card
-  of the profile still waiting that phones raised, oldest first, each with
-  `ttl_s` set to the seconds it has left, rounded up. A client keys cards by
+  of the profile still waiting that a phone's turn raised or that was asked in
+  the app, oldest first, a `job_change` card after the rest, each with `ttl_s`
+  set to the seconds it has left, rounded up. A client keys cards by
   `approval_id`, so a card it already shows is replaced, not doubled.
 - When `hello_ack` arrives, a client drops every card it shows and keeps only
   the ones the daemon sends after it. `approval_resolved` goes only to the
   connections open when a card is answered or expires, so a card that ended
   while the phone was away is never withdrawn: it is simply not sent again.
-- Waiting cards live in the daemon's memory, as their tokens do: a restart
-  forgets them without resolving them, so a client also drops a card when its
-  own `ttl_s` runs out. The daemon keeps at most 64; past that a card still
-  goes out live but is not sent again, so a reconnect drops it.
-- A card a phone's turn raises also sends each registered phone that is not
-  connected then a push with no content (see *Push notifications*).
+- A `job_change` card is kept in the home's record, not in memory, and lives
+  up to seven days: its `ttl_s` is what is left of them, up to 604,800. It is
+  sent again after every `hello_ack` while it waits, after a restart too, and
+  `approval_resolved` ends it however it ends: `approved` (the change was
+  made), `denied` (the job was left as it is), or `expired` (the seven days
+  passed, the owner edited, paused or resumed the job so the proposal no
+  longer applies, the job ran cleanly, or the job was removed). Its `token`
+  and its routes name the proposal, and `/confirm` or `/deny` with it is
+  answered from the app and nowhere else.
+- Every other card lives in the daemon's memory, as its token does: a restart
+  forgets it without resolving it, so a client also drops a card when its own
+  `ttl_s` runs out. The daemon keeps at most 64 of these; past that a card
+  still goes out live but is not sent again, so a reconnect drops it.
+- A card a phone's turn raises, and one asked in the app, also sends each
+  registered phone that is not connected then a push with no content, which
+  lives as long as the card does (see *Push notifications*).
 
 ## Attachments
 
@@ -1093,8 +1115,8 @@ application/json` and the body
 ```
 
 `ttl` is how long Google keeps the message for a phone it cannot reach:
-86,400 seconds (a day) for a row and 300 (five minutes) for an approval, since
-an alert after the approval expired is noise. `body` is the sealed message in
+86,400 seconds (a day) for a row and, for an approval, as long as the card
+itself lives, at most a day, since an alert after the approval ended is noise. `body` is the sealed message in
 base64url without padding, always 2,867 characters. No credential goes with
 it, and the address travels in the body alone. The relay hands Google a
 high-priority message whose one data field, `m`, holds `body`, with no

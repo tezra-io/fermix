@@ -45,7 +45,10 @@
 # also names what came of its ask (`rerun_outcome`), recorded through the same call; a
 # proposal is stored with the job version it was drawn for, which the owner's answer to
 # it is fenced on, and may be followed by the owner's own edit (`owner_edit`), which
-# supersedes it.
+# supersedes it. A `tell` or `propose` conclusion timed `decided_minutes_after` instead
+# is recorded and NOT sent: the heal run that held it stopped after its decision, as one
+# that dies does, so its lease has run out and the daemon's next pass claims it, resolves
+# the owner's inbox itself, and sends it (for a proposal, its card), with no model.
 # Nothing is sent and the job is not touched otherwise: the spec states the job as the
 # decision left it (a raised limit already raised, a proposal not applied). Every job and
 # run is checked before the reset, so a refused spec leaves the home as it was.
@@ -105,7 +108,10 @@ defmodule SeedState do
   @tally_read_statuses ~w(ok error timeout)
   @heal_decisions ~w(rerun raise_limit propose tell)
   @heal_keys ~w(decision note change read_outside rerun_outcome delivered_minutes_after
-                owner_edit)
+                decided_minutes_after owner_edit)
+  # The decisions whose send a seed may leave to the daemon: neither moves the job, and
+  # neither asks for a run after it is sent.
+  @unsent_decisions ~w(tell propose)
   # What a seeded owner's edit after a proposal may change, as `Jobs.Registry`
   # takes it: each moves the job's definition, so the edit supersedes the proposal.
   @owner_edit_fields %{
@@ -496,15 +502,47 @@ defmodule SeedState do
   # delivery marked, which takes it where its decision says. Nothing is sent, and the
   # job is as the spec states it. `check_jobs!/2` made sure no other heal is open, so
   # the claim's oldest open heal is this run's.
+  defp conclude_heal!(job, %{"decided_minutes_after" => _minutes} = heal, at, config),
+    do: decide_unsent!(job, heal, at, config)
+
   defp conclude_heal!(job, heal, at, config) do
     lease_until = DateTime.add(at, @seeded_lease_s, :second)
     {id, token} = claim_seeded_heal!(job, at, lease_until)
-    {:ok, inbox} = OwnerInbox.for_approval(jobs_config: config.jobs, configured_owners: %{})
+    inbox = seeded_inbox!(config)
     :ok = Repo.job_heals_call({:put_inbox, id, token, inbox, at})
     :ok = conclude_message!(seeded_plan(heal, job), {id, token}, inbox, at, config)
     :ok = Repo.job_heals_call({:delivered, id, token, at})
     record_rerun_outcome!(id, heal, at)
     owner_edit!(job, Map.get(heal, "owner_edit"))
+  end
+
+  # A conclusion whose send is left to the daemon: the decision recorded under a lease
+  # that ends a second after it, as a heal run that died after deciding leaves it, and
+  # nothing else. No inbox is stored (the daemon's heal run resolves it, the rule under
+  # test) and no message for a tell (the run builds it); a proposal keeps the short ask
+  # its card is held to, fitted against the inbox this home's rule gives, as a heal run
+  # stores it with its decision, and its card is bound by the send that offers it.
+  defp decide_unsent!(job, heal, at, config) do
+    {id, token} = claim_seeded_heal!(job, at, DateTime.add(at, 1, :second))
+    :ok = decide_message!(seeded_plan(heal, job), {id, token}, seeded_inbox!(config), at, config)
+  end
+
+  defp decide_message!(%{decision: "propose"} = plan, {id, token}, inbox, at, config) do
+    case fitted_proposal(plan, id, inbox, config) do
+      {:offered, offered} -> Repo.job_heals_call({:decided, id, token, offered, at})
+      {:kept, kept} -> decide_message!(kept, {id, token}, inbox, at, config)
+    end
+  end
+
+  defp decide_message!(plan, {id, token}, _inbox, at, _config),
+    do: Repo.job_heals_call({:decided, id, token, plan, at})
+
+  # The owner's inbox for a heal's card, by the engine's own rule and this home's config.
+  defp seeded_inbox!(config) do
+    {:ok, inbox} =
+      OwnerInbox.for_approval(:approval_card, jobs_config: config.jobs, configured_owners: %{})
+
+    inbox
   end
 
   # The owner's own edit of the job after its proposal reached them, through the
@@ -524,21 +562,13 @@ defmodule SeedState do
   # decision, and the card is bound to that chat under a fresh token, as a send
   # leaves it. Every other decision's message is built from the store's facts.
   defp conclude_message!(%{decision: "propose"} = plan, {id, token}, inbox, at, config) do
-    {:ok, facts} = Repo.job_heals_call({:message_facts, id})
-    facts = Map.merge(facts, %{decision: "propose", note: plan.note, change: plan.change})
-    lines = HealMessage.card_lines(facts, personalization: config.personalization)
-    chars = lines |> HealCard.card(plan.change) |> HealCard.chars()
-    origin = OwnerInbox.answer_origin(inbox)
-
-    case HealDecision.fit_card(plan, match?({:ok, _}, origin), chars) do
-      %{decision: "propose"} = offered ->
-        offered = Map.put(offered, :message, Enum.join(lines, "\n"))
+    case fitted_proposal(plan, id, inbox, config) do
+      {:offered, offered} ->
         :ok = Repo.job_heals_call({:decided, id, token, offered, at})
-        {:ok, card_origin} = origin
+        {:ok, card_origin} = OwnerInbox.answer_origin(inbox)
         bind_card!(id, token, card_origin, at)
 
-      kept ->
-        IO.puts(:stderr, "seed: heal #{id}'s proposal kept as tell: #{kept.refusal_detail}")
+      {:kept, kept} ->
         conclude_message!(kept, {id, token}, inbox, at, config)
     end
   end
@@ -548,6 +578,26 @@ defmodule SeedState do
     {:ok, facts} = Repo.job_heals_call({:message_facts, id})
     text = HealMessage.build(facts, personalization: config.personalization)
     Repo.job_heals_call({:put_message, id, token, text, at})
+  end
+
+  # A proposal's short ask built from the facts with its decision, held to its card's
+  # bound and to an inbox whose chat can answer it (`HealDecision.fit_card/3`), as a heal
+  # run fits it: offered with that ask as its message, or kept as tell.
+  defp fitted_proposal(plan, id, inbox, config) do
+    {:ok, facts} = Repo.job_heals_call({:message_facts, id})
+    facts = Map.merge(facts, %{decision: "propose", note: plan.note, change: plan.change})
+    lines = HealMessage.card_lines(facts, personalization: config.personalization)
+    chars = lines |> HealCard.card(plan.change) |> HealCard.chars()
+    chat? = match?({:ok, _origin}, OwnerInbox.answer_origin(inbox))
+
+    case HealDecision.fit_card(plan, chat?, chars) do
+      %{decision: "propose"} = offered ->
+        {:offered, Map.put(offered, :message, Enum.join(lines, "\n"))}
+
+      kept ->
+        IO.puts(:stderr, "seed: heal #{id}'s proposal kept as tell: #{kept.refusal_detail}")
+        {:kept, kept}
+    end
   end
 
   defp bind_card!(id, token, origin, at) do
@@ -647,12 +697,13 @@ defmodule SeedState do
   end
 
   defp owner_inbox!(config) do
-    case OwnerInbox.for_approval(jobs_config: config.jobs, configured_owners: %{}) do
+    case OwnerInbox.for_approval(:approval_card, jobs_config: config.jobs, configured_owners: %{}) do
       {:ok, _inbox} ->
         :ok
 
       other ->
-        raise "a seeded heal needs the owner's inbox to be local (--owner-inbox-cli): #{inspect(other)}"
+        raise "a seeded heal needs an owner's inbox a send reaches (--owner-inbox-cli or " <>
+                "--owner-inbox-app): #{inspect(other)}"
     end
   end
 
@@ -816,7 +867,20 @@ defmodule SeedState do
     check_change!(key, spec, decision, Map.get(heal, "change"))
     check_rerun_outcome!(key, decision, next_run, Map.get(heal, "rerun_outcome"))
     check_owner_edit!(key, spec, decision, Map.get(heal, "owner_edit"))
+    check_unsent!(key, decision, heal)
   end
+
+  # A send left to the daemon: a decision that moves nothing and asks for no run, with
+  # nothing after it that a sent message would come first for.
+  defp check_unsent!(key, decision, %{"decided_minutes_after" => _minutes} = heal) do
+    unless decision in @unsent_decisions and not Map.has_key?(heal, "owner_edit"),
+      do:
+        raise(
+          "jobs #{key}: a seeded heal whose send is left to the daemon (decided_minutes_after) is one of #{inspect(@unsent_decisions)} with no owner_edit, got #{inspect(heal)}"
+        )
+  end
+
+  defp check_unsent!(_key, _decision, _heal), do: :ok
 
   # An owner's edit after a proposal: on a proposal only, each field one the edit
   # path takes, each value a change from what the spec states.

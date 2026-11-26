@@ -13,8 +13,10 @@ defmodule FermixChannels.Channels.Companion do
   broadcasts the logical events to every connection watching the profile,
   through the `registry/0` those connections join after their handshake. A row
   it writes reaches the phones too (`Companion.Fanout`), and a delivery is
-  pushed to them while their channel runs; an approval stays on this socket,
-  the only transport its token resolves from. A turn's replies
+  pushed to them while their channel runs; an approval a turn here raised
+  stays on this socket, the only transport its token resolves from, and one
+  asked in the owner's inbox when that is the app goes to the phones too
+  (`send_approval/2`). A turn's replies
   and its ending go through `Companion.Turns`, which writes and announces them
   only once the queue fires the turn's outcome.
 
@@ -278,16 +280,48 @@ defmodule FermixChannels.Channels.Companion do
   end
 
   @doc """
-  Deliver a kind-aware approval card with exact approve and deny routes, to
-  this socket's connections alone: its token resolves only from here (M19
-  §9.5). It is kept until it resolves or expires, for a client that connects
-  later.
+  Deliver a kind-aware approval card with exact approve and deny routes.
+
+  A card a turn on this socket raised goes to this socket's connections
+  alone: its token resolves only from here (M19 §9.5). It is kept until it
+  resolves or expires, for a client that connects later.
+
+  A card asked in the owner's inbox when that is the Fermix app (M106 §8,
+  D12; the message `Gateway.OwnerInboxApproval` hands over, marked
+  `owner_inbox`) is answered from the Mac chat or a paired phone, so it goes
+  to both, and each paired phone that is away is pushed, for as long as the
+  card lives: an access confirmation that had no chat of its own, kept as a
+  turn's card is, and a heal's proposal for a job (`:job_change`), offered
+  and never kept, since its record offers it again after every hello.
   """
   @impl true
   @spec send_approval(Message.t(), map()) :: :ok | {:error, term()}
+  def send_approval(%Message{} = message, %{kind: :job_change, text: text, token: token} = spec)
+      when is_binary(text) and is_binary(token) do
+    %{"ttl_s" => ttl_s} = card = Output.approval(spec)
+    :ok = Approvals.offer(Approvals.server(), message.chat_id, card)
+    push_approval(message.chat_id, ttl_s)
+  end
+
+  def send_approval(
+        %Message{metadata: %{owner_inbox: true}} = message,
+        %{kind: kind, text: text, token: token} = spec
+      )
+      when kind in [:sandbox, :soul] and is_binary(text) and is_binary(token) do
+    %{"ttl_s" => ttl_s} = card = Output.approval(spec)
+    :ok = Approvals.announce(Approvals.server(), message.chat_id, card, :all)
+    push_approval(message.chat_id, ttl_s)
+  end
+
   def send_approval(%Message{} = message, %{kind: kind, text: text, token: token} = spec)
       when kind in [:sandbox, :soul] and is_binary(text) and is_binary(token) do
     Approvals.announce(Approvals.server(), message.chat_id, Output.approval(spec), :companion)
+  end
+
+  # A card in the owner's inbox reaches the paired phones that are away while
+  # their channel runs, as a delivered row does (`push_delivered/4`).
+  defp push_approval(profile_id, ttl_s) do
+    if MobileSupervisor.running?(), do: Mobile.push_approval(profile_id, ttl_s), else: :ok
   end
 
   @doc """

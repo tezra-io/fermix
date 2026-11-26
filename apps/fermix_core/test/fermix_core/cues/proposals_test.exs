@@ -199,6 +199,56 @@ defmodule FermixCore.Cues.ProposalsTest do
     end
   end
 
+  # M106 §8: a watcher's card is a proposal card, which the phone's wire does
+  # not carry. With the Fermix app first for every other ask while a phone is
+  # paired, a watcher's card still goes where it went: the owner's DM, else
+  # the app's own proposal surface on an engine with an app, else nowhere.
+  describe "a watcher's card where a phone is paired" do
+    test "still goes to the owner's DM, and with none goes where it went with none" do
+      paired = [jobs_config: [delivery_channels: FermixTestSupport.AppInbox.channels()]]
+
+      assert {:ok, {%{platform: "telegram", destination: "40017"}, origin}} =
+               Proposals.owner_chat(paired ++ [configured_owners: %{"telegram" => "40017"}])
+
+      assert origin == %{platform: "telegram", chat_id: "40017", user_id: "40017"}
+
+      assert {:ok, nil} =
+               Proposals.owner_chat(paired ++ [configured_owners: %{}, app_surface?: true])
+
+      assert {:refuse, _sentence} =
+               Proposals.owner_chat(paired ++ [configured_owners: %{}, app_surface?: false])
+    end
+  end
+
+  # M106 §8, D9: a computer of this home linked to an engine that is no app's
+  # makes the Mac chat the inbox for every other ask, last; a watcher's card
+  # keeps its reach, since the apps show it on their own proposal surface.
+  describe "a watcher's card where a computer is linked" do
+    defmodule LinkedComputer do
+      def send_message(_destination, _text, _opts), do: :ok
+      def owner_inbox, do: {:ok, "main"}
+      def phone_paired?, do: false
+      def computer_linked?, do: true
+    end
+
+    test "still goes to the owner's DM, and with none has no reach on an engine that is no app's" do
+      linked = [
+        jobs_config: [
+          delivery_channels: %{
+            "companion" => FermixTestSupport.AppInbox.MacChat,
+            "mobile" => LinkedComputer
+          }
+        ],
+        app_surface?: false
+      ]
+
+      assert {:ok, {%{platform: "telegram", destination: "40017"}, _origin}} =
+               Proposals.owner_chat(linked ++ [configured_owners: %{"telegram" => "40017"}])
+
+      assert {:refuse, _sentence} = Proposals.owner_chat(linked ++ [configured_owners: %{}])
+    end
+  end
+
   describe "approve mode needs a chat that can confirm (C55)" do
     test "a home whose only chats are the Mac app and the phone refuses the mandate at load" do
       fixture = F.cue_run("prop_c55")

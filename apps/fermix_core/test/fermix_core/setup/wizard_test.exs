@@ -954,6 +954,24 @@ defmodule FermixCore.Setup.WizardTest do
     assert Keyword.get(persisted.fermix_core, :open_loops) == [enabled: false]
   end
 
+  # M106 §8: the skill-curation question names where proposals arrive: the
+  # Fermix app as a place, every other inbox by its platform's word as before.
+  test "the skill-curation question names the Fermix app as a place, a DM as it always did" do
+    jobs = Application.fetch_env(:fermix_core, :jobs)
+    on_exit(fn -> restore_env(:fermix_core, :jobs, jobs) end)
+
+    Application.put_env(:fermix_core, :jobs,
+      delivery_channels: FermixTestSupport.AppInbox.channels()
+    )
+
+    assert Wizard.skill_curation_label() =~ "Proposals will arrive in the Fermix app."
+
+    Application.put_env(:fermix_core, :jobs, delivery_channels: %{})
+    Application.put_env(:fermix_channels, :telegram, owner_user_id: "40017")
+
+    assert Wizard.skill_curation_label() =~ "Proposals will arrive in telegram."
+  end
+
   test "the open_loops question says a check-in arrives where the owner mentioned it" do
     label = Wizard.open_loops_label()
 

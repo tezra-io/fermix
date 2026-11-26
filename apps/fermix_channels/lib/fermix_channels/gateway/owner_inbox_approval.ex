@@ -8,17 +8,21 @@ defmodule FermixChannels.Gateway.OwnerInboxApproval do
 
   It composes three existing seams and adds no delivery path of its own:
 
-    1. `FermixCore.Delivery.OwnerInbox.for_approval/1`, the one answer to "where
-       is the owner's inbox" for a prompt that waits on the owner (iMessage that
-       a computer carries comes last, and never while that computer is away).
-       Only an inbox `OwnerInbox.dm_origin/1` answers for
-       qualifies (Telegram, Signal, WhatsApp, iMessage): on those the DM's chat
-       id is the owner's user id, so the owner's `/confirm` there passes the
-       pending record's origin check. That rule lives in core alone.
-    2. `Commands.Sandbox.store_pending_grant/2`, binding the token to that DM.
-       A repeat while the token lives answers `:existing` and sends nothing.
+    1. `FermixCore.Delivery.OwnerInbox.for_approval/2`, the one answer to "where
+       is the owner's inbox" for an approval card that waits on the owner (the
+       Fermix app first while a phone is paired; iMessage that a computer
+       carries comes last, and never while that computer is away). Only an
+       inbox an answer can be held to qualifies: a DM `OwnerInbox.dm_origin/1`
+       answers for (Telegram, Signal, WhatsApp, iMessage), whose chat id is the
+       owner's user id, or the Fermix app's inbox (M106 §8, D12), answered
+       from the Mac chat or a paired phone as the app's one origin
+       (`OwnerInbox.answer_origin/1`). That rule lives in core alone.
+    2. `Commands.Sandbox.store_pending_grant/2`, binding the token to that
+       origin. A repeat while the token lives answers `:existing` and sends
+       nothing.
     3. `Gateway.Delivery`, the single channel-delivery path, so Telegram renders
-       its one-tap button and every other channel the tap-to-copy command.
+       its one-tap button, the app its approval card on the Mac and the
+       phones, and every other channel the tap-to-copy command.
 
   A failed delivery takes the token back, so no confirmable record exists that
   the owner never saw. A request marked `in_call: true` is a call that waits in
@@ -102,8 +106,9 @@ defmodule FermixChannels.Gateway.OwnerInboxApproval do
   Telegram draws it with its two answers, whose taps send the same
   `/confirm <token>` and `/deny <token>` the card's text answers for every
   other channel. The inbox must be one a card's answer can come from
-  (`OwnerInbox.answer_origin/1`: the owner's DM, or the local `cli` chat,
-  which a watcher's reach never chooses). A spec's `proactive_key` rides on
+  (`OwnerInbox.answer_origin/1`: the owner's DM, the Fermix app's inbox, or
+  the local `cli` chat, the last two of which a watcher's reach never
+  chooses). A spec's `proactive_key` rides on
   the message the channel is handed, so a channel whose helper answers a
   repeated send by its key (iMessage) never shows a retried card twice.
   Nothing is stored here: the card and its token's digest are durable in
@@ -201,15 +206,24 @@ defmodule FermixChannels.Gateway.OwnerInboxApproval do
 
   defp owner_dm(opts) do
     case OwnerInbox.for_approval(
+           :approval_card,
            Keyword.take(opts, [:jobs_config, :configured_owners, :imessage_carrier])
          ) do
-      {:ok, inbox} -> with {:ok, origin} <- dm_inbox(inbox), do: {:ok, inbox, origin}
+      {:ok, inbox} -> with {:ok, origin} <- confirm_origin(inbox), do: {:ok, inbox, origin}
       :no_delivery_target -> {:error, :no_owner_inbox}
     end
   end
 
-  defp dm_inbox(inbox) do
-    case OwnerInbox.dm_origin(inbox) do
+  # The owner's DM, or the Fermix app's inbox (an answer from its Mac chat
+  # or a paired phone). Never the local cli chat, whose confirmation this
+  # path has never sent.
+  defp confirm_origin(inbox) do
+    result =
+      if OwnerInbox.app?(inbox),
+        do: OwnerInbox.answer_origin(inbox),
+        else: OwnerInbox.dm_origin(inbox)
+
+    case result do
       {:ok, origin} -> {:ok, origin}
       :error -> {:error, :no_owner_inbox}
     end
@@ -248,6 +262,9 @@ defmodule FermixChannels.Gateway.OwnerInboxApproval do
     end
   end
 
+  # Marked `owner_inbox`: no turn raised what goes through it, so a channel
+  # that keeps a turn's card for that turn's transport alone (the Mac chat)
+  # gives it to the owner's inbox as a whole (`Channels.Companion`).
   defp inbox_message(%{platform: platform, destination: owner}) do
     Message.new!(%{
       id: "owner-inbox-#{System.unique_integer([:positive])}",
@@ -257,7 +274,7 @@ defmodule FermixChannels.Gateway.OwnerInboxApproval do
       chat_id: owner,
       reply_target: owner,
       thread_ts: nil,
-      metadata: %{user_id: owner, chat_type: "private"}
+      metadata: %{user_id: owner, chat_type: "private", owner_inbox: true}
     })
   end
 end

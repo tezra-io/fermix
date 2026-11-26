@@ -347,8 +347,8 @@ def requirement_problem(need: str, home: str, reset_home: bool = False) -> str |
         return None if reset_home else (
             "a phone case runs only with --reset-home, each attempt from the seeded home "
             "(its five daily attempts and one call slot)")
-    if need == owner_inbox.REQUIREMENT:
-        return owner_inbox.home_problem(home)
+    if need in owner_inbox.INBOXES:
+        return owner_inbox.home_problem(home, need)
     raise ValueError(f"unknown requirement {need!r}")
 
 

@@ -44,6 +44,12 @@ defmodule SeedRunTimesTest do
     [start] = SeedRunTimes.starts!(job("40 5 * * *", [concluded]), @zone, later)
     assert local(start) == "Mon 23 05:40"
     assert DateTime.compare(SeedRunTimes.concluded(concluded, start), later) == :lt
+
+    # A conclusion whose send is left to the daemon is timed the same way.
+    left = run(%{"fires_ago" => 1, "heal" => %{"decided_minutes_after" => 180}})
+    [start] = SeedRunTimes.starts!(job("40 5 * * *", [left]), @zone, later)
+    assert local(start) == "Mon 23 05:40"
+    assert DateTime.diff(SeedRunTimes.concluded(left, start), start) == 40 + 180 * 60
   end
 
   test "a weekly schedule counts back in weeks" do
@@ -86,6 +92,13 @@ defmodule SeedRunTimesTest do
         {"a manual run at a fire time", %{"trigger" => "manual", "fires_ago" => 1}},
         {"a duration that is not whole", %{"fires_ago" => 1, "duration_seconds" => 40.5}},
         {"a conclusion with no time", %{"fires_ago" => 1, "heal" => %{"decision" => "tell"}}},
+        {"a conclusion both sent and left to send",
+         %{
+           "fires_ago" => 1,
+           "heal" => %{"delivered_minutes_after" => 5, "decided_minutes_after" => 5}
+         }},
+        {"a send left with a time that is not whole",
+         %{"fires_ago" => 1, "heal" => %{"decided_minutes_after" => 2.5}}},
         {"a retry trigger", %{"trigger" => "retry", "hours_ago" => 1}}
       ] do
     test "refused: #{label}" do

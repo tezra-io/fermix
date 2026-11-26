@@ -37,6 +37,7 @@ defmodule FermixCore.Jobs.Scheduler do
   alias FermixCore.Jobs.CueAdmission
   alias FermixCore.Jobs.CueRun
   alias FermixCore.Jobs.Failure
+  alias FermixCore.Jobs.HealCard
   alias FermixCore.Jobs.HealRun
   alias FermixCore.Jobs.Runner
   alias FermixCore.Jobs.RunnerSupervisor
@@ -237,8 +238,11 @@ defmodule FermixCore.Jobs.Scheduler do
       run_monitors: %{},
       heal_runs: %{},
       heal_run_module: Keyword.get(opts, :heal_run_module, HealRun),
-      # `Delivery.OwnerInbox.for_approval/1`'s seams for the heal runs (tests).
+      # `Delivery.OwnerInbox.for_approval/2`'s seams for the heal runs (tests).
       heal_inbox_opts: Keyword.get(opts, :heal_inbox_opts, []),
+      # `Jobs.HealCard.announce_ended/3`'s listener seam, for this Scheduler's
+      # expiry and its runners' clean settles (tests).
+      heal_card_opts: Keyword.get(opts, :heal_card_opts, []),
       conversation_store: Keyword.get(opts, :conversation_store, ConversationStore),
       # Whether the last reconcile scan succeeded, so the monitors hold every
       # surviving runner; set by `reconcile_active_runs/1`.
@@ -1054,7 +1058,8 @@ defmodule FermixCore.Jobs.Scheduler do
         timeout_ms: state.timeout_ms,
         inactivity_timeout_ms: state.inactivity_timeout_ms,
         notify: state.runner_notify,
-        start_delay_ms: startup_stagger_ms(state)
+        start_delay_ms: startup_stagger_ms(state),
+        heal_card_opts: state.heal_card_opts
       ]
 
     case RunnerSupervisor.start_run(state.runner_supervisor, opts) do
@@ -1381,6 +1386,7 @@ defmodule FermixCore.Jobs.Scheduler do
     case Repo.job_heals_call({:expire_waiting, state.clock.()}, state.repo_opts) do
       {:ok, heals} ->
         Enum.each(heals, &trace_expired/1)
+        HealCard.announce_ended(Enum.map(heals, & &1.id), :expired, heal_card_opts(state))
         state
 
       {:error, reason} ->
@@ -1399,6 +1405,13 @@ defmodule FermixCore.Jobs.Scheduler do
       outcome: "expired"
     })
   end
+
+  # A proposal's card the Fermix app shows is told its proposal expired (M106
+  # §8); the store this Scheduler uses is the one read.
+  defp heal_card_opts(state),
+    do:
+      [repo: state.repo] ++
+        Keyword.take(state.repo_opts, [:timeout, :on_timeout]) ++ state.heal_card_opts
 
   defp schedule_due_timer(state, outcome \\ :ok) do
     cancel_timer(state.due_timer)

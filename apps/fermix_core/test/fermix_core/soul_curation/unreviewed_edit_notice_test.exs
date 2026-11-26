@@ -42,6 +42,19 @@ defmodule FermixCore.SoulCuration.UnreviewedEditNoticeTest do
     assert_received {:sent, "owner-1", ^expected}
   end
 
+  # M106 §8, D3: with a phone paired the owner's inbox is the Fermix app's
+  # chat; `/soul revert` is typed there as anywhere else.
+  test "with a phone paired deliver sends the line to the app's chat" do
+    assert :ok =
+             UnreviewedEditNotice.deliver(
+               @event,
+               FermixTestSupport.AppInbox.opts() ++ [adapter: RecordingChannel]
+             )
+
+    expected = UnreviewedEditNotice.text(@event)
+    assert_received {:sent, "main", ^expected}
+  end
+
   test "deliver never falls back to a group chat when no owner inbox exists" do
     assert :no_delivery_target =
              UnreviewedEditNotice.deliver(@event,

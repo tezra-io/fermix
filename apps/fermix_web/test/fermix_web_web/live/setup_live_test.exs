@@ -6025,6 +6025,38 @@ defmodule FermixWebWeb.SetupLiveTest do
       refute html =~ ~s(name="coding_form[harness_approved]")
     end
 
+    # M106 §8: the line names where proposals arrive: the Fermix app as a
+    # place, never its internal word; a DM by its platform's word as before.
+    test "the skill-curation line names the Fermix app as a place, a DM as it always did", %{
+      conn: conn
+    } do
+      jobs = Application.fetch_env(:fermix_core, :jobs)
+      telegram = Application.fetch_env(:fermix_channels, :telegram)
+
+      on_exit(fn ->
+        restore_env(:fermix_core, :jobs, jobs)
+        restore_env(:fermix_channels, :telegram, telegram)
+      end)
+
+      Application.delete_env(:fermix_channels, :telegram)
+
+      Application.put_env(:fermix_core, :jobs,
+        delivery_channels: FermixTestSupport.AppInbox.channels()
+      )
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element("button[phx-value-tab=\"personalization\"]") |> render_click()
+      assert html =~ "Proposals arrive in the Fermix app."
+      refute html =~ "Proposals arrive in companion."
+
+      Application.put_env(:fermix_core, :jobs, delivery_channels: %{})
+      Application.put_env(:fermix_channels, :telegram, owner_user_id: "40017")
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element("button[phx-value-tab=\"personalization\"]") |> render_click()
+      assert html =~ "Proposals arrive in telegram."
+    end
+
     test "the skill-curation toggle renders checked by default and names the destination", %{
       conn: conn
     } do

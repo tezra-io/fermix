@@ -1407,6 +1407,31 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     assert approvals =~ "When `hello_ack` arrives, a client drops every card it shows"
   end
 
+  # M106 §8, §11.1 (stage S6): a card Fermix asks in the app with no turn
+  # goes to the phones and the Mac, a heal's (`job_change`) is kept in the
+  # home's record and sent again after every hello_ack, a restart too, and
+  # an approval's push lives as long as its card. No field and no version
+  # moved for it: only what the document says is true now.
+  test "documentation says what an approval asked in the app is, and how long its push lives",
+       %{protocol: protocol} do
+    [_before, approvals] = String.split(protocol, "## Approvals", parts: 2)
+    [approvals | _rest] = String.split(approvals, "\n## ", parts: 2)
+    approvals = String.replace(approvals, ~r/\s+/, " ")
+    squashed = String.replace(protocol, ~r/\s+/, " ")
+
+    assert approvals =~ "Its `kind` is `sandbox`, `soul` or `job_change`"
+    assert approvals =~ "goes to the phones and the Mac alike, is answered from either"
+    assert approvals =~ "is kept in the home's record, not in memory, and lives up to seven days"
+    assert approvals =~ "sent again after every `hello_ack` while it waits, after a restart too"
+    refute approvals =~ "Its `kind` is `sandbox` or `soul`."
+
+    assert squashed =~
+             "for an approval, as long as the card itself lives, at most a day, since an " <>
+               "alert after the approval ended is noise"
+
+    refute squashed =~ "300 (five minutes) for an approval"
+  end
+
   test "documentation has a table row for every catalog event", %{protocol: protocol} do
     for type <- Protocol.client_events() ++ Protocol.server_events() do
       assert protocol =~ "| `#{type}` |", "PROTOCOL.md has no table row for #{type}"

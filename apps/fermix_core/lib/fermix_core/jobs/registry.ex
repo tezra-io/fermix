@@ -20,6 +20,7 @@ defmodule FermixCore.Jobs.Registry do
 
   alias FermixCore.Agents.IterationLimits
   alias FermixCore.Clock
+  alias FermixCore.Jobs.HealCard
   alias FermixCore.Jobs.Schedule
   alias FermixCore.Jobs.Scheduler
   alias FermixCore.Jobs.Telemetry, as: JobTelemetry
@@ -253,11 +254,19 @@ defmodule FermixCore.Jobs.Registry do
     end
   end
 
+  @doc """
+  Removes job `id` while no run holds it. Its heals go with it, so a card the
+  Fermix app shows for one of its proposals is told it expired (M106 §8),
+  read before the removal. `opts`: `:repo`, `:scheduler`,
+  `:app_card_listener`.
+  """
   @spec remove_job(String.t(), keyword()) :: :ok | {:error, term()}
   def remove_job(id, opts \\ []) when is_binary(id) and is_list(opts) do
     with {:ok, job} <- Repo.get_scheduled_job(id, repo_opts(opts)),
+         cards = HealCard.waiting_cards_of_job(id, heal_card_opts(opts)),
          :ok <- Repo.delete_scheduled_job_if_idle(id, repo_opts(opts)),
          :ok <- mark_source(job.memory_source_id, "removed", opts) do
+      HealCard.announce(cards, :expired, heal_card_opts(opts))
       notify_scheduler(opts)
       :ok
     end
@@ -329,7 +338,7 @@ defmodule FermixCore.Jobs.Registry do
 
     with {:ok, updated, superseded} <-
            Repo.update_scheduled_job_fields(id, fields, repo_opts(opts)),
-         :ok <- trace_superseded(updated, superseded),
+         :ok <- trace_superseded(updated, superseded, opts),
          :ok <- mark_source(updated.memory_source_id, source_status, opts) do
       notify_scheduler(opts)
       {:ok, updated}
@@ -343,7 +352,7 @@ defmodule FermixCore.Jobs.Registry do
 
     with {:ok, updated, superseded} <-
            Repo.update_scheduled_job_fields(job.id, fields, repo_opts(opts)),
-         :ok <- trace_superseded(updated, superseded),
+         :ok <- trace_superseded(updated, superseded, opts),
          :ok <- update_source(updated.memory_source_id, source_patch, opts) do
       notify_scheduler(opts)
       {:ok, updated}
@@ -351,11 +360,19 @@ defmodule FermixCore.Jobs.Registry do
   end
 
   # A heal proposal the write closed, drawn for the version it replaced (M106
-  # §5.7), traced as the close it is.
-  defp trace_superseded(job, superseded) do
+  # §5.7), traced as the close it is; a card the Fermix app shows for it is
+  # told it expired (§8).
+  defp trace_superseded(job, superseded, opts) do
     Enum.each(superseded, fn heal_id ->
       JobTelemetry.heal("closed", %{heal_id: heal_id, job_id: job.id, outcome: "superseded"})
     end)
+
+    HealCard.announce_ended(superseded, :expired, heal_card_opts(opts))
+  end
+
+  defp heal_card_opts(opts) do
+    [repo: Keyword.get(opts, :repo, Keyword.get(opts, :server, Repo))] ++
+      Keyword.take(opts, [:app_card_listener])
   end
 
   defp normalize_update_attrs(job, attrs, now) do

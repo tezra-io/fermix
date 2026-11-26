@@ -140,6 +140,15 @@ the send. It is off by default, because it moves every owner-inbox message and
 every job's default delivery in the home. The seed records it in
 `eval-fixtures/owner_inbox.json` (`evallib.owner_inbox`); a seed without it
 removes that, and a case that `requires: [owner_inbox_cli]` is held out.
+
+`--owner-inbox-app` (M106 §8, stage S6) makes the Fermix app's chat the target
+instead: the `companion` channel's conversation `main`, the Mac chat's, which a
+paired phone shares, and which the companion socket in the home serves. A message
+to the owner is then a row in the app's timeline and in that conversation's
+history, and a heal's proposal an `approval` card on the socket, which `drive: app`
+reads and answers as the app does. The two flags are exclusive (one inbox); the
+manifest names the target, and a case that `requires: [owner_inbox_app]` is held
+out of a home seeded without it.
 """
 
 from __future__ import annotations
@@ -447,7 +456,7 @@ def render_config(
     home: str, pid: str, blk: dict, profile: str | None,
     explicit: bool = False, voice: str | None = None, cues: dict | None = None,
     computers: bool = False, voice_conversation: str = "chat", phone_calls: bool = False,
-    owner_inbox_cli: bool = False,
+    owner_inbox_cli: bool = False, owner_inbox_app: bool = False,
 ) -> str:
     uses_key = "api_key" in blk
     if explicit:
@@ -535,8 +544,11 @@ def render_config(
     # With --owner-inbox-cli the target is the local chat instead: a local channel
     # is the owner's own at rung one, and its adapter sends with no credentials, so
     # a message to the owner's inbox lands (`evallib.owner_inbox`).
+    # With --owner-inbox-app it is the app's chat, which a configured target naming
+    # it makes the owner's own at rung one.
     target = owner_inbox.TARGET if owner_inbox_cli else {"platform": "telegram",
                                                          "chat_id": "100001"}
+    target = owner_inbox.APP_TARGET if owner_inbox_app else target
     lines += ["[fermix_core.jobs.default_delivery_target]",
               *(f"{key} = {json.dumps(value)}" for key, value in target.items()), ""]
     # The owner-inbox ladder (`Delivery.OwnerInbox`) accepts that target only when
@@ -603,10 +615,13 @@ def clear_phone_fixtures(home: str) -> None:
             os.remove(safe_rm.check(path, home, min_below=1))
 
 
-def write_owner_inbox_manifest(home: str) -> dict:
-    """The manifest that says this seed made the local chat the owner's inbox."""
-    manifest = {"default_delivery_target": owner_inbox.TARGET,
-                "adapter": "FermixChannels.CLI"}
+def write_owner_inbox_manifest(home: str, app: bool = False) -> dict:
+    """The manifest that says this seed made the local chat (or, with `app`, the Fermix
+    app's chat) the owner's inbox."""
+    manifest = ({"default_delivery_target": owner_inbox.APP_TARGET,
+                 "adapter": "FermixChannels.Channels.Companion"} if app else
+                {"default_delivery_target": owner_inbox.TARGET,
+                 "adapter": "FermixChannels.CLI"})
     path = os.path.join(home, owner_inbox.MANIFEST)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
@@ -1312,6 +1327,12 @@ def parse_args() -> argparse.Namespace:
                         help="make the local cli chat the owner's inbox (the default "
                              "delivery target), so a message to the owner, such as a job "
                              "heal's, is sent and recorded; off by default")
+    parser.add_argument("--owner-inbox-app", dest="owner_inbox_app", action="store_true",
+                        help="make the Fermix app's chat (the companion socket's "
+                             "conversation) the owner's inbox (the default delivery "
+                             "target), so a message to the owner is a row in the app's "
+                             "timeline and a heal's proposal an approval card there; off "
+                             "by default, and not with --owner-inbox-cli")
     parser.add_argument("--extra-config", dest="extra_config",
                         help="TOML fragment appended to the rendered config (one "
                              "configuration ARM's difference); refused when it "
@@ -1353,6 +1374,8 @@ def main() -> None:
         die("--cue-mandates and --cue-filter-model need --cues")
     if args.voice_engine and not args.voice:
         die("--voice-engine needs --voice")
+    if args.owner_inbox_cli and args.owner_inbox_app:
+        die("the owner has one inbox: --owner-inbox-cli or --owner-inbox-app, not both")
     if args.voice_conversation and not args.voice:
         die("--voice-conversation needs --voice")
     voice_conversation = args.voice_conversation or "chat"
@@ -1405,8 +1428,8 @@ def main() -> None:
         write_phone_fixtures(home)
     else:
         clear_phone_fixtures(home)
-    if args.owner_inbox_cli:
-        write_owner_inbox_manifest(home)
+    if args.owner_inbox_cli or args.owner_inbox_app:
+        write_owner_inbox_manifest(home, app=args.owner_inbox_app)
     else:
         clear_owner_inbox_manifest(home)
     fixture_port = write_fixture_manifest(home, cues["door_port"] if cues else None,
@@ -1414,7 +1437,8 @@ def main() -> None:
     config = render_config(home, pid, blk, profile, explicit=bool(args.provider),
                            voice=voice_engine, cues=cues, computers=args.computers,
                            voice_conversation=voice_conversation,
-                           phone_calls=args.phone_calls, owner_inbox_cli=args.owner_inbox_cli)
+                           phone_calls=args.phone_calls, owner_inbox_cli=args.owner_inbox_cli,
+                           owner_inbox_app=args.owner_inbox_app)
     if args.extra_config:
         config += read_extra_config(config, args.extra_config)
     with open(os.path.join(home, "config.toml"), "w", encoding="utf-8") as fh:
@@ -1455,6 +1479,10 @@ def main() -> None:
     if args.owner_inbox_cli:
         print("owner inbox: the local cli chat (the default delivery target); a message to "
               "the owner is printed by the daemon and recorded where it was sent from")
+    if args.owner_inbox_app:
+        print("owner inbox: the Fermix app's chat (companion, main; the default delivery "
+              "target); a message to the owner is a row in its timeline and a heal's "
+              "proposal an approval card on the companion socket")
 
 
 if __name__ == "__main__":

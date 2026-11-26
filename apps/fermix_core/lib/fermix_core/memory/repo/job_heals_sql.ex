@@ -93,7 +93,13 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
   concluding write (delivered or dead letter) and any close set it NULL, and
   no read but the bind ever selects it (`@read_columns`). The rail finds a
   card by digest (`{:card_held, _}`, `{:card_by_digest, _}`) and lists those
-  delivered to a chat and still answerable (`{:cards_in_chat, origin}`).
+  delivered to a chat and still answerable (`{:cards_in_chat, origin}`). The
+  Fermix app's cards (M106 §8) are read from the record, never from a held
+  token: those still answerable in the app's chat with what each shows
+  (`{:app_cards, origin}`), and, for telling a chat a card ended, the chat
+  each of some heals' cards went to (`{:cards_among, ids}`) and the cards a
+  job's removal ends (`{:waiting_cards_of_job, job_id}`). These are reads; no
+  write is added for the app.
   """
 
   require Logger
@@ -307,6 +313,13 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
   @doc "The two tables and their indexes, for their migration."
   @spec schema_sql() :: String.t()
   def schema_sql, do: @schema_sql
+
+  @doc """
+  How many days a heal waits on the owner, or watches a job, before it
+  closes as expired: a proposal's card lives as long (M106 §5.7).
+  """
+  @spec waiting_days() :: pos_integer()
+  def waiting_days, do: @waiting_days
 
   @doc """
   The column migration 73 adds to `job_heals` for the tool a heal of a run
@@ -578,6 +591,49 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
     with {:ok, rows} <- CuesSql.query_all(conn, sql, [platform, chat_id, user_id]) do
       {:ok, Enum.map(rows, fn [id, name] -> %{id: id, job_name: name} end)}
     end
+  end
+
+  # The same cards, each with what an app's card shows of it (its job's name
+  # and the stored change) and when it began to wait, oldest first: what the
+  # Fermix app is offered again after every hello (M106 §8, D12). A change
+  # this engine cannot read reads as none, logged by its heal's id.
+  def handle(conn, {:app_cards, %{platform: platform, chat_id: chat_id, user_id: user_id}})
+      when is_binary(platform) and is_binary(chat_id) and is_binary(user_id) do
+    sql = """
+    SELECT h.id, h.change_json, h.waiting_since,
+           (SELECT j.name FROM scheduled_jobs j WHERE j.id = h.job_id)
+    FROM job_heals h
+    WHERE #{@answerable} AND delivery_status = 'delivered' AND card_platform = ?
+      AND card_chat_id = ? AND card_user_id = ?
+    ORDER BY waiting_since, id
+    """
+
+    with {:ok, rows} <- CuesSql.query_all(conn, sql, [platform, chat_id, user_id]) do
+      {:ok, Enum.map(rows, &app_card_row/1)}
+    end
+  end
+
+  # The cards among heals `ids` and the chat each was bound to: whose end the
+  # chat that shows it is told (M106 §8).
+  def handle(_conn, {:cards_among, []}), do: {:ok, []}
+
+  def handle(conn, {:cards_among, ids}) when is_list(ids) do
+    sql =
+      "SELECT id, card_platform, card_chat_id, card_user_id FROM job_heals " <>
+        "WHERE card_token_digest IS NOT NULL AND id IN (#{placeholders(ids)}) ORDER BY id"
+
+    with {:ok, rows} <- CuesSql.query_all(conn, sql, ids), do: {:ok, Enum.map(rows, &card_ref/1)}
+  end
+
+  # The cards of `job_id`'s proposals still waiting for an answer: the ones
+  # removing the job ends, read before the removal takes their rows with it.
+  def handle(conn, {:waiting_cards_of_job, job_id}) when is_binary(job_id) do
+    sql =
+      "SELECT id, card_platform, card_chat_id, card_user_id FROM job_heals " <>
+        "WHERE job_id = ? AND #{@answerable} AND card_token_digest IS NOT NULL ORDER BY id"
+
+    with {:ok, rows} <- CuesSql.query_all(conn, sql, [job_id]),
+         do: {:ok, Enum.map(rows, &card_ref/1)}
   end
 
   @doc "Whether `claim` is a `claim()` of a well-formed shape."
@@ -1459,6 +1515,18 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
     |> Map.put(:tool, decode_tool(heal.id, tool_json))
     |> Map.update!(:read_outside, &read_flag/1)
   end
+
+  defp app_card_row([id, change_json, waiting_since, job_name]) do
+    %{
+      id: id,
+      change: decode_change(id, change_json),
+      waiting_since: CuesSql.parse_stamp(waiting_since),
+      job_name: job_name
+    }
+  end
+
+  defp card_ref([id, platform, chat_id, user_id]),
+    do: %{id: id, origin: %{platform: platform, chat_id: chat_id, user_id: user_id}}
 
   # A change as `HealDecision` stored it: each field with what it would
   # become. One this engine cannot read reads as none, logged by the heal's

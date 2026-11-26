@@ -348,6 +348,22 @@ defmodule FermixChannels.Gateway.Channel do
   @callback owner_inbox() :: {:ok, String.t()} | :unavailable
 
   @doc """
+  Whether a phone whose pairing completed is paired with this engine: the
+  question `FermixCore.Delivery.OwnerInbox` asks the phones' channel to put
+  the Fermix app first in the owner's inbox order (M106 §8, D3). Only that
+  channel implements it.
+  """
+  @callback phone_paired?() :: boolean()
+
+  @doc """
+  Whether a computer of this home is linked to this engine, connected now or
+  not: the question `FermixCore.Delivery.OwnerInbox` asks the phones' channel
+  to make the Mac chat the owner's inbox, last, on an engine that is no
+  app's (M106 §8, D9). Only that channel implements it.
+  """
+  @callback computer_linked?() :: boolean()
+
+  @doc """
   The conversation `message` runs in when this channel's turns join another
   transport's (M56 D9): the phone's turns run in the Mac's chat, so the one
   timeline both draw has one agent history and one queue lane. The gateway
@@ -359,6 +375,8 @@ defmodule FermixChannels.Gateway.Channel do
 
   @optional_callbacks [
     owner_inbox: 0,
+    phone_paired?: 0,
+    computer_linked?: 0,
     joined_conversation: 1,
     start_typing: 1,
     download_attachment: 2,

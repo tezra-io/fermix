@@ -945,6 +945,20 @@ diagnosis on the home's main model (at most six steps), and every turn is follow
 the home's memory review. Seeded runs sit at their jobs' own fire times
 (`bin/seed_run_times.exs`).
 
+The Fermix app as the owner's inbox (stage S6) is its own candidate,
+`cap_job_heal_app_inbox`, on a home seeded with `--owner-inbox-app` instead (one inbox
+per home; each suite is held out of the other's): each trial seeds a heal whose
+conclusion is recorded and left for the daemon to send, and drives the companion
+socket as the app does (`drive: app`), so only its one edit task runs a model turn.
+
+```sh
+FERMIX_CAP_SEED_ARGS="--owner-inbox-app" bin/capability-daemon.sh up
+uv run bin/run_capability.py --candidates --suite cap_job_heal_app_inbox --trials 3 --estimate
+uv run bin/run_capability.py --candidates --suite cap_job_heal_app_inbox --trials 3 \
+  --confirm-daemon-isolated --confirm-isolated-env
+bin/capability-daemon.sh down
+```
+
 ### The Cues screen (`make capability-screen`)
 
 While `[fermix_core.cues] screen` is `decision_model`, a decision model judges each

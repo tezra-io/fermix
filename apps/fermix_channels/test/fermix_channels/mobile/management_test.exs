@@ -339,6 +339,156 @@ defmodule FermixChannels.Mobile.ManagementTest do
     refute File.exists?(Path.join(root, "mobile"))
   end
 
+  # M106 §8, D3: the Fermix app is the owner's first inbox while a phone is
+  # paired: the phones' channel on, and a phone whose pairing completed (it
+  # said hello). The home's computers are no phones. One answer for the
+  # daemon (the running store) and a tree-less CLI (the file).
+  describe "phone_paired?/1" do
+    test "a phone that said hello counts; one still pairing, or a computer, does not" do
+      phone = %{
+        device_attrs("11111111-1111-4111-8111-111111111111")
+        | last_seen: ~U[2026-09-02 08:00:00Z]
+      }
+
+      pairing = device_attrs("22222222-2222-4222-8222-222222222222")
+
+      computer = %{
+        computer_attrs("33333333-3333-4333-8333-333333333333", "studio", true)
+        | last_seen: ~U[2026-09-02 08:00:00Z]
+      }
+
+      running = fn devices ->
+        [
+          config: [enabled: true],
+          device_store: :store,
+          whereis: fn _name -> self() end,
+          list_devices: fn :store -> {:ok, devices} end
+        ]
+      end
+
+      assert Management.phone_paired?(running.([phone, computer]))
+      refute Management.phone_paired?(running.([pairing, computer]))
+      refute Management.phone_paired?(running.([]))
+    end
+
+    test "the phones' channel off counts no phone, and the store is not read" do
+      off = [
+        config: [enabled: false],
+        whereis: fn _name -> self() end,
+        list_devices: fn _store -> flunk("the channel is off: nothing is read") end
+      ]
+
+      refute Management.phone_paired?(off)
+    end
+
+    test "a tree-less process reads the stored file, as the daemon reads its store" do
+      phone = %{
+        device_attrs("44444444-4444-4444-8444-444444444444")
+        | last_seen: ~U[2026-09-03 07:00:00Z]
+      }
+
+      root = stored_root([phone])
+
+      assert Management.phone_paired?(
+               config: [enabled: true],
+               root: root,
+               whereis: fn _name -> nil end
+             )
+
+      refute Management.phone_paired?(
+               config: [enabled: true],
+               root: stored_root([]),
+               whereis: fn _name -> nil end
+             )
+    end
+
+    test "a store that cannot be read counts no phone, and says so" do
+      unreadable = [
+        config: [enabled: true],
+        device_store: :store,
+        whereis: fn _name -> self() end,
+        list_devices: fn :store -> {:error, :disk_full} end
+      ]
+
+      log = capture_log(fn -> refute Management.phone_paired?(unreadable) end)
+      assert log =~ "whether a phone is paired could not be read"
+    end
+  end
+
+  # M106 §8, D9: on an Always On server the owner's Mac reaches the chat
+  # through its computer's link, so a computer of the home makes the Mac chat
+  # an inbox: the phones' channel on, and a desktop row, connected or not.
+  # One answer for the daemon (the running store) and a tree-less CLI (the
+  # file), from the same rows.
+  describe "computer_linked?/1" do
+    test "a computer of the home counts, connected or not; a phone alone does not" do
+      computer = computer_attrs("55555555-5555-4555-8555-555555555555", "studio", true)
+
+      phone = %{
+        device_attrs("66666666-6666-4666-8666-666666666666")
+        | last_seen: ~U[2026-09-02 08:00:00Z]
+      }
+
+      running = fn devices ->
+        [
+          config: [enabled: true],
+          device_store: :store,
+          whereis: fn _name -> self() end,
+          list_devices: fn :store -> {:ok, devices} end
+        ]
+      end
+
+      assert Management.computer_linked?(running.([computer]))
+      refute Management.computer_linked?(running.([phone]))
+      refute Management.computer_linked?(running.([]))
+
+      refute Management.computer_linked?(
+               config: [enabled: false],
+               whereis: fn _name -> self() end,
+               list_devices: fn _store -> flunk("the channel is off: nothing is read") end
+             )
+    end
+
+    test "the daemon's running store and a tree-less read of the file agree" do
+      computer = computer_attrs("77777777-7777-4777-8777-777777777777", "studio", true)
+      {:ok, stored} = DeviceStore.list(root: stored_root([computer]))
+
+      daemon = [
+        config: [enabled: true],
+        device_store: :store,
+        whereis: fn _name -> self() end,
+        list_devices: fn :store -> {:ok, stored} end
+      ]
+
+      treeless = [
+        config: [enabled: true],
+        root: stored_root([computer]),
+        whereis: fn _ -> nil end
+      ]
+
+      assert Management.computer_linked?(daemon)
+      assert Management.computer_linked?(treeless)
+
+      refute Management.computer_linked?(
+               config: [enabled: true],
+               root: stored_root([]),
+               whereis: fn _name -> nil end
+             )
+    end
+
+    test "a store that cannot be read counts no computer, and says so" do
+      unreadable = [
+        config: [enabled: true],
+        device_store: :store,
+        whereis: fn _name -> self() end,
+        list_devices: fn :store -> {:error, :disk_full} end
+      ]
+
+      log = capture_log(fn -> refute Management.computer_linked?(unreadable) end)
+      assert log =~ "whether a computer is linked could not be read"
+    end
+  end
+
   test "health surfaces missing or invalid identity and device-store failures" do
     base = [
       config: [enabled: true],

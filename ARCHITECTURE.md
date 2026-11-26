@@ -821,7 +821,21 @@ reminder text without a model.
 through the adapter named in `[:fermix_core, :jobs, :delivery_channels]`, so core
 never compile-depends on channels, and `OwnerInbox` is the one resolver for the
 owner's inbox, the first one or the one on a named platform (a transport only
-the owner reaches names its own through its adapter's `owner_inbox/0`).
+the owner reaches names its own through its adapter's `owner_inbox/0`). Its
+order (M106 §8): a configured target that is the owner's own (a DM of theirs,
+the local chat, or the Fermix app), then the Fermix app while a phone is paired
+(the `mobile` adapter's `phone_paired?/0`, asked through the delivery-channels
+map), then the DM on the first of Telegram, Signal, WhatsApp and iMessage, then
+the app alone on an engine with an app (`Cues.Mandates.app_surface?/1`) or with
+a computer of the home linked to it, connected or not (the `mobile` adapter's
+`computer_linked?/0`): an Always On server, whose owner reads the chat through
+a linked Mac; a watcher card's reach keeps the narrower question. The
+app's inbox is the Mac chat's conversation, which a paired phone shares, and
+an answer typed on either transport is the app's one origin
+(`OwnerInbox.answered_in_app/2`). An ask names what it waits on
+(`for_approval/2`): an approval card, which every app draws, takes that order;
+a watcher's proposal card never goes to the app, whose phone wire carries none.
+Reminders take the DM rung alone (`derived_candidates/1`).
 `FrozenOrigin.resolve/2` freezes where a run that outlives its turn (a coding
 run, a phone call) reports, onto its row, and `FrozenSend` makes the send to it.
 
@@ -877,7 +891,7 @@ sends nothing and marks the delivery `skipped`.
 lease after its due scan on every due and reconcile tick and when a run or a
 heal run ends, and starts its run under `Jobs.RunnerSupervisor`, one at a time,
 monitored and never waited on. The run resolves the owner's inbox once
-(`Delivery.OwnerInbox.for_approval/1`), builds the message once with the pure
+(`Delivery.OwnerInbox.for_approval/2`, for an approval card), builds the message once with the pure
 `Jobs.HealMessage` from the store's facts, sends it once under its message's
 key (`HealMessage.send_key/1`: `job_heal:<id>` for the first message, its card
 and their retries, `job_heal:<id>:verdict` for the verdict and its retries, so
@@ -999,8 +1013,9 @@ whole, and that Fermix has not made the change), its detail every changed
 field exactly as it is and as it would become (`HealMessage.change_detail/1`),
 its answers Approve and Deny, and its text, for a chat with no buttons, ending
 with how to reply. The heal run offers it only when the inbox has a chat an
-answer can come from (`Delivery.OwnerInbox.answer_origin/1`: a DM, or the
-local `cli` chat, owner-private by construction) and the whole card fits
+answer can come from (`Delivery.OwnerInbox.answer_origin/1`: a DM, the local
+`cli` chat, owner-private by construction, or the Fermix app's inbox, the
+app's one origin) and the whole card fits
 `Cues.Card.max_chars/0`; otherwise `Jobs.HealDecision.fit_card/3` keeps it as
 `tell`, refused as `no_card_chat` or `card_too_large`, never cut. The short
 ask is stored with the decision, so what was held to the bound is what is
@@ -1018,7 +1033,19 @@ bare command (the heal's id from the chat's list) reach it only from the
 chat and user it went to, with the cues feature off as well as on; `/always`
 is refused by the rail. The apps' proposal family (`waiting_cards/1`,
 `decide/4`, the companion's and the management socket's lists) stays the
-watcher cards' alone. `Jobs.HealAnswer` is the apply and the leave the card
+watcher cards' alone. In the Fermix app (M106 §8, D12) a card is no message
+that stays: the heal's message is written as a row in the app's timeline,
+saying it waits on its card (`HealCard.app_row/1`), and the card beside it is
+an `approval` of kind `job_change` (`HealCard.app_card/2`: the job and each
+changed field, the whole change in its detail), routed by the heal's id
+(`/confirm jhl_…`), which the rail answers only from the chat the card is
+bound to, the app's one origin, while it waits there. It is offered again
+from the record after every hello and restart (`HealCard.app_cards/2`,
+`{:app_cards, origin}`), and every end of it (an answer, an edit, pause or
+resume, the expiry, a clean run, the job's removal) is told to the app
+(`HealCard.announce_ended/3`, `announce/3`) through the listener the channels
+application registers (`:app_approval_listener`,
+`Companion.Approvals.heal_card_ended/3`). `Jobs.HealAnswer` is the apply and the leave the card
 calls, with no turn in it:
 given the heal, the surface the answer came from (`decided_from`, the rail's
 own `<platform>:<chat>:<user>` for a chat) and, as
@@ -2261,12 +2288,19 @@ Current channels:
   `Companion.Output.row/2`, in the phone's history-message shape, and
   projected to the Mac's `row` fields); a turn's stream and ending stay with
   the transport that ran it, and the other one learns the reply as a `row`.
-- `Companion.Approvals` keeps the approval cards still waiting for the owner,
-  each for the transport whose turn raised it, the only one its token resolves
-  from. It announces each card and, when it resolves or expires, its
-  `approval_resolved`, through one announce, to the connections open then; it
-  re-sends the cards after a phone's `hello_ack` and a Mac client's
-  `server_hello` with the time each has left, and holds at most 64.
+- `Companion.Approvals` is the one way approval cards reach the apps. It
+  keeps the cards still waiting for the owner, each a turn raised for the
+  transport whose turn raised it, the only one its token resolves from, and
+  each asked in the app with no turn (an access confirmation that had no chat
+  of its own) for both. It announces each card and, when it resolves or
+  expires, its `approval_resolved`, through one announce, to the connections
+  open then; it re-sends the cards after a phone's `hello_ack` and a Mac
+  client's `server_hello` with the time each has left, and holds at most 64. A
+  heal's proposal (`job_change`) is never kept: it is offered to both
+  transports when sent, read again from its record by the store's `:durable`
+  source in the caller at every hello (so the store never waits on the Repo,
+  and a source that fails or answers nonsense is logged and the hello goes
+  on), and resolved to both when it ends.
   A card that ended while a client was away is never withdrawn, so both wires'
   clients drop every card they show at that handshake and keep only the ones
   sent after it. It runs on every boot, after the registry and `Turns` in

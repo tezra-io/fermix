@@ -10,6 +10,7 @@ Also covers the shared session-id helper. Pure: no daemon, no Opik, no spend.
 Run: `uv run bin/test_suites.py`."""
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -444,6 +445,41 @@ def test_an_owner_command_case_belongs_to_a_capability_suite(tmp_path):
     with pytest.raises(suites.SuiteError) as exc:
         suites.load_all(_command_suite(tmp_path, suite="cmd_behavioral"))
     assert any("belongs to a capability suite" in p for p in exc.value.problems)
+
+
+# --- drive: app (the Fermix app's chat as the owner's inbox, M106 S6) --------
+
+APP_STEPS = {"steps": ["await_card", {"answer": "approve"}]}
+
+
+def test_an_app_case_loads_its_steps_as_its_turns(tmp_path):
+    [suite] = suites.load_all(_command_suite(tmp_path, drive="app", query=None, app=APP_STEPS))
+    case = suite.scenarios[0].cases[0]
+    assert case.drive == "app" and case.app == APP_STEPS
+    assert [json.loads(turn.query) for turn in case.turns] == APP_STEPS["steps"]
+
+
+@pytest.mark.parametrize("change, why", [
+    ({"query": "/confirm"}, "takes its `app.steps`"),
+    ({"app": None}, "needs an `app` map"),
+    ({"app": {"steps": [{"answer": "approve"}]}}, "need an `await_card` step before"),
+    ({"expect": {"status": "ok"}}, "not in `expect`"),
+    ({"checker": {"script": "suites/capability/checkers/job_app_inbox.py", "mode": "json"}},
+     "over its seeded `checker.state`"),
+    ({"drive": "ask", "query": "hello"}, "`app` needs `drive: app`"),
+])
+def test_an_app_case_is_refused_what_it_cannot_take(tmp_path, change, why):
+    case = {"drive": "app", "query": None, "app": APP_STEPS, **change}
+    with pytest.raises(suites.SuiteError) as exc:
+        suites.load_all(_command_suite(tmp_path, **case))
+    assert any(why in p for p in exc.value.problems), exc.value.problems
+
+
+def test_an_app_case_belongs_to_a_capability_suite(tmp_path):
+    with pytest.raises(suites.SuiteError) as exc:
+        suites.load_all(_command_suite(tmp_path, suite="app_behavioral", drive="app",
+                                       query=None, app=APP_STEPS))
+    assert any("`drive: app` belongs to a capability suite" in p for p in exc.value.problems)
 
 
 # --- requires_tools_all (case level) ----------------------------------------

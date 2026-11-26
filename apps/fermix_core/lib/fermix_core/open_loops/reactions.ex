@@ -17,7 +17,8 @@ defmodule FermixCore.OpenLoops.Reactions do
       it recorded, one recorded before the read among them;
     * `record_sent/4` — rung 2, from `OpenLoops.CheckIn`'s confirmed send: the
       delivery target's conversation and the sent text, no session; only on an
-      inbox where the owner's reply can be captured;
+      inbox where the owner's reply can be captured (a DM, the Fermix app's
+      chat, or the conversation the loop came from);
     * `capture/3` — from `Agents.TurnRunner` before the run: what the owner
       typed (`UntrustedContent.owner_text/1`, nothing for a forwarded
       message), its first `Defaults.reply_text_max/0` characters, as the reply
@@ -240,10 +241,12 @@ defmodule FermixCore.OpenLoops.Reactions do
   Only where the owner's reply can be captured, which is where it arrives
   under the conversation the follow-up is recorded in: the conversation the
   loop came from (the owner wrote in it, so their answer is keyed as that turn
-  was), or an inbox keyed by the owner's own id
-  (`Delivery.OwnerInbox.dm_origin/1`). A Slack or Discord DM arrives under its
-  DM channel's id and a CLI turn under its session id, so a follow-up sent
-  there for a loop said elsewhere would only ever read as silence; it is
+  was), or an inbox keyed as a turn there is
+  (`Delivery.OwnerInbox.history_conversation/1`): a DM keyed by the owner's
+  own id, or the Fermix app's chat, where the Mac's turns run and a paired
+  phone's join them (M106 §8). A Slack or Discord DM arrives under its DM
+  channel's id and a CLI turn under its session id, so a follow-up sent there
+  for a loop said elsewhere would only ever read as silence; it is
   `{:skipped, :reply_uncapturable}`, and nothing is written.
   """
   @spec record_sent(Repo.open_loop_row(), String.t(), DateTime.t(), keyword()) ::
@@ -257,7 +260,7 @@ defmodule FermixCore.OpenLoops.Reactions do
 
   defp reply_capturable?(loop) do
     inbox = %{platform: loop.delivery_platform, destination: loop.delivery_destination}
-    sent_where_said?(loop) or match?({:ok, _origin}, OwnerInbox.dm_origin(inbox))
+    sent_where_said?(loop) or match?({:ok, _key}, OwnerInbox.history_conversation(inbox))
   end
 
   defp sent_where_said?(loop) do

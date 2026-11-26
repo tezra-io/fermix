@@ -7,9 +7,10 @@
 # own schedule parser (`Jobs.Schedule`). An off-schedule run is stated as one:
 # `hours_ago` hours before now, for a `manual` run. Each run lasts `duration_seconds`,
 # and a heal concluded on it (`heal`) is concluded `delivered_minutes_after` minutes
-# after the run ended. The fires counted are those early enough that every run and
-# conclusion of the job ends before now, so a seed taken right after a fire still
-# finds every run over.
+# after the run ended (and its message sent then), or `decided_minutes_after` minutes
+# after (its send left to the daemon). The fires counted are those early enough that
+# every run and conclusion of the job ends before now, so a seed taken right after a
+# fire still finds every run over.
 defmodule SeedRunTimes do
   alias FermixCore.Jobs.Schedule
 
@@ -38,8 +39,16 @@ defmodule SeedRunTimes do
     do: DateTime.add(start, seconds, :second)
 
   @doc "When a heal concluded on a run was concluded: minutes after the run ended."
-  def concluded(%{"heal" => %{"delivered_minutes_after" => minutes}} = run, start),
-    do: DateTime.add(ended(run, start), minutes * 60, :second)
+  def concluded(%{"heal" => heal} = run, start),
+    do: DateTime.add(ended(run, start), conclusion_minutes(heal) * 60, :second)
+
+  @doc """
+  The minutes after its run a seeded heal was concluded: `delivered_minutes_after` (its
+  message sent then) or `decided_minutes_after` (its send left to the daemon), whichever
+  it names; `check_order!/4`'s checks made sure it names exactly one.
+  """
+  def conclusion_minutes(%{"delivered_minutes_after" => minutes}), do: minutes
+  def conclusion_minutes(%{"decided_minutes_after" => minutes}), do: minutes
 
   @doc """
   The runs in time order, as listed: each starts after the one before ended, every run
@@ -79,12 +88,12 @@ defmodule SeedRunTimes do
   defp check_conclusion_delay!(_key, nil), do: :ok
 
   defp check_conclusion_delay!(key, heal) do
-    minutes = Map.get(heal, "delivered_minutes_after")
+    named = Map.take(heal, ["delivered_minutes_after", "decided_minutes_after"])
 
-    unless is_integer(minutes) and minutes > 0,
+    unless map_size(named) == 1 and Enum.all?(Map.values(named), &positive?/1),
       do:
         raise(
-          "jobs #{key}: a seeded heal's delivered_minutes_after is a positive whole number of minutes after its run ended, got #{inspect(minutes)}"
+          "jobs #{key}: a seeded heal names one of delivered_minutes_after (sent then) or decided_minutes_after (its send left to the daemon), a positive whole number of minutes after its run ended, got #{inspect(named)}"
         )
   end
 
@@ -119,8 +128,8 @@ defmodule SeedRunTimes do
     DateTime.add(now, -(tail + @margin_s), :second)
   end
 
-  defp tail_s(%{"heal" => %{"delivered_minutes_after" => minutes}} = run),
-    do: run["duration_seconds"] + minutes * 60
+  defp tail_s(%{"heal" => heal} = run),
+    do: run["duration_seconds"] + conclusion_minutes(heal) * 60
 
   defp tail_s(run), do: run["duration_seconds"]
 

@@ -454,6 +454,46 @@ defmodule FermixChannels.Companion.ConnectionTest do
     assert ttl == 180
   end
 
+  # M106 §8, D12 (stage S6): a heal's proposal waiting in the app is read
+  # again from its record after every server_hello, an engine restart
+  # included, with the time it has left; a source that cannot answer leaves
+  # the hello and the cards in memory as they are.
+  test "a heal's card waiting in the app follows the server_hello, read from its record", ctx do
+    heal = %{
+      "t" => "approval",
+      "approval_id" => Output.approval_id(:job_change, "jhl_0a1b2c3d4e5f6a7b"),
+      "kind" => "job_change",
+      "text" => ~s(Change job "Harbour tide table"?),
+      "detail" => "Details: each change in full",
+      "token" => "jhl_0a1b2c3d4e5f6a7b",
+      "ttl_s" => 86_400,
+      "approve_command" => "/confirm jhl_0a1b2c3d4e5f6a7b",
+      "deny_command" => "/deny jhl_0a1b2c3d4e5f6a7b"
+    }
+
+    approvals = durable_store(:heal_card_approvals, fn "main" -> {:ok, [heal]} end)
+    restart_endpoint(ctx, approvals: approvals)
+
+    client = hello(ctx.socket_path)
+    assert recv(client) == Map.put(Map.delete(heal, "t"), "type", "approval")
+  end
+
+  test "a source of heal cards that cannot answer leaves the hello and the cards in memory",
+       ctx do
+    approvals = durable_store(:failing_approvals, fn "main" -> {:error, :repo_timeout} end)
+    card = Output.approval(%{kind: :soul, text: "Apply?", token: "SOUL-T"})
+    assert :ok = Approvals.announce(approvals, "main", card, :companion)
+    restart_endpoint(ctx, approvals: approvals)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        client = hello(ctx.socket_path)
+        assert %{"type" => "approval", "token" => "SOUL-T"} = recv(client)
+      end)
+
+    assert log =~ "the waiting heal cards could not be read"
+  end
+
   # R1-2: a card raised on the phone resolves only from the phone (M19 §9.5),
   # so the Mac is never re-sent it, and what a Mac request resolves is told
   # to the Mac alone.
@@ -1874,4 +1914,15 @@ defmodule FermixChannels.Companion.ConnectionTest do
   end
 
   defp closed?(socket), do: :gen_tcp.recv(socket, 0, @arrival_ms) == {:error, :closed}
+
+  defp durable_store(id, durable) do
+    start_supervised!(
+      {Approvals,
+       name: nil,
+       schedule: fn _message, _delay -> make_ref() end,
+       announce: fn _profile, _card, _audience -> :ok end,
+       durable: durable},
+      id: id
+    )
+  end
 end

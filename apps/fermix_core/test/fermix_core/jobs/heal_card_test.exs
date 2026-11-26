@@ -9,9 +9,12 @@ defmodule FermixCore.Jobs.HealCardTest do
   # value is invented; every time is given.
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog, only: [capture_log: 1]
+
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Cues
   alias FermixCore.Cues.Proposals
+  alias FermixCore.Jobs.HealCard
   alias FermixCore.Jobs.Registry
   alias FermixCore.Management.Cues, as: ManagementCues
   alias FermixCore.Memory.Repo
@@ -304,7 +307,130 @@ defmodule FermixCore.Jobs.HealCardTest do
     end
   end
 
+  # M106 §8, D12 (stage S6): a card in the Fermix app is bound to the app's
+  # one origin, answered by the heal's id from the Mac chat or a paired phone
+  # and nowhere else, offered again from the record after every hello and
+  # restart, and the app is told how it ended, whatever ended it.
+  describe "in the Fermix app" do
+    @app %{platform: "companion", chat_id: "main", user_id: "app"}
+    @cli %{platform: "cli", chat_id: "cli", user_id: "cli"}
+
+    test "its id answers only from the app's origin: not from a DM or the cli chat", ctx do
+      %{job: job, heal: heal} = HealCards.waiting_card!(ctx.repo, @app)
+
+      for elsewhere <- [@owner, @cli, %{@app | user_id: "40017"}, %{@app | chat_id: "work"}] do
+        assert {:error, "That card is not waiting in this chat; nothing ran."} =
+                 Proposals.confirm(heal.id, elsewhere, ctx.opts)
+
+        assert {:error, "That card is not waiting in this chat; nothing ran."} =
+                 Proposals.deny(heal.id, elsewhere, ctx.opts)
+      end
+
+      assert {:ok, %{state: "waiting", answer: nil}} = get_heal(ctx, heal.id)
+
+      assert {:ok, sentence} = Proposals.confirm(heal.id, @app, ctx.opts)
+      assert sentence =~ ~s(Fermix made the change it proposed to job "#{job.name}")
+
+      assert {:ok, %{state: "watching", decided_from: "companion:main:app"}} =
+               get_heal(ctx, heal.id)
+    end
+
+    test "is offered again from the record, its card standing alone, with the time it has left",
+         ctx do
+      %{job: job, heal: heal} = HealCards.waiting_card!(ctx.repo, @app)
+      # A chat's card, and one whose send never landed, are no app's.
+      HealCards.waiting_card!(ctx.repo, @owner)
+      HealCards.waiting_card!(ctx.repo, @app, delivered: false)
+
+      assert {:ok, [spec]} = HealCard.app_cards("main", repo: ctx.repo, now: ctx.now)
+
+      assert %{kind: :job_change, token: token, ttl_s: ttl_s, lines: lines, detail: detail} = spec
+      assert token == heal.id
+      assert ttl_s == 7 * 86_400 - 600
+      assert lines == [~s(Change job "#{job.name}"?), ~s(- Schedule: "every 2 hours")]
+
+      assert detail ==
+               "Details: each change in full\nSchedule now: every 1 hour\n" <>
+                 "Schedule after the change: every 2 hours"
+
+      assert spec.actions == %{confirm: "Approve", deny: "Deny"}
+      assert {:ok, []} = HealCard.app_cards("work", repo: ctx.repo, now: ctx.now)
+
+      # Its seven days up, or answered, it is offered no more.
+      days_on = DateTime.add(HealCards.delivered_at(), 7 * 86_400, :second)
+      assert {:ok, []} = HealCard.app_cards("main", repo: ctx.repo, now: days_on)
+      assert {:ok, _sentence} = Proposals.deny(heal.id, @app, ctx.opts)
+      assert {:ok, []} = HealCard.app_cards("main", repo: ctx.repo, now: ctx.now)
+    end
+
+    test "a store that is not running is an error to say, never an exit", ctx do
+      assert {:error, :repo_not_running} =
+               HealCard.app_cards("main", repo: :"no_repo_#{ctx.now.second}", now: ctx.now)
+    end
+
+    test "its answer on its card is told to the app: approved, then denied", ctx do
+      %{heal: approved} = HealCards.waiting_card!(ctx.repo, @app)
+      %{heal: denied} = HealCards.waiting_card!(ctx.repo, @app)
+      opts = ctx.opts ++ [app_card_listener: listener()]
+
+      assert {:ok, _sentence} = Proposals.confirm(approved.id, @app, opts)
+      assert_received {:card_ended, "main", id, :approved}
+      assert id == approved.id
+
+      assert {:ok, _sentence} = Proposals.deny(denied.id, @app, opts)
+      assert_received {:card_ended, "main", id, :denied}
+      assert id == denied.id
+    end
+
+    test "every other end is told as expired: an edit, a clean run, the job removed",
+         ctx do
+      opts = [repo: ctx.repo, scheduler: nil, app_card_listener: listener()]
+
+      %{job: edited, heal: superseded} = HealCards.waiting_card!(ctx.repo, @app)
+
+      {:ok, _edited} =
+        Registry.update_job(edited.id, %{task_prompt: "Read the tide board."}, opts)
+
+      assert_received {:card_ended, "main", id, :expired}
+      assert id == superseded.id
+
+      %{job: recovered, heal: healed} = HealCards.waiting_card!(ctx.repo, @app)
+      {:ok, {_run, _job, %{healed: ids}}} = HealCards.settle_ok!(ctx.repo, recovered, ctx.now)
+      :ok = HealCard.announce_ended(ids, :expired, opts)
+      assert_received {:card_ended, "main", id, :expired}
+      assert id == healed.id
+
+      %{job: removed, heal: gone} = HealCards.waiting_card!(ctx.repo, @app)
+      :ok = Registry.remove_job(removed.id, opts)
+      assert_received {:card_ended, "main", id, :expired}
+      assert id == gone.id
+      assert {:error, :not_found} = get_heal(ctx, gone.id)
+    end
+
+    test "a chat's card ending tells the app nothing", ctx do
+      opts = ctx.opts ++ [app_card_listener: listener()]
+      %{heal: heal} = HealCards.waiting_card!(ctx.repo, @owner)
+
+      assert {:ok, _sentence} = Proposals.deny(heal.id, @owner, opts)
+      :ok = HealCard.announce_ended([heal.id], :expired, opts)
+      refute_received {:card_ended, _profile, _id, _outcome}
+    end
+
+    test "a listener that raises is logged, and its caller goes on", ctx do
+      %{heal: heal} = HealCards.waiting_card!(ctx.repo, @app)
+      opts = [repo: ctx.repo, app_card_listener: fn _profile, _id, _outcome -> raise "boom" end]
+
+      log = capture_log(fn -> assert :ok = HealCard.announce_ended([heal.id], :expired, opts) end)
+      assert log =~ "the app was not told its card ended"
+    end
+  end
+
   # --- helpers -------------------------------------------------------------------
+
+  defp listener do
+    test_pid = self()
+    fn profile, id, outcome -> send(test_pid, {:card_ended, profile, id, outcome}) end
+  end
 
   defp changed_keys, do: [:schedule_expr, :next_run_at, :updated_at]
 

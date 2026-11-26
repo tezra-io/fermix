@@ -1158,6 +1158,25 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     refute reference =~ ~r/(?<![\d.])v?\d+\.\d+\.\d+(?![\d.])/
   end
 
+  # M106 §8, D3, D9, D12 (stage S6): where Fermix reaches the owner, and the
+  # heal's message and card in the Fermix app, as the agent reads them.
+  test "the owner's inbox puts the app first while a phone is paired, and the app shows a card" do
+    jobs = "jobs" |> reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
+    setup = channel_setup_reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
+    mobile = mobile_reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
+
+    for reference <- [jobs, setup] do
+      assert reference =~ "the Fermix app while a phone is paired"
+      assert reference =~ "or on an Always On server with a computer linked to it"
+    end
+
+    assert jobs =~ "In the Fermix app the message is a row in the chat"
+    assert jobs =~ "sent again whenever the app reconnects, after a restart too"
+    refute jobs =~ "The Fermix apps do not show a proposal's card yet."
+    assert setup =~ "A watcher's proposal never goes to the app's chat"
+    assert mobile =~ "goes to the Mac and the phones alike"
+  end
+
   defp cues_paragraph do
     self_knowledge_path()
     |> File.read!()

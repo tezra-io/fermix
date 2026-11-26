@@ -88,6 +88,16 @@ without it both runners hold the case out as **NOT EVALUATED** (they read
 capability suite may require it, and `run_capability.py` holds its tasks out as it
 does for `cues`.
 
+`owner_inbox_app` — the home was seeded with `--owner-inbox-app` instead (one inbox:
+the two flags are exclusive), which makes the Fermix app's chat (`companion`, `main`,
+the companion socket's conversation) the configured target, taken by
+`Delivery.OwnerInbox` as the owner's own (M106 §8, stage S6). A message to the owner
+is then a row in the app's timeline (`mobile_timeline`, keyed by its send key, its
+job in `metadata.origin`) and a row in that conversation's history, and a heal's
+proposal an `approval` card of kind `job_change` on the socket; a case drives it with
+`drive: app`. The manifest names the target it set, so each requirement is held out of
+a home seeded for the other.
+
 A **case** may declare `requires:` too, from the same values, when its suite runs
 without that seed (`coding_harness.yaml`'s `claude_code_signed_out_run`): the
 case needs its suite's requirements and its own, and only that case is held out,
@@ -96,8 +106,8 @@ its siblings still run. A held-out case is listed on the console before the run
 never scored and never a failure; a run left with nothing to drive exits 3.
 `--dry-run` does not look at the home, so it plans the case either way. Only
 `run_eval.py` reads a case's `requires`: in a capability suite (`cap_*`) it is a
-load error, since `run_capability.py` holds a task out by its suite's `cues` and
-`owner_inbox_cli` alone.
+load error, since `run_capability.py` holds a task out by its suite's `cues`,
+`owner_inbox_cli` and `owner_inbox_app` alone.
 
 ### `abort_on_tool_error`
 
@@ -369,7 +379,9 @@ the `query` shorthand; multi-turn uses `turns`.
   `turns`, `image`, `rubric`, `score` or `expect`: the case's posts are its
   turns and its json `checker` is its grade. `owner_command` (capability suites
   only): each turn is a command the owner types (`/confirm`, `/deny`), which the
-  gateway answers with no model; see *`drive: owner_command`* below.
+  gateway answers with no model; see *`drive: owner_command`* below. `app`
+  (capability suites only): the Fermix app's chat on the companion socket as the
+  owner's inbox; the case's `app.steps` are its turns; see *`drive: app`* below.
 - `image` (string, optional) — path to a known local attachment (a picture, or
   any file: a GIF, a video, a PDF, a text file, a file Fermix cannot read)
   relative to the suite file and physically contained under `suites/fixtures/`.
@@ -858,6 +870,45 @@ $0, and `--estimate` prices no such turn). A command the daemon did not answer, 
 answered with nothing, makes the trial INVALID. Every turn is one line starting with
 `/`; no `expect`, `score`, `rubric` or `image`.
 
+### `drive: app` — the Fermix app's chat as the owner's inbox
+
+```yaml
+- id: card_offered_again_until_answered
+  drive: app
+  app:
+    steps:                       # 1..8, in order
+      - await_card               # an `approval` of kind job_change
+      - reconnect                # close, connect, hello: what it offered again
+      - answer: approve          # or deny: the card's own route, sent as a command
+      - reconnect
+  checker:
+    script: suites/capability/checkers/job_app_inbox.py
+    mode: json
+    state: suites/capability/fixtures/state/job_heal_app_proposal.json
+    expect: {job: holds, outcome: applied}
+```
+
+What reaches the owner in the app (M106 §8, stage S6), on a home seeded with
+`--owner-inbox-app` (`requires: [owner_inbox_app]`), driven the way the Mac app lives
+with it (`bin/evallib/app_drive.py`). The runner opens the companion socket, says
+hello, reads to a barrier (a `history_pull` answered after every card the hello
+offered again) and sends `/new`; then it seeds the case's `checker.state` with the
+socket open, so the heal the daemon sends on its next pass arrives live; then it takes
+the steps: `await_card` (an `approval` of kind `job_change`) or `await_row` (an
+assistant `row` whose origin is a job); `answer: approve | deny` (the card's own
+`approve_command` or `deny_command`, sent as `command{name, args}` as the app sends
+it, then up to 10 s for its `approval_resolved`); `reconnect`; `type_cli: "/confirm
+{card}"` (one command typed in the owner's terminal chat through `fermix ask`,
+`{card}` standing for the card's token); `say: "<text>"` (one message of the owner's in
+the app: a model turn, waited to its end, then up to 10 s for the card's resolution).
+`answer` and `type_cli` need an `await_card` before them. Every event each connection
+received goes to the checker (`app.connections`, each `hello` and `events`), with the
+replies (`replies`); a wait that runs out is recorded and stops the steps, and the
+checker decides from the store whether the heal was never sent (invalid) or went
+somewhere else (a 0). A socket that refused or closed makes the trial INVALID. No
+`query`, `turns`, `expect`, `score`, `rubric` or `image`; only a `say` step is a turn
+`--estimate` prices, and the drive reads no trace, so a trial's cost reads unknown.
+
 ### `drive: cue` — cues into the eval daemon's door
 
 ```yaml
@@ -1081,7 +1132,8 @@ A run may also say (M106 §5.1, §5.5):
   conclusion its heal run would have reached,
   `{"decision": rerun | raise_limit | propose | tell, "note" (at most 280 characters, the
   bound a diagnosis note keeps), "change"?,
-  "read_outside"?, "rerun_outcome"?, "delivered_minutes_after", "owner_edit"?}` and nothing else, made through the Repo's
+  "read_outside"?, "rerun_outcome"?, "delivered_minutes_after" | "decided_minutes_after",
+  "owner_edit"?}` and nothing else, made through the Repo's
   own heal calls (the claim, the inbox, the decision, the message `Jobs.HealMessage`
   builds, the delivered mark, and for a rerun what came of its ask: `started`,
   `running`, `refused` or `unanswered`, required with `rerun` and refused on any other
@@ -1105,10 +1157,17 @@ A run may also say (M106 §5.1, §5.5):
   `superseded` as a live edit does; the manifest's job is the edited one. A seeded pause is not offered (every seeded job is enabled), nor is a plugin's
   heal concluded (code tells it, with no decision). The conclusion comes
   `delivered_minutes_after` (whole, positive) its run ended, before the next run began
-  and before now. A spec that concludes
+  and before now. With `decided_minutes_after` instead (exactly one of the two; a
+  `tell` or `propose` with no `owner_edit`), the conclusion is recorded and NOT sent:
+  the decision is written under a lease that ends a second later, as a heal run that
+  died after deciding leaves it, with no inbox stored, no message for a tell (the
+  daemon's run builds it) and, for a proposal, its short ask fitted to this home's
+  inbox and no card bound; the daemon's next pass claims it, resolves the owner's
+  inbox itself and sends it, binding and offering the card, with no model (stage S6's
+  `cap_job_heal_app_inbox`). A spec that concludes
   a heal gives only one job runs that open one, failed or ending ok without working
-  (the claim takes the oldest open heal), and needs the local owner inbox
-  (`--owner-inbox-cli`). A job's runs are listed oldest first, each over before the next
+  (the claim takes the oldest open heal), and needs an owner inbox a send reaches
+  (`--owner-inbox-cli` or `--owner-inbox-app`). A job's runs are listed oldest first, each over before the next
   starts, so the runs before one in the spec are the runs its settle reads. All of it
   is checked before the reset, so a refused spec leaves the home as it was.
 

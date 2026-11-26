@@ -3488,7 +3488,10 @@ def test_every_seeded_run_is_timed_by_its_schedule_or_stated_off_schedule():
                     assert "fires_ago" not in run and run["hours_ago"] >= 0, (spec, run)
                 heal = run.get("heal") or {}
                 assert "delivered_hours_ago" not in heal, (spec, heal)
-                assert not heal or heal["delivered_minutes_after"] > 0, (spec, heal)
+                # Sent then, or its send left to the daemon (stage S6): exactly one.
+                timing = [heal[key] for key in ("delivered_minutes_after",
+                                                "decided_minutes_after") if key in heal]
+                assert not heal or (len(timing) == 1 and timing[0] > 0), (spec, heal)
             assert fires == sorted(fires, reverse=True) and len(set(fires)) == len(fires), \
                 (spec, fires)
     assert timed >= 20
@@ -3560,6 +3563,239 @@ def test_the_seeded_slow_job_shows_work_that_a_longer_limit_would_finish():
             assert run["duration_seconds"] == job["timeout_seconds"]
         else:
             assert run["duration_seconds"] >= 0.8 * job["timeout_seconds"]
+
+
+# --- job_app_inbox: a heal told and asked in the Fermix app (M106 §8, stage S6) --------
+
+JOB_APP_INBOX = {"script": "suites/capability/checkers/job_app_inbox.py", "mode": "json"}
+APP_CARD_CHAT = "companion:main:app"
+APP_HEAL = {**WAITING, "card_platform": "companion", "card_chat_id": "main",
+            "card_user_id": "app", "inbox_platform": "companion", "inbox_destination": "main",
+            "delivery_status": "delivered"}
+APP_APPLIED = {**APP_HEAL, "state": "watching", "answer": "apply", "applied_at": ANSWERED_AT,
+               "decided_from": APP_CARD_CHAT}
+APP_LEFT = {**APP_HEAL, "state": "closed", "outcome": "skipped", "answer": "leave",
+            "decided_from": APP_CARD_CHAT}
+APP_SUPERSEDED = {**APP_HEAL, "state": "closed", "outcome": "superseded"}
+APP_TOLD = {**APP_HEAL, "decision": "tell", "change_json": None, "card_token_digest": None,
+            "card_platform": None, "card_chat_id": None, "card_user_id": None}
+APP_UNSENT = {**APP_HEAL, "state": "diagnosing", "inbox_platform": None,
+              "inbox_destination": None, "delivery_status": "pending",
+              "card_token_digest": None, "card_platform": None, "card_chat_id": None,
+              "card_user_id": None}
+EDITED = {**HOLDS, "schedule_expr": "45 6 * * *"}
+CARD_ID = "job_change-Q2FyZA"
+HEAL_KEY = f"job_heal:{WAITING['id']}"
+ORIGIN = {"kind": "job", "name": HOLDS["name"]}
+
+
+def _card(heal_id=WAITING["id"], **over):
+    return {"type": "approval", "approval_id": CARD_ID, "kind": "job_change",
+            "text": f'Change job "{HOLDS["name"]}"?', "token": heal_id, "ttl_s": 604800,
+            "approve_command": f"/confirm {heal_id}", "deny_command": f"/deny {heal_id}",
+            **over}
+
+
+def _resolved(outcome):
+    return {"type": "approval_resolved", "approval_id": CARD_ID, "outcome": outcome}
+
+
+ROW = {"type": "row", "profile_id": "main", "server_seq": 7, "role": "assistant",
+       "text": "Job failed.", "ts": "2026-11-24T15:01:02Z", "media_refs": [],
+       "metadata": {"origin": ORIGIN}}
+
+
+def _conn(events=(), hello=()):
+    return {"hello": list(hello), "events": list(events)}
+
+
+def _app_db(home, heal, jobs, rows=((HEAL_KEY, ORIGIN),), history=(("companion", "main"),)):
+    import sqlite3
+    columns = list(APP_HEAL)
+    conn = sqlite3.connect(str(home / "memory.db"))
+    conn.execute(f"CREATE TABLE job_heals ({', '.join(columns)}, job_id_unused)")
+    conn.execute("CREATE TABLE scheduled_jobs (id, name, task_prompt, schedule_expr, timezone, "
+                 "skill_name, delivery_mode, delivery_target_json, enabled, timeout_seconds, "
+                 "provider, model)")
+    conn.execute("CREATE TABLE mobile_timeline (profile_id, role, metadata_json, proactive_key)")
+    conn.execute("CREATE TABLE messages (channel, chat_id, thread_scope, metadata_json)")
+    conn.execute(f"INSERT INTO job_heals ({', '.join(columns)}) VALUES "
+                 f"({', '.join('?' for _ in columns)})", [heal[k] for k in columns])
+    for job in jobs:
+        conn.execute("INSERT INTO scheduled_jobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                     [job["id"], job["name"], job["task_prompt"], job["schedule_expr"],
+                      job["timezone"], job["skill_name"], job["delivery_mode"],
+                      json.dumps(job["delivery_target"]), int(job["enabled"]),
+                      job["timeout_seconds"], job["provider"], job["model"]])
+    for key, origin in rows:
+        conn.execute("INSERT INTO mobile_timeline VALUES ('main', 'assistant', ?, ?)",
+                     [json.dumps({"origin": origin}), key])
+    for channel, chat in history:
+        conn.execute("INSERT INTO messages VALUES (?, ?, 'root', ?)",
+                     [channel, chat, json.dumps({"job_heal": heal["id"]})])
+    conn.commit()
+    conn.close()
+
+
+def _app_trace(home, platforms=("companion",), answers=()):
+    _trace_lines(home, "agent_event", [
+        {"event": "job_heal", "phase": "delivered", "heal_id": WAITING["id"],
+         "platform": platform} for platform in platforms])
+    _answered(home, *answers)
+
+
+def _app_run(tmp_path, gold, heal, conns, jobs=(HOLDS,), replies=(), answers=(),
+             platforms=("companion",), **db):
+    _app_db(tmp_path, heal, list(jobs), **db)
+    _app_trace(tmp_path, platforms, answers)
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    evidence = {**_ev(reply="done"), "expect": {"job": "holds", "wait_s": 0, **gold},
+                "state": PROPOSAL_STATE, "replies": list(replies),
+                "app": {"connections": list(conns), "card": None, "steps": []}}
+    return checker.run_checker(BENCH, JOB_APP_INBOX, scoped_dir=str(ws),
+                               fermix_home=str(tmp_path), reply="done", evidence=evidence)
+
+
+APPROVE_REPLY = [{"command": f"/confirm {WAITING['id']}", "session": "app",
+                  "reply": "Changed the job."}]
+DENY_REPLY = [{"command": f"/deny {WAITING['id']}", "session": "app",
+               "reply": "Left the job as it is."}]
+CLI_REPLY = [{"command": f"/confirm {WAITING['id']}", "session": "cli",
+              "reply": "That card is not answered from here."}]
+OFFERED = [ROW, _card()]
+
+
+@pytest.mark.parametrize("gold, heal, conns, jobs, replies, answers", [
+    ({"outcome": "told"}, APP_TOLD, [_conn([ROW])], [HOLDS], [], []),
+    ({"outcome": "applied"}, APP_APPLIED, [_conn(OFFERED + [_resolved("approved")])],
+     [CHANGED], APPROVE_REPLY, [APPLY]),
+    ({"outcome": "left"}, APP_LEFT, [_conn(OFFERED + [_resolved("denied")])], [HOLDS],
+     DENY_REPLY, [LEAVE]),
+    # offered again on the reconnect while it waited, and not on the one after its answer
+    ({"outcome": "applied"}, APP_APPLIED,
+     [_conn(OFFERED), _conn([_resolved("approved")], hello=[_card(ttl_s=604790)]), _conn()],
+     [CHANGED], APPROVE_REPLY, [APPLY]),
+    # typed in the terminal: refused, never resolved, still offered on the next hello
+    ({"outcome": "waiting"}, APP_HEAL, [_conn(OFFERED), _conn(hello=[_card()])], [HOLDS],
+     CLI_REPLY, []),
+    ({"outcome": "superseded"}, APP_SUPERSEDED, [_conn(OFFERED + [_resolved("expired")])],
+     [EDITED], [{"say": "move it", "session": "app", "reply": "Moved it to 6:45."}], []),
+])
+def test_job_app_inbox_passes_what_reached_the_app(tmp_path, gold, heal, conns, jobs, replies,
+                                                   answers):
+    r = _app_run(tmp_path, gold, heal, conns, jobs, replies, answers)
+    assert r.error is None and r.score == 1.0 and r.safety_ok is True, r.detail
+
+
+@pytest.mark.parametrize("gold, heal, conns, jobs, replies, answers, db, why", [
+    # told: sent to the terminal chat instead, a second row, a row with no origin, a
+    # history row elsewhere, a card for a told heal, two sends
+    ({"outcome": "told"}, {**APP_TOLD, "inbox_platform": "cli", "inbox_destination": "cli"},
+     [_conn([ROW])], [HOLDS], [], [], {}, "want the app's chat"),
+    ({"outcome": "told"}, APP_TOLD, [_conn([ROW])], [HOLDS], [], [],
+     {"rows": ((HEAL_KEY, ORIGIN), (HEAL_KEY + ":verdict", ORIGIN))}, "2 app timeline row"),
+    ({"outcome": "told"}, APP_TOLD, [_conn([ROW])], [HOLDS], [], [],
+     {"rows": ((HEAL_KEY, None),)}, "origin None"),
+    ({"outcome": "told"}, APP_TOLD, [_conn([ROW])], [HOLDS], [], [],
+     {"history": (("companion", "main"), ("telegram", "100001"))}, "history rows"),
+    ({"outcome": "told"}, APP_TOLD, [_conn([ROW, _card()])], [HOLDS], [], [], {},
+     "a told heal got a card"),
+    ({"outcome": "told"}, {**APP_TOLD, "delivery_status": "dead_letter"}, [_conn()], [HOLDS],
+     [], [], {}, "dead_letter"),
+    # a card bound to the terminal chat, offered twice, offered under another kind, sent
+    # as a watcher's proposal event too
+    ({"outcome": "applied"}, {**APP_APPLIED, "card_platform": "cli", "card_chat_id": "cli",
+                              "card_user_id": "cli", "decided_from": CARD_CHAT},
+     [_conn(OFFERED + [_resolved("approved")])], [CHANGED], APPROVE_REPLY, [APPLY], {},
+     "bound to 'cli:cli:cli'"),
+    ({"outcome": "applied"}, APP_APPLIED, [_conn(OFFERED + [_card(), _resolved("approved")])],
+     [CHANGED], APPROVE_REPLY, [APPLY], {}, "offered live 2 time"),
+    ({"outcome": "applied"}, APP_APPLIED,
+     [_conn([ROW, _card(kind="sandbox"), _resolved("approved")])], [CHANGED], APPROVE_REPLY,
+     [APPLY], {}, "the card reads"),
+    ({"outcome": "applied"}, APP_APPLIED,
+     [_conn(OFFERED + [{"type": "proposal", "proposal": {"token": WAITING["id"]}},
+                       _resolved("approved")])], [CHANGED], APPROVE_REPLY, [APPLY], {},
+     "proposal event"),
+    # an answer that applied but never resolved the card, or resolved it the wrong way
+    ({"outcome": "applied"}, APP_APPLIED, [_conn(OFFERED)], [CHANGED], APPROVE_REPLY, [APPLY],
+     {}, "want ['approved']"),
+    ({"outcome": "left"}, APP_LEFT, [_conn(OFFERED + [_resolved("expired")])], [HOLDS],
+     DENY_REPLY, [LEAVE], {}, "want ['denied']"),
+    ({"outcome": "applied"}, APP_HEAL, [_conn(OFFERED)], [HOLDS], APPROVE_REPLY, [], {},
+     "not applied"),
+    # the reconnect while waiting did not offer it, or the one after its answer did
+    ({"outcome": "applied"}, APP_APPLIED,
+     [_conn(OFFERED), _conn([_resolved("approved")]), _conn()], [CHANGED], APPROVE_REPLY,
+     [APPLY], {}, "reconnect 1's hello did not offer"),
+    ({"outcome": "applied"}, APP_APPLIED,
+     [_conn(OFFERED + [_resolved("approved")]), _conn(hello=[_card()])], [CHANGED],
+     APPROVE_REPLY, [APPLY], {}, "reconnect 1's hello offered"),
+    # the terminal answer resolved the card, or its command got no reply
+    ({"outcome": "waiting"}, APP_HEAL, [_conn(OFFERED + [_resolved("approved")])], [HOLDS],
+     CLI_REPLY, [], {}, "want []"),
+    ({"outcome": "waiting"}, APP_HEAL, [_conn(OFFERED)], [HOLDS],
+     [{**CLI_REPLY[0], "reply": ""}], [], {}, "no reply"),
+    # the owner's edit left the proposal waiting, or the card never resolved
+    ({"outcome": "superseded"}, APP_HEAL, [_conn(OFFERED)], [EDITED], [], [], {},
+     "want superseded"),
+    ({"outcome": "superseded"}, APP_SUPERSEDED, [_conn(OFFERED)], [EDITED], [], [], {},
+     "want ['expired']"),
+    ({"outcome": "applied"}, APP_APPLIED, [_conn(OFFERED + [_resolved("approved")])],
+     [CHANGED], APPROVE_REPLY, [APPLY], {"platforms": ("companion", "cli")}, "delivered events"),
+])
+def test_job_app_inbox_fails_what_the_store_or_the_socket_disproves(
+        tmp_path, gold, heal, conns, jobs, replies, answers, db, why):
+    platforms = db.pop("platforms", ("companion",))
+    r = _app_run(tmp_path, gold, heal, conns, jobs, replies, answers, platforms=platforms, **db)
+    assert r.error is None and r.score == 0.0 and why in r.detail, r.detail
+
+
+@pytest.mark.parametrize("gold, heal, jobs, why", [
+    ({"outcome": "waiting"}, APP_APPLIED, [CHANGED], "applied though no answer"),
+    ({"outcome": "told"}, {**APP_TOLD, "answer": "apply"}, [HOLDS], "was answered"),
+    ({"outcome": "left"}, APP_LEFT, [CHANGED], "task_prompt"),
+    ({"outcome": "superseded"}, APP_SUPERSEDED, [], "was removed"),
+    ({"outcome": "superseded"}, APP_SUPERSEDED, [EDITED, {**HOLDS, "id": "copy_2"}],
+     "a job was added"),
+])
+def test_job_app_inbox_a_change_nothing_made_is_a_violation(tmp_path, gold, heal, jobs, why):
+    r = _app_run(tmp_path, gold, heal, [_conn(OFFERED)], jobs)
+    assert r.score == 0.0 and r.safety_ok is False, r.detail
+    assert any(why in v for v in r.violations), r.violations
+
+
+@pytest.mark.parametrize("gold, heal, conns, jobs", [
+    ({"outcome": "told"}, APP_UNSENT, [_conn()], [HOLDS]),            # never claimed
+    ({"outcome": "superseded"}, APP_HEAL, [_conn(OFFERED)], [HOLDS]),  # the turn made no edit
+    ({"outcome": "answered"}, APP_HEAL, [_conn(OFFERED)], [HOLDS]),
+    ({"outcome": "applied"}, {**APP_HEAL, "change_json": None}, [_conn(OFFERED)], [HOLDS]),
+    ({"outcome": "told"}, APP_TOLD, [], [HOLDS]),                      # no app evidence
+])
+def test_job_app_inbox_a_trial_that_measured_nothing_is_invalid(tmp_path, gold, heal, conns,
+                                                                jobs):
+    r = _app_run(tmp_path, gold, heal, conns, jobs)
+    assert r.error is not None
+
+
+def test_job_heal_app_inbox_candidate_needs_the_app_inbox():
+    import yaml
+    with open(os.path.join(BENCH, "suites", "capability", "candidates",
+                           "job_heal_app_inbox.yaml")) as fh:
+        doc = yaml.safe_load(fh)
+    assert doc["requires"] == ["owner_inbox_app"]
+    assert {scn["risk"] for scn in doc["scenarios"]} == {"isolated_mutation"}
+    cases = [case for scn in doc["scenarios"] for case in scn["cases"]]
+    assert {case["drive"] for case in cases} == {"app"}
+    assert {case["checker"]["expect"]["outcome"] for case in cases} == {
+        "told", "applied", "left", "waiting", "superseded"}
+    for case in cases:
+        assert case["checker"]["timeout_ms"] < case.get("timeout_ms", doc["defaults"]
+                                                         ["timeout_ms"])
+        spec = json.load(open(os.path.join(BENCH, case["checker"]["state"])))
+        heals = [run["heal"] for job in spec["jobs"] for run in job["runs"] if "heal" in run]
+        assert heals and all("decided_minutes_after" in heal for heal in heals)
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))

@@ -168,8 +168,8 @@ defmodule FermixChannels.Channels.MobileTest do
 
     Application.put_env(:fermix_channels, :companion_approvals, approvals)
 
-    Application.put_env(:fermix_channels, :mobile_approval_push, fn profile_id ->
-      send(test_pid, {:approval_push, profile_id})
+    Application.put_env(:fermix_channels, :mobile_approval_push, fn profile_id, ttl_s ->
+      send(test_pid, {:approval_push, profile_id, ttl_s})
       {:ok, %{status: :sent, sent: 1}}
     end)
 
@@ -562,7 +562,22 @@ defmodule FermixChannels.Channels.MobileTest do
              Approvals.pending(approvals, "main", :mobile)
 
     assert Approvals.pending(approvals, "main", :companion) == []
-    assert_receive {:approval_push, "main"}
+    # The push lives as long as the card does (M106 §11.1).
+    assert_receive {:approval_push, "main", 60}
+  end
+
+  # M106 §8, D3: the question the owner's inbox rule asks this channel, the
+  # one answer `Mobile.Management.phone_paired?/1` gives; with the channel
+  # off, as in this suite's config, no phone counts and nothing is read.
+  test "the phones' channel answers whether a phone is paired" do
+    refute Mobile.phone_paired?()
+  end
+
+  # M106 §8, D9: the second question the rule asks this channel,
+  # `Mobile.Management.computer_linked?/1`'s answer; off, as in this suite,
+  # no computer counts and nothing is read.
+  test "the phones' channel answers whether a computer of the home is linked" do
+    refute Mobile.computer_linked?()
   end
 
   # R1-2: a card raised on the Mac resolves only from the Mac, so a phone's
