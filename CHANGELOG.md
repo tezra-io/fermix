@@ -48,6 +48,24 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   check, and its device record says it is a release build. Until now only the
   development key was trusted, so no release build could pair.
 
+- **Auto Heal: Fermix notices a scheduled job that fails, and tells you once.**
+  A run that fails before it did anything, on something waiting can clear (a
+  provider's rate limit or outage, a lost connection), is run again quietly, up
+  to three times. Any other failure opens a heal: one message in your own
+  inbox, written from Fermix's own facts (the job, what failed and when, how
+  often lately, when it runs next), in place of an error sent where the job
+  delivers. Later failures of the same job join it and send nothing, and every
+  job failing on one provider shares one message. A job that keeps ending ok
+  while one of its tools never once succeeds, three runs in a row, is noticed
+  the same way. Before the message Fermix takes one short look at the job and
+  may, on its own, run it once more, raise its time limit (never past 30
+  minutes) or pause it. Anything else, such as a different task, schedule or
+  skill, it only proposes, on an approval card with **Approve** and **Deny**
+  (or `/confirm` and `/deny` in the chat the card went to): a yes makes
+  exactly the change shown, and only if the job is still as it was when the
+  change was drawn. A fix that does not hold is said once, and a heal nobody
+  answers closes after seven days.
+
 ### Changed
 
 - **One slow attachment no longer holds up your other chats.** On Telegram and
@@ -73,6 +91,18 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   history.** Working out your active hours, and reading your recent messages
   when skills are reviewed, each sorted every message you have sent. They now
   read an index, which an existing home gains the first time it starts.
+
+- **Your inbox is the Fermix app while a phone is paired.** What Fermix sends
+  you on its own (a heal's message, a watcher's notice, a voice call's report,
+  an access confirmation that had no chat of its own) went to the default
+  target you configured or to your chat on Telegram, Signal, WhatsApp or
+  iMessage, and never to the app. The order is now: the default target you
+  configured, which may be the app; the Fermix app while a phone is paired;
+  your messaging chat; and with none of those, the app's chat on an install
+  with the app or on an Always On server with a computer linked to it. An
+  approval asked this way shows in the app as the approval card it already
+  draws, on the Mac and the phone alike, and is answered from either. A
+  watcher's proposal card and reminders stay where they were.
 
 ### Fixed
 
