@@ -59,13 +59,13 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/cues/filters.ex @ 9f400ed757c3
 \* SOURCE: apps/fermix_core/lib/fermix_core/cues/supervisor.ex @ e1b36533a8b3
 \* SOURCE: apps/fermix_core/lib/fermix_core/cues/sweeper.ex @ 2f4ac202fed9
-\* SOURCE: apps/fermix_core/lib/fermix_core/cues/proposals.ex @ b373ea1426ea
+\* SOURCE: apps/fermix_core/lib/fermix_core/cues/proposals.ex @ 8e911e5a2425
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_sql.ex @ 5a1008301ef3
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_filter_sql.ex @ 319f777956cf
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_runs_sql.ex#@open_sql,@cap_room_sql,@eligible_sql,@candidates_sql,@eligible_delivery_sql,@settle_facts_sql,eligible_delivery,settle_delivery,settle_facts,settle_held,settle_move,unspent_retry,spent_retry,move_patch,untouched @ 03becc353f97
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_mandate_sql.ex#mark_tools_started,decide_propose,store_proposal,point_at_existing,decide_waiting,decided_or_why,decide_by_id,decided_by_id,end_denied,settle_proposal,expire_proposals @ 3cde2fd13edc
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/cue_admission.ex @ b98563b66ad5
-\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/scheduler.ex#init,handle_info,handle_cast,maybe_request_admission,request_admission,admit_cue_runs,free_cue_slots,cue_run_attrs,start_cue_run,reconcile_active_runs,reconcile_active_run,adopt_live_run,monitored_run?,reap_orphaned_run,live_runner_pids,put_live_runner,active_run_count,start_or_mark_failed,monitor_entry,mark_run_crashed,mark_run_failed,mark_run_error,fail_delivery_after_settle @ 32d790ba5d74
+\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/scheduler.ex#init,handle_info,handle_cast,maybe_request_admission,request_admission,admit_cue_runs,free_cue_slots,cue_run_attrs,start_cue_run,reconcile_active_runs,reconcile_active_run,adopt_live_run,monitored_run?,reap_orphaned_run,live_runner_pids,put_live_runner,active_run_count,start_or_mark_failed,monitor_entry,mark_run_crashed,mark_run_failed,mark_run_error,fail_delivery_after_settle @ 6454943b97bf
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/runner.ex#complete_run,mark_cue_completed,mark_failed @ 79d812050e66
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,request_message,deadline_after,deadline_passed?,call_or_timeout_error,periodic_opts,claim_cue_run,claim_cue_run_tx,claim_cue_run_in_tx,claim_delivery,claim_in_tx,fetch_claimable_job,ensure_no_active_job_run,settle_cue_run,settle_cue_run_tx,settle_cue_run_in_tx,active_run_trigger,release_cue_job,ensure_job_run_active,finish_job_settle,rollback_job_settle,upsert_job_run_row @ 81e81369930e
 \* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,supervision_children,maybe_cues_supervisor @ 50220a45fd6a
@@ -75,7 +75,7 @@ EXTENDS Naturals, Sequences, FiniteSets
 CONSTANTS
     Topology,        \* which deliveries exist (see Wat, Subj, Kind below)
     MaxFaults,       \* how many injected faults one behaviour may contain
-    MaxActive,       \* the scheduler's run ceiling (@max_active_runs 4, scheduler.ex:78)
+    MaxActive,       \* the scheduler's run ceiling (@max_active_runs 4, scheduler.ex:79)
     MaxCue,          \* the cue share of it (@max_cue_runs 3, cue_admission.ex:58)
     MaxFilterAttempts, \* @max_filter_attempts 3 (cues_filter_sql.ex:66), scaled
     MaxTaskAttempts, \* @max_task_attempts 3 (cues_runs_sql.ex:49), scaled
@@ -133,9 +133,9 @@ CONSTANTS
                                 \* claimed by it (cues_runs_sql.ex:366)
     ReapsOnlyDeadRuns,          \* reconciliation reaps a run only when the runner
                                 \* supervisor no longer holds its runner
-                                \* (scheduler.ex:511, :523)
+                                \* (scheduler.ex:515, :527)
     ReconcilesRuns,             \* init and the 60 s tick reconcile unsettled runs
-                                \* (scheduler.ex:235, :275, :495)
+                                \* (scheduler.ex:236, :279, :499)
     ExhaustsAfterAction,        \* a failure once tools_started_at is set ends the
                                 \* delivery exhausted (cues_runs_sql.ex:388)
     ToolsMarkWriteOnce,         \* the run upsert never clears tools_started_at
@@ -147,8 +147,8 @@ CONSTANTS
                                 \* filters.ex:193-216 reclaim_orphans,
                                 \* cues_filter_sql.ex:675 reclaim_in_tx)
     AdmitsAfterScan,            \* no cue run is admitted while the last reconcile
-                                \* scan failed (R3, CUE-2: scheduler.ex:370
-                                \* free_cue_slots; the flag :499, :507)
+                                \* scan failed (R3, CUE-2: scheduler.ex:374
+                                \* free_cue_slots; the flag :503, :511)
     AppDecideFenced,            \* a device's answer is one UPDATE on id, state and
                                 \* expiry (cues_mandate_sql.ex decide_by_id)
     TaskLessSettlesAtPass       \* a watcher with no task settles its delivery acked
@@ -632,10 +632,10 @@ Eligible(d) ==
 EligibleOf(w) == {d \in D : Wat[d] = w /\ Eligible(d)}
 
 \* The runner supervisor's live runners (active_run_count/1, scheduler.ex
-\* :713-717, which counts the children that published a run id: a live
+\* :717-721, which counts the children that published a run id: a live
 \* Jobs.HealRun, M106, is a child too but no run, so it takes no slot) and
 \* the scheduler's monitored cue runs
-\* (CueAdmission.active_cue_runs/1). free_cue_slots/1 (scheduler.ex:370):
+\* (CueAdmission.active_cue_runs/1). free_cue_slots/1 (scheduler.ex:374):
 \* none while the last reconcile scan failed (the monitors may miss runners
 \* that survived a restart, CUE-2), else CueAdmission.free_slots/3.
 LiveRunners == {r \in Runs : runner[r] \in {"live", "half"}}
@@ -660,10 +660,10 @@ ClaimRunRows(w) ==
        /\ jstate' = [jstate EXCEPT ![w] = "running"]
        /\ nextRun' = nextRun + 1
 
-\* :cue_admit / a tick -> admit_cue_runs/2 (scheduler.ex:285, :318), gated on
-\* cues_running? (the cue tree alive, :220; always true here):
+\* :cue_admit / a tick -> admit_cue_runs/2 (scheduler.ex:289, :322), gated on
+\* cues_running? (the cue tree alive, :221; always true here):
 \* CueAdmission.free_slots/3 then claim/4 (cue_admission.ex:83, :109), each
-\* claim one Repo call, then start_cue_run/2 -> start_or_mark_failed/3 (scheduler.ex:482, :860)
+\* claim one Repo call, then start_cue_run/2 -> start_or_mark_failed/3 (scheduler.ex:486, :864)
 \* starts the runner and monitors it, in the same callback. One claim per
 \* step; the slots are recomputed each step, which bounds the claims exactly
 \* as the pass's one `free` does.
@@ -816,7 +816,7 @@ RunnerCrash(r) ==
 -----------------------------------------------------------------------------
 (* The scheduler's recovery paths *)
 
-\* mark_run_failed/4 -> mark_run_error/4 (scheduler.ex:956, :1012):
+\* mark_run_failed/4 -> mark_run_error/4 (scheduler.ex:960, :1016):
 \* the run read fresh (so its tools_started_at is the column's), then
 \* CueAdmission.settle(attrs, :scheduler, ...).
 SchedulerSettle(r) ==
@@ -826,11 +826,11 @@ SchedulerSettle(r) ==
     ELSE UNCHANGED <<dstate, holder, due, tatt, staleRunWrite, retriedAfterAction,
                      rstatus, jstate>>
 
-\* handle_info({:DOWN, ...}) (scheduler.ex:291): a normal exit only frees
+\* handle_info({:DOWN, ...}) (scheduler.ex:295): a normal exit only frees
 \* the monitor; a crash is settled by the scheduler. A crash settle that
 \* rolls back is logged and left for reconciliation. Since M106 both clauses
-\* then re-arm the due timer and may start a heal run (scheduler.ex:344-360),
-\* and a heal run's own DOWN clause comes first (:321-333): none of it
+\* then re-arm the due timer and may start a heal run (scheduler.ex:348-364),
+\* and a heal run's own DOWN clause comes first (:325-337): none of it
 \* touches a delivery, a run row or the monitors counted here.
 SchedDown(r) ==
     /\ sched = "up"
@@ -850,9 +850,9 @@ SchedDown(r) ==
 Alive(r) == runner[r] \in {"live", "half"}
 
 \* One unsettled run of a reconciliation pass (reconcile_active_runs/1 and
-\* reconcile_active_run/3, scheduler.ex:495, :511): a run whose runner the
-\* supervisor still holds is adopted (monitored, :523); any other is reaped
-\* (:537), whatever its monitor. Without ReapsOnlyDeadRuns a run
+\* reconcile_active_run/3, scheduler.ex:499, :515): a run whose runner the
+\* supervisor still holds is adopted (monitored, :527); any other is reaped
+\* (:541), whatever its monitor. Without ReapsOnlyDeadRuns a run
 \* the scheduler does not monitor is reaped even with its runner alive.
 ReconcileRun(r) ==
     /\ ReconcilesRuns
@@ -894,14 +894,14 @@ SchedRestart ==
     /\ runsKnown' = FALSE
     /\ UNCHANGED <<rowD, wblocked, jstate, callRows, runRows, propVars, dispVars, obs>>
 
-\* init/1 (scheduler.ex:164): runs_known? starts false (:218), then
-\* reconcile_active_runs (:235). The scan adopts every live runner's run (the
+\* init/1 (scheduler.ex:165): runs_known? starts false (:219), then
+\* reconcile_active_runs (:236). The scan adopts every live runner's run (the
 \* dead ones are reaped by ReconcileRun, the same function) and sets the run
-\* set known (:499). A scan that errors or times out (periodic opts) is logged,
-\* leaves the run set unknown (:507) and init goes on with no monitors
-\* (:495-509); it then requests an admission pass (:238,
+\* set known (:503). A scan that errors or times out (periodic opts) is logged,
+\* leaves the run set unknown (:511) and init goes on with no monitors
+\* (:499-513); it then requests an admission pass (:239,
 \* maybe_request_admission/1), which admits no cue run while the set is
-\* unknown (free_cue_slots/1, :370). Without reconciliation there is no scan,
+\* unknown (free_cue_slots/1, :374). Without reconciliation there is no scan,
 \* and the empty monitors are taken as the run set, as before R3.
 SchedBoot ==
     /\ sched = "down"
@@ -921,9 +921,9 @@ SchedBoot ==
                    obs>>
 
 \* The 60 s reconcile tick's scan (handle_info(:reconcile_tick),
-\* scheduler.ex:270-275 -> reconcile_active_runs/1, :495) succeeding while the
+\* scheduler.ex:274-279 -> reconcile_active_runs/1, :499) succeeding while the
 \* run set is unknown: every live runner's run is adopted in that callback and
-\* the set is known again (:499). Reaping the dead runs of the same pass is
+\* the set is known again (:503). Reaping the dead runs of the same pass is
 \* ReconcileRun (which, without ReapsOnlyDeadRuns, also reaps the live runs
 \* this step then leaves unmonitored).
 SchedRescan ==
@@ -937,7 +937,7 @@ SchedRescan ==
                    runner, obs, faults>>
 
 \* A tick's scan that fails: the run set is unknown until a scan succeeds
-\* (:507), even though the monitors already hold every runner.
+\* (:511), even though the monitors already hold every runner.
 SchedRescanFails ==
     /\ ReconcilesRuns /\ SchedulerRepoCanFail /\ Fault
     /\ sched = "up" /\ runsKnown

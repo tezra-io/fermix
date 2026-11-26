@@ -405,7 +405,7 @@ the checks that show a rule needs it):
 - `AnnouncesEveryRow`: every row written outside a turn's completion is
   announced as a `row` as it is written: the user's row (`announce_user_row`,
   `connection.ex:1378-1379`) and a delivery (`announce_written`,
-  `channels/companion.ex:409-410`), both built by `Companion.Output.row` and
+  `channels/companion.ex:443-444`), both built by `Companion.Output.row` and
   sent through `Companion.Fanout.announce`. `FALSE` announces no user row.
 - `SingleAnswer`: `Confirmations.take` is an `:ets.take`, the sole consumer of
   a token (`confirmations.ex:21-31`).
@@ -952,3 +952,45 @@ the same `{:trips_changed, _}` then `:trips_flush` steps any trips change takes,
 and the size guard counts a town on every day. The trip family is outside this
 spec (Not modelled: protocol 8's trips), and the push carries no seq, request or
 turn. No modelled step changed.
+
+## Re-read for the app inbox (M106 S6, 2026-11-26)
+
+M106's stage S6 staled `PROTOCOL.md`, `output.ex#approval`,
+`approvals.ex` (whole) and `channels/companion.ex#send_approval`. Function
+by function:
+- **`Channels.Companion.send_approval/2`.** A card a turn on this socket
+  raised (`:sandbox`, `:soul`, no `owner_inbox` mark) takes the clause it
+  took: `Approvals.announce(..., :companion)`, kept, this socket's clients
+  alone. Two clauses are new.
+  - A heal's proposal (`:job_change`) is offered to both transports and
+    never kept (`Approvals.offer/3`).
+  - An access confirmation asked in the owner's inbox when that is the app
+    (`owner_inbox: true`) is kept for `:all`.
+
+  Neither is a turn's card. The spec's one approval is still raised by a
+  turn of the socket.
+- **`Companion.Approvals`.**
+  - `announce` and `resolve` now take an audience (a transport, or `:all`).
+    For a turn's card it is its transport, as before.
+  - `resolve` announces to the audience the card was kept with.
+  - `pending/3` returns the kept cards for the transport or for `:all`,
+    then the heal proposals its `:durable` source reads in the caller (the
+    Connection's join). That source never raises: a store that does not
+    answer gives none.
+  - The modelled card's announce, its kept deadline, its expiry
+    (`handle_info({:approval_expired, ...})`, `expire/3`), its resend at
+    hello and its resolution are as they were.
+  - `heal_card_ended/3` resolves a heal's card to both transports. It is
+    another card id, which the spec's one approval never is.
+- **`Output.approval/1`** builds the new kind's routes from the heal's id
+  (`approval_routes(:job_change, _)`), takes its `ttl_s` from the spec and
+  its text from its lines. A `:sandbox` or `:soul` card is built as before.
+- **`PROTOCOL.md`** documents `job_change` and a card's audience. The wire's
+  events and their order are as they were.
+
+No step, variable or check changed. A heal's card and an owner-inbox
+confirmation are approval cards the spec leaves out: they are not raised by
+a turn, and no property here is about them. Their answers go through the
+answer rail and the sandbox confirmations, unchanged in what this spec pins.
+The `approvals.ex`, `companion.ex` and `sandbox.ex` citations in the spec and
+above Findings moved with the code and were updated.

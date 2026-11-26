@@ -25,7 +25,7 @@ mechanism check.
 **Environment switches** (set per check):
 - `PlatformDedupes`: the platform drops a second message with the same
   `proactive_key`. Only the companion timeline does, for the mobile and
-  companion channels (`output.ex:268-270` → `mobile_sql.ex:434-444`), and
+  companion channels (`output.ex:279-281` → `mobile_sql.ex:434-444`), and
   neither is a reminder platform (see the plan hypotheses).
 - `PlatformCanBeSlow`: the platform can answer after the watchdog fired, and can
   still show a message Fermix gave up on.
@@ -596,6 +596,25 @@ and `:438-439` for the temporal rail, `:209` for the tree's strategy, and
 `f2a874b8` (M94, 2026-11-17) shortened the comment above `prep_stop/1` and
 changed none of the pinned functions; the `application.ex` citations below it
 moved up by two with the code.
+
+Re-read on 2026-11-26 for the app inbox (M106 S6), which staled the
+`mobile.ex` and `output.ex` pins.
+- `mobile.ex`:
+  - `send_approval` now pushes with the card's own lifetime
+    (`push_approval/3`, `notify_approval/2`);
+  - `phone_paired?/0` and `computer_linked?/0` answer `OwnerInbox`;
+  - the reminder's delivery path (the proactive send, its dedupe key and
+    its push) is unchanged.
+- `output.ex`: only the approval card changed (a new `job_change` kind, its
+  routes, `ttl_s` and text). The proactive dedupe the spec cites is as it
+  was and moved down eleven lines.
+- A reminder's targets still come from `OwnerInbox.derived_candidates/1`
+  (`temporal/registry.ex`), the derived rung alone, which S6 left as it
+  was. The app rung it added is only in `resolve/1` and
+  `for_approval(:approval_card, _)`, so no reminder is delivered to the
+  app's chat by it.
+
+No delivery path the spec models changed, and the cited lines were updated.
 
 ## Code and doc drift
 

@@ -44,7 +44,7 @@ the checks that show a property needs it):
   fires `{:failed, _}` (`queue.ex:920-928`).
 - `TurnsShareQueueFate`: turn tasks run under a `Task.Supervisor` that
   `QueueSupervisor` (`:one_for_all`) terminates before it restarts the Queue
-  (`queue_supervisor.ex:46-51`, `application.ex:223`).
+  (`queue_supervisor.ex:46-51`, `application.ex:232`).
 - `CrashClosesUserMessage`: a crashed turn's `:DOWN` writes the stopped marker
   before the next message starts (`queue.ex:879`, `:893-899`).
 - `StopSparesClaimedTurn`: a stop leaves a turn that has claimed its outcome
@@ -606,3 +606,15 @@ Queue run as the spec says, and a daemon stop stays outside the model. No
 claim, start, stop, result or answer the spec models changed. The line
 references into `turn_runner.ex` after the context map and into the channels
 `application.ex` moved with the code.
+
+## Re-read for the app inbox (M106 S6, 2026-11-26)
+
+M106's stage S6 staled the channels `application.ex`, pinned whole.
+- `start/2` now registers `Companion.Approvals` as core's
+  `:app_approval_listener` (an `Application.put_env`).
+- The companion supervisor is given an `approvals_durable` option
+  (`approvals_durable/1`): the heal proposals a hello offers again.
+
+Neither touches the Queue, its supervisor or the children's order, which
+this spec rests on. No claim, start, stop, result or answer the spec models
+changed, and the `application.ex` citation moved with the code (`:232`).

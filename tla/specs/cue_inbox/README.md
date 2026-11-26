@@ -85,7 +85,7 @@ if it was sent, is already in the Repo's mailbox ahead of the reset.
   under weak fairness that timer fires, so the delay is not modelled. A stale
   settle wakes the scheduler (`filters.ex:376-377`): admission is fair here
   anyway. Admission is gated on `cues_running?` (the cue tree alive,
-  `scheduler.ex:220`), always true here, and no longer reads
+  `scheduler.ex:221`), always true here, and no longer reads
   `cue_watchers.enabled` (a paused watcher's passed items still run); watchers
   are always enabled and keep every source. The daily budget read and spent
   inside the accept transaction, the gap marking at a settle, the cap notices
@@ -298,14 +298,14 @@ reconcile scan errors), `LifetimesCanEnd`, `Proposals`, `OwnerCanMistap`,
 | `CueSlotCap` | `free = min(max_active − active, 3 − active_cue)` (`cue_admission.ex:83`) |
 | `AtomicCueSettle` | the run row, the job's release and the delivery's move are one transaction (`repo.ex` `settle_cue_run_in_tx`) |
 | `RunSettleFenced` | a run settle needs the run active (`ensure_job_run_active`) and the delivery claimed by it (`settle_held/5`, `cues_runs_sql.ex:366`) |
-| `ReapsOnlyDeadRuns` | reconciliation reaps a run only when the runner supervisor no longer holds its runner (`scheduler.ex:511`, `:523`) |
-| `ReconcilesRuns` | init and the 60 s tick reconcile unsettled runs (`scheduler.ex:235`, `:275`, `:495`) |
+| `ReapsOnlyDeadRuns` | reconciliation reaps a run only when the runner supervisor no longer holds its runner (`scheduler.ex:515`, `:527`) |
+| `ReconcilesRuns` | init and the 60 s tick reconcile unsettled runs (`scheduler.ex:236`, `:279`, `:499`) |
 | `ExhaustsAfterAction` | a failure once `tools_started_at` is set ends the delivery `exhausted` (`cues_runs_sql.ex:388`) |
 | `ToolsMarkWriteOnce` | the run upsert never clears `tools_started_at` (`repo.ex` `upsert_job_run_row`, `coalesce`) |
 | `ConfirmFenced` | the confirm is one `UPDATE` fenced on state, token, chat and expiry (`cues_mandate_sql.ex` `decide_waiting`) |
 | `AppDecideFenced` | a device's answer is one `UPDATE` fenced on id, state and expiry (`cues_mandate_sql.ex` `decide_by_id`) |
 | `ReclaimsOrphans` | every sweep puts back a `filtering` row whose call the dispatcher does not hold, fence cleared, attempts unchanged, its call finished `aborted` (R3, CUE-1: `reclaim_orphans/1`, `filters.ex:193-216`; `{:reclaim_orphans, …}`, `cues_filter_sql.ex:132`, `reclaim_in_tx/4` `:675`) |
-| `AdmitsAfterScan` | no cue run is admitted while the last reconcile scan failed, since the monitors may then miss runners that survived a restart (R3, CUE-2: `free_cue_slots/1`, `scheduler.ex:370`; `runs_known?` set by `reconcile_active_runs/1`, `:499`, `:507`) |
+| `AdmitsAfterScan` | no cue run is admitted while the last reconcile scan failed, since the monitors may then miss runners that survived a restart (R3, CUE-2: `free_cue_slots/1`, `scheduler.ex:374`; `runs_known?` set by `reconcile_active_runs/1`, `:503`, `:511`) |
 | `TaskLessSettlesAtPass` | a watcher with no task settles its delivery `acked`, outcome `follow_up`, in the transaction that passes it (`CuesFollowUpSql.on_pass` → `settle_taskless`, `cues_follow_up_sql.ex:340-347`, `:451-454`) |
 
 ## Checks
@@ -793,3 +793,20 @@ Read for what this spec models:
   were updated.
 
 No step, variable or check changed.
+
+## Re-read for the app inbox (M106 S6, 2026-11-26)
+
+M106's stage S6 staled `cues/proposals.ex` (pinned whole) and the
+Scheduler's `init`.
+- `Proposals.owner_dm/1` now asks `OwnerInbox.for_approval(:proposal_card,
+  _)`. That is the ladder it asked before, with no app rung: a watcher's
+  mandate card is never sent to the app's chat, and a paired phone changes
+  nothing for it. `Mandates.owner_inbox/1` asks the same.
+- The rail still answers a card id only while its card waits in the
+  answering chat. No mandate card waits in the app's chat, so an id sent
+  from there finds none, as before.
+- `init` keeps the new `heal_card_opts`, which only `expire_waiting_heals`
+  reads. Admission, the cue share and the monitors are as they were.
+
+No step, variable or check changed. The `scheduler.ex` citations in the
+spec and above Findings moved with the code and were updated.

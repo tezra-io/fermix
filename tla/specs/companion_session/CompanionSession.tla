@@ -207,15 +207,15 @@
 (* One step = one callback of one process, one Memory.Repo call, or one    *)
 (* thing a client or the environment does.                                 *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ a7bf4423ee9a
+\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ 0a3e74ea3207
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/requests.ex#request,cancel,claim_and_run,acquire_and_run,run_started,ingest_span,settle_after_ingest,settle_unless_handed_off,handoff_settlement,fail_attempt,report_failure,settle_failed,append_user,after_user_append,settle_inline,ingest_gateway,approval_resolution_fn,history,fit_page,cut_page,take_within,accepted_event,history_event,emit,best_effort_emit @ 97be58f8e741
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/turns.ex @ 028bd206fc14
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex#text_done,turn_error,row,timeline_message,approval,approval_resolved,persist_text,persist_output,complete_request,fail_request @ 28a393bb68d2
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex#text_done,turn_error,row,timeline_message,approval,approval_resolved,persist_text,persist_output,complete_request,fail_request @ 694eda049f73
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/connection.ex#handle_info,dispatch,hello,join,send_pending_approvals,write_pending_approval,write_event,send_event,transport,request_failure_reporter,announce_user_row,request_opts,read_opts,sink @ 1f0a48d2c438
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/fanout.ex @ abddae4baafe
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/approvals.ex @ 59c135c36360
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/approvals.ex @ d8fb3342dced
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/endpoint.ex#@max_clients,accept_connection,start_connection,hand_over @ c9885a5286f1
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/companion.ex#broadcast,dispatch,build_text_reply,build_turn_result,send_approval,send_message,write_call_row,announce_written,message,build_raw_stream_callback,every_client_reads? @ 0ca43785e88f
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/companion.ex#broadcast,dispatch,build_text_reply,build_turn_result,send_approval,send_message,write_call_row,announce_written,message,build_raw_stream_callback,every_client_reads? @ a98e23380884
 \* SOURCE: apps/fermix_core/lib/fermix_core/companion/timeline.ex#append_client_message,append_proactive,history_page,claim_client_request,get_client_request,cancel_client_request,start_client_request,append_client_output,complete_client_request,fail_client_request @ bfe43cb17172
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/mobile_sql.ex#history,cancel_request,cancelled_request,append_in_tx,next_server_seq,increment_server_seq,claim_request_in_tx,classify_claim,complete_request,settle_request_in_tx,request_transition,append_client_output_in_tx,ensure_running_attempt @ 1ec47b7ff12f
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/request_coordinator.ex#handle_call @ 176aadf6651d
@@ -279,15 +279,15 @@ CONSTANTS
     AnnouncesEveryRow,   \* every row written outside a turn's completion is announced as
                          \* a row as it is written: the user's (announce_user_row,
                          \* connection.ex:1378-1379) and a delivery's (announce_written,
-                         \* channels/companion.ex:409-410), both built by Output.row and
+                         \* channels/companion.ex:443-444), both built by Output.row and
                          \* sent through Fanout.announce; FALSE announces no user row
     SingleAnswer,        \* an approval token is consumed once: Confirmations.take is
                          \* an :ets.take (confirmations.ex:21-26, take_pending
-                         \* sandbox.ex:753-762)
+                         \* sandbox.ex:762-771)
     ResendsPendingApprovals, \* the Connection writes every card still waiting right
                          \* after server_hello, in the step that joined the registry
                          \* (join, send_pending_approvals, connection.ex:638-727, from
-                         \* Approvals.pending, approvals.ex:112-115); FALSE: a card goes
+                         \* Approvals.pending, approvals.ex:166-170); FALSE: a card goes
                          \* out once, live
     DropsCardsAtHello,   \* when server_hello arrives the client drops every approval card
                          \* it shows and keeps only those sent after it (PROTOCOL.md
@@ -479,7 +479,7 @@ NextStarts(pg, cur) ==
 NextSeq == MaxOf(Range(tl)) + 1
 
 \* Companion.Fanout.announce (fanout.ex:47-67) -> Channels.Companion.broadcast
-\* (channels/companion.ex:175-178, dispatch :464-468): one send to every
+\* (channels/companion.ex:177-180, dispatch :498-502): one send to every
 \* Connection registered under the profile, each event the companion wire
 \* carries, a row (built once, by Output.row) projected to the fields this
 \* wire's row has (its kind and metadata among them, which no rule reads). A row and a text_done are both a live row here.
@@ -643,13 +643,13 @@ OnCancel(m) ==
                       dupWhileRunning, refused, told>>
 
 \* /confirm TOKEN or /deny TOKEN: a command request through the same path,
-\* answered by the Gateway's command (confirm, deny, sandbox.ex:309-329).
+\* answered by the Gateway's command (confirm, deny, sandbox.ex:310-330).
 \* take_pending peeks, checks the expiry and origin, then takes the token
-\* (sandbox.ex:753-770, Confirmations.take, confirmations.ex:21-26). Only a
+\* (sandbox.ex:762-779, Confirmations.take, confirmations.ex:21-26). Only a
 \* take that finds the token applies the answer and announces
-\* approval_resolved (notify_approval, sandbox.ex:400-408 ->
+\* approval_resolved (notify_approval, sandbox.ex:401-409 ->
 \* approval_resolution_fn, requests.ex:619-624 -> Approvals.resolve,
-\* approvals.ex:97-105, :136-143, which forgets the card first). Without
+\* approvals.ex:147-155, :226-234, which forgets the card first). Without
 \* SingleAnswer the token survives its first answer.
 OnAnswer(c) ==
     /\ answeredBy' = answeredBy \cup {c}
@@ -709,7 +709,7 @@ Resend(m) ==
 \* to the socket, and right behind it every card still waiting
 \* (ResendsPendingApprovals; hello, join, send_pending_approvals,
 \* connection.ex:598-727). The store keeps a card before it announces it, in
-\* one step (Approvals.announce, approvals.ex:79-88, :130-134), and the
+\* one step (Approvals.announce, approvals.ex:112-121, :217-221), and the
 \* Connection joins before it reads the kept cards, so however the two
 \* interleave, a connection gets the
 \* card from the one, the other, or both (a client deduplicates by
@@ -944,11 +944,11 @@ TurnsNext ==
 
 \* A tool of m's turn needs the owner's approval (a directory grant, or a
 \* coding run's vendor-config change to acknowledge; one path for both): the
-\* gateway stores a pending token (store_pending_grant, sandbox.ex:246-259)
+\* gateway stores a pending token (store_pending_grant, sandbox.ex:247-260)
 \* and the channel's approval store keeps the card, then announces it to this
 \* transport's connections alone, through the announce it announces the
-\* card's end with (send_approval, channels/companion.ex:288-291 ->
-\* Approvals.announce, approvals.ex:79-88, :130-134). The turn does not wait
+\* card's end with (send_approval, channels/companion.ex:316-319 ->
+\* Approvals.announce, approvals.ex:112-121, :217-221). The turn does not wait
 \* for it.
 Ask(m) ==
     /\ turn[m] = "running" /\ appr = "none" /\ Approvals > 0
@@ -958,11 +958,11 @@ Ask(m) ==
                    applied, reqs, queue, store, env, obs>>
 
 \* The card's ttl_s runs out: the token is refused from then on
-\* (validate_pending, sandbox.ex:764-770), and Approvals drops the card and
+\* (validate_pending, sandbox.ex:773-779), and Approvals drops the card and
 \* announces approval_resolved{expired} to its transport (handle_info
-\* {:approval_expired, ...}, expire, approvals.ex:150-155, :208-217). The two
+\* {:approval_expired, ...}, expire, approvals.ex:241-246, :328-337). The two
 \* clocks run the same window, 60 s or the one an access-sensitive request
-\* names (a phone call's 5 minutes, grant_ttl_ms, sandbox.ex:261-268, which
+\* names (a phone call's 5 minutes, grant_ttl_ms, sandbox.ex:262-269, which
 \* its card carries as ttl_s), and start a moment apart; either order leaves
 \* no card that can be approved, so they are one step here. Time, so no
 \* fairness.
@@ -982,7 +982,7 @@ Claim(m) ==
                    obs>>
 
 \* The turn invokes {:completed} (Turns.outcome, a call into Turns' mailbox,
-\* turns.ex:234-236, through build_turn_result, channels/companion.ex:268-272)
+\* turns.ex:234-236, through build_turn_result, channels/companion.ex:270-274)
 \* and exits; the Queue's :DOWN frees the slot and starts the next waiting
 \* turn (folded in: nothing else can act on the dead turn in between). A turn
 \* its snapshot let end with no reply may have answered exactly [SILENT]: its
@@ -999,8 +999,8 @@ Finish(m) ==
 
 -----------------------------------------------------------------------------
 (* A scheduled job reporting back: Channels.Companion.send_message in the   *)
-(* job's own process (channels/companion.ex:308-323). A GPT-Live call's    *)
-(* rows (write_call_row, :340-359, M56 sections 4.2 and 4.5) are written   *)
+(* job's own process (channels/companion.ex:342-357). A GPT-Live call's    *)
+(* rows (write_call_row, :374-393, M56 sections 4.2 and 4.5) are written   *)
 (* and announced the same way: a result shown, from the call's session,    *)
 (* and the call's one row when it ends, from the task that made its gist   *)
 (* or from the boot pass after a restart. So the job stands for them too.  *)
@@ -1023,7 +1023,7 @@ JobWrite ==
     /\ UNCHANGED <<client, conn, turns, reqs, queue, env, obs>>
 
 \* announce_written -> Fanout.announce: the job announces its row
-\* (channels/companion.ex:409-410).
+\* (channels/companion.ex:443-444).
 JobAnnounce ==
     /\ job = "written"
     /\ job' = "done"
