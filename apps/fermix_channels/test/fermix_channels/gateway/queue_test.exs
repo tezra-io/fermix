@@ -282,6 +282,22 @@ defmodule FermixChannels.Gateway.QueueTest do
     end
   end
 
+  # Order inside a conversation rests on this mailbox. `Gateway.AlbumBuffer`'s
+  # ingress lanes start a conversation's next ingest only after the previous
+  # one ended, so the previous enqueue cast was sent first; but the two casts
+  # come from two task processes, and only the default on-heap mailbox takes
+  # them in the order one node sent them. An off-heap one
+  # (`message_queue_data: :off_heap`, parallel signal delivery) does not
+  # promise it, and two messages of one chat could then run out of order. A
+  # VM-wide `+hmqd off_heap` would do the same, which this test cannot see.
+  describe "mailbox" do
+    test "keeps the default on-heap mailbox the album buffer's lanes rely on", ctx do
+      queue = start_queue(ctx)
+
+      assert Process.info(queue, :message_queue_data) == {:message_queue_data, :on_heap}
+    end
+  end
+
   describe "side-effect acks (§7 EMOJI_REACTION_ACKS)" do
     # reply_fn forwards every delivered part to the test and lets a caller pick
     # the result for a reaction (so the "records only on :ok" path is testable).

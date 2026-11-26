@@ -58,6 +58,38 @@ defmodule FermixChannels.Gateway do
     end)
   end
 
+  @doc """
+  The conversation `message` runs in, named by the steps `ingest/2` takes before
+  the queue keys it: normalize, name the conversation (a channel whose turns
+  join another transport's answers it), then `ConversationKey.from/1`, threads
+  included. Work ordered by conversation before ingest (`Gateway.AlbumBuffer`'s
+  lanes) and the queue therefore agree. A message that does not normalize has
+  no conversation: `{:error, {:invalid_message, field}}`, as `ingest/2` rejects
+  it. Emits no telemetry: `ingest/2` counts the normalize once.
+
+  The one input it cannot see is the trust authorization grants later, which
+  only a Live hand-off on the `voice` channel reads
+  (`FermixCore.Agents.VoiceCall`); every other channel's message is keyed the
+  same before ingest and after.
+  """
+  @spec conversation_key(module(), Message.t() | map()) ::
+          {:ok, ConversationKey.t()} | {:error, {:invalid_message, atom()}}
+  def conversation_key(channel, message) when is_atom(channel) and is_map(message) do
+    with {:ok, normalized} <- normalize_message(message) do
+      conversation_of(name_conversation(channel, normalized))
+    end
+  end
+
+  # A struct a parser built without a channel or a chat names no conversation.
+  defp conversation_of(%Message{channel: channel, chat_id: chat_id} = message)
+       when is_binary(channel) and is_binary(chat_id),
+       do: {:ok, ConversationKey.from(message)}
+
+  defp conversation_of(%Message{channel: channel}) when is_binary(channel),
+    do: {:error, {:invalid_message, :chat_id}}
+
+  defp conversation_of(%Message{}), do: {:error, {:invalid_message, :channel}}
+
   # The ingest dependency context: every collaborator this batch dispatches
   # through, resolved once from `opts` and then read by name at each stage.
   # Threading it as one named value keeps the stages from carrying a positional

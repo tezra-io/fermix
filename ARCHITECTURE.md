@@ -1855,6 +1855,20 @@ the attachments under the workspace's `media/inbound/`
 `FermixChannels.Dispatcher` remains only as a thin alias for `Gateway.ingest/2`,
 used by tests.
 
+Telegram and WhatsApp deliver an album as separate messages, so each hands
+every inbound message to its channel's `Gateway.AlbumBuffer`, which coalesces
+an album's parts on a short debounce. The buffer never runs `Gateway.ingest/2`
+itself: each delivery runs in a task of the buffer's own linked
+`Task.Supervisor`, ordered by `Gateway.IngressLanes` (pure data): first in,
+first out within a conversation, keyed by `Gateway.conversation_key/2` (the key
+the queue gives the turn, threads included), up to 8 conversations at once,
+and at most 200 deliveries waiting. Past that a delivery is refused, logged and
+counted (`[:fermix, :dispatcher, :ingress_failed]`, `reason:
+:ingress_lanes_full`), and a webhook's ids are forgotten so the provider's
+retry runs. So one chat's slow attachment holds neither another chat nor the
+buffer's flush timers, a dispatch that crashes ends only its own task, and a
+dispatch in flight stops with its buffer.
+
 Current channels:
 
 - `Telegram` uses long polling through `Telegram.Poller`, with albums coalesced

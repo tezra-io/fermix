@@ -44,6 +44,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   blaming the key. A PDF sent to a Grok model through it goes to the next
   provider in the chain, because xAI reads no PDF inline.
 
+### Changed
+
+- **One slow attachment no longer holds up your other chats.** On Telegram and
+  WhatsApp, Fermix downloaded and read each message's attachments one message
+  at a time for the whole channel, so a big album, a video or a voice note in
+  one chat delayed every other chat's messages until it was done. Each chat is
+  now handled on its own, up to eight at once, and messages within a chat
+  still reach Fermix in the order you sent them.
+
 ### Fixed
 
 - **The first phone you pair can be on any network.** Turning phone access on

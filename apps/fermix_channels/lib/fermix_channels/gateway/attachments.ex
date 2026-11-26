@@ -92,7 +92,8 @@ defmodule FermixChannels.Gateway.Attachments do
 
   # Album downloads are independent fetches, so they run concurrently and
   # bounded. `async_stream_nolink` keeps a raise inside a channel's download from
-  # taking the caller down (the AlbumBuffer holds other conversations' parts);
+  # taking the caller down (an album buffer's dispatch task, whose whole message
+  # would fail with it);
   # `timeout: :infinity` because each HTTP fetch is bounded by its client, and a
   # stream timeout would kill a slow download before its temp file is removed;
   # the stream is drained whole, so every task runs its own cleanup.

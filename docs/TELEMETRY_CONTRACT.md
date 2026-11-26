@@ -1580,6 +1580,15 @@ Opik does **not** subscribe. A message whose attachments are all unreadable is
 answered at the gateway and counted as `[:fermix, :dispatcher, :ingress_failed]`
 with `reason: :attachments_unusable`. Never hand-roll the event.
 
+The album buffer of Telegram and WhatsApp (`Gateway.AlbumBuffer`) counts a
+delivery it refuses because its ingress lanes are full (`Gateway.IngressLanes`:
+the most deliveries that may wait already do) as the same
+`[:fermix, :dispatcher, :ingress_failed]` (`count: 1`) with
+`reason: :ingress_lanes_full` and `channel` (the message's channel name). No
+turn ran, so it has no session; the error log beside it names the channel and
+both bounds, and a webhook's message ids are forgotten so the provider's retry
+runs.
+
 An operator turn that keeps its attachments in the workspace
 (`FermixCore.Attachments.Workspace`, `media/inbound/<date>/`) emits **one point
 event per turn** through `FermixCore.Attachments.Telemetry.emit_save/4`:
