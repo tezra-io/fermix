@@ -305,7 +305,8 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
   `turn_runner.ex:199`, `commit_turn/4` `:245`). The claim happens only after that returns
   (`finish_turn`, `queue.ex:519`), so the window also covers post-delivery
   auto-compaction: seconds to tens of seconds when it runs. The kill aborts
-  that compaction (safely: `replace_history` is one atomic call) and skips
+  that compaction (safely: `replace_history` is one call into the store, and
+  its write to the database is one transaction) and skips
   `record_context_tokens_peak`.
 - **Impact:** the channel gets `{:cancelled}` after the full reply. ACP reports
   stop reason `cancelled` for an answered prompt; mobile marks the rendered
@@ -618,3 +619,24 @@ M106's stage S6 staled the channels `application.ex`, pinned whole.
 Neither touches the Queue, its supervisor or the children's order, which
 this spec rests on. No claim, start, stop, result or answer the spec models
 changed, and the `application.ex` citation moved with the code (`:232`).
+
+## Re-read for a compaction's checkpoint and the one-transaction replace (c75ee1097, 2026-11-26)
+
+`c75ee1097` staled the `conversation_store.ex` pin, pinned whole.
+- A replace's durable step is one `Repo.replace_messages/3`: one transaction
+  that deletes the conversation's chat messages and inserts the replacement,
+  where it was a delete and then one call for each row. It leaves the
+  conversation's other rows, so a compaction's checkpoint survives the
+  replace that follows it. A clear still deletes every row of the
+  conversation.
+- Each durable step's Repo call waits with no deadline, so a retry never
+  follows a write that timed out and could still commit.
+
+The store's calls, its cache and the order of a conversation's writes are as
+before: a conversation is loaded before any write to it, and its writes land
+one at a time in call order, which is what `history` rests on. Compaction,
+clear and replace are still not modelled here. No claim, start, stop, result
+or answer the spec models changed, and the one line reference into
+`conversation_store.ex` (`:176`, `append_stopped_marker`) still points at
+the code. QUEUE-3's note on the compaction a stop aborts now says what is
+true of the database as well as of the cache.

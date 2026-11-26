@@ -810,3 +810,15 @@ Scheduler's `init`.
 
 No step, variable or check changed. The `scheduler.ex` citations in the
 spec and above Findings moved with the code and were updated.
+
+## Re-read for the home's lock taken first (0705a4fc0, 2026-11-26)
+
+`0705a4fc0` staled the `application.ex` pin. `start_supervision_tree/0` now
+starts the tree through `start_holding_home_lock/3`: a daemon boot takes the
+lock beside its control socket before the role is read, the home prepared or
+any child started, and what the function did before is `start_tree/0`.
+`supervision_children/2` gained comments and no child, so the cue tree is
+still last, and `maybe_cues_supervisor/1` is as it was. The boot reset and
+the orphan reclaim this spec models are the one engine's: a second daemon is
+refused before any child starts, which `engine_boot` checks. No step,
+variable or check changed; the spec cites no `application.ex` line.

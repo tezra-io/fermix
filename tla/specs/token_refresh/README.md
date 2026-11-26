@@ -16,7 +16,7 @@ then has the profile's manager forget its tokens and stops it (plugin logout,
 anthropic and xai, `management/auth.ex:219-226`, `:519-523`). A logout from a
 tree-less CLI VM deletes the entry the same way, then has a running daemon let
 go of the profile over the control socket (`auth_forget`,
-`cli/daemon.ex:1331-1361` → `TokenSupervisor.forget_signed_out`).
+`cli/daemon.ex:1328-1358` → `TokenSupervisor.forget_signed_out`).
 
 OpenAI Codex signs in with ChatGPT, under the `chatgpt` profile
 (`store.ex:281-291`). Its sign-out deletes the entry too, registration and
@@ -164,7 +164,7 @@ least one check):
   `:407-422`;
   `cli/daemon/client.ex:70-84`). The daemon has the profile's manager forget
   its tokens, which also deletes its plugin child's token file, then stops it
-  (`cli/daemon.ex:1088`, `:1331-1361`; `token_supervisor.ex:143-164`). Off, the
+  (`cli/daemon.ex:1085`, `:1328-1358`; `token_supervisor.ex:143-164`). Off, the
   CLI logout reaches no manager. That is also the state a daemon leaves when
   it answers the notice with an error, which the CLI reports by exiting
   non-zero; checks 14 and 26 model that case.
@@ -536,7 +536,7 @@ describes, and the **Fix** bullets cite the code as it is now.
     restart of the daemon (from the Fermix app, or `fermix restart` for a
     daemon the operator runs).
   - **The daemon side.** The daemon validates the profile, then runs
-    `TokenSupervisor.forget_signed_out/1` (`cli/daemon.ex:1088`, `:1331-1361`;
+    `TokenSupervisor.forget_signed_out/1` (`cli/daemon.ex:1085`, `:1328-1358`;
     `token_supervisor.ex:143-164`).
     - It reuses `forget` (`drop_tokens`: tokens cleared, refusal set, and the
       plugin child's token file deleted), then `stop_profile`. The next use of
@@ -597,7 +597,7 @@ the Codex CLI's session and then Fermix's, closed when that import was retired
   refresh in flight, so `forget` normally finds the manager idle. It can still
   meet a manager that is itself waiting up to 10 s for the profile lock (held
   by a CLI refresh, say); the management caller then exits first, the socket
-  turns that into `internal_error` (`cli/daemon.ex:706-808`), and
+  turns that into `internal_error` (`cli/daemon.ex:703-805`), and
   `revert_route` (`management/auth.ex:223`) never runs. The in-daemon plugin
   logout's forget (`forget_signed_out`, `plugins/auth.ex:73`) and ChatGPT's
   sign-out's (`chatgpt/logout.ex:51`) are the same call and can meet the same
@@ -813,3 +813,19 @@ they meant: the store lock's `lock/4` and `hold/4`, `read_existing`,
 `remove_provider`'s refusal, `put_provider`'s merge and the quarantine
 statuses in `store.ex`; the provider sign-out's delete and `forget` in
 `management/auth.ex`; and the TOKEN-1, TOKEN-2 and TOKEN-4 **Fix** bullets.
+
+## Re-read for the lock taken by the boot (0705a4fc0, 2026-11-26)
+
+`0705a4fc0` staled the `cli/daemon.ex` pin. The lock beside the control
+socket (`Fermix.CLI.Daemon.Lock`) is now taken by the engine's boot before its
+first child starts and held until the application stops
+(`FermixCore.Application.start_holding_home_lock/3`, `stop/1`); the socket
+process no longer takes or releases it (`bind/2`, `terminate/2`), and
+`default_socket_path/0` is public so both name one path. The CLI's sign-out
+still reaches the running daemon as an `auth_forget` request on the socket,
+answered by `forget_signed_out` as before, and `Client.classify/2` still reads
+a held lock the same way. A daemon whose socket is not yet up, or already
+gone, now reads as running for as long as its application does, which only
+narrows the window in which a CLI could take a busy daemon for a stopped one.
+No modelled step changed, and the line numbers into `cli/daemon.ex` moved with
+the code.

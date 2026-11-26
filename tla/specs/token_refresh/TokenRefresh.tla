@@ -95,7 +95,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/chatgpt/registration.ex#read,signed_in?,@profile @ 4283f894c7cf
 \* SOURCE: apps/fermix_core/lib/fermix/cli/plugins_command.ex @ be9afb0398a5
 \* SOURCE: apps/fermix_core/lib/fermix/cli/auth_command.ex @ 464083735b2d
-\* SOURCE: apps/fermix_core/lib/fermix/cli/daemon.ex @ 5e9f53c9e8bd
+\* SOURCE: apps/fermix_core/lib/fermix/cli/daemon.ex @ fe3900a7219d
 \* SOURCE: apps/fermix_core/lib/fermix/cli/daemon/client.ex @ d8237e7757e7
 EXTENDS Naturals, FiniteSets
 
@@ -123,7 +123,7 @@ CONSTANTS
     StoreLock,              \* auth.json.lock around every Store.write, replace, remove and delete_provider (store.ex:179-198, :208-225)
     ProfileLock,            \* the profile's lock over one refresh, read to write, and over a delete (store.ex:242-248)
     RefusesMissingEntry,    \* a manager whose entry is gone drops its tokens (token_manager.ex:320-329, :382-406)
-    CliLogoutReachesDaemon  \* a CLI logout then has a running daemon let go of the profile (auth_command.ex:407-422, plugins_command.ex:520-545, cli/daemon.ex:1331-1361)
+    CliLogoutReachesDaemon  \* a CLI logout then has a running daemon let go of the profile (auth_command.ex:407-422, plugins_command.ex:520-545, cli/daemon.ex:1328-1358)
 
 ASSUME /\ CliProfile \in Profiles /\ LogoutProfile \in Profiles
        /\ MaxAttempts \in Nat \ {0} /\ Rounds \in Nat
@@ -524,7 +524,7 @@ Freed(h) == IF h \in Actors /\ Killed(h) THEN None ELSE h
 \*      daemon to let go of the profile (plugins_command.ex:278, :520-545;
 \*      auth_command.ex:322-356, :363-381, :407-422): an `auth_forget`
 \*      request on the control socket (cli/daemon/client.ex:70-84), answered by
-\*      forget_signed_out (cli/daemon.ex:1088, :1331-1361). Without
+\*      forget_signed_out (cli/daemon.ex:1085, :1328-1358). Without
 \*      CliLogoutReachesDaemon, or when the daemon does not answer "ok"
 \*      (the CLI then exits non-zero), nothing reaches the manager.
 \*    - The in-daemon plugin logout calls it right after its delete

@@ -42,7 +42,7 @@ attempt like every platform's, so nothing here models it separately.
   (`delivery_worker.ex:197-200`, `:66`).
 - `SchedulerCanRestart`: the scheduler crashes while the BEAM stays up. Any
   earlier child of the flat `:rest_for_one` list (`Repo`, `MainAgent`,
-  `JobScheduler`, …; `application.ex:336-428`) restarts it too. A scheduler
+  `JobScheduler`, …; `application.ex:427-519`) restarts it too. A scheduler
   Repo call that times out no longer does: it returns an error (see
   `RepoCanFail`).
 - `DaemonCanCrash`: the whole daemon dies and boots again.
@@ -71,7 +71,7 @@ least one check):
   (`:1033`) repeat it inside the same Repo callback (`repo.ex:3134-3137`), where
   no other writer can interleave, so removing only them would change nothing.
 - `WorkersDieWithScheduler`: `DeliverySupervisor` starts after the scheduler
-  under `:rest_for_one` (`application.ex:436-437`, `:209`).
+  under `:rest_for_one` (`application.ex:527-528`, `:290`).
 - `SendsDieWithWorker`: a worker's send process is spawned linked to it
   (`Process.spawn(fun, [:link, :monitor])`, `channel_send.ex:219-224`), so a
   worker killed mid-send takes its send with it. Off, it is the code before the
@@ -97,7 +97,7 @@ least one check):
   - No sixth attempt (`scheduler.ex:332-335`). This rests on `AttemptCap`
     (check 02).
   - Never two workers for the row (`delivery_supervisor.ex:5-10`,
-    `application.ex:429-437`). This rests on `ClaimRequiresPending` (check 03),
+    `application.ex:520-528`). This rests on `ClaimRequiresPending` (check 03),
     `WorkersDieWithScheduler` (check 04) and `ResetSkipsMonitored` (check 05),
     and on the timing fact `DownHandledBeforeRetryDue` (check 20).
   - Never two sends for the row either (the premise of M30 §19.10's no-lease
@@ -615,6 +615,20 @@ Re-read on 2026-11-26 for the app inbox (M106 S6), which staled the
   app's chat by it.
 
 No delivery path the spec models changed, and the cited lines were updated.
+
+Re-read on 2026-11-26 for the home's lock taken first (`0705a4fc0`), which
+staled the `application.ex` pin. `start_supervision_tree/0` now starts the
+tree through `start_holding_home_lock/3`: a daemon boot takes the lock beside
+its control socket before the role is read, the home prepared or any child
+started, and what the function did before is `start_tree/0`.
+`supervision_children/2` gained comments and no child, and
+`temporal_scheduler_opts/0` is as it was. The children keep their order
+(`Repo` … `JobScheduler`, then `TemporalScheduler` and
+`TemporalDeliverySupervisor`), which is what "no delivery worker outlives the
+scheduler" rests on, and the tree is still `:rest_for_one`. The boot sweep
+this spec models is the one engine's: a second daemon is refused before the
+scheduler starts, which `engine_boot` checks. No modelled step changed, and
+the `application.ex` lines cited above moved with the code.
 
 ## Code and doc drift
 

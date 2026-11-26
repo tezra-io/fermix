@@ -23,6 +23,13 @@ retries; see "Retries (M106)"
 below, "Re-read for M106 retries and heals", "Re-read for the heal's
 diagnosis and moves" and "Re-read for runs that end ok without working".
 
+The Scheduler's own write of a job is modelled through its stale skip of a
+due time older than the freshness window (`DueCanGoStale`). Since JOB-13's
+fix that write is one guarded `UPDATE` of `next_run_at` with no read before
+it, and checks 77 to 80 put it beside the owner's pause and edit (see "The
+Scheduler's own writes (JOB-13)"). The expiry and the disable of a job whose
+schedule no longer parses have the same shape and are not modelled apart.
+
 With cues on (M60) the Scheduler also admits cue runs, and the one job can be
 a watcher's task: a job that runs on cues, claimed by admission from its
 passed deliveries instead of by the due tick. Checks 36 to 52 cover it; see
@@ -42,7 +49,7 @@ what is left out and every step folded into another.
   what the platform took survive. This also covers a crash of any core child
   started before the `RunnerSupervisor` (`CommandHostSupervisor` through
   `MainAgent`, `Memory.Repo`, `Trace` and `Finch` among them,
-  `application.ex:336-420`) or of the `RunnerSupervisor` itself, since
+  `application.ex:427-511`) or of the `RunnerSupervisor` itself, since
   `:rest_for_one` restarts every job process in each case (`:209`). A
   runner's send helper and its AgentLoop are linked to it, so none outlives
   the restart; `LoopDiesWithRunner` off lets the loop outlive it (JOB-8).
@@ -50,12 +57,12 @@ what is left out and every step folded into another.
   of any callback, including its own init. A Repo timeout no longer kills it
   (`SchedulerTimeouts`); another cause still does, such as `:rest_for_one`
   restarting it when `MeetingsSupervisor`, started between the
-  `RunnerSupervisor` and the Scheduler, dies (`application.ex:421-428`).
+  `RunnerSupervisor` and the Scheduler, dies (`application.ex:512-519`).
   Runners keep running. When it dies waiting on the reaper's write, that write
   may still land (see late writes).
 - `SchedulerTimeouts`: how many of the Scheduler's Repo calls may time out.
   Every call its process makes passes `Repo.periodic_opts` (`on_timeout:
-  :error`, `repo.ex:1252-1254`, `scheduler.ex:172-175`), so a call the Repo
+  :error`, `repo.ex:1252-1254`, `scheduler.ex:200-203`), so a call the Repo
   does not answer within 5 s returns `{:error, :repo_timeout}`
   (`repo.ex:4455-4463`). The Scheduler takes that call site's error branch and
   keeps its monitors and timers; it does not restart, so no init
@@ -82,6 +89,12 @@ what is left out and every step folded into another.
   answer within the Repo's bound). The gate then runs no tool and the loop
   ends in `{:tool_start_unrecorded, _}`, a failure no retry takes. `FALSE`:
   the store always records it. Checks 61, 62, 63 and 72 set it `TRUE`.
+- `DueCanGoStale`: a due scan may find the job's due time older than the
+  freshness window (`stale?`, `scheduler.ex:723-736`: the daemon was down
+  across it). The Scheduler then skips the run: it moves `next_run_at` to
+  the next future occurrence and claims nothing that tick (`skip_stale_job`,
+  `:738-750`). The scan's read and the skip's write are two steps (`Scan`,
+  `StaleSkip`). `FALSE` (checks 01 to 76): every due time is fresh.
 
 **Configuration** (set per check):
 - `CuesOn`: the cue tree runs (`Cues.running?/0`, which the Scheduler reads
@@ -169,38 +182,41 @@ crash or timeout step itself.
 **A Scheduler Repo call that times out**, site by site (`scheduler.ex`):
 - Modelled, because the Scheduler carries on from states a crash and restart
   never left:
-  - The claim (`Repo.claim_due_job`, `:733-735`; `ClaimTimeout`) and "run
-    now"'s claim (`Repo.claim_job_now`, `:769-774`; `ManualRunTimeout`). A
+  - The claim (`Repo.claim_due_job`, `:833-836`; `ClaimTimeout`) and "run
+    now"'s claim (`Repo.claim_job_now`, `:871-877`; `ManualRunTimeout`). A
     claim the Repo had started still lands when it would have (one it turned
     away unrun writes nothing and leaves what a timed-out due scan leaves,
     `ScanTimeout`, or "run now"'s first branch), but no runner starts and
     nothing monitors the run: a queued run with no runner holds the job (`running`)
     until the next 60 s reconcile pass reaps it with `reaped: no live runner
     (daemon or scheduler restart, or a memory store that answered too late)`
-    (`:70-74`). That occurrence never runs. A restart would have reaped it in
+    (`:81-85`). That occurrence never runs. A restart would have reaped it in
     init at once. Witness 30 reaches this.
-  - The run lookup in `mark_run_failed` (`Repo.get_job_run`, `:972-975`;
+  - The run lookup in `mark_run_failed` (`Repo.get_job_run`, `:1036-1039`;
     `ReapLookupTimeout`). After a DOWN the monitor is already gone, so the dead
     runner's run keeps its row: a queued/running row holds the job, and a
     pending delivery stays pending, until the next reconcile pass reaps it with
     the generic text instead of `runner crashed: ...`. In a reconcile pass
     the orphan waits for the next pass. Witness 31 reaches this.
-  - The reconcile scan (`Repo.unsettled_job_runs`, `:507-513`;
+  - The reconcile scan (`Repo.unsettled_job_runs`, `:565-572`;
     `ReconcileRowsTimeout`): the pass reaps and adopts nothing. After a
     restart, a live runner then stays unmonitored until the next pass, so its
     crash sends no DOWN. The run set is unknown until a scan succeeds, so no
     cue run starts meanwhile.
-  - The due scan (`:587-589`; `ScanTimeout`), and the timer lookup
-    (`Repo.next_scheduled_job`, `:1161-1165`; `ArmTimeout`): nothing is written
+  - The due scan (`:645-647`; `ScanTimeout`), and the timer lookup
+    (`Repo.next_scheduled_job`, `:1382-1386`; `ArmTimeout`): nothing is written
     and the due timer is armed at the 5 s backoff. After a timed-out scan or
     claim the tick's outcome is `:error`, so its re-arm floors at the backoff
     whatever its own lookup returns; that re-arm is folded into the timeout
-    step. "Run now"'s lookup (`:744-746`) replies the error and writes nothing.
+    step. "Run now"'s lookup (`:843-845`) replies the error and writes nothing.
+  - The stale skip's write (`Repo.advance_stale_scheduled_job`, `:778-780`;
+    `StaleSkipTimeout`): it lands late, as the write would, and the tick's
+    outcome is `:error`, so its re-arm is folded in as for the due scan.
 - Folded into an existing step, because the outcome is the same: the reaper's
-  write (`Repo.settle_job_run` or the pending-delivery upsert, `:1038-1054`,
-  `:1078-1091`) lands late, before the Scheduler's next call, and its error
-  branch only logs and skips the memory-source mirror (`:1051-1052`,
-  `:1086-1089`), which the spec does not model. That is `ReapRun`. The
+  write (`Repo.settle_job_run` or the pending-delivery upsert, `:1112-1133`,
+  `:1171-1184`) lands late, before the Scheduler's next call, and its error
+  branch only logs and skips the memory-source mirror (`:1101-1102`,
+  `:1130-1131`), which the spec does not model. That is `ReapRun`. The
   `:run_not_active` re-read is unreachable, as before. Adopting a live runner
   and starting one make no Repo call.
 
@@ -222,27 +238,28 @@ checks listed under it):
   key `job:<run id>` (`runner.ex:1696`). The mobile channel keeps one row per
   key (`mobile_sql.ex:44-46`), so a retry there would not show twice. Check 04.
 - `ReconcilesRuns`: at init and every 60 s the Scheduler reaps unsettled runs
-  with no live runner and adopts live ones (`scheduler.ex:236`, `:274-544`).
+  with no live runner and adopts live ones (`scheduler.ex:266`, `:302-315`,
+  `:548-626`).
   Checks 07, 28, 33 and 60.
 - `CrashFailsPendingDelivery`: the crash path marks a dead runner's pending
-  delivery failed, whatever the run's status (`scheduler.ex:1060-1063`,
-  `:1082-1095`). Check 09.
+  delivery failed, whatever the run's status (`scheduler.ex:1135-1137`,
+  `:1171-1184`). Check 09.
 - `DeliveryWatchdog`: the runner stops waiting for a send after
   `delivery_timeout_ms` (`channel_send.ex:219-241`). Check 05.
 - `AtomicSettle`: a run's final row and its job's release are one
   transaction, `Repo.settle_job_run` (`repo.ex:2563-2566`, `:7015-7031`, `:7091-7138`), used by
-  the runner (`runner.ex:365`, `:519`) and the reaper (`scheduler.ex:1042-1058`).
+  the runner (`runner.ex:365`, `:519`) and the reaper (`scheduler.ex:1112-1133`).
   The release is a column-targeted `UPDATE` that turns `running` back into
   `scheduled` and keeps any other state. Switched off, the spec runs the code
   before the fix: the run row alone, then a read and a whole-row upsert of the
   job row, in the runner and in the reaper. Checks 12, 22, 23, 24 and 70.
 - `ReconcilesPending`: the reconcile pass reads every unsettled run, the
   queued/running rows and then the rows whose delivery is still pending
-  (`unsettled_job_runs`, `repo.ex:2602-2655`; `scheduler.ex:500`). Switched
+  (`unsettled_job_runs`, `repo.ex:2602-2655`; `scheduler.ex:560`). Switched
   off, it reads queued/running rows only. Checks 14, 15, 35.
 - `RefusalBacksOff`: a due claim refused as `:already_running` returns
   `{:busy, state}`, so the re-arm floors at the 5 s backoff
-  (`scheduler.ex:725-729`, `:1216-1222`). Switched off, the refusal counts as a
+  (`scheduler.ex:827-830`, `:1420-1433`). Switched off, the refusal counts as a
   clean drain and a past-due job re-arms at 0 ms. Check 19.
 - `OwnerWritesColumns`: pause, resume and `update_job` write only the columns
   they own, in place (`registry.ex:333-376`;
@@ -269,7 +286,7 @@ checks listed under it):
   report the user saw on a run row that says nothing was sent. Check 45.
 - `RearmsOnDown`: every runner's DOWN, a normal exit or a crash, re-arms the
   due timer for the earliest wakeup, a retry's included (`handle_info({:DOWN,
-  ...})`, `scheduler.ex:339-366`). Switched off, the code before M106: a
+  ...})`, `scheduler.ex:339-367`). Switched off, the code before M106: a
   normal DOWN only drops the monitor and a crash's callback ends after its
   reap. Check 67.
 - `StampsToolStart`: a run's first tool start is on its row before the tool
@@ -295,6 +312,13 @@ checks listed under it):
   whatever value it leaves, the heal's claim clears the mark, and a heal
   run's move under a marked heal is not made (JOB-12's fix). Switched off,
   the version compare alone: the first S4 code. Check 76.
+- `StaleSkipGuarded`: the stale skip's write is one guarded `UPDATE` of
+  `next_run_at` with no read before it (`advance_stale_job`,
+  `scheduler.ex:760-782`; `Repo.advance_stale_scheduled_job/4`,
+  `repo.ex:2786-2794`, `:9330-9341`), made only while the job is still
+  enabled, `scheduled` and due at the instant the scan read. Switched off,
+  the code before JOB-13's fix: `Repo.get_scheduled_job`, then
+  `Repo.upsert_scheduled_job` of the whole row it read. Checks 78 and 79.
 
 **What holds.** Every property below is also broken by its `needs` check.
 - **At most one active run per job** (check 01). An active run is a
@@ -513,6 +537,34 @@ In every other check `HealMoves = 0`. There a heal run's move is still
 covered by the owner's steps, since a move that lands writes what an atomic
 `Pause` or an edit writes (retry cleared, no other modelled column), and a
 move that does not land writes nothing.
+
+**The Scheduler's own writes (JOB-13).** With `DueCanGoStale` a due scan
+may find the job's due time stale and skip the run (`Scan`, then
+`StaleSkip`), beside runs and their loop's errors, the owner's pause or
+resume and an edit, a daemon crash, a Scheduler restart and a timed-out
+Scheduler Repo call. Every property below is broken by its `needs` check.
+- **The stale skip never undoes a pause the owner was told about** (check
+  77, `PauseNeverOverwritten`, 320,840 states). This rests on
+  `StaleSkipGuarded` (check 78: JOB-13's 7-state counterexample, a pause
+  between the old code's get and its upsert).
+- **The stale skip never puts back the definition from before an owner's
+  edit** (check 77, `EditNeverOverwritten`, an action rule: `defVer` never
+  goes down). This rests on `StaleSkipGuarded` (check 79, 8 states: an edit
+  between the get and the upsert).
+- Witness 80 shows the guarded write as the Scheduler's next step after
+  both an owner's pause and an edit landed since the scan read the job (7
+  states), so the pass is not vacuous.
+
+`defVer` moves with an owner's edit only in a check where a step reads it
+(a heal's move, or the stale skip), and every check before 77 sets
+`DueCanGoStale` `FALSE`, so checks 01 to 76 keep every verdict and every
+state count.
+
+Check 77 was run by hand with one more of each entity, one at a time, and
+held each time: a second run id (2,059,750 states, 54 s), a third fire
+time (741,411), a second owner move (578,930), a second edit (706,616) and
+a run by hand (979,663). No send attempt was added, since its sends never
+fail.
 
 "A retry never moves `next_run_at`" is not a check. In this clock a job
 that is not due always has `next_run_at` at the next fire time (`now + 1`),
@@ -1601,6 +1653,91 @@ shortest and can change between runs.
     write before the claim does not block the move"; "the mark does not
     survive into the next claim".
 
+### JOB-13: the Scheduler's own writes of a job put back a whole row from an earlier read
+- **Severity:** low.
+  - The window is one Repo round trip, between the Scheduler's read of the
+    job and its write, longer when the Repo is busy. The stale skip runs
+    only for a due time older than the freshness window (an hour by
+    default), as after a daemon that was down across it; the expiry and the
+    disable only at a job's end.
+  - In the stale skip's window an owner's pause is undone: the job comes
+    back enabled and scheduled, and runs again, although the owner was told
+    it is paused. In any of the three windows an edit is lost the same way,
+    and a job the owner removed comes back.
+- **Status:** fixed (f34da4811). Found by reading the three writes,
+  which this spec's "not modelled" list named. JOB-4 (the runner's settle)
+  and JOB-7 (the owner's writes) were the same class.
+- **Checks:**
+  - 77 holds (`PauseNeverOverwritten`, `EditNeverOverwritten`); witness 80
+    shows its guarded write meeting a pause and an edit in the gap.
+  - 78 and 79 (`needs StaleSkipGuarded`) break them with the fix switched
+    off. Their counterexamples are the ones below.
+- **Counterexample (check 78, 7 states):**
+  1. The job is enabled and scheduled, its next run at the first fire time.
+  2. The clock passes that fire time (`Tick`).
+  3. The due timer fires (`DueTimerFires`).
+  4. The due scan reads the job, due, and finds its due time stale
+     (`Scan`): the run is skipped.
+  5. `advance_stale_job` reads the job again (`StaleRead`,
+     `Repo.get_scheduled_job`): still enabled and scheduled.
+  6. The owner pauses it (`Pause`) and is told "paused".
+  7. The upsert of the row the get read, with the next run advanced
+     (`StaleWrite`), writes `enabled` and `scheduled` back over the pause.
+
+  Check 79 (8 states) is the same path with an owner's edit: read before
+  the scan (`UpdateRead`) and written between the get and the upsert
+  (`UpdateWrite`). The upsert puts back the definition the get read.
+- **Code (before the fix):**
+  - `advance_stale_job/4` called `Repo.get_scheduled_job`. For a job still
+    enabled and `scheduled`, `store_advanced_run_at/4` merged the new
+    `next_run_at` and `updated_at` into that row and wrote it with
+    `Repo.upsert_scheduled_job`. Its `upsert_scheduled_job_row` is
+    `INSERT … ON CONFLICT(id) DO UPDATE` of every column.
+  - `expire_job/3`, through the private `expire_scheduled_job/3`, and
+    `disable_job/4` were the same get and whole-row upsert, with the
+    expiry's or the disable's columns merged in.
+  - So a write that landed between the two calls was reverted: an owner's
+    pause, resume or edit, or a heal's guarded write. A job removed in
+    between was inserted again.
+- **Fix:**
+  - Each is one Repo call, one column-targeted `UPDATE … RETURNING *` with
+    no read before it and no insert (`guarded_scheduled_job_write`,
+    `repo.ex:9377-9383`):
+    - `Repo.advance_stale_scheduled_job/4` (`repo.ex:2786-2794`,
+      `:9330-9341`) sets `next_run_at` and `updated_at`, only while the job
+      is enabled, `scheduled` and due at the stale instant the scan read;
+    - `Repo.expire_scheduled_job/3` (`:2806-2808`, `:9346-9361`) sets the
+      expiry's columns, only while the job is enabled, `scheduled` and its
+      `expires_at` has passed;
+    - `Repo.disable_scheduled_job/4` (`:2821-2830`, `:9363-9375`) sets the
+      disable's columns, only while the job is enabled, `scheduled` and
+      still carries the `schedule_expr` and `timezone` the scan read, so an
+      owner who fixed the schedule keeps the fix.
+  - A write that changes no row is `{:ok, :unchanged}`, a normal outcome
+    (`advance_stale_job`, `expire_job`, `disable_job`, `scheduler.ex:760-782`,
+    `:886-922`). The expiry's memory source follows only a job that write
+    expired.
+  - None goes through the owner's write path: none marks a diagnosing heal
+    written-under, supersedes a proposal or clears a retry.
+  - In the spec the stale skip stands for the three (`StaleSkip`; without
+    the fix, `StaleRead` then `StaleWrite`), since it is the one that leaves
+    the job enabled, so an undone pause shows. Expiry and an unparseable
+    schedule are still not modelled; their writes have its shape.
+- **Not checked:** the spec has no removal, so a removed job written back
+  has no check; a heal's move in the gap (`HealMoves = 0` in checks 77 to
+  80), which the old upsert put back the same way, is not checked either.
+- **Tests** (names read in the export, not run here):
+  - `repo_jobs_scheduler_writes_test.exs`: for each of the three writes,
+    "changes nothing on a job the owner paused since the scan" and "never
+    inserts a job removed since the scan"; "keeps an edit made since the
+    scan and moves only its own columns" (expiry); "changes nothing on a job
+    whose schedule an edit fixed since the scan" (disable); "the engine's
+    moves, not the owner's";
+  - `scheduler_test.exs`: "an owner's write landing before the Scheduler's
+    own write of the job" ("a stale skip keeps a pause", "a stale skip keeps
+    an edit", "a stale skip keeps a removed job gone", and the same for an
+    expiry and a disable).
+
 ## Re-read for M106 retries and heals (2026-11-24)
 
 M106's quiet retry (§5.3) and its heal (§5.4) staled `scheduler.ex`,
@@ -2241,6 +2378,51 @@ No check was added or changed. The citations in the spec and in this
 README's top sections and assumptions moved with the code and were updated.
 The earlier dated re-reads and the findings keep the lines of their day.
 
+## Re-read for the Scheduler's own writes (JOB-13, 2026-11-26)
+
+JOB-13's fix staled `scheduler.ex`, which the spec pins whole. Read against
+the committed file:
+- `advance_stale_job/4`, `expire_job/3` and `disable_job/4` each make one
+  guarded Repo write now. `store_advanced_run_at/4`, `outcome_state/2` and
+  the private `expire_scheduled_job/3` are gone. None of them was a step of
+  the spec; the stale skip now is (JOB-13, checks 77 to 80).
+- Nothing else the spec models changed. Every `scheduler.ex` citation in
+  the spec, and in this README's top sections and assumptions, was checked
+  against the file. Many had fallen behind earlier changes too, above the
+  lines this one moved, and all now point at the committed code.
+- One comment was wrong beyond its line numbers. `NextReap` said a DOWN
+  callback ends after its reap, which stopped being so when M106 re-armed
+  the timer at every run's end; it now says the callback goes on to the
+  re-arm, as `reapReturn` already did.
+
+New `SOURCE` pin: in `repo.ex`, `advance_stale_scheduled_job`,
+`advance_stale_scheduled_job_row`, `guarded_scheduled_job_write`,
+`expire_scheduled_job`, `expire_scheduled_job_row`, `disable_scheduled_job`
+and `disable_scheduled_job_row`.
+
+New constants: `DueCanGoStale` (`FALSE` in checks 01 to 76) and
+`StaleSkipGuarded` (`TRUE` in them). The Scheduler's job snapshot `sSnap`
+also carries the definition (`ver`), which the split reaper's read takes
+too, but `defVer` stays 0 in every check that runs the split reaper.
+Checks 01 to 76 keep every verdict and every state count.
+
+## Re-read for the home's lock taken first (0705a4fc0, 2026-11-26)
+
+`0705a4fc0` staled the `application.ex` pin. `start_supervision_tree/0` now
+starts the tree through `start_holding_home_lock/3`: a daemon boot takes the
+lock beside its control socket before the role is read, the home prepared or
+any child started, and what the function did before is `start_tree/0`.
+`supervision_children/2` gained comments and no child, and
+`jobs_scheduler_opts/0` is as it was. `JobRunnerSupervisor` still starts
+before `JobScheduler` under `:rest_for_one`, which is what the reaper's
+"liveness is the signal" rests on within one engine. That the reaping engine
+is the home's only one is no longer an assumption this spec carries
+unchecked: a second daemon is refused before the Scheduler starts, which
+`engine_boot` checks, and a command that boots the tree beside the daemon
+still reaps (`engine_boot`'s BOOT-1). No modelled step changed, and the
+`application.ex` lines cited in the spec and above Findings moved with the
+code.
+
 ## Re-read for events drawn as cards (2026-11-13)
 
 `reply_delivery_opts` now keeps the run's events and trips blocks beside its lists (M89): it
@@ -2373,12 +2555,12 @@ moved up by two with the code.
   write or Scheduler call (`job_registry_support.ex:36-41`): a request the owner
   never made. That check's job-row read feeds no modelled column. The store
   of parked confirmations (`Capabilities.AccessGate.Pending`,
-  `application.ex:408`) and the holder of a conversation's place records
-  (`ReplyBlocks`, `:412`, which no job process reads) are two more core
+  `application.ex:499`) and the holder of a conversation's place records
+  (`ReplyBlocks`, `:503`, which no job process reads) are two more core
   children started before the `RunnerSupervisor`, so a crash of either is the
   daemon crash above.
 - The run-row value `unset` stands for the `"none"` the claim writes before a
-  result exists (`scheduler.ex:915`). The final `"none"` of `delivery_mode
+  result exists (`scheduler.ex:972`). The final `"none"` of `delivery_mode
   "none"` is modelled as `skipped`.
 - The due timer is modelled from the row as it is now. The code arms it at
   the end of a tick, on `:job_changed`, after run now and (since M106) at
@@ -2394,7 +2576,7 @@ moved up by two with the code.
   claim it earlier than the code. The attempt count, the delays, the
   `:exhausted` fourth and a retry whose time falls at or after the next run
   (no time written) are a free choice of the settle. A retry older than the
-  freshness window, dropped by the scan, is left out with the stale-skip.
+  freshness window, dropped by the scan (`drop_stale_retry`), is left out.
 - A heal's rows (M106 §5.4) are outside the model: see "Re-read for M106
   retries and heals" for why none of the settle's heal writes touches a job
   row, a run row or the claim, and "Re-read for runs that end ok without
@@ -2420,9 +2602,16 @@ moved up by two with the code.
 - The admission ceiling (4 runs) is never reached by one job (two runners).
   A heal run is not counted against it: the ceiling and the cue share count
   runs by the run id each runner publishes (`active_run_count/1`). Expiry,
-  one-shot jobs, an unparseable schedule and the stale-skip are not modelled.
-  The Scheduler's own whole-row writers on those paths (`advance_stale_job`,
-  `expire_scheduled_job`, `disable_job`) are therefore not modelled either.
+  one-shot jobs and an unparseable schedule are not modelled.
+- The stale skip is modelled with `DueCanGoStale` (checks 77 to 80), and
+  stands for the Scheduler's two other writes of a job, the expiry and the
+  disable, which have its shape (JOB-13).
+  - The freshness window is not counted in the model's clock, so a due scan
+    may skip or claim whatever the due time's age: what the code does, and
+    more.
+  - Its next run is the next fire time (`now + 1`), as a claim's is.
+  - Its outcome is a clean drain whether or not it wrote, so its re-arm is
+    `Arm`'s.
 - An owner edit is modelled as one that writes no modelled column (a task,
   description, pin or delivery edit). A schedule edit also writes a fresh
   `next_run_at`, which the column-targeted write keeps as the owner meant,
