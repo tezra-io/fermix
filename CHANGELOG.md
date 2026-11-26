@@ -61,6 +61,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   up the page, and a **Refresh** button beside the list asks again (after
   `ollama pull`, for example).
 
+- **The Logs page opens faster on a large log.** A page formatted every entry
+  in the last 2 MB of the log to show 200 of them; it now formats only the
+  entries it shows.
+
 ### Fixed
 
 - **The first phone you pair can be on any network.** Turning phone access on

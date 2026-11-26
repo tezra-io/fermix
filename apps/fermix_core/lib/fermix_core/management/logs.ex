@@ -233,13 +233,16 @@ defmodule FermixCore.Management.Logs do
     end
   end
 
-  # Walks the rotated set newest-first and stops as soon as `needed` matching
-  # entries exist, so a query never reads the whole retained history. A read
-  # failure halts the walk: a short list would otherwise present itself as the
-  # honest end of the set while entries still exist behind the unreadable file.
+  # Walks the rotated set newest-first and returns the first `needed` matching
+  # entries, or every match the set holds when it holds fewer. Each file is asked
+  # only for the matches still missing, and the walk stops at the file that
+  # supplies the last of them, so a query never reads the whole retained
+  # history. A read failure halts the walk: a short list would otherwise present
+  # itself as the honest end of the set while entries still exist behind the
+  # unreadable file.
   defp collect(files, request, needed) do
     Enum.reduce_while(files, {:ok, []}, fn file, {:ok, acc} ->
-      case matching_entries(file, request) do
+      case matching_entries(file, request, needed - length(acc)) do
         {:ok, entries} -> take_until_enough(acc ++ entries, needed)
         {:error, reason} -> {:halt, {:error, reason}}
       end
@@ -249,15 +252,23 @@ defmodule FermixCore.Management.Logs do
   defp take_until_enough(acc, needed) when length(acc) >= needed, do: {:halt, {:ok, acc}}
   defp take_until_enough(acc, _needed), do: {:cont, {:ok, acc}}
 
-  defp matching_entries(file, request) do
+  # One file's first `wanted` matches, newest first. The whole bounded tail is
+  # parsed, because a continuation line belongs to the entry above it. An entry
+  # is finished (repaired, redacted, truncated) and only then matched, so
+  # selection reads exactly the text the page returns; both happen as the walk
+  # reaches the entry, and the walk stops at the `wanted`th match. The default
+  # page therefore formats about 200 entries, not every entry in the tail; only
+  # a filter that matches too few of them still formats the whole tail.
+  defp matching_entries(file, request, wanted) do
     with {:ok, contents, partial?} <- read_tail(file) do
       entries =
         contents
         |> String.split("\n")
         |> drop_partial_line(partial?)
-        |> to_entries()
-        |> Enum.filter(&matches?(&1, request))
-        |> Enum.reverse()
+        |> entries_newest_first()
+        |> Stream.map(&finish_entry/1)
+        |> Stream.filter(&matches?(&1, request))
+        |> Enum.take(wanted)
 
       {:ok, entries}
     end
@@ -310,12 +321,10 @@ defmodule FermixCore.Management.Logs do
   defp drop_partial_line([_cut | rest], true), do: rest
   defp drop_partial_line([], true), do: []
 
-  defp to_entries(lines) do
-    lines
-    |> Enum.reduce([], &fold_line/2)
-    |> Enum.reverse()
-    |> Enum.map(&finish_entry/1)
-  end
+  # The fold reads the lines oldest first and puts each new entry at the head,
+  # where its continuation lines join it, so the raw entries come out newest
+  # first: the order a page is gathered in.
+  defp entries_newest_first(lines), do: Enum.reduce(lines, [], &fold_line/2)
 
   defp fold_line("", entries), do: entries
 
