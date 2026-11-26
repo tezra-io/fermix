@@ -2144,6 +2144,7 @@
         "cues",
         "integrations",
         "voice",
+        "phone_calls",
         "meetings",
         "computer",
         "browser",

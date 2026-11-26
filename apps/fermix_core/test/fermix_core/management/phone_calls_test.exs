@@ -1,6 +1,6 @@
 defmodule FermixCore.Management.PhoneCallsTest do
   @moduledoc """
-  The Phone calls section of Settings, Voice and the `phone_calls.*` methods
+  The Phone calls section of Settings, Phone calls and the `phone_calls.*` methods
   (M94 §12): the section's rows and their writes, the off switch applied with
   its write, the three facts and the summary, the calls, the stop and the
   recovery view, the hold on the credentials a call reads, and the
@@ -145,7 +145,8 @@ defmodule FermixCore.Management.PhoneCallsTest do
       rows = rows(ctx)
 
       assert Enum.map(rows, & &1["key"]) == @rows
-      assert %{id: "phone_calls", pane: "voice", title: "Phone calls"} in Settings.sections()
+
+      assert %{id: "phone_calls", pane: "phone_calls", title: "Phone calls"} in Settings.sections()
 
       for row <- rows, row["key"] != "openai_api_key", do: refute(row["restart"], row["key"])
 

@@ -2647,15 +2647,15 @@ timeout.
 ## Phone calls
 
 `phone_calls.*` and the `phone_calls` settings section are what Settings,
-Voice, Phone calls shows (M94 §12): Fermix placing an outbound call through
+Phone calls shows (M94 §12): Fermix placing an outbound call through
 the owner's own Telnyx number, with GPT-Live conducting it. The section is the
 home's, never a computer's, so after a move every app shows and changes the
 server's, and the methods are the home's too: a linked computer forwards them,
 and a device with no link refuses them as retired (*After a move*). The app
 renders every word as the daemon sends it and derives no state of its own.
 
-**The section.** `phone_calls`, pane `voice`, after Talk to Fermix and independent
-of it: it stays visible and usable whatever Talk to Fermix's switch and engine,
+**The section.** `phone_calls`, pane `phone_calls`, independent of Talk to
+Fermix: it stays visible and usable whatever Talk to Fermix's switch and engine,
 a write of either section never rewrites the other's values or secret
 references, and there is no master Voice switch. Its rows, in order:
 `phone_calls_enabled` (the switch), `phone_calls_status` (read-only: the

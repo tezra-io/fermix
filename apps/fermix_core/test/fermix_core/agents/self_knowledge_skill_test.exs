@@ -473,7 +473,7 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     assert reference =~ "only `web_search` and `place_search` can be granted to a call today"
 
     for fact <- [
-          "**Phone calls** section in the Voice settings",
+          "**Phone calls** section in a settings pane of its own",
           "Never a private individual",
           "toll-free",
           "the US territories",

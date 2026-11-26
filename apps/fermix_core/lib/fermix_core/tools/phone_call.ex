@@ -648,7 +648,9 @@ defmodule FermixCore.Tools.PhoneCall do
 
   defp sentence(text) when is_binary(text), do: text
   defp sentence({:invalid_action, _action}), do: "action must be start, status or cancel."
-  defp sentence(:disabled), do: "Phone calls are turned off in Settings, Voice." <> @nothing
+
+  defp sentence(:disabled),
+    do: "Phone calls are turned off in Settings, Phone calls." <> @nothing
 
   defp sentence(:engine_stopping),
     do: "Fermix is stopping, so no call can start now; ask again once it is back." <> @nothing

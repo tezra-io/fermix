@@ -3856,49 +3856,49 @@
       "method": "settings.get:phone_calls",
       "field": "rows:openai_api_key",
       "kind": "engine_only",
-      "why": "M94 §12: the phone_calls section, under the voice pane and independent of Talk to Fermix, holds the five settings of [fermix_core.phone_calls] (the switch, the voice, the caller number, and the Telnyx connection's username and password), the status and the engine that calls as two read-only facts, and the OpenAI key as a second row for the OpenAI provider's own secret. It postdates the draft, and an app that has not re-vendored never asks for the section."
+      "why": "M94 §12: the phone_calls section, under a pane of its own and independent of Talk to Fermix, holds the five settings of [fermix_core.phone_calls] (the switch, the voice, the caller number, and the Telnyx connection's username and password), the status and the engine that calls as two read-only facts, and the OpenAI key as a second row for the OpenAI provider's own secret. It postdates the draft, and an app that has not re-vendored never asks for the section."
     },
     {
       "method": "settings.get:phone_calls",
       "field": "rows:phone_calls_caller_number",
       "kind": "engine_only",
-      "why": "M94 §12: the phone_calls section, under the voice pane and independent of Talk to Fermix, holds the five settings of [fermix_core.phone_calls] (the switch, the voice, the caller number, and the Telnyx connection's username and password), the status and the engine that calls as two read-only facts, and the OpenAI key as a second row for the OpenAI provider's own secret. It postdates the draft, and an app that has not re-vendored never asks for the section."
+      "why": "M94 §12: the phone_calls section, under a pane of its own and independent of Talk to Fermix, holds the five settings of [fermix_core.phone_calls] (the switch, the voice, the caller number, and the Telnyx connection's username and password), the status and the engine that calls as two read-only facts, and the OpenAI key as a second row for the OpenAI provider's own secret. It postdates the draft, and an app that has not re-vendored never asks for the section."
     },
     {
       "method": "settings.get:phone_calls",
       "field": "rows:phone_calls_enabled",
       "kind": "engine_only",
-      "why": "M94 §12: the phone_calls section, under the voice pane and independent of Talk to Fermix, holds the five settings of [fermix_core.phone_calls] (the switch, the voice, the caller number, and the Telnyx connection's username and password), the status and the engine that calls as two read-only facts, and the OpenAI key as a second row for the OpenAI provider's own secret. It postdates the draft, and an app that has not re-vendored never asks for the section."
+      "why": "M94 §12: the phone_calls section, under a pane of its own and independent of Talk to Fermix, holds the five settings of [fermix_core.phone_calls] (the switch, the voice, the caller number, and the Telnyx connection's username and password), the status and the engine that calls as two read-only facts, and the OpenAI key as a second row for the OpenAI provider's own secret. It postdates the draft, and an app that has not re-vendored never asks for the section."
     },
     {
       "method": "settings.get:phone_calls",
       "field": "rows:phone_calls_engine",
       "kind": "engine_only",
-      "why": "M94 §12: the phone_calls section, under the voice pane and independent of Talk to Fermix, holds the five settings of [fermix_core.phone_calls] (the switch, the voice, the caller number, and the Telnyx connection's username and password), the status and the engine that calls as two read-only facts, and the OpenAI key as a second row for the OpenAI provider's own secret. It postdates the draft, and an app that has not re-vendored never asks for the section."
+      "why": "M94 §12: the phone_calls section, under a pane of its own and independent of Talk to Fermix, holds the five settings of [fermix_core.phone_calls] (the switch, the voice, the caller number, and the Telnyx connection's username and password), the status and the engine that calls as two read-only facts, and the OpenAI key as a second row for the OpenAI provider's own secret. It postdates the draft, and an app that has not re-vendored never asks for the section."
     },
     {
       "method": "settings.get:phone_calls",
       "field": "rows:phone_calls_sip_password",
       "kind": "engine_only",
-      "why": "M94 §12: the phone_calls section, under the voice pane and independent of Talk to Fermix, holds the five settings of [fermix_core.phone_calls] (the switch, the voice, the caller number, and the Telnyx connection's username and password), the status and the engine that calls as two read-only facts, and the OpenAI key as a second row for the OpenAI provider's own secret. It postdates the draft, and an app that has not re-vendored never asks for the section."
+      "why": "M94 §12: the phone_calls section, under a pane of its own and independent of Talk to Fermix, holds the five settings of [fermix_core.phone_calls] (the switch, the voice, the caller number, and the Telnyx connection's username and password), the status and the engine that calls as two read-only facts, and the OpenAI key as a second row for the OpenAI provider's own secret. It postdates the draft, and an app that has not re-vendored never asks for the section."
     },
     {
       "method": "settings.get:phone_calls",
       "field": "rows:phone_calls_sip_username",
       "kind": "engine_only",
-      "why": "M94 §12: the phone_calls section, under the voice pane and independent of Talk to Fermix, holds the five settings of [fermix_core.phone_calls] (the switch, the voice, the caller number, and the Telnyx connection's username and password), the status and the engine that calls as two read-only facts, and the OpenAI key as a second row for the OpenAI provider's own secret. It postdates the draft, and an app that has not re-vendored never asks for the section."
+      "why": "M94 §12: the phone_calls section, under a pane of its own and independent of Talk to Fermix, holds the five settings of [fermix_core.phone_calls] (the switch, the voice, the caller number, and the Telnyx connection's username and password), the status and the engine that calls as two read-only facts, and the OpenAI key as a second row for the OpenAI provider's own secret. It postdates the draft, and an app that has not re-vendored never asks for the section."
     },
     {
       "method": "settings.get:phone_calls",
       "field": "rows:phone_calls_status",
       "kind": "engine_only",
-      "why": "M94 §12: the phone_calls section, under the voice pane and independent of Talk to Fermix, holds the five settings of [fermix_core.phone_calls] (the switch, the voice, the caller number, and the Telnyx connection's username and password), the status and the engine that calls as two read-only facts, and the OpenAI key as a second row for the OpenAI provider's own secret. It postdates the draft, and an app that has not re-vendored never asks for the section."
+      "why": "M94 §12: the phone_calls section, under a pane of its own and independent of Talk to Fermix, holds the five settings of [fermix_core.phone_calls] (the switch, the voice, the caller number, and the Telnyx connection's username and password), the status and the engine that calls as two read-only facts, and the OpenAI key as a second row for the OpenAI provider's own secret. It postdates the draft, and an app that has not re-vendored never asks for the section."
     },
     {
       "method": "settings.get:phone_calls",
       "field": "rows:phone_calls_voice",
       "kind": "engine_only",
-      "why": "M94 §12: the phone_calls section, under the voice pane and independent of Talk to Fermix, holds the five settings of [fermix_core.phone_calls] (the switch, the voice, the caller number, and the Telnyx connection's username and password), the status and the engine that calls as two read-only facts, and the OpenAI key as a second row for the OpenAI provider's own secret. It postdates the draft, and an app that has not re-vendored never asks for the section."
+      "why": "M94 §12: the phone_calls section, under a pane of its own and independent of Talk to Fermix, holds the five settings of [fermix_core.phone_calls] (the switch, the voice, the caller number, and the Telnyx connection's username and password), the status and the engine that calls as two read-only facts, and the OpenAI key as a second row for the OpenAI provider's own secret. It postdates the draft, and an app that has not re-vendored never asks for the section."
     },
     {
       "method": "(schema)",

@@ -1,6 +1,6 @@
 defmodule FermixCore.Management.Settings.PhoneCalls do
   @moduledoc """
-  The `phone_calls` section, Settings, Voice, Phone calls (M94 §12): the
+  The `phone_calls` section, Settings, Phone calls (M94 §12): the
   owner's five settings of `[fermix_core.phone_calls]` (decision D5) and two
   facts the engine publishes beside them.
 
@@ -15,7 +15,7 @@ defmodule FermixCore.Management.Settings.PhoneCalls do
   trunk address, the model, the limits and the retention are constants of the
   engine (`PhoneCalls.CarrierProfile`, `PhoneCalls.Limits`) and no rows.
 
-  The section is the home's, not a computer's: Voice is no machine section, so
+  The section is the home's, not a computer's: it is no machine section, so
   after a move every app shows the server's. It is its own: no row here reads
   or writes `[fermix_core.realtime]`, and a write here never touches it.
 
@@ -38,7 +38,7 @@ defmodule FermixCore.Management.Settings.PhoneCalls do
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Wizard
 
-  @section %{id: "phone_calls", pane: "voice", title: "Phone calls"}
+  @section %{id: "phone_calls", pane: "phone_calls", title: "Phone calls"}
   @prefix "phone_calls_"
   # An invented number in the 555-01XX range, which NANPA keeps for fiction.
   @example_number "+12125550142"

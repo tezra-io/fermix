@@ -1638,8 +1638,8 @@ through `Setup.Wizard`. The canonical export is
 fixtures).
 `Management.PhoneCalls` answers `phone_calls.status`, `phone_calls.list`,
 `phone_calls.stop`, `phone_calls.recovery.get` and `phone_calls.recovery.confirm`
-(the owner's word that an unresolved call ended), and the Phone calls section of
-the Voice pane (`Management.Settings.PhoneCalls`) applies its switch in the same
+(the owner's word that an unresolved call ended), and the Phone calls pane's
+section (`Management.Settings.PhoneCalls`) applies its switch in the same
 operation as its write. `lifecycle.prepare_restart`, the owner's restart, is
 refused while a call's worker runs, and allowed when that cannot be told.
 

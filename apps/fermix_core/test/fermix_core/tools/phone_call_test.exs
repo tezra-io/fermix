@@ -235,7 +235,9 @@ defmodule FermixCore.Tools.PhoneCallTest do
                "password of the Telnyx connection"
 
       off = owner_turn(ctx, %{phone_call_readiness: fn -> :disabled end})
-      assert refusal(PhoneCall.execute(start_args(), off)) =~ "turned off"
+
+      assert refusal(PhoneCall.execute(start_args(), off)) =~
+               "Phone calls are turned off in Settings, Phone calls."
 
       refute_received {:start_call, _request}
     end
