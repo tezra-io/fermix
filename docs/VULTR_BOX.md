@@ -61,7 +61,7 @@ of it compiling OTP. If it fails, the provisioning log is saved to
 | OTP 28, Elixir 1.19.5 | yes, **verified** | via `mise`. OTP 28 is **compiled** (~30-45 min): Erlang Solutions publishes no noble component past 27 and Ubuntu's own is older, so no prebuilt 28 exists for this distro. Dropping to 27 would test a toolchain we do not ship. Paid once, into the image; a mismatch aborts before the image is accepted |
 | Rust (rustup), `uv` | no | NIF build; harness |
 | `claude`, `codex` CLIs | no, **presence verified** | the harness must work against what you actually run, so pinning would test a fossil. Override with `CLAUDE_CLI_VERSION` / `CODEX_CLI_VERSION` |
-| warm `deps/` + `_build/` (dev + test) | — | ~214 MB of deps and the Rust NIF, reused instead of rebuilt |
+| warm `deps/` + `_build/` (dev + test) | — | ~214 MB of deps and the compiled C NIF (`fermix_nif`), reused instead of rebuilt |
 
 Vendor-CLI **logins are not in the image** — see §5.
 
@@ -156,9 +156,10 @@ Linux at all. That difference is exactly what this box exists to test: a
 - **Never baked into the image.** Provider and channel keys are forwarded per
   run and quoted with `printf %q`. Snapshots persist in your Vultr account.
 - Forwarded when set: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`,
-  `OPENROUTER_API_KEY`, `EVAL_JUDGE_API_KEY`, `FERMIX_OPIK_API_KEY`,
-  `FERMIX_OPIK_WORKSPACE`, `OPIK_API_KEY`, `OPIK_WORKSPACE`,
-  `TELEGRAM_BOT_TOKEN`.
+  `OPENROUTER_API_KEY`, `EVAL_JUDGE_API_KEY`, `EVAL_JUDGE_BASE_URL`,
+  `EVAL_JUDGE_MODEL`, `FERMIX_OPIK_API_KEY`, `FERMIX_OPIK_WORKSPACE`,
+  `FERMIX_OPIK_BASE_URL`, `OPIK_API_KEY`, `OPIK_WORKSPACE`, `OPIK_BASE_URL`,
+  `OPIK_PROJECT`, `TELEGRAM_BOT_TOKEN`.
 - **Use a separate test bot token** for channels. Never the production one.
 
 ---

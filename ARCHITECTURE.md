@@ -107,11 +107,17 @@ redacting logger, attaches telemetry, and starts the core tree under
    `RestartState`, `Sandbox.EnvHealth`)
 8. `AgentSupervisor` and `MainAgent`
 9. the job, meeting, and temporal schedulers with their delivery supervisors,
-   and `Harness.Supervisor`
-10. children gated by config or platform: the daemon socket
-    (`Fermix.CLI.Daemon` and the management workers), `Realtime`,
-    `ComputerUse`, `ComputerHistory` (macOS only), and `SkillCuration.Scheduler`
-11. `Cues.Supervisor`, last, only with cues enabled (see `FermixCore.Cues`
+   `OpenLoops.Scheduler` and `OpenLoops.CheckInSupervisor` (in a daemon with
+   open loops and memory on), `Harness.Supervisor`, and `PhoneCalls.Supervisor`
+   (always, primary-only)
+10. children gated by config, platform or role: the daemon socket
+    (`Fermix.CLI.Daemon` and the management workers), the native host,
+    `Realtime`, `ComputerUse` and its screen seat, `ComputerHistory` (on the
+    primary and on a machine with a recorder), and `SkillCuration.Scheduler`
+11. the primary's late children: the companion origin backfill, the move's
+    progress, `Computers.Registry` and `Computers.Calls`, the trip placer and
+    day turn, `Home.ReleaseTable`, and `Home.Snapshot.Scheduler`
+12. `Cues.Supervisor`, last, only with cues enabled (see `FermixCore.Cues`
     below)
 
 Architecture Invariant: core is the only place where agent runtime state, memory
@@ -200,7 +206,10 @@ one when the list does not have it.
 
 `Selection` builds the primary-plus-fallback chain (at most one provider may be
 marked `primary`), `RouteResolver` resolves a route to `{route_key,
-adapter_opts}`, `Adapter.for_route/1` picks the module, and `RoutingOverrides`
+adapter_opts}` (with Fast mode, the `fast` key of the `openai` and `anthropic`
+blocks, it asks for the vendor's fast tier only where the model has one,
+`ModelCatalog.fast?/2`, and the route takes it, and every call on such a route
+reports the `speed` it ran at), `Adapter.for_route/1` picks the module, and `RoutingOverrides`
 applies the `[fermix_core.routing]` model and reasoning-effort overrides for
 sub-agents, cron, and meetings. `Failover` and `Transient` classify retryable
 errors. Every provider call emits through `Providers.Telemetry.emit_call/3`.
@@ -307,13 +316,16 @@ Built-in tool families: file read/write/edit, glob and content search, shell,
 and `view_image`; git read/write; web (`web_search`, `web_fetch`,
 `place_search`, `browser`); skills and delegation (`skill_*`, `subagents`,
 `model_routing_config`); memory (`memory_store`, `memory_forget`,
-`memory_recall`, `memory_sources_list`, `recall_activity`); scheduled jobs;
-dated events and
-reminders (`event_*`, `reminder_snooze`); messaging (`send_attachment`,
+`memory_recall`, `memory_sources_list`, `recall_activity`); scheduled jobs,
+with `job_heal_respond` offered only inside a heal run; dated events and
+reminders (`event_*`, `reminder_snooze`); open loops (`open_loop_*`,
+`open_loop_respond` only inside a check-in run); the owner's lists and trips
+(`checklist_*`, `trip_*`); messaging (`send_attachment`,
 `react`, and `send_to_channel` to the owner's own inbox on a channel they name);
-`generate_image`, `request_directory_access`, and `tool_help`.
-`computer_use`, the coding-harness tools, and the meeting tools are registered
-only when their feature is ready.
+`voice_call_context` while a Live call in the chat is up; `generate_image`,
+`request_directory_access`, `tool_help`, and `tool_result_recall`.
+`computer_use`, the coding-harness tools, the meeting tools, and the cue tools
+are registered only when their feature is ready.
 `phone_call` is registered always, because its switch is live both ways, and
 offered by `advertise?/1` on the owner's attended turn only; the text agent's
 capability catalog never names it, and a Live call's prompt names it only while
@@ -358,8 +370,11 @@ Memory has two layers:
   `FERMIX_HOME/memory.db`
 
 The same database also holds full-text search, versioned resources, scheduled
-jobs and their runs, temporal events and reminders, harness runs, meetings,
-skill usage and curation, the companion timeline, computer-history rows, and
+jobs and their runs (with the facts, retries and heals behind them,
+`job_run_facts`, `job_retries`, `job_heals`), temporal events and reminders,
+open loops, the owner's lists and trips, harness runs, meetings, phone calls
+(`phone_calls`, migrations 67 and 68), skill usage and curation, the companion
+timeline, computer-history rows, and
 the inbound channel event ids `Gateway.Idempotency` keeps for 24 hours
 (`channel_event_ids`, migration 53, M75), so a provider's retry, or a
 Telegram update sent again, that arrives after a restart, or on the new host
@@ -506,8 +521,10 @@ seals a stopped home (manifest, PBKDF2 key, AES-256-GCM) minus
 `Home.DeviceLocal`, the single list both export exclusion and restore refusal
 read; `Archive.RestoredConfig` rebases the old home path, leaves the old
 machine's own settings out (coding-agent consent among them, M98 D5) and moves a keyring-mode home to the file store on a keyring-less host
-in the restored `config.toml` through `Archive.ConfigText`, `Archive.ScreenHistory`
-clears computer-history rows from the restored database, and a restore writes
+in the restored `config.toml` through `Archive.ConfigText`, a restore with a
+fresh history renews the computer-history home token in the restored database
+(`ComputerHistorySql.renew_home_token/1`; a move back's continued stream keeps
+its own), and a restore writes
 the archived epoch plus one. `Home.Snapshot` is the streaming twin of the
 archive: `write/4` captures a running home (`Snapshot.Capture`: the archive's
 `collect/2` set, each file copied once while hashed, `memory.db` by
@@ -850,7 +867,12 @@ and stored on the row; send time resolves only the adapter. A send watched by
 Architecture Invariant: a job is `running` only while one of its runs is queued
 or running. The claim takes the job and inserts the run in one transaction, and
 `Repo.settle_job_run` writes the run's final row and releases the job in
-another; owner edits write only the columns they own.
+another; owner edits write only the columns they own, and so do the
+Scheduler's own writes of a job (a stale skip, an expiry, the disable of a
+schedule that no longer parses: `Repo.advance_stale_scheduled_job/4`,
+`expire_scheduled_job/3`, `disable_scheduled_job/4`), each one guarded UPDATE
+with no read before it and no insert, so an owner's pause, edit or removal
+beside it stands.
 
 A run's row carries three facts beside its result (M106 §5.1): when its first
 tool started (`job_runs.tools_started_at`, stored by the run's loop before that
@@ -1082,6 +1104,44 @@ the decision was resolved against, and a change to what the job does or where
 it reports is only ever stored. Only the owner's own answer on the
 proposal's card, from the chat it went to (`Jobs.HealCard`, `Jobs.HealAnswer`),
 applies a stored change, and exactly as stored; no model can.
+
+### `FermixCore.OpenLoops`: open loops
+
+An open loop (M78, M83) is something in the owner's own life, in their words,
+that they mean to do or decide by a date, or are waiting on or going through,
+kept so Fermix can follow it up. Open loops are on by default:
+`[fermix_core.open_loops] enabled` (`OpenLoops.Config`, default true) is the way
+to turn them off, and every tuning value is a constant in `OpenLoops.Defaults`.
+`OpenLoops.Registry` is the one layer that turns the model's `open_loop_note`
+and `open_loop_update` arguments into a stored or settled loop, and
+`OpenLoops.Access` admits them only on the owner's attended turn in a private
+chat or the owner's own voice call, so guests, group chats, shared Buzz
+sessions, and scheduled, background and delegated runs never see, record or
+settle one. A loop noted on a turn that read outside content is stamped, and
+its words come back framed, unless they are found in what the owner typed on
+that turn. Its delivery is resolved once, at capture: the conversation it came
+from when that is the owner's own inbox on its platform
+(`Delivery.OwnerInbox.on_platform/2`), otherwise the owner-inbox ladder.
+`OpenLoops.Lifecycle` is the pure state machine, whose column changes
+`Memory.Repo` applies under a live-state guard.
+
+A due loop is raised two ways. `OpenLoops.DueNote` is a system note the
+owner's next private turn carries. `OpenLoops.Scheduler`, in the
+`Temporal.Scheduler` shape and the one claimer, arms one timer for the nearest
+change, keeps check-ins inside the owner's active hours (`OpenLoops.ActiveHours`,
+read from the owner's own messages; there is no quiet-hours setting), and
+starts each `OpenLoops.CheckIn` under `OpenLoops.CheckInSupervisor` (at most
+two at once; a full supervisor is a traced skip, never a queue): one isolated
+model run that may call exactly `memory_recall`, `open_loop_list` and
+`open_loop_respond`, whose one decision (speak, silent, later, close) only code
+carries out, sending at most one message. `OpenLoops.Reactions` records what
+the owner said next, read back as their own words. The two processes start
+only in a daemon with open loops and memory on, read once at boot.
+
+Architecture Invariant: a check-in's model causes only the decisions in
+`open_loop_respond`'s list, and it can never note or settle a loop; the
+`:open_loop_checkin` key of its context is the whole gate between the
+check-in's surface and the main agent's.
 
 ### `FermixCore.Cues`: Cues and Watchers
 
@@ -1459,17 +1519,24 @@ cosign-verified install.
 ### `FermixCore.ComputerUse`, `ComputerHistory`, and `Browser`
 
 `ComputerUse` controls the desktop through the `compux` sidecar (macOS arm64
-and Linux x86_64). `ready?/0` (enabled and sidecar installed) is the one gate for
-both the `computer_use` tool and `ComputerUse.Supervisor`. `SidecarInstaller`
+and Linux x86_64). `ready?/0` (enabled, sidecar installed and OS permissions
+granted) is the gate for both the `computer_use` tool and
+`ComputerUse.Supervisor` on this machine; a primary that may drive a linked
+computer's screen (`drives_computers?/1`) also registers the tool and offers it
+only while a screen is in reach, and a linked computer that is driven starts
+its screen seat (`ComputerUse.Seat`). `SidecarInstaller`
 fetches a sha256-pinned binary into `FERMIX_HOME/plugins/compux/`, and `Safety`
 refuses state-changing actions under strict access and host sessions outside an
 attended chat or voice turn. `SessionManager.ensure/3`, the one door a session
 opens through, also refuses a turn from a shared Buzz channel
 (`Acp.Identity.multi_principal?/1`) before the Stop hold and the registry lookup.
 
-`ComputerHistory` is an opt-in, macOS-only recorder. It captures interaction
-events through the same sidecar and summarizes them on the device into memories
-that `recall_activity` reads. `ComputerHistory.Gate` decides where history may
+`ComputerHistory` is an opt-in recorder on each machine that has one (macOS's
+Accessibility observer, Linux's accessibility bus, through the same sidecar).
+A machine keeps its raw record for 48 hours and sends each finished sitting to
+the home, which summarizes it into a note marked with the machine it came from,
+for `recall_activity`; an Always On server records nothing and keeps the
+notes. `ComputerHistory.Gate` decides where history may
 flow, and `MainAgent` snapshots it per turn.
 
 `Browser` runs the `browser` tool: managed Chrome over the DevTools protocol,
@@ -1487,7 +1554,8 @@ launches only through the `disclaim` shim from `fermix_nif`; on Linux, through
 of memory the kernel stops a Chrome process before the engine.
 
 Architecture Invariant: the computer-use tool is registered only when `ready?/0`
-holds, as a GUI-control capability that guests never get. Computer history
+holds or the primary may drive a linked computer's screen, as a GUI-control
+capability that guests never get. Computer history
 reaches a model only when every hop in the provider chain is local or granted.
 
 ### `FermixCore.Transcription` and `Meetings`
@@ -1733,13 +1801,17 @@ auth (`setup`, `auth`), talking to the agent over the daemon socket (`ask`,
 `chat`), lifecycle (`run`, `service`, `start`, `stop`, `restart`, `status`,
 `health`, `upgrade`, `uninstall`, `migrate-to-app`), diagnostics (`doctor`,
 `diagnostics`, `logs`), administration (`agents`, `capabilities`, `skills`,
-`plugins`, `memory`, `sandbox`, `grant`, `revoke`, `home`, `always-on`), and companion surfaces
-(`voice`, `acp`, `pair`, `devices`). `always-on` (`Fermix.CLI.AlwaysOnCommand`) is a
+`plugins`, `memory`, `sandbox`, `grant`, `revoke`, `settings`, `home`, `always-on`,
+`computer`), and companion surfaces (`voice`, `acp`, `browser`,
+`browser-bridge`, `pair`, `devices`). `settings` is the headless renderer of
+the management settings sections, and `settings phone-calls recovery` and
+`confirm-ended` are the terminal's way to settle a phone call whose end is
+unconfirmed. `always-on` (`Fermix.CLI.AlwaysOnCommand`) is a
 renderer of the Always On summary like the apps and the setup page: it collects what a
 step needs (masked secrets or flags, never argv), sends one `home.act`, and follows the
 step with `home.status {after, wait_ms}`, bounded at 45 minutes and reconnecting for 90 s
 across a move's restart; it never sequences calls itself. Mix tasks: `fermix.dev`, `fermix.setup`,
-`fermix.resource.*`, and the eval tasks in core; `fermix.bench*` in channels;
+`fermix.resource.*`, `fermix.cues.*`, `fermix.iroh_helper`, and the eval tasks in core; `fermix.bench*` in channels;
 `opik.ping` and `opik.replay` in opik. `Release.AppEngineManifest` records the
 version, source commit, tree digest, and protocol ranges that the macOS app
 verifies.
@@ -1790,9 +1862,10 @@ install: no cosign exists before the package); turns on Debian's daily
 unattended-upgrades and installs two root timers over one script,
 `fermix-update`: `fermix-follow.timer` every five minutes (`--follow`) and
 `fermix-update.timer` at 04:00 UTC. Each installs `fermix home status
---json`'s `update_ceiling` (the oldest engine among the desktops the
-server served in the last 30 days, `FermixCore.Home.EngineCeiling`, which
-the server records from each desktop's `hello`) when it is newer than the
+--json`'s `update_ceiling`, which is `update.eligible` (the newest release,
+at or above the one running, that a published app of each system whose
+computers keep the home's backups carries, read from the release table
+`Home.ReleaseTable` keeps, `FermixCore.Home.Releases.eligible/3`) when it is newer than the
 installed release in `dpkg --compare-versions`' order, never back down
 and nothing when there is none, never through the site's installer:
 `install_checked` installs the release's `.deb` only when fermix.ai's
@@ -1852,9 +1925,11 @@ every command line it starts), then in throwaway Debian containers against
 stand-ins for systemd, curl, apt, `tailscale` and `fermix`, and once with the
 real apt and Chromium.
 
-Architecture Invariant: a server's Fermix is never newer than the oldest of
-the desktops it serves, so the home can always move back to one of them
-(the move's review refuses a server newer than the computer moving to it).
+Architecture Invariant: a server installs only a release that a published
+app of every system keeping the home's backups carries, so the home can
+always move back to one of them, and a move's review refuses a server whose
+home this computer could not read back unless a published update for this
+computer's system reads it (`Home.Releases.restorable?/3`, `Home.MoveReadiness`).
 No engine process reaches the instance metadata
 service. The enrollment code reaches the engine only as a file, never in an
 argument, an environment the engine inherits, or the console output, and the
@@ -1978,8 +2053,12 @@ Current channels:
   delivery it writes (a job's result, `send_to_channel`), unlike a reply, is
   pushed to the phones while their channel runs, as the phone's own deliveries
   are, since the two draw one timeline.
-- `Mobile` serves the iOS companion on its own Bandit TLS listener (port 4031,
-  Noise sessions, a pairing window, APNs push). It is on by default, its
+- `Mobile` serves the phone companion on its own Bandit TLS listener (port 4031,
+  Noise sessions, a pairing window, APNs push to an iPhone and relayed push to
+  an Android phone). A phone pairs only with Android key attestation
+  (`Mobile.Attestation`, against `priv/mobile/attestation_roots.json` and
+  `android_signers.json`, which lists the app's development and release
+  signing keys, compiled in). It is on by default, its
   listener dormant until the first pairing window creates the identity and
   its mDNS announcement off unless `advertise_mdns` is set, and
   `FermixCore.Companion.Timeline` keeps each profile's synced timeline apart from
@@ -2441,9 +2520,10 @@ instance for trace inspection. It is compiled into dev and prod builds but stays
 inert unless enabled: `FermixOpik.enabled?/0` requires a non-test compile-time
 env and `FERMIX_OPIK_ENABLED` (or the `:fermix_opik, :enabled` config), and when
 disabled it attaches no telemetry handler. The reporter covers agent, provider,
-tool, job, memory, harness, curation, plugin, MCP, reminder, realtime, meeting,
-management, and computer-use events and nests runs by `session_id` and
-`parent_session`. `mix opik.ping` and `mix opik.replay` help debug the export.
+tool, job (job heals among them), memory, harness, curation, plugin, MCP,
+reminder, open-loop, cue, realtime and voice, meeting, phone-call, management,
+doctor, accessory, computer-invocation and computer-use events and nests runs
+by `session_id` and `parent_session`. `mix opik.ping` and `mix opik.replay` help debug the export.
 
 Architecture Invariant: observability export is opt-in and side-car. The handler
 only casts to a bounded aggregator; it never sits on the reply path, and its
@@ -2451,10 +2531,11 @@ absence or failure must not affect a turn.
 
 ### `docs/` and `benchmark/`
 
-Milestone design documents live in `docs/design/`. Most are machine-local
-(gitignored), and all are more detailed and more historical than this file.
+Milestone design documents live in the private `tezra-io/fermix-design-docs`
+repository; `docs/design/` is only a link to its `fermix/` folder, and those
+documents are more detailed and more historical than this file.
 Tracked contracts and runbooks include `docs/TELEMETRY_CONTRACT.md`,
-`docs/RELEASING.md`, and `docs/DEVELOPMENT.md`. `docs/lessons.md` holds the
+`docs/RELEASING.md`, `docs/DEVELOPMENT.md`, and `docs/VULTR_BOX.md`. `docs/lessons.md` holds the
 incident write-ups behind the one-line rules in `AGENTS.md`; the wire contracts are exported
 under `apps/fermix_core/priv/{management,realtime,companion,mobile}/`. When a milestone is
 implemented, update this map only for durable boundaries and invariants, not for
@@ -2464,6 +2545,12 @@ every implementation detail.
 the real agent path: behavioral suites (`benchmark/suites/*.yaml`,
 `make -C benchmark regression`) and capability suites
 (`benchmark/suites/capability/*.yaml`, `make -C benchmark capability-auto`).
+
+`tla/` holds TLA+ specs of the parts where several processes act on one state
+(the turn queue, job runs, a home's move, one engine per home in
+`tla/specs/engine_boot`, and the rest), each pinned to the source it models:
+`make -C tla check` runs TLC and reports a spec whose pinned source changed as
+stale (`tla/README.md`).
 
 ## Cross-Cutting Concerns
 
@@ -2512,11 +2599,16 @@ callback instead.
 ### Testing
 
 Tests live beside each umbrella app; shared support is in the root
-`test/support/` and compiles into core. `mix quality` is the local full gate. CI
-runs four legs (Linux and macOS, x64 and arm64) with compile, format, credo, and
-`mix test --warnings-as-errors`, plus jobs for the benchmark harness, the release
-scripts, and the disclaim shim, gathered by an aggregate `gate` job; CI does not
-run dialyzer.
+`test/support/` and compiles into core; each test database starts as a copy
+of one migrated template (`test/support/repo_template.ex`). The gate before a
+push is `scripts/dev/gate.py`, which runs every tree check CI runs once on the
+final tree and remembers the pass for that tree; `mix quality` adds dialyzer.
+CI runs the suite on Linux and macOS, x64 and arm64 (the Intel Mac's suite in
+three partitioned legs) with compile and `mix test --warnings-as-errors`, and
+format and credo on linux-x64, plus jobs for the stress run of changed test
+files, the catalog and compux checksums, the benchmark harness, the release,
+CI and dev scripts with the TLA+ runner's tests, and the disclaim shim,
+gathered by an aggregate `gate` job; CI does not run dialyzer.
 
 For focused work, run the smallest relevant `mix test` target first, then
 broaden before merging. The umbrella runs every child app's tests in one VM, so a
@@ -2525,9 +2617,9 @@ test must not leak global state (see `AGENTS.md`).
 ### Observability
 
 Telemetry is the common event surface for provider calls, tool execution,
-channel messages, agent turns, memory review, jobs, reminders, the harness,
-meetings, curation, MCP, plugins, management, voice, computer use, and sandbox
-decisions. Durable traces are JSONL. Logs go to `FERMIX_HOME/logs/fermix.log`
+channel messages, agent turns, memory review, jobs and their heals,
+reminders, open loops, the harness, meetings, phone calls, curation, MCP,
+plugins, management, voice, computer use, and sandbox decisions. Durable traces are JSONL. Logs go to `FERMIX_HOME/logs/fermix.log`
 through a redacting formatter, rotated at 10 MB with ten files kept.
 
 Architecture Invariant: observability should be added at boundaries where work

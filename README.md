@@ -10,7 +10,7 @@ Elixir-native multi-agent AI platform that runs as a local daemon and reaches yo
 
 [![CI](https://github.com/tezra-io/fermix/actions/workflows/ci.yml/badge.svg)](https://github.com/tezra-io/fermix/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Elixir](https://img.shields.io/badge/elixir-%E2%89%A5%201.17-purple)
+![Elixir](https://img.shields.io/badge/elixir-%E2%89%A5%201.18-purple)
 ![Erlang/OTP](https://img.shields.io/badge/otp-%E2%89%A5%2028-red)
 ![Status](https://img.shields.io/badge/status-alpha%20(pre--1.0)-yellow)
 
@@ -20,9 +20,9 @@ Elixir-native multi-agent AI platform that runs as a local daemon and reaches yo
 Fermix is a personal, self-hosted AI agent: it runs as a background service on your own machine and reaches you through the chat apps you already use. You bring your own model provider key — there is no Fermix cloud, and your config, history, and logs stay under `~/.fermix`.
 
 - **One runtime.** Everything is a single Elixir/OTP application in one BEAM VM — no HTTP bridges, no external worker pool, no message broker. Persistent agents, concurrent conversations, and in-process sub-agents all fall out of that design.
-- **Reaches you anywhere.** Telegram, WhatsApp, Slack, Discord, Signal, iMessage (on a Mac), and a local CLI all terminate in the same agent loop. The daemon side of a first-party iPhone companion — the `mobile` channel and its pairing ceremony — ships alongside them as groundwork until the phone app is released.
+- **Reaches you anywhere.** Telegram, WhatsApp, Slack, Discord, Signal, iMessage (on a Mac), and a local CLI all terminate in the same agent loop. The daemon side of a first-party phone companion — the `mobile` channel and its pairing ceremony — ships alongside them as groundwork until the phone app is released.
 - **Bring your own model.** Nine providers — OpenAI, OpenAI Codex, Anthropic, SpaceXAI, OpenRouter, Mistral, Venice, Vercel AI Gateway, and a keyless local Ollama — chosen as one primary with an automatic fallback chain. Sub-agents and scheduled jobs can be pinned to their own cheaper model.
-- **Always on.** Scheduled jobs run digests, watchers, reminders, and checks — each isolated, bounded, stored durably, and delivered back through your channels. Work survives reboots.
+- **Always on.** Scheduled jobs run digests, watchers, reminders, and checks — each isolated, bounded, stored durably, and delivered back through your channels. Work survives reboots, and a job that fails is retried quietly when waiting can clear it, or told to you once, in your own inbox, with any change Fermix proposes waiting for your approval.
 - **Self-contained.** Ships as one self-extracting binary per platform and installs an OS service unit on first run.
 
 Provider auth modes (API key vs. OAuth), channel setup, and scheduling are covered in [Configure](#configure) and [Use](#use) below.
@@ -65,7 +65,7 @@ brew install tezra-io/tap/fermix
 
 ### Build from source
 
-Requires Elixir ≥ 1.17, Erlang/OTP 28, and [Zig](https://ziglang.org) 0.15.2 — Burrito uses it to package the self-contained binary.
+Requires Elixir ≥ 1.18, Erlang/OTP 28, and [Zig](https://ziglang.org) 0.15.2 — Burrito uses it to package the self-contained binary.
 
 ```bash
 git clone https://github.com/tezra-io/fermix.git
@@ -97,7 +97,7 @@ It also creates the workspace roots the runtime expects:
 - `$FERMIX_HOME/logs`
 - `$FERMIX_HOME/auth.json` (when `openai_codex` is selected; `0600`)
 
-Regular OpenAI uses `OPENAI_API_KEY`. Codex uses the separate `openai_codex` provider and imports OAuth tokens from the Codex CLI into the provider-scoped token store at `~/.fermix/auth.json`, refreshed by the supervised `TokenManager`. Realtime voice V1 uses the regular OpenAI API key even when the text/chat provider is `openai_codex`.
+Regular OpenAI uses `OPENAI_API_KEY`. OpenAI Codex is the separate `openai_codex` provider: it signs in with ChatGPT (from setup, or `fermix auth login`) and keeps its tokens in the provider-scoped token store at `~/.fermix/auth.json`, refreshed by the supervised `TokenManager`. Voice uses an OpenAI Platform API key for OpenAI's voice models and a SpaceXAI API key for Grok, even when the chat provider is `openai_codex`: a ChatGPT or SpaceXAI sign-in does not authorize either voice API.
 
 Runtime precedence is:
 
@@ -122,6 +122,8 @@ chat_id = "8217352118"
 
 `chat_id` is the external channel conversation id, such as a Telegram chat id; it is not a Fermix session id. Delivery settings are resolved into each job when the job is created, so changing the default later does not silently retarget existing jobs. Jobs can also set an optional `expires_at` ISO8601 timestamp; when it is reached, Fermix marks the job expired through scheduler state.
 
+A failed run of a job you set up is not delivered to the job's target. A run that failed before it did anything, on something waiting can clear (a provider's rate limit or outage, a lost connection), is run again quietly, up to three times; any other failure is told to you once, in your own inbox. Fermix may on its own run the job once more, raise its time limit or pause it, and proposes anything else on an approval card (**Approve** / **Deny**, or `/confirm` and `/deny` in the chat the card went to).
+
 ### Transcription
 
 Inbound voice notes are transcribed before they reach the agent, through a pluggable speech-to-text backend:
@@ -135,7 +137,7 @@ max_file_mb = 20
 
 `backend` is `openai`, `xai`, or `deepgram`. `model` defaults to `gpt-4o-mini-transcribe`; Deepgram uses `nova-3`, and SpaceXAI's native STT is modelless, so it takes no model. Each backend reads its own optional key slot — `openai_api_key`, `xai_api_key`, `deepgram_api_key` — and OpenAI and SpaceXAI fall through to the matching chat-provider key when the slot is unset. Deepgram always requires its own key, and SpaceXAI STT requires an API key even when the `xai` chat provider is on OAuth. `max_file_mb` (default 20) bounds the audio Fermix will accept.
 
-Set it from the web setup **Transcription** card, or with `fermix setup --transcription-backend/--transcription-model/--transcription-api-key`. `fermix doctor` reports a `transcription` row.
+Set it from the web setup **Voice notes** tab, or with `fermix setup --transcription-backend/--transcription-model/--transcription-api-key`. `fermix doctor` reports a `transcription` row.
 
 ### Environment variables
 
@@ -170,8 +172,8 @@ Set it from the web setup **Transcription** card, or with `fermix setup --transc
 | `FERMIX_LOG_FILE` | No | Override the log file path |
 | `FERMIX_HTTP_BIND` | No | Web endpoint bind address; defaults to `127.0.0.1` (loopback). `0.0.0.0` serves on the network but also exposes the setup/reconfig surface — gate it behind a trusted network |
 | `FERMIX_REALTIME_ENABLED` | No | Enable the local Realtime voice companion mode |
-| `FERMIX_REALTIME_PROVIDER` | No | Realtime provider; only `openai` is supported |
-| `FERMIX_REALTIME_MODEL` | No | Override the OpenAI Realtime model |
+| `FERMIX_REALTIME_PROVIDER` | No | Voice provider, `openai` or `xai` (Grok); it must be the one the voice model's engine takes |
+| `FERMIX_REALTIME_MODEL` | No | Override the voice model |
 | `FERMIX_REALTIME_VOICE` | No | Override the Realtime voice |
 | `FERMIX_REALTIME_MAX_SESSION_MINUTES` | No | Per-session voice duration cap |
 | `FERMIX_REALTIME_MAX_COST_CENTS` | No | Per-session estimated/reported cost cap |
@@ -207,7 +209,7 @@ The unit calls `fermix run`, which boots the OTP supervision tree, binds the Pho
 
 Realtime voice is an optional local mode: **Fermix**, the native Mac app (macOS 15 or later), lets you talk to the agent by voice. The daemon owns provider auth, prompts, tools, memory, and cost caps; the app only captures and plays audio, over a `0600` Unix socket at `~/.fermix/realtime.sock`.
 
-Enable it on the **setup page** under the *Realtime* tab (it needs an OpenAI API key), then restart the daemon. Check it with `fermix voice status`.
+Enable it on the **setup page** under the *Voice* tab (it needs an OpenAI API key, or a SpaceXAI API key for Grok), then restart the daemon. Check it with `fermix voice status`.
 
 Realtime uses the same capability surface as the main agent, so voice tool scope is governed by the sandbox mode and command profile rather than a voice-specific knob.
 
@@ -219,6 +221,12 @@ brew install --cask tezra-io/tap/fermix
 
 Setup and troubleshooting are in the [installation guide](https://fermix.ai/docs/installation/).
 
+### Phone calls
+
+Off by default. Asked in your chat, the Fermix app or by voice, Fermix can phone a business, or your own phone, for a concrete task (asking whether a table is free, booking one) and report what was said and agreed. GPT-Live speaks on the call from your own Telnyx number; calls are outbound only. Only a business or your own phone in the 50 US states or DC is called, one call at a time and at most twenty attempts in any 24 hours, and a request made after Fermix read something someone else wrote waits for your confirmation in your chat.
+
+It needs a Telnyx number with a credential connection (its username and password) and an OpenAI API key; a ChatGPT or SpaceXAI sign-in does not place a call. Configure it under `[fermix_core.phone_calls]` from browser setup's **Phone calls** tab or `fermix settings` (section `phone_calls`; the connection password is the secret `phone_calls_sip_password`). Only the computer the home runs on places calls.
+
 ### Channels
 
 All channels normalize inbound messages and dispatch them through the same `FermixCore.Agents.MainAgent`.
@@ -229,7 +237,7 @@ All channels normalize inbound messages and dispatch them through the same `Ferm
 - **Discord** — Gateway DM and app-mention ingress, REST replies.
 - **Signal** — `signal-cli` receive loop, subprocess send path.
 - **iMessage (Mac only)** — a signed helper app, Fermix Messages, reads and sends through Messages on the Mac Fermix runs on; it holds the Full Disk Access and Automation grants and the confirmed list of who Fermix may message. Direct iMessage conversations, plain-text replies.
-- **Mobile (phone)** — daemon-side groundwork for a first-party phone companion: a dedicated Noise-encrypted listener on `:4031`, reachable over the LAN or a tailnet. One socket per paired device carries streaming replies, tool activity, chunked media, slash commands, and cursor-exact history sync. The channel is on by default (its listener starts once the first pairing begins; the mDNS announcement is off unless turned on) and is managed over the management protocol: the `channels.mobile` settings section (the enable switch applies at once; a port, listen address or mDNS announcement change needs a restart) and the `mobile.*` pairing and paired-device methods that the Mac app's and the Linux app's Phone rows and the browser setup's Phone card are built on (each turns the channel on and pairs in one place). A dev or Linux host also pairs with `fermix pair`, which drives the same methods, and revokes with `fermix devices revoke`; where the channel is off (`enabled = false` under `[fermix_channels.mobile]`), `fermix pair` asks to turn it on first, with no restart. On an app-managed Mac, pairing happens in the app, never through the CLI. No phone app is released yet (the iPhone app ships in its own release, and an Android app is in design), so there is nothing to pair with today.
+- **Mobile (phone)** — daemon-side groundwork for a first-party phone companion: a dedicated Noise-encrypted listener on `:4031`, reachable over the LAN or a tailnet, and from any network through Fermix's relays ("Reach from anywhere"). One socket per paired device carries streaming replies, tool activity, chunked media, slash commands, and cursor-exact history sync. The channel is on by default (its listener starts once the first pairing begins; the mDNS announcement is off unless turned on) and is managed over the management protocol: the `channels.mobile` settings section (the enable switch applies at once; a port, listen address or mDNS announcement change needs a restart) and the `mobile.*` pairing and paired-device methods that the Mac app's and the Linux app's Phone rows and the browser setup's Phone card are built on (each turns the channel on and pairs in one place). A dev or Linux host also pairs with `fermix pair`, which drives the same methods, and revokes with `fermix devices revoke`; where the channel is off (`enabled = false` under `[fermix_channels.mobile]`), `fermix pair` asks to turn it on first, with no restart. On an app-managed Mac, pairing happens in the app, never through the CLI. Pairing takes the Fermix Android app, which proves its secure hardware when it pairs. No phone app is released yet (the Android app is in development, and there is no iPhone app), so there is nothing to pair with today.
 - **CLI** — local stdin/stdout smoke path through the same dispatcher and `MainAgent`.
 
 ### HTTP endpoints
@@ -253,9 +261,11 @@ Telegram, Discord, and Signal use long-poll or persistent client transports and 
 |---------|-------------|
 | `fermix setup [--reconfigure]` | Install + start the service and open the browser setup (or a terminal wizard with `--cli`) |
 | `fermix auth login [--provider PROVIDER]` | Complete or refresh a provider OAuth login |
+| `fermix auth status\|logout` | Show the stored provider sign-ins, or remove one |
 | `fermix run` | Start the daemon in the foreground (used by service units) |
 | `fermix service install [--user\|--system]` | Write and enable the OS service unit |
 | `fermix service uninstall [--user\|--system]` | Remove the OS service unit |
+| `fermix service status [--json]` | Show the service, its binding and the engine it runs |
 | `fermix start [--user\|--system]` | Start the installed OS service |
 | `fermix stop [--user\|--system]` | Stop the installed OS service |
 | `fermix restart [--user\|--system]` | Restart the installed OS service |
@@ -264,6 +274,12 @@ Telegram, Discord, and Signal use long-poll or persistent client transports and 
 | `fermix voice status [--json]` | Show local Realtime voice companion status |
 | `fermix pair` | Pair a phone companion device over the management protocol — renders the daemon's QR, polls until a phone asks, then approves only if the six-digit code matches the one on the phone (needs the mobile channel running) |
 | `fermix devices list\|revoke ID` | List paired phones, or revoke one and drop its live socket (revoking needs the mobile channel running) |
+| `fermix settings [list\|show\|set\|secret\|primary\|reload]` | Read and change the running daemon's settings sections and secrets; `fermix settings phone-calls recovery` and `confirm-ended CALL_ID` settle a phone call whose end is unconfirmed |
+| `fermix acp` | Bridge an Agent Client Protocol client's stdio to the daemon |
+| `fermix browser bridge install\|uninstall\|status` | Manage the browser extension bridge |
+| `fermix home ...` | Export, import, enroll, and inspect this home and its snapshots |
+| `fermix always-on [ACTION]` | Show Always On, or take one of its steps |
+| `fermix computer join` | Join this computer to a Fermix that already runs |
 | `fermix ask` / `fermix chat` | Send one local prompt to the running daemon and print the MainAgent reply |
 | `fermix sandbox explain` | Show the effective sandbox roots, each annotated `(granted)` or `(mode)` |
 | `fermix grant path PATH` | Persist a sandbox root the agent may work in |
@@ -275,7 +291,10 @@ Telegram, Discord, and Signal use long-poll or persistent client transports and 
 | `fermix memory` | Review and restore durable memory rows |
 | `fermix logs [-f] [-n LINES]` | Show or follow the daemon log file |
 | `fermix upgrade [--check]` | Self-update from signed releases (cosign-verified, atomic swap) |
+| `fermix uninstall` | Remove a Fermix.app-managed installation |
+| `fermix migrate-to-app [--yes]` | Move a Homebrew formula install to Fermix.app |
 | `fermix doctor [--full]` | Post-install diagnostics; `--full` adds network checks |
+| `fermix diagnostics export --offline` | Collect a redacted support bundle with no daemon |
 | `fermix version` | Print the release version |
 | `fermix help` | Show usage |
 
@@ -293,11 +312,15 @@ Plain-text commands work in every channel through the shared dispatcher, and loc
 | `/help` | List available commands |
 | `/whoami` | Show the stable channel user id used for command authorization |
 | `/background` | Run the current request as a durable background job (`/tasks` to check, `/stop` to cancel); alias `/bg` |
-| `/tasks` | List in-flight background tasks for this channel |
-| `/stop` | Cancel a running background task |
+| `/tasks` | List running and recent background work |
+| `/stop` | Stop all running Fermix work and clear queued messages |
+| `/pause` | Pause computer use and hand the cursor and keyboard back to you |
+| `/resume` | Resume computer use after a `/pause` |
 | `/ultra` | Run the next turn in exhaustive multi-agent (ultra) mode |
-| `/sandbox` | Inspect and adjust the workspace sandbox (env allow/deny/set, command presets, path grants); aliased as `/grant path PATH`, `/revoke path PATH`, and `/confirm TOKEN` |
+| `/sandbox` | Inspect and adjust the workspace sandbox (env allow/deny/set, command presets, path grants); aliased as `/grant path PATH`, `/revoke path PATH`, `/confirm [TOKEN]`, `/deny [TOKEN]`, and `/always [TOKEN]`; a bare `/confirm` or `/deny` answers the one approval card waiting in this chat, such as a scheduled job's proposed fix |
 | `/soul` | Review, apply, revert, or reset the agent's persona (`SOUL.md`); owner-only, and mutations are confirmed with a token |
+| `/skills` | Review, approve, or deny skill-curation proposals; unpark or restore skills |
+| `/history` | Manage computer history: status, pause, purge, off |
 
 Outside the local CLI, mutating commands require a per-channel owner. For a
 single-user channel, `owner_user_id` is enough; it also becomes the default
@@ -325,7 +348,7 @@ enabled = true
 threshold = 0.85
 ```
 
-After each agent turn, Fermix estimates the conversation tokens for that conversation key. When usage reaches `threshold * model_context_window`, it summarizes older messages and replaces the stored conversation history with the summary plus recent turns. `/new` only clears the conversation window; long-term memory, resource revisions, and scheduled jobs are preserved.
+After each agent turn, Fermix estimates the conversation tokens for that conversation key. When usage reaches `threshold * model_context_window`, it summarizes older messages, building on the previous summary, and replaces the stored conversation history with the summary plus recent turns. `/new` only clears the conversation window; long-term memory, resource revisions, and scheduled jobs are preserved.
 
 ## Architecture
 
@@ -333,10 +356,11 @@ After each agent turn, Fermix estimates the conversation tokens for that convers
 
 ```
 fermix/ (umbrella)
-├── apps/fermix_core/       # Agents, providers, tools, memory, setup, CLI, auth, tracing
-├── apps/fermix_channels/   # Telegram, WhatsApp, Slack, Discord, Signal, CLI
+├── apps/fermix_core/       # Agents, providers, tools, memory, jobs, phone calls, setup, CLI, auth, tracing
+├── apps/fermix_channels/   # Telegram, WhatsApp, Slack, Discord, Signal, iMessage, ACP, companion, mobile, voice, CLI
 ├── apps/fermix_web/        # Phoenix: setup LiveView, health, webhook ingress
-└── apps/fermix_nif/        # C NIF (elixir_make): kill_pgid process-group signal shim
+├── apps/fermix_opik/       # Telemetry export to Opik (opt-in)
+└── apps/fermix_nif/        # C NIF (elixir_make): kill_pgid process-group signal shim, macOS disclaim exec shim
 ```
 
 The Mac app ([fermix.ai/download](https://fermix.ai/download/)) talks to the daemon over the local management, Realtime and companion sockets.
@@ -348,7 +372,7 @@ channel adapter → FermixChannels.Dispatcher → FermixCore.Agents.MainAgent
   → capability execution → provider → LLM → reply
 ```
 
-The agent loop calls the provider, parses tool calls, executes them through the registered `FermixCore.Capabilities.Registry`, and recurses up to a bounded per-loop iteration cap (default 100 for interactive turns, sub-agents, and scheduled jobs; tunable via `[fermix_core.iteration_limits]`). Built-in tools are capabilities, and installed skills are registered as capabilities as well.
+The agent loop calls the provider, parses tool calls, executes them through the registered `FermixCore.Capabilities.Registry`, and recurses up to a bounded per-loop iteration cap (default 100 for interactive turns, sub-agents, and scheduled jobs; a build setting in `config/config.exs`, not a `config.toml` key). Built-in tools are capabilities, and installed skills are registered as capabilities as well.
 
 Built-in tools ship inside Fermix. They are always available when registered; users do not install or remove them. Skills are different: they live under the Fermix skills directories (`priv/skills`, `~/.fermix/skills`, and plugin roots), and each skill carries its own instructions and allowed-tool boundary.
 
@@ -358,6 +382,7 @@ The current built-in capability set is:
 |------|-------------|
 | `shell` | Execute system commands with timeout |
 | `file_read` | Read files with offset/limit |
+| `view_image` | Look at local image files (JPEG, PNG, WebP, GIF) |
 | `file_write` | Write files with auto mkdir |
 | `file_edit` | Replace one unique string anchor in a file |
 | `glob_search` | Find files with bounded glob matching |
@@ -375,10 +400,13 @@ The current built-in capability set is:
 | `skill_reload` | Re-scan the skills directories |
 | `model_routing_config` | Read or update local model-routing config |
 | `tool_help` | Return full docs for one registered capability |
-| `memory_store` | Store key-value facts |
-| `memory_recall` | Recall stored facts |
+| `tool_result_recall` | Read back the full text of an earlier tool result in this run that was compressed into a digest |
+| `memory_store` | Save a memory: long-term under a category, a note for this conversation, or a correction by id |
+| `memory_forget` | Archive a memory so no conversation or recall shows it |
+| `memory_recall` | Recall stored memories |
 | `memory_sources_list` | List visible memory sources, including scheduled-job sources |
-| `browser` | Drive a browser via the `agent-browser` CLI (snapshot, navigate, click, fill, screenshot) |
+| `recall_activity` | Recall what the owner was doing on their computers, from computer history (owner-only) |
+| `browser` | Control a supervised local browser (managed Chrome, or the Mac app's browser pane): navigate, snapshot, fill and click, sign in with a saved login after approval, screenshots of its own page |
 | `schedule_job` | Create a durable scheduled job and memory source, with optional expiry |
 | `list_jobs` | List scheduled jobs |
 | `update_job` | Update a scheduled job's schedule, prompt, or config |
@@ -388,12 +416,22 @@ The current built-in capability set is:
 | `run_job_now` | Trigger a scheduled job immediately |
 | `list_job_runs` | List a scheduled job's run history |
 | `get_job_run` | Show one scheduled-job run in detail |
+| `job_heal_respond` | Report a failed job's heal decision; offered only inside that heal's own run |
+| `event_store`, `event_list`, `event_update`, `event_remove` | Store, list, change, or cancel dated events (birthdays, appointments, deadlines) with a reminder plan |
+| `reminder_snooze` | Push a delivered reminder to a later time |
+| `open_loop_note`, `open_loop_update`, `open_loop_list` | Record, settle, and list open loops: what the owner means to do or is waiting on, for Fermix to follow up (owner's private chats only) |
+| `open_loop_respond` | Report a check-in's decision; offered only inside an open-loop check-in run |
+| `checklist_read`, `checklist_edit` | Read and change the owner's lists |
+| `trip_read`, `trip_edit` | Read, make, and change the owner's trips |
 | `send_attachment` | Send a file attachment back through the active channel |
 | `react` | Acknowledge a message with a channel emoji reaction instead of a text reply |
+| `send_to_channel` | Send a text to the owner's own inbox on a channel they name |
+| `voice_call_context` | Read the voice call in progress in this chat; offered only while one is up |
 | `generate_image` | Generate an image through the configured media backend |
 | `request_directory_access` | Ask the owner to grant a directory, approved with `/confirm` |
+| `phone_call` | Place, check, or stop one outbound phone call the owner asked for; offered on the owner's attended turn while phone calls are on or a call is still in progress |
 
-`computer_use` is seeded only when Computer Use is enabled and its sidecar and OS permissions are ready.
+Some are registered only when their feature is ready: `computer_use` when Computer Use is enabled and its sidecar and OS permissions are ready (or on an Always On server that can drive a linked computer's screen); the meeting tools (`join_meeting`, `leave_meeting`, `list_meetings`) when meetings are enabled and can place one; the cue tools (`manage_watcher`, `list_cues`, `cue_history`) when cues are on; the coding-agent tools (`codex_run`, `claude_code_run`, `list_coding_runs`, `get_coding_run`, `cancel_coding_run`) when coding agents are enabled and their CLI is installed; and `tool_search`, `tool_describe` and `tool_call`, behind which plugin and MCP tools sit, while tool deferral is on (the default).
 
 Observability:
 
@@ -404,18 +442,18 @@ Observability:
 
 ## Develop
 
-Requirements: Elixir ≥ 1.17, Erlang/OTP ≥ 28, Git, and `signal-cli` on `PATH` (or `SIGNAL_CLI_PATH` configured) if Signal is enabled.
+Requirements: Elixir ≥ 1.18, Erlang/OTP ≥ 28, Git, [`uv`](https://docs.astral.sh/uv/) and Java 11 or newer for the pre-push gate, and `signal-cli` on `PATH` (or `SIGNAL_CLI_PATH` configured) if Signal is enabled.
 
 ```bash
 git clone git@github.com:tezra-io/fermix.git
 cd fermix
 mix setup           # deps.get + install git hooks
-mix quality         # format check → compile --warnings-as-errors → credo --strict → dialyzer → test
 mix test            # tests only
 mix test --only integration
+scripts/dev/gate.py # the gate before a push
 ```
 
-`mix quality` is the canonical "does everything pass" command. The git pre-commit hook enforces format, compile, credo, and tests.
+`scripts/dev/gate.py` runs every check of the tree that CI runs (format, compile, credo, the script and benchmark-harness tests, the whole suite, then the TLA+ specs), once, on the final tree; a pass is remembered for that exact tree, so a second run on it skips to the specs. While working, run the tests you touched. The git pre-commit hook enforces format, compile, credo, and tests. `mix quality` adds dialyzer, which CI does not run.
 
 ### Running the daemon in dev
 
@@ -464,22 +502,22 @@ The Mac app's development loop lives in its own repository (`scripts/dev_e2e.sh 
 
 ### Unit and integration tests
 
-`mix test` and `mix test --only integration` do **not** need a running `mix fermix.dev` — each test boots its own minimal supervision tree and uses a tmp-dir-scoped Memory database independent of `FERMIX_HOME`. The suite never runs against your real `~/.fermix` either: with `FERMIX_HOME` unset, the test config points it at a fresh temporary home for that run, so boot reads no installed plugins, no `config.toml`, and no keychain sentinels of yours. Set `FERMIX_HOME` yourself to override it. Run `mix quality` before pushing; the pre-commit hook enforces the same gates.
+`mix test` and `mix test --only integration` do **not** need a running `mix fermix.dev` — each test boots its own minimal supervision tree and uses a tmp-dir-scoped Memory database independent of `FERMIX_HOME`. The suite never runs against your real `~/.fermix` either: with `FERMIX_HOME` unset, the test config points it at a fresh temporary home for that run, so boot reads no installed plugins, no `config.toml`, and no keychain sentinels of yours. Set `FERMIX_HOME` yourself to override it. Run `scripts/dev/gate.py` once before pushing.
 
 ### Latency benchmarks
 
 The deterministic benchmark harness uses a mock provider and `Req.Test` channel stubs, so it does not call real LLMs or external channel networks. The default run covers the shared dispatcher → `MainAgent` → `AgentLoop` path; adapter, E2E, idempotency, and soak scenarios are available explicitly by name.
 
 ```bash
-FERMIX_HOME=~/.fermix-dev mix fermix.bench --list
-FERMIX_HOME=~/.fermix-dev mix fermix.bench --output=bench/current.json
-FERMIX_HOME=~/.fermix-dev mix fermix.bench --scenarios=shared_text_minimal --samples=1000 --warmup=20 --output=bench/current.json
-FERMIX_HOME=~/.fermix-dev mix fermix.bench --scenarios=telegram_send_short_text,telegram_e2e_text --samples=200 --warmup=10 --output=bench/adapter.json
-FERMIX_HOME=~/.fermix-dev mix fermix.bench.soak --output=bench/soak.json
+mix fermix.bench --list
+mix fermix.bench --output=bench/current.json
+mix fermix.bench --scenarios=shared_text_minimal --samples=1000 --warmup=20 --output=bench/current.json
+mix fermix.bench --scenarios=telegram_send_short_text,telegram_e2e_text --samples=200 --warmup=10 --output=bench/adapter.json
+mix fermix.bench.soak --output=bench/soak.json
 mix fermix.bench.diff bench/baseline.json bench/current.json
 ```
 
-Relative benchmark paths are resolved from the umbrella root, so the commands above write to the repo-level `bench/` directory even when invoked from a child directory. Use `--compare=bench/baseline.json` with `mix fermix.bench` when you want the run to print the p95 delta table after writing `bench/current.json`.
+Relative benchmark paths are resolved from the umbrella root, so the commands above write to the repo-level `bench/` directory even when invoked from a child directory. Use `--compare=bench/baseline.json` with `mix fermix.bench` when you want the run to print the median (p50) delta table after writing `bench/current.json`, and `--runs N` for a report that is the median of N back-to-back runs. Each run makes a home of its own and removes it when it ends, so `FERMIX_HOME` is never read, and a turn that does not end with its scenario's reply fails the run.
 
 ## Resource history CLI
 

@@ -65,7 +65,10 @@ command, the local coding runs `codex_run` and `claude_code_run`) after the turn
 read outside content, where Fermix cannot sandbox that call (no kernel
 enforcement, or a preset or coding run that runs unconfined; the next run a
 finished coding run's follow-up turn starts in that run's folder dispatches as
-`chained`); any call made
+`chained`); a built-in whose call makes an effect outside the machine (a
+`Capabilities.ExternalEffect`: `phone_call`'s `start`) in a turn that read
+outside content or came from a shared Buzz channel; a `browser` call of `act`
+kind `sign_in`, which it only refuses; any call made
 while another call of the same turn is parked,
 and, through its first clause (`Cues.MandateGate`), **every** call a run woken
 by a cue makes, flagged or not (see "Access-gate labels"). It derives the map
@@ -97,8 +100,9 @@ invocations").
 
 ### Access-gate labels
 
-Every call the gate decides (every access-sensitive call, every host command it
-decides, and every call of a run a cue woke) also carries
+Every call the gate decides (every access-sensitive call, every host command and
+effect outside the machine it decides, every sign-in, and every call of a run a
+cue woke) also carries
 `access_gate`, a closed enum of how the gate
 settled it: `direct` (the owner's clean, attended request), `scheduled` (a
 job whose `allowed_tools` names it), `confirmed`, `chained` (the next run of a
@@ -108,12 +112,21 @@ per finished run (no run yet names it as the run it continued), having read
 nothing but the run's report, with only its task,
 folder, model, effort and limits), or one of `held_this_chat`,
 `held_owner_inbox`, `held_voice`, `already_confirmed`, `refused_worker`,
-`refused_cue_run`, `refused_unattended`, `refused_not_allowlisted`,
+`refused_cue_run`, `refused_unattended`, `refused_scheduled` (an effect outside
+the machine from a scheduled run, which no job's `allowed_tools` admits),
+`refused_not_allowlisted`,
 `refused_no_surface`, `refused_full`, `refused_confirm_mismatch`,
-`refused_voice_surface` (a host command on a voice call, which cannot show the
-owner the exact command), `refused_command_too_long` (a host command too long to
+`refused_voice_surface` (a host command or an effect outside the machine on a
+voice call, which cannot show the owner what they would confirm),
+`refused_command_too_long` (a host command too long to
 show the owner whole), `refused_unshown_file` (a coding run naming
-`append_system_prompt_file`, whose contents the owner could not review). The refused
+`append_system_prompt_file`, whose contents the owner could not review),
+`refused_confirmation_too_long` (an effect whose confirmation is too long to
+show the owner whole), `refused_unconfirmable` (an effect its own module
+refuses before the owner is asked, in that module's sentence),
+`refused_sign_in_not_allowed` (a sign-in outside the owner's attended turn, or
+from a shared Buzz channel) and `refused_sign_in_not_on_voice` (a sign-in on a
+voice turn). The refused
 labels are one function's output (`refused_<reason>`), so a new refusal reason
 is a new label here. `refused_cue_run` is an access-sensitive call made by a job
 run a cue woke (`trigger: "cue"` on the context) outside its mandate: it read
@@ -203,7 +216,8 @@ readiness publishes the name in the sandbox pane until it resolves.
 ## Adding a provider / adapter
 
 Emit the LLM call via the single provider emitter, and pass the correlation ids
-(which `AgentLoop.build_adapter_opts/3` already puts into `adapter_opts`):
+(which the agent loop's `bind_route/2` already merges into every route's
+`adapter_opts`):
 
 ```elixir
 alias FermixCore.Providers.Telemetry, as: ProviderTelemetry
@@ -863,10 +877,12 @@ check read a cue run as a scheduled one. The bookends carry `trigger`
 (`"schedule"`, `"manual"`, `"retry"`, `"cue"` or `"watcher"`) on every run, and on a cue run also
 `watcher_id` (which the runner puts on the run map it passes, since the run row
 does not hold it) and `delivery_id` (the row's `cue_delivery_id`, the
-`cue_deliveries.id` the run held); both are absent on any other run. The Opik
-run trace's metadata carries `trigger`, `watcher_id` and `delivery_id`, and
-`mix opik.replay` keeps all three. A cue run's tools are ordinary
-`[:fermix, :tool, :exec]` events under the run's session, one per model call:
+`cue_deliveries.id` the run held). A watcher's follow-up run (`trigger:
+"watcher"`) carries `watcher_id` too, with `cue_id` (the cue that set it off)
+and `trigger_id` (its trigger); none of the four is on any other run. The Opik
+run trace's metadata carries `trigger`, `watcher_id`, `delivery_id`, `cue_id`
+and `trigger_id`, and `mix opik.replay` keeps them. A cue run's tools are
+ordinary `[:fermix, :tool, :exec]` events under the run's session, one per model call:
 the gate labels each call it decides, a mandate call with a `mandate_*` label,
 a refused read tool `refused_reader_writes` or a `mandate_*` label, a call
 outside the run's tools `refused_cue_surface`, an access-sensitive one outside
@@ -1019,11 +1035,12 @@ outcome; `run_error` closes a `failed`, `dispatch_unknown` or
 `closure_unconfirmed` one, with `error` = the failure word (else the status).
 Shared metadata: `agent: "phone_call:<id>"`, `call_id`, `origin_kind`
 (`chat | voice`), `model`, `carrier_profile`, `authorization`
-(`direct | confirmed`); the closers add `status`, `outcome`, `usage_state`,
-`failure_reason` and the vendor's own words (`vendor_message`, cut to
+(`direct | confirmed`) and the row's `status`; the closers add `outcome`,
+`usage_state`, `failure_reason` and the vendor's own words (`vendor_message`, cut to
 `PhoneCalls.Limits.max_record_text_bytes/0`, 500 bytes, every digit run that
 reads as a phone number replaced by `[number]`), and measure `duration_ms`,
-`voice_seconds`, `core_turns`, `dtmf_keys`, `cleanup_attempts`. The
+`voice_seconds`, `core_turns`, `dtmf_keys`, `cleanup_attempts` (`run_error`
+adds `count: 1`). The
 destination, the mandate and transcripts never reach these events, and no
 vendor word carries either credential: one scrub in `OpenAILive` (the
 function the sideband holds is `scrubber/1`) replaces the API key and the
@@ -1038,7 +1055,8 @@ message that refuses the key is withheld whole for the engine's own sentence
 registers all three; `FermixOpik` binds them (`kind: :phone_call`,
 `infer_kind("phone_call_" <> _)`) as a root of its own, the meeting shape:
 `parent_session` is correlation metadata, never a parent, because the
-requesting turn ships long before the call ends.
+requesting turn ships long before the call ends. `mix opik.replay` skips the
+three rows, as it skips a meeting's.
 
 The call's backend turns (`Agents.PhoneCallTurn`) are children of the call's
 session: each carries the call's `session_id` as its own, with no
@@ -1068,7 +1086,7 @@ above.
 A call on a **task engine**, one that hands every task to Fermix through the
 voice bridge, is a **run kind**, and it is always a **root**. There are two
 task engines, GPT Live (`openai_live`) and Grok (`xai_realtime`, M70), and they
-share this run kind, its six events and its id prefixes: `engine` and
+share this run kind, its eight events and its id prefixes: `engine` and
 `provider` on every event are what tell them apart. The local voice socket
 mints `session_id = "voice_live:<n>"` for the call on either engine; the call's
 session mints a *separate* `"voice_delegation_<n>"` for every backend turn it
@@ -1641,7 +1659,7 @@ exporter places each under its turn's or job run's trace as a point span
 call, under the name the model used, and a refused call's event carries
 `error_code` (`Trips.Registry.error_tag/1`) and `error_summary`, the sentence
 the model received. The place lookups inside a `trip_edit` call are the
-engine's, not the model's: they go through `PlaceSearch.lookup/3`, which emits
+engine's, not the model's: they go through `PlaceSearch.searcher/2`, which emits
 no `place_search` row, and are counted on the call's `[:fermix, :trip, :edit]`
 event below.
 
@@ -1750,7 +1768,7 @@ one ordinary `[:fermix, :trip, :edit]` under the run's `session_id`, with
 each trip whose towns it writes one more, `ops: 0`, with that trip's
 `towns` (its geocodes that reached the place search, answered or not),
 `towns_found` and `towns_not_found`. Its
-lookups go through `PlaceSearch.lookup/3` as a call's do (no `place_search`
+lookups go through `PlaceSearch.searcher/2` as a call's do (no `place_search`
 row), and on a Mac of the home each is one `places` invocation whose turn is
 the run (`origin: background`, the run's `session_id`).
 `Trace.TelemetryHandler` records the bookends as `trip_place_run_start`,
