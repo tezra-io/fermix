@@ -2089,6 +2089,104 @@ Citations:
 - the earlier dated re-reads and the findings cite the code as it was then;
 - the `repo.ex` ones were left as before.
 
+## Re-read for a heal's proposal answered on its card (M106 S4b, 2026-11-25)
+
+M106's stage S4b staled `heal_run.ex` and `JobHealsSql.close_rows`.
+It also gave `Jobs.HealAnswer` its caller, a `/confirm` or `/deny` on a
+heal's card. Point by point, no modelled step changed:
+
+1. **The owner's answer is still the owner's own edit, read and write
+   apart.**
+   - A `/confirm` reaches `Jobs.HealCard` through the answer rail, and
+     `HealAnswer.apply_change/4` (`heal_answer.ex:72-82`) runs in a task
+     the gateway starts.
+   - The task first reads: the token's holder, the card by its digest and
+     the chat it went to, the heal, the job, the watcher scope and the
+     edit's checks.
+   - It then makes one write, `Registry.heal_write/5` →
+     `Repo.heal_job_write/5` under the answer claim (`write`,
+     `heal_answer.ex:264`). That write is one `BEGIN IMMEDIATE`: the heal
+     still answerable (`claimant` on `@answerable`), the job's version
+     unmoved, then the job written as an owner write does (columns,
+     follow-up approval, retry) with the heal moved to `watching`. Or it
+     writes nothing to the job and the heal closes `superseded`.
+   - Then the `:job_changed` cast (`after_heal_write`).
+   - Nothing before the write is acted on until the write re-checks it, so
+     the answer is `UpdateRead` followed at once by `UpdateWrite` (the
+     read at the write), or no write. The owner's steps already have that,
+     within `OwnerEdits`.
+   - `/deny` is `{:leave}`, one transaction on `job_heals` alone
+     (`answered`, `job_heals_sql.ex:709-727`).
+2. **The answer never meets a heal run's move.**
+   - A heal is answerable only while `waiting`, on its first conclusion,
+     with a stored `propose` and no answer. A heal run moves the job only
+     while its heal is `diagnosing` under its lease. One heal is never
+     both: `state` is one column.
+   - The claim takes `open` heals and `diagnosing` ones whose lease ran
+     out, never a `waiting` one. A `waiting` heal leaves that state only by
+     an answer, a close or (as `watching`) a verdict.
+   - Two heals of one job: a job's subject has at most one heal not closed
+     (`take_failure` joins it), and a provider's or a plugin's heal has no
+     job. So no proposal of a job waits while a heal run of the same job
+     moves it.
+   - So the answer's write and a heal run's move are never both live for
+     one job, and the answer needs no step of its own in checks 73 to 76.
+   - The answer's write does not mark (`heal_job_write_in_tx` is not
+     `update_scheduled_job_fields_row`). There is no diagnosing heal of
+     that job to mark.
+3. **No yes lands on a closed heal.** Every closer writes `state =
+   'closed'` in its own transaction, and the answer's claim reads `state =
+   'waiting'` in the answer's own `BEGIN IMMEDIATE`, so whichever commits
+   second sees the other:
+   - a run's settle closing it `healed` (`close_proven` → `close_ids` →
+     `close_rows`, `job_heals_sql.ex:1024-1033`);
+   - the seven-day expiry (`expire_rows` → `close_rows`);
+   - an owner's edit, pause or resume superseding it in that write's
+     transaction (`supersede_proposals` → `close_superseded`);
+   - a `/deny`.
+
+   A failure the settle takes into a waiting heal joins it and leaves it
+   `waiting`, which is no close. A verdict reopens only a `watching` heal.
+4. **A bound card is not answerable before it is delivered.**
+   - `{:bind_card, ...}` writes the token, its digest and the chat under
+     the run's lease, once (`bind_card`, `job_heals_sql.ex:1074-1101`). A
+     retry gets the stored token, and a heal whose send concluded gets
+     `:card_concluded`.
+   - `{:delivery_failed, ...}` reopens the heal (`open`) and keeps the
+     token. `{:delivered, ...}` and `{:dead_letter, ...}` move it to
+     `waiting` and clear the token; every `close_rows` clears it too.
+   - So the token exists while the heal is `diagnosing` or back to `open`.
+     The rail finds it there (`{:card_held, _}`), but the answer is refused
+     before any write: `HealAnswer` refuses `open` and `diagnosing` as
+     "not sent yet" (`answerable`, `heal_answer.ex:173-177`), and the
+     claim's `@answerable` would refuse it again.
+   - A bare `/confirm` lists only delivered cards (`{:cards_in_chat, _}`).
+   - A dead-lettered card makes its heal `waiting` and answerable. Only a
+     token from an earlier send that did reach the owner answers it, which
+     is right.
+5. **What else changed writes no modelled row.**
+   - The two refusals at decide time keep a `propose` as `tell`
+     (`offer_card`, `heal_run.ex:263-280`).
+   - Each message has its own send key (`HealMessage.send_key/1`).
+   - The card is sent through the rail's one sender
+     (`Cues.Proposals.send_card/3`), and `{:decided}` stores the card's
+     short text. These are heal rows and sends.
+
+`cue_inbox` went stale on `cues/proposals.ex` (pinned whole); see its
+README. No other spec pins a file S4b changed in a function that changed:
+`companion_session` pins functions of the gateway's `commands/sandbox.ex`,
+which S4b left as they were.
+
+New `SOURCE` pins:
+- `bind_card`, `write_card` and `answered` beside the heal settle's
+  functions in `job_heals_sql.ex`;
+- `heal_answer.ex#apply_change,leave,waiting,answerable,write`.
+
+No check was added or changed. All 76 keep their verdicts and every
+`holds` state count. Citations moved by S4b in `follow_ups.ex`,
+`heal_decision.ex`, `heal_run.ex`, `job_heals_sql.ex` and
+`cues_follow_up_sql.ex` were updated in the spec.
+
 ## Re-read for events drawn as cards (2026-11-13)
 
 `reply_delivery_opts` now keeps the run's events and trips blocks beside its lists (M89): it

@@ -306,7 +306,7 @@ reconcile scan errors), `LifetimesCanEnd`, `Proposals`, `OwnerCanMistap`,
 | `AppDecideFenced` | a device's answer is one `UPDATE` fenced on id, state and expiry (`cues_mandate_sql.ex` `decide_by_id`) |
 | `ReclaimsOrphans` | every sweep puts back a `filtering` row whose call the dispatcher does not hold, fence cleared, attempts unchanged, its call finished `aborted` (R3, CUE-1: `reclaim_orphans/1`, `filters.ex:193-216`; `{:reclaim_orphans, …}`, `cues_filter_sql.ex:132`, `reclaim_in_tx/4` `:675`) |
 | `AdmitsAfterScan` | no cue run is admitted while the last reconcile scan failed, since the monitors may then miss runners that survived a restart (R3, CUE-2: `free_cue_slots/1`, `scheduler.ex:370`; `runs_known?` set by `reconcile_active_runs/1`, `:499`, `:507`) |
-| `TaskLessSettlesAtPass` | a watcher with no task settles its delivery `acked`, outcome `follow_up`, in the transaction that passes it (`CuesFollowUpSql.on_pass` → `settle_taskless`, `cues_follow_up_sql.ex:349-356`, `:460-463`) |
+| `TaskLessSettlesAtPass` | a watcher with no task settles its delivery `acked`, outcome `follow_up`, in the transaction that passes it (`CuesFollowUpSql.on_pass` → `settle_taskless`, `cues_follow_up_sql.ex:340-347`, `:451-454`) |
 
 ## Checks
 
@@ -755,5 +755,41 @@ is `job_runs`' scope, and so does the owner-write mark that guards it. The
 owner's answer to a proposal (`Jobs.HealAnswer`) has no caller yet. A job
 a watcher wakes never gets a proposal to answer
 (`HealDecision.proposal_scope/2`).
+
+No step, variable or check changed.
+
+## Re-read for a heal's proposal answered on its card (M106 S4b, 2026-11-25)
+
+M106's stage S4b staled `cues/proposals.ex`, pinned whole: the answer
+rail now asks the `Cues.CardHolder` holders in turn. A mandate's
+proposal is asked first, then a follow-up's card, then a heal's proposal.
+Read for what this spec models:
+- **A mandate's and a follow-up's answers take the steps they took.**
+  - Token lookup:
+    - before, one `UNION` read (`{:token_kind, _}`) said whose a token
+      was;
+    - now each holder's store is asked in turn (`token_holder`,
+      `proposals.ex:362-370`; `{:token_held, _}` for a mandate's), the
+      first that holds it answers, and none means `:unknown`, refused
+      with no write, as before.
+  - Either way the lookup is a read before the answer, never part of it.
+    The answer itself is the same call as before: `confirm_mandate` and
+    `deny_mandate` for a mandate (the token's decide in one transaction),
+    and the follow-up's own decide for a follow-up. That is the atomic
+    `OwnerConfirm` / `OwnerDeny` (or the app's) step the spec has.
+  - Two answers racing for one token both pass the lookup, and the decide
+    transaction lets only the first change the row, as before.
+  - Always allow is refused for every holder but a follow-up's card, as
+    before.
+- **Changed, but not a step here.** A bare `/confirm` lists every holder's
+  cards waiting in that chat (`holders_waiting`), a heal's delivered
+  proposals now among them. When a heal's card also waits in the chat, a
+  bare `/confirm` that named one mandate proposal before may now be
+  ambiguous and answer none. The owner's answers get no fairness here, so
+  no step changes.
+- The mandate SQL functions this spec pins (`cues_mandate_sql.ex`) and the
+  follow-up pass functions (`cues_follow_up_sql.ex#on_pass,trigger_pass,
+  settle_taskless`) are unchanged; their citations moved with the file and
+  were updated.
 
 No step, variable or check changed.

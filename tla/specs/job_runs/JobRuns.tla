@@ -96,23 +96,24 @@
 (* transaction, and its own row stays ok and its text is delivered as      *)
 (* before. Jobs.HealRun, a child of the RunnerSupervisor that the          *)
 (* Scheduler starts, monitors in a map of its own and adopts after a       *)
-(* restart, sends the heal's message. For a job's heal it first reads the  *)
-(* job and runs a diagnosis that writes nothing, then makes at most one    *)
-(* move on the job: a pause or a raised time limit, since M106 S4 one      *)
-(* transaction fenced on its lease, on the job still being the version it  *)
-(* read and on no owner write having marked the heal since its claim       *)
-(* (Repo.heal_job_write), which is HealRead and HealWrite below (with      *)
-(* HealMoves); or, once its message is out, a "run now"                    *)
+(* restart, sends the heal's message, a proposal as its card. For a job's  *)
+(* heal it first reads the job and runs a diagnosis that writes nothing,   *)
+(* then makes at most one move on the job: a pause or a raised time limit, *)
+(* since M106 S4 one transaction fenced on its lease, on the job still     *)
+(* being the version it read and on no owner write having marked the heal  *)
+(* since its claim (Repo.heal_job_write), which is HealRead and HealWrite  *)
+(* below (with HealMoves); or, once its message is out, a "run now"        *)
 (* (Registry.check_run_now, then Scheduler.run_now), which is ManualRun.   *)
 (* Without HealMoves a landed pause or raise writes what Pause or an edit  *)
 (* writes, so the owner's steps cover it. The owner's answer to a stored   *)
-(* proposal (Jobs.HealAnswer) has no caller yet. A plugin's heal has no    *)
-(* job and makes no move. The Scheduler's heal claim and its expiry of     *)
-(* waiting and watching heals are Repo calls on those tables inside        *)
-(* callbacks modelled here, where a timeout changes nothing modelled and a *)
-(* crash is SchedulerCrash; and a heal run is no run for the admission     *)
-(* ceiling or the cue share, which count runs by the run id each publishes *)
-(* (active_run_count, scheduler.ex:713-717).                               *)
+(* proposal, on its card (Jobs.HealCard, M106 S4b), is the owner's own     *)
+(* guarded edit. A plugin's heal has no job and makes no move. The         *)
+(* Scheduler's heal claim and its expiry of waiting and watching heals are *)
+(* Repo calls on those tables inside callbacks modelled here, where a      *)
+(* timeout changes nothing modelled and a crash is SchedulerCrash; and a   *)
+(* heal run is no run for the admission ceiling or the cue share, which    *)
+(* count runs by the run id each publishes (active_run_count,              *)
+(* scheduler.ex:713-717).                                                  *)
 (* The access gate is not modelled either. A run's access-sensitive tool   *)
 (* call that its job row does not name is refused inside the one loop      *)
 (* step, since a scheduled run never parks a call for the owner            *)
@@ -235,13 +236,14 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_follow_up_sql.ex#claimable,mark_started,refuse_starting @ 0b00297833af
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/retry.ex @ 29a81ebd67c8
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/job_retries_sql.ex @ d45d0abed8ea
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/job_heals_sql.ex#settle,take_failure,not_closed,verdict,join,open_or_quiet,open,link_run,close_rows,expire_waiting,expire_rows,rerun_outcome,degraded,earlier_tallies,settle_ok,close_proven,open_for,query_open_for,close_ids,run_tally,claimant,claim_written,moved_on,mark_written_under,take_lease @ 3fc59dd5c98c
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/job_heals_sql.ex#settle,take_failure,not_closed,verdict,join,open_or_quiet,open,link_run,close_rows,expire_waiting,expire_rows,rerun_outcome,degraded,earlier_tallies,settle_ok,close_proven,open_for,query_open_for,close_ids,run_tally,claimant,claim_written,moved_on,mark_written_under,take_lease,bind_card,write_card,answered @ 24ed0c910ce9
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/degraded.ex @ a44077b00219
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#heal_job_write,heal_job_write_tx,heal_job_write_fenced,heal_job_write_in_tx,write_scheduled_job_fields,supersede_moved,written_under? @ f9994ae3ed8a
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/heal_decision.ex#job_version,@version_fields,@run_written_fields,decide @ 9df0bacc4c33
+\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/heal_answer.ex#apply_change,leave,waiting,answerable,write @ 95808cd186ff
 \* SOURCE: apps/fermix_core/lib/fermix_core/agent_loop.ex#run,run_tool_call,gate_tool,trace_unexecuted @ fb2d6fbb7f69
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/failure.ex#provider_failure? @ e1cc6a876455
-\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/heal_run.ex @ cb90a4228cdc
+\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/heal_run.ex @ 409cd9511a5c
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/heal_diagnosis.ex#@allowed_tools,supervise_loop,await_loop,report_loop,release_loop,kill_loop @ 4c906da777a9
 EXTENDS Naturals, FiniteSets
 
@@ -668,7 +670,7 @@ Tick ==
 \* in the pass's transaction; the filter's wake, filters.ex:321, or the
 \* accept's, ingest.ex:205), or the owner's Run or Always allow on its card,
 \* waiting -> starting (FollowUps.confirm, always_allow or decide, then the
-\* wake, follow_ups.ex:464).
+\* wake, follow_ups.ex:518).
 CueArrives ==
     /\ CuesOn /\ cueSupply > 0
     /\ cueSupply' = cueSupply - 1
@@ -763,11 +765,13 @@ Resume ==
 \* Registry.update_job (registry.ex:146-154 -> prepare_update :227-233):
 \* Repo.get_scheduled_job, whose row the edit is computed from
 \* (normalize_update_attrs) ... A heal run's raised limit is no longer this
-\* edit: it is HealWrite below. The owner's answer to a stored proposal
-\* (Jobs.HealAnswer.apply_change/4, which nothing calls yet) would be the
-\* owner's own edit, its read folded into one guarded write
-\* (heal_job_write_tx under the answer claim): this step with the read at
-\* the write.
+\* edit: it is HealWrite below. The owner's answer to a stored proposal, a
+\* /confirm on its card (Jobs.HealCard -> Jobs.HealAnswer.apply_change/4,
+\* in a task the gateway starts, M106 S4b), is the owner's own edit: its
+\* reads, then one guarded write (heal_job_write_tx under the answer claim,
+\* the heal answerable and the job's version unmoved), then the
+\* :job_changed cast. That is this step with the read at the write, or no
+\* write.
 UpdateRead ==
     /\ oPc = "idle" /\ editsLeft > 0
     /\ oPc' = "editing"
@@ -804,15 +808,15 @@ UpdateWrite ==
     /\ UNCHANGED <<OwnerQuiet, intent, movesLeft, editsLeft, manualLeft, HealQuiet>>
 
 \* A heal run's move (M106 5.6, with HealMoves > 0). Jobs.HealRun reads the
-\* job once, before its diagnosis (diagnose, heal_run.ex:228-237), and code
+\* job once, before its diagnosis (diagnose, heal_run.ex:248-257), and code
 \* resolves the decision against that read (HealDecision.resolve): a pause
 \* only for a job enabled and scheduled or running (decide(:pause),
-\* heal_decision.ex:188-192), a raised limit any time (:194). The plan
-\* carries the job's version as read (job_version, :130-136: the
+\* heal_decision.ex:222-226), a raised limit any time (:228). The plan
+\* carries the job's version as read (job_version, :135-141: the
 \* definition and enabled, never what a run writes). Up to two minutes of
 \* diagnosis then pass, in which anything else may happen. The step folds
 \* in the Scheduler's claim just before the read (take_lease,
-\* job_heals_sql.ex:946-960), which clears the owner-write mark: the run
+\* job_heals_sql.ex:1055-1069), which clears the owner-write mark: the run
 \* reads the job after it, so an owner write before it is in what it reads.
 HealRead ==
     /\ HealMoves > 0 /\ hPc = "idle"
@@ -967,7 +971,7 @@ HandleExit(r) ==
 \* run_job_now.ex:71, registry.ex:109-113), and a job's kind never changes.
 \* A follow-up does: check_run_now refuses only the cue kind, since a run of
 \* a follow-up is not the run of one item (registry.ex:103-114).
-\* A heal run's rerun (M106 5.5, heal_run.ex:462-500) takes the same path,
+\* A heal run's rerun (M106 5.5, heal_run.ex:563-601) takes the same path,
 \* check_run_now then Scheduler.run_now, once its message is out. Its call
 \* waits behind whatever callback runs and is served here: the Scheduler
 \* never waits on a heal run (its init/1 does no work, and its heal id is
@@ -1265,13 +1269,13 @@ FollowUpClaimable == jobEnabled /\ jobState = "scheduled" /\ (Active = {} \/ ~At
 \* The claim of one trigger, as it lands: Repo.claim_follow_up_run
 \* (repo.ex:2642-2645, :7739-7785), one BEGIN IMMEDIATE that reads the
 \* trigger while it is starting (CuesFollowUpSql.claimable,
-\* cues_follow_up_sql.ex:535-541), takes the job through the claim every run
+\* cues_follow_up_sql.ex:526-532), takes the job through the claim every run
 \* takes with state "running" alone (claim_follow_up_job: claim_in_tx over
 \* fetch_claimable_job), inserts the run with trigger "watcher" and moves the
-\* trigger to started (mark_started, :497-503). A job that cannot take the
+\* trigger to started (mark_started, :488-494). A job that cannot take the
 \* run (:not_runnable, :already_running: paused, gone, or still running)
 \* refuses the trigger in the same transaction with Fermix's sentence
-\* (refuse_follow_up, follow_up_refusal; refuse_starting, :510-511), so a
+\* (refuse_follow_up, follow_up_refusal; refuse_starting, :501-502), so a
 \* trigger never waits behind a run. With every modelled run id in use the
 \* claim is out of the model's bounds and leaves the trigger starting.
 \* `start`: the Scheduler starts the claimed run once every trigger the scan

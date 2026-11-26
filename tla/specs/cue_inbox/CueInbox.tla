@@ -59,7 +59,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/cues/filters.ex @ 9f400ed757c3
 \* SOURCE: apps/fermix_core/lib/fermix_core/cues/supervisor.ex @ e1b36533a8b3
 \* SOURCE: apps/fermix_core/lib/fermix_core/cues/sweeper.ex @ 2f4ac202fed9
-\* SOURCE: apps/fermix_core/lib/fermix_core/cues/proposals.ex @ 8e1d4a202135
+\* SOURCE: apps/fermix_core/lib/fermix_core/cues/proposals.ex @ b373ea1426ea
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_sql.ex @ 5a1008301ef3
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_filter_sql.ex @ 319f777956cf
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/cues_runs_sql.ex#@open_sql,@cap_room_sql,@eligible_sql,@candidates_sql,@eligible_delivery_sql,@settle_facts_sql,eligible_delivery,settle_delivery,settle_facts,settle_held,settle_move,unspent_retry,spent_retry,move_patch,untouched @ 03becc353f97
@@ -154,7 +154,7 @@ CONSTANTS
     TaskLessSettlesAtPass       \* a watcher with no task settles its delivery acked
                                 \* (outcome follow_up) in the transaction that passes
                                 \* it (CuesFollowUpSql.on_pass -> settle_taskless,
-                                \* cues_follow_up_sql.ex:349-356, :460-463)
+                                \* cues_follow_up_sql.ex:340-347, :451-454)
 
 -----------------------------------------------------------------------------
 (* Topologies *)
@@ -296,7 +296,7 @@ Fault == faults > 0 /\ faults' = faults - 1
 \* The state a pass leaves a delivery in: passed, or for a watcher with no
 \* task acked with outcome follow_up in the same transaction
 \* (CuesFollowUpSql.on_pass -> settle_taskless, cues_follow_up_sql.ex
-\* :303-310, :412-415): no task will claim it, and what the owner answers
+\* :303-310, :403-406): no task will claim it, and what the owner answers
 \* stays on the trigger row (design §4.3).
 PassedRow(w) == IF ~HasTask(w) /\ TaskLessSettlesAtPass THEN "acked" ELSE "passed"
 
