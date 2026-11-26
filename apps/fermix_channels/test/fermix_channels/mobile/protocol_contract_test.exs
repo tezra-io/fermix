@@ -40,7 +40,7 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
   # M51 §7: the trust inputs a phone's attestation is verified against are
   # exported, and a changed byte in either is a changed contract.
   @attestation_roots_sha256 "1c8f9da8b5a13da216198541d276e424c6a73c72af9fa3433f43e096100ae5ed"
-  @android_signers_sha256 "27dce7a69692b7b7c2329e2cae0c9b00e7a61e92276e2a05178ebb647713421c"
+  @android_signers_sha256 "c44618046c5f1c4e65638b7fe7717ab8c24107c83d7bf70a3269f6f66b93d57e"
 
   setup_all do
     %{
@@ -184,10 +184,13 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     assert %{package: package, signers: by_digest} = Attestation.signers()
     assert package == signers["package"]
 
-    assert Enum.map(by_digest, fn {digest, role} ->
-             {Base.encode16(digest, case: :lower), Atom.to_string(role)}
-           end) ==
-             Enum.map(signers["signers"], &{&1["sha256"], &1["role"]})
+    # A map has no order, so both sides are compared sorted.
+    assert Enum.sort(
+             Enum.map(by_digest, fn {digest, role} ->
+               {Base.encode16(digest, case: :lower), Atom.to_string(role)}
+             end)
+           ) ==
+             Enum.sort(Enum.map(signers["signers"], &{&1["sha256"], &1["role"]}))
   end
 
   test "documentation tells an operator what cannot pair", %{protocol: protocol} do

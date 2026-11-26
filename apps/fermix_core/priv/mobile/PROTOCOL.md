@@ -414,7 +414,8 @@ An emulator cannot pair: its key is attested at the software level under the
 Android software attestation root, not Google's. Neither can a phone with an
 unlocked bootloader or an unverified system, an app signed by any key but the
 pinned ones (a debug keystore included), or a rebuilt app. Development pairs a
-real, locked phone running a build signed with the `development` key.
+real, locked phone running a build signed with the `development` key; a build
+signed with the `release` key pairs as a release build.
 Attestation is pairing-time evidence: a reconnect is never verified again, and
 a phone paired before the daemon verified attestation keeps working.
 

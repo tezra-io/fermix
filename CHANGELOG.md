@@ -43,6 +43,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   payment method on file, and a turn refused for that says so instead of
   blaming the key. A PDF sent to a Grok model through it goes to the next
   provider in the chain, because xAI reads no PDF inline.
+- **The Android app's release key can pair.** A phone running a build of the
+  Fermix Android app signed with its release key now passes the pairing
+  check, and its device record says it is a release build. Until now only the
+  development key was trusted, so no release build could pair.
 
 ### Changed
 
