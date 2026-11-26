@@ -15,7 +15,9 @@ defmodule FermixCore.Jobs.HealRunDiagnosisTest do
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Cues.Proposals
   alias FermixCore.Jobs.HealDecision
+  alias FermixCore.Jobs.HealMessage
   alias FermixCore.Jobs.HealRun
   alias FermixCore.Jobs.Registry
   alias FermixCore.Jobs.Runner
@@ -58,6 +60,18 @@ defmodule FermixCore.Jobs.HealRunDiagnosisTest do
       |> Agent.get_and_update(fn state ->
         {result, rest} = next(state.script)
         {result, %{state | script: rest, calls: state.calls ++ [%{text: text, opts: opts}]}}
+      end)
+    end
+
+    # The rail's card sender (`Cues.Proposals.send_card/3`'s seam): a card
+    # takes the same script, and is recorded with its spec and inbox.
+    def send_card(%{destination: destination} = inbox, %{text: text} = spec) do
+      destination
+      |> String.to_existing_atom()
+      |> Agent.get_and_update(fn state ->
+        {result, rest} = next(state.script)
+        call = %{text: text, spec: spec, inbox: inbox}
+        {result, %{state | script: rest, calls: state.calls ++ [call]}}
       end)
     end
 
@@ -728,12 +742,14 @@ defmodule FermixCore.Jobs.HealRunDiagnosisTest do
       # The version an apply is fenced on (stage S4): the job's definition as drawn.
       assert stored.change_job_digest == HealDecision.job_version(job)
 
-      assert [%{text: text}] = calls(ctx)
+      assert [%{text: text, spec: %{kind: :job_change, lines: lines}}] = calls(ctx)
       assert text =~ "every 2 hours"
-      assert text =~ "Task: a longer rewrite than fits here."
-      assert text =~ "Fermix has not made this change."
-      refute text =~ "Reply"
-      refute text =~ ~r/button|card|tap|approve|\/confirm/i
+      # The task as its changed part, whole: what the card offers is what it shows.
+      changed = String.replace_prefix(String.trim(task), "Fetch ", "")
+      assert ~s(- Task: "this morning's tides." becomes "#{changed}") in lines
+      refute Enum.join(lines, "\n") =~ "longer rewrite"
+      assert List.last(lines) == "Fermix has not made this change."
+      refute Enum.join(lines, "\n") =~ ~r/button|tap|approve|\/confirm/i
     end
 
     test "propose is checked as an owner's edit: an unknown skill or a schedule that does not parse",
@@ -821,6 +837,182 @@ defmodule FermixCore.Jobs.HealRunDiagnosisTest do
 
       assert {:ok, %{decision: "tell", note: @note}} = get_heal(ctx, heal.id)
       assert {:ok, %{state: "scheduled"}} = Repo.get_scheduled_job(job.id, server: ctx.repo)
+    end
+  end
+
+  # Stage S4b (M106 §5.7, D5): a proposal goes to the owner's chat as its
+  # card, the approval card a watcher's proposal is, bound to that chat under
+  # one token for every retry of its send; a proposal that card cannot carry
+  # whole, or that no chat can answer, is told and not offered.
+  describe "the proposal's card" do
+    test "is the short ask, the detail and Approve and Deny, held to the owner's chat",
+         ctx do
+      start_channel(ctx, [:ok])
+      {job, heal} = claimed_heal!(ctx)
+      TelemetryCapture.attach([@heal_event], heal_id: heal.id)
+      run!(ctx, heal, script([respond(propose_schedule())]))
+
+      assert [%{spec: spec, inbox: inbox, text: text}] = calls(ctx)
+      assert inbox.platform == "telegram"
+      assert %{kind: :job_change, token: "cp_" <> _rest, actions: actions} = spec
+      assert actions == %{confirm: "Approve", deny: "Deny"}
+      assert hd(spec.lines) =~ ~s(Job "#{job.name}" failed on)
+      assert ~s(- Schedule: "every 2 hours") in spec.lines
+      assert List.last(spec.lines) == "Fermix has not made this change."
+      refute Enum.join(spec.lines, "\n") =~ "Reply"
+
+      assert spec.detail ==
+               "Details: each change in full\nSchedule now: every 1 hour\n" <>
+                 "Schedule after the change: every 2 hours"
+
+      assert String.ends_with?(
+               text,
+               "Reply /confirm to make this change, or /deny to leave the job as it is."
+             )
+
+      # The card is the heal's first message: it carries the key a plain first
+      # message of the heal is sent under (`HealRunTest`), the message's own.
+      assert spec.proactive_key == "job_heal:" <> heal.id
+      assert spec.proactive_key == HealMessage.send_key(%{id: heal.id, conclusion: "first"})
+
+      origin = %{platform: "telegram", chat_id: inbox.destination, user_id: inbox.destination}
+
+      assert {:ok, %{state: "waiting", decision: "propose", message: message} = stored} =
+               get_heal(ctx, heal.id)
+
+      assert message == Enum.join(spec.lines, "\n")
+      assert stored.card_token_digest == Proposals.digest(spec.token)
+
+      assert {stored.card_platform, stored.card_chat_id, stored.card_user_id} ==
+               {origin.platform, origin.chat_id, origin.user_id}
+
+      assert stored_token(ctx, heal.id) == nil
+
+      for {:telemetry, @heal_event, _measurements, metadata} <- drain() do
+        refute inspect(metadata) =~ spec.token
+      end
+
+      # Answered on the card, with no model: the change is made.
+      opts = [
+        repo: ctx.repo,
+        now: @now,
+        scheduler: nil,
+        capability_registry: ctx.caps,
+        skill_registry: ctx.skills
+      ]
+
+      assert {:ok, _sentence} = Proposals.confirm(spec.token, origin, opts)
+
+      assert {:ok, %{schedule_expr: "every 2 hours"}} =
+               Repo.get_scheduled_job(job.id, server: ctx.repo)
+    end
+
+    test "every retry of its send carries the token the first carried", ctx do
+      start_channel(ctx, [{:error, {:transport, :timeout}}, :ok])
+      {_job, heal} = claimed_heal!(ctx)
+      run!(ctx, heal, script([respond(propose_schedule())]))
+
+      assert {:ok, %{state: "open", delivery_attempts: 1, next_delivery_at: due}} =
+               get_heal(ctx, heal.id)
+
+      [%{spec: first}] = calls(ctx)
+      assert stored_token(ctx, heal.id) == first.token
+
+      {:ok, again} = claim(ctx, due)
+      run!(ctx, again, clock: fn -> due end)
+
+      assert [%{spec: ^first}, %{spec: second}] = calls(ctx)
+      assert second.token == first.token
+      assert {:ok, %{state: "waiting", delivery_status: "delivered"}} = get_heal(ctx, heal.id)
+      assert stored_token(ctx, heal.id) == nil
+    end
+
+    test "a change too large for its card is told, not offered, and the refusal is said", ctx do
+      start_channel(ctx, [:ok])
+      {job, heal} = claimed_heal!(ctx)
+      TelemetryCapture.attach([@heal_event], heal_id: heal.id)
+      task = String.duplicate("Walk the quay and count the moored boats. ", 60)
+      decision = %{"decision" => "propose", "note" => @note, "change" => %{"task" => task}}
+
+      {_result, log} = with_log(fn -> run!(ctx, heal, script([respond(decision)])) end)
+
+      assert {:ok, %{decision: "tell", change: nil, card_token_digest: nil}} =
+               get_heal(ctx, heal.id)
+
+      assert {:ok, %{task_prompt: unchanged}} = Repo.get_scheduled_job(job.id, server: ctx.repo)
+      assert unchanged == job.task_prompt
+
+      assert_received {:telemetry, @heal_event, _measurements,
+                       %{phase: "decided", decision: "tell", requested: "propose"} = decided}
+
+      assert decided.refusal == "card_too_large"
+      assert decided.error =~ "a card holds 3500"
+      assert log =~ "card_too_large"
+
+      assert [%{text: text} = call] = calls(ctx)
+      refute Map.has_key?(call, :spec)
+      assert text =~ "Fermix's reading: " <> @note
+      refute text =~ "Fermix would change"
+    end
+
+    test "with no chat a card's answer can come from, a proposal is told, not offered", ctx do
+      start_channel(ctx, [:ok])
+      {_job, heal} = claimed_heal!(ctx)
+      TelemetryCapture.attach([@heal_event], heal_id: heal.id)
+      slack = Atom.to_string(ctx.channel)
+
+      inbox_opts = [
+        jobs_config: [default_delivery_target: %{"platform" => "slack", "chat_id" => slack}],
+        configured_owners: %{"slack" => slack}
+      ]
+
+      {_result, log} =
+        with_log(fn ->
+          run!(ctx, heal, script([respond(propose_schedule())]) ++ [inbox_opts: inbox_opts])
+        end)
+
+      assert {:ok, %{decision: "tell", change: nil, inbox_platform: "slack"}} =
+               get_heal(ctx, heal.id)
+
+      assert_received {:telemetry, @heal_event, _measurements,
+                       %{phase: "decided", requested: "propose", refusal: "no_card_chat"}}
+
+      assert log =~ "no_card_chat"
+      assert [%{text: _text} = call] = calls(ctx)
+      refute Map.has_key?(call, :spec)
+    end
+
+    test "the local cli chat holds a card, answered from that chat", ctx do
+      start_channel(ctx, [:ok])
+      {job, heal} = claimed_heal!(ctx)
+      chat = Atom.to_string(ctx.channel)
+
+      inbox_opts = [
+        jobs_config: [default_delivery_target: %{"platform" => "cli", "chat_id" => chat}],
+        configured_owners: %{}
+      ]
+
+      run!(ctx, heal, script([respond(propose_schedule())]) ++ [inbox_opts: inbox_opts])
+
+      assert [%{spec: %{kind: :job_change}, inbox: %{platform: "cli"}}] = calls(ctx)
+      origin = %{platform: "cli", chat_id: chat, user_id: "cli"}
+
+      opts = [
+        repo: ctx.repo,
+        now: @now,
+        scheduler: nil,
+        capability_registry: ctx.caps,
+        skill_registry: ctx.skills
+      ]
+
+      assert {:ok, [%{kind: :job_heal, id: id}]} = Proposals.waiting_in_chat(origin, opts)
+      assert id == heal.id
+      assert {:ok, _sentence} = Proposals.confirm(id, origin, opts)
+
+      assert {:ok, %{state: "watching", decided_from: "cli:" <> _rest}} = get_heal(ctx, heal.id)
+
+      assert {:ok, %{schedule_expr: "every 2 hours"}} =
+               Repo.get_scheduled_job(job.id, server: ctx.repo)
     end
   end
 
@@ -1216,6 +1408,7 @@ defmodule FermixCore.Jobs.HealRunDiagnosisTest do
           repo: ctx.repo,
           conversation_store: ctx.store,
           delivery_opts: [adapter: ScriptedChannel],
+          card_sender: &ScriptedChannel.send_card/2,
           inbox_opts: [
             jobs_config: [],
             configured_owners: %{"telegram" => Atom.to_string(ctx.channel)}
@@ -1405,6 +1598,32 @@ defmodule FermixCore.Jobs.HealRunDiagnosisTest do
       :ok = Sqlite3.release(conn, stmt)
     after
       Sqlite3.close(conn)
+    end
+  end
+
+  defp propose_schedule,
+    do: %{"decision" => "propose", "note" => @note, "change" => %{"schedule" => "every 2 hours"}}
+
+  # The card's token, read as only the heal run's bind reads it.
+  defp stored_token(ctx, heal_id) do
+    {:ok, conn} = Sqlite3.open(ctx.db_path, mode: :readonly)
+
+    try do
+      {:ok, stmt} = Sqlite3.prepare(conn, "SELECT card_token FROM job_heals WHERE id = ?")
+      :ok = Sqlite3.bind(stmt, [heal_id])
+      {:row, [token]} = Sqlite3.step(conn, stmt)
+      :ok = Sqlite3.release(conn, stmt)
+      token
+    after
+      Sqlite3.close(conn)
+    end
+  end
+
+  defp drain(acc \\ []) do
+    receive do
+      {:telemetry, _event, _measurements, _metadata} = message -> drain([message | acc])
+    after
+      0 -> Enum.reverse(acc)
     end
   end
 

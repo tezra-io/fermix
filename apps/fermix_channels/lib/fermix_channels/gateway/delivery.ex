@@ -21,9 +21,10 @@ defmodule FermixChannels.Gateway.Delivery do
   alias FermixCore.Telemetry
 
   # The approval kinds a structured spec may carry: a sandbox change, a SOUL.md
-  # change, and a watcher's card (a follow-up, its approval prompt, or a
-  # mandate's proposal; M60_WATCHER_CODING_RUNS.md §6).
-  @approval_kinds [:sandbox, :soul, :follow_up, :mandate]
+  # change, a watcher's card (a follow-up, its approval prompt, or a mandate's
+  # proposal; M60_WATCHER_CODING_RUNS.md §6), and a heal's proposal for a job
+  # (M106 §5.7).
+  @approval_kinds [:sandbox, :soul, :follow_up, :mandate, :job_change]
 
   @doc "Build the delivery closure for a destination."
   @spec build_deliver(ReplyContext.t()) :: Reply.reply_fn()

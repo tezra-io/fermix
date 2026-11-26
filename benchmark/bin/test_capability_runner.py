@@ -437,7 +437,10 @@ def test_a_home_whose_inbox_is_not_the_local_chat_holds_the_heal_tasks_out(tmp_p
         "skill_gone_run_now", "second_failure_joins", "planted_instruction_in_failure",
         "limit_too_short", "watching_heal_fails_again", "tool_never_worked_three_runs",
         "refused_plugin_tool_two_jobs", "two_runs_or_one_success_open_nothing",
-        "planted_note_read_through_the_run", "edited_proposal_superseded"}
+        "planted_note_read_through_the_run", "edited_proposal_superseded",
+        "confirm_applies_the_recorded_change", "deny_leaves_the_job",
+        "a_second_answer_changes_nothing", "confirm_after_the_owner_edited",
+        "confirm_from_another_chat", "owner_asks_in_words"}
     assert all("--owner-inbox-cli" in why for _suite, _case, why in unmet)
     assert "NOT EVALUATED" in capsys.readouterr().out
 
@@ -1759,6 +1762,88 @@ def test_a_state_task_seeds_before_its_first_turn_and_hands_the_checker_the_mani
                        str(tmp_path))
     assert order == [("seed", str(home), str(tmp_path), "fixtures/state/w.json"), ("turn",)]
     assert seen["evidence"]["state"] == {"jobs": {"weather": "weather_1"}}
+
+
+def _command_case(chat="inbox", commands=("/confirm",)):
+    return SimpleNamespace(
+        id="confirm_applies_the_recorded_change", drive="owner_command",
+        command={"chat": chat}, timeout_ms=1000,
+        checker_spec={"script": "chk.py", "mode": "json", "reset": [],
+                      "state": "fixtures/state/holds.json", "expect": {"job": "holds"}},
+        turns=[SimpleNamespace(query=text, expect={}) for text in commands])
+
+
+def _command_world(tmp_path, monkeypatch, replies):
+    """A command trial's world: the seed, the typed commands (each answered with the
+    next of `replies`), and the checker, all recorded in order."""
+    home = tmp_path / "fermix-capability-eval"
+    scoped = home / "workspace" / "eval" / "task" / "t0"
+    scoped.mkdir(parents=True)
+    order, seen = [], {}
+    answers = iter(replies)
+    monkeypatch.setattr(rc.checker, "scoped_dir", lambda *_a: str(scoped))
+    monkeypatch.setattr(rc.checker, "seed_workspace", lambda *_a: None)
+    monkeypatch.setattr(rc.checker, "teardown_workspace", lambda *_a: None)
+    monkeypatch.setattr(rc, "_seed_state", lambda *_a: order.append("seed") or {"now": "x"})
+
+    def fake_drive(_cfg, session, query, _timeout=None, attachments=None):
+        order.append((session, query))
+        text = next(answers)
+        status = "ok" if text is not None else "not_running"
+        return driver.DriveResult(ok=status == "ok", status=status, response=text, error=None,
+                                  session_id=session, exit_code=0, sent_at=datetime.now())
+
+    def fake_checker(_skill, _spec, _scoped, reply, _home, evidence=None):
+        seen.update(evidence=evidence, reply=reply)
+        return rc.checker.CheckerResult(1.0, "applied", safety_ok=True)
+
+    monkeypatch.setattr(rc.driver, "drive_query", fake_drive)
+    monkeypatch.setattr(rc.checker, "run_checker", fake_checker)
+    monkeypatch.setattr(rc, "_capture_turn", lambda *_a: pytest.fail("a command has no trace"))
+    cfg = SimpleNamespace(daemon=SimpleNamespace(fermix_home=str(home)))
+    return cfg, str(home / "workspace" / "eval"), order, seen
+
+
+def test_an_owner_command_is_typed_in_the_owners_chat_with_no_trace_to_wait_for(
+        tmp_path, monkeypatch):
+    # M106 S4b: a card bound to the CLI inbox answers only from that chat, and the
+    # gateway answers a typed command with no model, so there is no trace to poll.
+    cfg, root, order, seen = _command_world(tmp_path, monkeypatch, ["Applied.", "Nothing."])
+    case = _command_case(commands=("/confirm", "/deny"))
+    trial, trace_id, models = rc._command_trial(cfg, SimpleNamespace(name="cap_x"), case,
+                                                "run", 0, "task", root, str(tmp_path))
+    assert order == ["seed", (rc.OWNER_CHAT, "/confirm"), (rc.OWNER_CHAT, "/deny")]
+    assert seen["evidence"]["replies"] == [
+        {"command": "/confirm", "session": "cli", "reply": "Applied."},
+        {"command": "/deny", "session": "cli", "reply": "Nothing."}]
+    assert seen["evidence"]["tool_spans"] == [] and seen["reply"] == "Nothing."
+    assert seen["evidence"]["state"] == {"now": "x"}
+    assert trial.status == "ok" and trial.effective_success == 1.0 and trial.safety_ok is True
+    assert trace_id is None and models == [] and trial.cost_known is False
+
+
+def test_an_owner_command_from_another_chat_is_typed_in_the_trials_own_session(
+        tmp_path, monkeypatch):
+    cfg, root, order, _seen = _command_world(tmp_path, monkeypatch, ["Nothing waits here."])
+    rc._command_trial(cfg, SimpleNamespace(name="cap_x"), _command_case(chat="trial"), "run",
+                      0, "task", root, str(tmp_path))
+    session = order[1][0]
+    assert session != rc.OWNER_CHAT and session.startswith("e2e-cmd")
+
+
+@pytest.mark.parametrize("replies", [[None], [""], ["Applied.", "   "]])
+def test_an_owner_command_with_no_reply_is_an_invalid_trial(tmp_path, monkeypatch, replies):
+    cfg, root, _order, seen = _command_world(tmp_path, monkeypatch, replies)
+    case = _command_case(commands=("/confirm", "/deny")[:len(replies)])
+    trial, _trace, _models = rc._command_trial(cfg, SimpleNamespace(name="cap_x"), case, "run",
+                                               0, "task", root, str(tmp_path))
+    assert trial.status == "not_running" and not trial.valid and "evidence" not in seen
+
+
+def test_planned_turns_prices_no_typed_owner_command():
+    cases = [(SimpleNamespace(name="s"), None, _plan_case(1)),
+             (SimpleNamespace(name="s"), None, _command_case(commands=("/confirm", "/deny")))]
+    assert rc._planned_turns(cases) == 1
 
 
 def test_a_state_seed_failure_stops_the_sweep_on_the_preconditions_exit(capsys):

@@ -24,6 +24,8 @@ defmodule FermixCore.Memory.RepoJobHealsMigrationTest do
                         rerun_at rerun_outcome)
   @tool_columns ~w(tool_json)
   @answer_columns ~w(change_job_digest answer answered_at decided_from applied_at owner_wrote_at)
+  # The columns 76 adds for a proposal's card (M106 §5.7, D5, stage S4b).
+  @card_columns ~w(card_token card_token_digest card_platform card_chat_id card_user_id)
   @scheduled_job_width 36
   @job_run_width 24
 
@@ -50,7 +52,11 @@ defmodule FermixCore.Memory.RepoJobHealsMigrationTest do
     assert @version in versions
 
     assert columns(db_path, "job_heals") ==
-             @heal_columns ++ @diagnosis_columns ++ @tool_columns ++ @answer_columns
+             @heal_columns ++
+               @diagnosis_columns ++
+               @tool_columns ++
+               @answer_columns ++
+               @card_columns
 
     assert columns(db_path, "job_heal_runs") == ~w(run_id heal_id job_id)
     assert length(columns(db_path, "scheduled_jobs")) == @scheduled_job_width

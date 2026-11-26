@@ -626,9 +626,13 @@ defmodule FermixChannels.Channels.IMessage do
   end
 
   # A reply is the turn that answers the message here: that conversation's
-  # chat turn, whose origin facts it carries.
-  defp reply_opts(metadata),
-    do: [{:turn_origin, %{computer_use_origin: :interactive}} | routing_opts(metadata)]
+  # chat turn, whose origin facts it carries. A message Fermix made to send a
+  # card that may be sent again (a heal's, M106 §5.7) carries its send key,
+  # so a retry of it is keyed as the first send was (§8.2).
+  defp reply_opts(metadata) do
+    [{:turn_origin, %{computer_use_origin: :interactive}} | routing_opts(metadata)]
+    |> put_present_kw(:proactive_key, Map.get(metadata, :proactive_key))
+  end
 
   # --- Inbound attachments (§8.3) ----------------------------------------------------
 

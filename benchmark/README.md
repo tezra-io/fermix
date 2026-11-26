@@ -919,8 +919,9 @@ banner names the harness. Reports redact every `drive_error` by default;
 
 A failed or degraded job's heal runs outside every turn, so the capability candidate
 `cap_job_auto_heal` seeds each trial's jobs and runs (`checker.state`) and grades the
-heal from memory.db and the trace (and what stays true of a stored proposal nobody
-answered: `checkers/job_proposal.py`), and the behavioral suite `job_auto_heal` seeds
+heal from memory.db and the trace (and what became of a stored proposal on its card,
+answered by a typed `/confirm` or `/deny` with no model: `checkers/job_proposal.py`), and
+the behavioral suite `job_auto_heal` seeds
 each case's record (`state:`) and asks about it. Both need the local chat as the owner's
 inbox (`--owner-inbox-cli`; held out as NOT EVALUATED without it), and the behavioral
 run needs the workspace snapshot:

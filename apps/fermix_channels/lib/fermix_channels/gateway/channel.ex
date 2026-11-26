@@ -271,11 +271,14 @@ defmodule FermixChannels.Gateway.Channel do
   @typedoc """
   A rich approval card with an explicit kind, expiry, and command routes. A
   watcher's card (`:follow_up`, and a mandate's proposal, `:mandate`;
-  `FermixCore.Cues.Card`) also carries its visible `lines`, its expandable
-  `detail` and its `actions`' words (a follow-up's card adds Always allow).
+  `FermixCore.Cues.Card`) and a heal's proposal for a job (`:job_change`,
+  `FermixCore.Jobs.HealCard`) also carry their visible `lines`, their
+  expandable `detail` and their `actions`' words (a follow-up's card adds
+  Always allow). A heal's card carries its send key (`proactive_key`), which
+  the message the channel is handed carries in its metadata.
   """
   @type approval_spec :: %{
-          required(:kind) => :sandbox | :soul | :follow_up | :mandate,
+          required(:kind) => :sandbox | :soul | :follow_up | :mandate | :job_change,
           required(:text) => String.t(),
           required(:token) => String.t(),
           optional(:approval_id) => String.t(),
@@ -286,7 +289,8 @@ defmodule FermixChannels.Gateway.Channel do
             required(:confirm) => String.t(),
             required(:deny) => String.t(),
             optional(:always_allow) => String.t()
-          }
+          },
+          optional(:proactive_key) => String.t()
         }
 
   @doc "Deliver a structured approval card when the caller knows its approval kind."

@@ -910,7 +910,7 @@ emitted only through `Jobs.Telemetry.heal/2` and `heal_settled/3`, with a
 | `closed` | the same, `outcome: "healed"` | an ok run closed the heal |
 | `closed` | `Jobs.Scheduler`'s reconcile pass, `outcome: "expired"` | the heal waited, or watched, 7 days |
 | `closed` | `Jobs.Registry`, `outcome: "superseded"` | an owner's edit, pause or resume moved the job's definition while a proposal waited, and its own write closed the proposal |
-| `answered` | `Jobs.HealAnswer`, `decision: "propose"`, `answer` (`apply` or `leave`), `applied` | the owner's answer to a waiting proposal was recorded: `applied` true when the change was written with the heal's move to watching, false for a leave or for an apply to a job no longer the version the change was drawn for. `Jobs.HealAnswer` has no production caller yet (the proposal's card, which will call it, is not built), so no running engine emits this phase |
+| `answered` | `Jobs.HealAnswer`, `decision: "propose"`, `answer` (`apply` or `leave`), `applied`, `platform` | the owner's answer to a waiting proposal, on its card (`Jobs.HealCard`, from the chat the card went to, by token, tap or bare command), was recorded: `applied` true when the change was written with the heal's move to watching, false for a leave or for an apply to a job no longer the version the change was drawn for; `platform` is the kind of surface it came from (the first part of the heal's `decided_from`, such as `telegram` or `cli`), never a chat or a user |
 | `closed` | `Jobs.HealAnswer`, `outcome: "skipped"` or `"superseded"` | the answer just recorded closed the heal: a leave, or an apply to a job that moved on |
 | `decided` | `Jobs.HealRun` | its diagnosis's decision, as code carries it out, was recorded |
 | `delivered` | `Jobs.HealRun` | the one message was sent and marked |
@@ -926,10 +926,13 @@ of `job_id`, `run_id`, `subject_kind`, `subject_id`, `failure_kind`, `outcome`,
 `rerun`, `raise_limit`, `pause`, `propose`, `tell` or `none`), `requested`
 (what the heal run asked), `refusal` (why a check did not carry the request
 out as asked: `not_upward`, `past_ceiling`, `not_runnable`, `not_running`,
-`consent_required`, `watcher_unreadable`, `invalid_change`, `move_failed`, or
+`consent_required`, `watcher_unreadable`, `invalid_change`, `move_failed`,
 `job_changed` when the owner wrote the job while the diagnosis ran, whatever
 value the write left, or anything else moved its definition, so its raised
-limit or pause was not written), `read_outside`,
+limit or pause was not written, `card_too_large` when a proposal's card would
+pass its bound, with its length in `error`, or `no_card_chat` when the owner's
+inbox has no chat a card's answer can come from; each of the last two keeps
+the proposal as `tell`), `read_outside`,
 `rerun_outcome`, and on `answered` the owner's `answer` and whether the change
 was `applied` the phase knows. A settle's `opened`, `joined` and
 `verdict` always carry `failure_kind`, `subject_kind` (`job`, `provider` or

@@ -154,12 +154,13 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   defp dispatch("revoke", ["path", path], _message, reply_fn, _context),
     do: apply_now({:remove_allowed_root, path}, reply_fn)
 
-  # A watcher's card (a mandate's proposal, M60 §10.9, or a follow-up's card)
-  # is core's, by its `cp_` token or its id: durable in `memory.db`, and core
-  # checks the message's origin against the chat it was sent to. Every other
-  # token is this store's. `/always` answers a follow-up's card alone: Run, and
-  # no card for its later items (the 2026-10-31 revision of
-  # M60_WATCHER_CODING_RUNS.md §3.4); nothing in this store takes it.
+  # A card of core's answer rail (a mandate's proposal, M60 §10.9, a
+  # follow-up's card, or a heal's proposal, M106 §5.7) is core's, by its `cp_`
+  # token or its id: durable in `memory.db`, and core checks the message's
+  # origin against the chat it was sent to. Every other token is this store's.
+  # `/always` answers a follow-up's card alone: Run, and no card for its later
+  # items (the 2026-10-31 revision of M60_WATCHER_CODING_RUNS.md §3.4);
+  # nothing in this store takes it.
   defp dispatch("confirm", [token], message, reply_fn, context) do
     if Proposals.answerable?(token),
       do: confirm_proposal(token, message, reply_fn, context),
@@ -581,10 +582,11 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   end
 
   # A bare `/confirm` or `/deny` answers the one thing waiting in this chat: a
-  # watcher's card held in core, or a parked command or sandbox change held
-  # here. A bare `/always` answers the one follow-up's card waiting, the only
-  # thing that takes it. With more than one it answers none, and lists each
-  # with the command that answers it (M60_WATCHER_CODING_RUNS.md §6.2).
+  # card held in core (a watcher's, or a heal's proposal), or a parked command
+  # or sandbox change held here. A bare `/always` answers the one follow-up's
+  # card waiting, the only thing that takes it. With more than one it answers
+  # none, and lists each with the command that answers it
+  # (M60_WATCHER_CODING_RUNS.md §6.2).
   defp answer_bare(command, message, reply_fn, context) do
     case Proposals.waiting_in_chat(proposal_origin(message), proposal_opts(context)) do
       {:ok, cards} ->

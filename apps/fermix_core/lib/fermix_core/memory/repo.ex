@@ -115,6 +115,7 @@ defmodule FermixCore.Memory.Repo do
   @job_run_tally_migration_version 73
   @job_heal_answer_migration_version 74
   @owner_hours_index_migration_version 75
+  @job_heal_card_migration_version 76
   @sqlite_open_intent :readwritecreate
 
   # The home's requests about notes from every machine (M97 §8), all served by
@@ -5477,8 +5478,39 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_job_heal_diagnosis_migration(conn, versions),
          :ok <- apply_job_run_tally_migration(conn, versions),
          :ok <- apply_job_heal_answer_migration(conn, versions),
-         :ok <- apply_owner_hours_index_migration(conn, versions) do
+         :ok <- apply_owner_hours_index_migration(conn, versions),
+         :ok <- apply_job_heal_card_migration(conn, versions) do
       :ok
+    end
+  end
+
+  # M106 §5.7, D5 (stage S4b): a proposal's card, held as the answer rail
+  # holds a watcher card's (its token's digest, unique, and the chat it went
+  # to), and the token itself while its send is pending, as columns on
+  # `job_heals`, with the version in one transaction, after 74's columns
+  # (75 is the active-hours index on `messages`, M107, which this does not
+  # touch). `job_heals` is this milestone's own table, read by column name,
+  # so it widens; `job_runs` and `scheduled_jobs` are left as they were. No
+  # row is rewritten: a proposal from before has no card, so no answer
+  # reaches it.
+  # Reapplying it changes nothing: the columns are added only while the table
+  # holds 74's, and a table that holds neither set is refused.
+  defp apply_job_heal_card_migration(conn, versions) do
+    if Enum.member?(versions, @job_heal_card_migration_version) do
+      :ok
+    else
+      with :ok <- Sqlite3.execute(conn, "BEGIN;") do
+        conn |> job_heal_card_step() |> commit_migration(conn)
+      end
+    end
+  end
+
+  defp job_heal_card_step(conn) do
+    with :ok <- add_columns(conn, "job_heals", JobHealsSql.card_columns()) do
+      Sqlite3.execute(
+        conn,
+        "INSERT INTO schema_migrations(version) VALUES (#{@job_heal_card_migration_version});"
+      )
     end
   end
 

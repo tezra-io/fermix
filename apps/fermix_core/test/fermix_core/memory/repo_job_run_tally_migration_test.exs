@@ -25,6 +25,8 @@ defmodule FermixCore.Memory.RepoJobRunTallyMigrationTest do
                       read_outside change_json change_job_version rerun_at rerun_outcome)
   # The columns 74 adds after `tool_json` (`RepoJobHealsAnswerMigrationTest`).
   @answer_columns ~w(change_job_digest answer answered_at decided_from applied_at owner_wrote_at)
+  # The columns 76 adds for a proposal's card (M106 §5.7, D5, stage S4b).
+  @card_columns ~w(card_token card_token_digest card_platform card_chat_id card_user_id)
   @scheduled_job_width 36
   @job_run_width 24
 
@@ -53,7 +55,10 @@ defmodule FermixCore.Memory.RepoJobRunTallyMigrationTest do
     assert {:ok, versions} = Repo.migration_versions(server: repo)
     assert @version in versions
     assert columns(db_path, "job_run_facts") == @facts_columns_69 ++ ["tool_tally_json"]
-    assert columns(db_path, "job_heals") == @heal_columns_72 ++ ["tool_json"] ++ @answer_columns
+
+    assert columns(db_path, "job_heals") ==
+             @heal_columns_72 ++ ["tool_json"] ++ @answer_columns ++ @card_columns
+
     assert length(columns(db_path, "scheduled_jobs")) == @scheduled_job_width
     assert length(columns(db_path, "job_runs")) == @job_run_width
   end
@@ -111,8 +116,9 @@ defmodule FermixCore.Memory.RepoJobRunTallyMigrationTest do
     raw(db_path, """
     ALTER TABLE job_run_facts DROP COLUMN tool_tally_json;
     ALTER TABLE job_heals DROP COLUMN tool_json;
-    #{Enum.map_join(@answer_columns, "\n", &"ALTER TABLE job_heals DROP COLUMN #{&1};")}
-    DELETE FROM schema_migrations WHERE version IN (#{@version}, 74);
+    DROP INDEX IF EXISTS job_heals_card_token;
+    #{Enum.map_join(@answer_columns ++ @card_columns, "\n", &"ALTER TABLE job_heals DROP COLUMN #{&1};")}
+    DELETE FROM schema_migrations WHERE version IN (#{@version}, 74, 76);
     """)
 
     assert columns(db_path, "job_run_facts") == @facts_columns_69
@@ -133,7 +139,9 @@ defmodule FermixCore.Memory.RepoJobRunTallyMigrationTest do
 
     reopen(repo, db_path, :second)
     assert columns(db_path, "job_run_facts") == @facts_columns_69 ++ ["tool_tally_json"]
-    assert columns(db_path, "job_heals") == @heal_columns_72 ++ ["tool_json"] ++ @answer_columns
+
+    assert columns(db_path, "job_heals") ==
+             @heal_columns_72 ++ ["tool_json"] ++ @answer_columns ++ @card_columns
 
     assert {:ok, %{failure_kind: "time_limit", tool_timeline: [], tool_tally: nil}} =
              Repo.get_job_run("run_kept", server: repo)
@@ -149,7 +157,9 @@ defmodule FermixCore.Memory.RepoJobRunTallyMigrationTest do
     assert {:ok, versions} = Repo.migration_versions(server: repo)
     assert Enum.count(versions, &(&1 == @version)) == 1
     assert columns(db_path, "job_run_facts") == @facts_columns_69 ++ ["tool_tally_json"]
-    assert columns(db_path, "job_heals") == @heal_columns_72 ++ ["tool_json"] ++ @answer_columns
+
+    assert columns(db_path, "job_heals") ==
+             @heal_columns_72 ++ ["tool_json"] ++ @answer_columns ++ @card_columns
   end
 
   test "a table that holds neither column set is refused, never rewritten", %{

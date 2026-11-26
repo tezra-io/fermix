@@ -193,8 +193,9 @@ defmodule FermixCore.Jobs.Telemetry do
   `requested` (what the heal run asked), `refusal` (why code did not carry
   the request out), `read_outside`, on `rerun` its `rerun_outcome`
   (`started`, `running`, `refused` or `unanswered`), and on `answered` the
-  owner's `answer` (`apply` or `leave`) and whether the change was
-  `applied` the phase knows.
+  owner's `answer` (`apply` or `leave`), whether the change was `applied`
+  and, as its `platform`, the kind of surface the answer came from, the
+  phase knows.
   """
   @spec heal(String.t(), map()) :: :ok
   def heal(phase, %{heal_id: heal_id} = facts)

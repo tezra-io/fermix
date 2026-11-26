@@ -51,6 +51,7 @@ _CASE_KEYS = {
     "id", "query", "turns", "expect", "rubric", "judge", "timeout_ms", "drive",
     "image", "images", "score", "checker", "requires_tools", "requires_tools_all",
     "cross_session", "companion", "watch", "voice", "cue", "requires", "state",
+    "command",
 }
 _TURN_KEYS = {"query", "expect", "await", "after"}
 # The one profile a behavioral case's `state:` may run under: the seed deletes every
@@ -125,8 +126,14 @@ EXPECT_SPEC: dict[str, tuple] = {
 # send the message, so it runs only with --operator; `voice` spends a paid voice
 # minute against a Grok-enabled eval daemon, so it runs only with --voice; `cue`
 # posts cues to the eval daemon's door and is capability-tier only
-# (evallib/cue_drive.py).
-DRIVES = ("ask", "companion", "telegram_operator", "voice", "cue")
+# (evallib/cue_drive.py); `owner_command` sends each turn as a command the owner
+# types (`/confirm`, `/deny`), which the gateway answers with no model, in the
+# owner's own chat, and is capability-tier only.
+DRIVES = ("ask", "companion", "telegram_operator", "voice", "cue", "owner_command")
+# The chats an `owner_command` case may type in: the owner's inbox chat (`fermix
+# ask`'s default session, where a card bound to the local CLI inbox answers from), or
+# the trial's own session, which is another chat.
+COMMAND_CHATS = ("inbox", "trial")
 OPERATOR_DRIVES = ("telegram_operator",)
 VOICE_DRIVES = ("voice",)
 
@@ -190,6 +197,8 @@ class Case:
     #   and when; evallib/voice.py.
     cue: dict = field(default_factory=dict)  # drive: cue — the source and the events
     #   the runner posts to the door; evallib/cue_drive.py.
+    command: dict = field(default_factory=dict)  # drive: owner_command — `chat`, where
+    #   the owner types: `inbox` (default) or `trial`. COMMAND_CHATS.
     requires: tuple[str, ...] = ()  # what the eval home must be seeded with for this case
     #   beyond its suite's `requires` (REQUIREMENTS); run_eval.py holds it out without.
     phone_calls: bool = False       # its suite or itself requires `phone_calls`: its calls
@@ -743,6 +752,45 @@ def _voice_spec(cs: dict, drive: str, case_expect: dict, cloc: str, fixtures_dir
     return spec, voice.spoken_text(spec, fixtures_dir)
 
 
+def _command_spec(cs: dict, drive: str, turns: list, turn_expects: list[dict],
+                  case_expect: dict, suite_name: str, cloc: str, problems: list[str]) -> dict:
+    """Validate an `owner_command` case. Each turn is a command the owner types, which
+    the gateway answers with no model and no trace, so the case is a capability case
+    whose json checker grades the store its seeded state (`checker.state`) left, and
+    nothing about a reply's trace can be asked of it."""
+    if drive != "owner_command":
+        if "command" in cs:
+            problems.append(f"{cloc}: `command` needs `drive: owner_command`")
+        return {}
+    spec = cs.get("command", {})
+    found = []
+    if not isinstance(spec, dict) or set(spec) - {"chat"} or \
+            spec.get("chat", "inbox") not in COMMAND_CHATS:
+        found.append(f"{cloc}: `command` is a map with only `chat`, one of "
+                     f"{list(COMMAND_CHATS)}, got {spec!r}")
+    if not suite_name.startswith(CAPABILITY_SUITE_PREFIX):
+        found.append(f"{cloc}: `drive: owner_command` belongs to a capability suite (cap_*): "
+                     "its outcome is rows a checker grades, not a reply")
+    checker_spec = cs.get("checker")
+    if not isinstance(checker_spec, dict) or checker_spec.get("mode") != "json" \
+            or not checker_spec.get("state"):
+        found.append(f"{cloc}: a `drive: owner_command` case is graded by a json-mode "
+                     "`checker` over its seeded `checker.state`")
+    for key in ("score", "rubric", "image", "images", "cross_session"):
+        if cs.get(key):
+            found.append(f"{cloc}: a `drive: owner_command` case takes no `{key}`")
+    if case_expect or any(turn_expects):
+        found.append(f"{cloc}: a `drive: owner_command` turn leaves no trace to grade; "
+                     "declare what it requires in `checker.expect`")
+    typed = [turn.query for turn in turns]
+    if not all(isinstance(text, str) and text.startswith("/") and "\n" not in text
+               for text in typed):
+        found.append(f"{cloc}: each `drive: owner_command` turn is one typed command "
+                     f"starting with `/`, got {typed!r}")
+    problems.extend(found)
+    return {} if found else {"chat": spec.get("chat", "inbox")}
+
+
 def _cue_spec(cs: dict, drive: str, case_expect: dict, suite_name: str, cloc: str,
               problems: list[str]) -> dict:
     """Validate a case's `cue:` map. A cue case has no user turn: the runner posts the
@@ -1056,6 +1104,8 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
             voice_spec, spoken = _voice_spec(cs, drive, case_expect, cloc, fixtures_dir, problems)
             if spoken is not None:
                 turns = [Turn(query=spoken, expect={})]
+            command_spec = _command_spec(cs, drive, turns, turn_expects, case_declared,
+                                         str(name), cloc, problems)
             cue_spec = _cue_spec(cs, drive, case_expect, str(name), cloc, problems)
             if cue_spec:
                 turns = [Turn(query=text, expect={}) for text in cue_drive.turn_texts(cue_spec)]
@@ -1110,7 +1160,8 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
                         score_spec=score_spec, checker_spec=checker_spec,
                         requires_tools=requires_tools, cross_session=cross_session,
                         requires_tools_all=tuple(requires_all), companion=companion_spec,
-                        watch=watch, voice=voice_spec, cue=cue_spec, requires=case_requires,
+                        watch=watch, voice=voice_spec, cue=cue_spec, command=command_spec,
+                        requires=case_requires,
                         phone_calls="phone_calls" in (*suite_requires, *case_requires),
                         state=state)
             _refuse_misplaced_phone_turns(case, str(name), cloc, problems)

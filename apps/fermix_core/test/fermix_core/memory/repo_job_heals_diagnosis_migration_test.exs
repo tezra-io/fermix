@@ -23,6 +23,8 @@ defmodule FermixCore.Memory.RepoJobHealsDiagnosisMigrationTest do
   # ones 74 adds after it (`RepoJobHealsAnswerMigrationTest`).
   @tool_columns ~w(tool_json)
   @answer_columns ~w(change_job_digest answer answered_at decided_from applied_at owner_wrote_at)
+  # The columns 76 adds for a proposal's card (M106 §5.7, D5, stage S4b).
+  @card_columns ~w(card_token card_token_digest card_platform card_chat_id card_user_id)
   @scheduled_job_width 36
   @job_run_width 24
 
@@ -48,7 +50,7 @@ defmodule FermixCore.Memory.RepoJobHealsDiagnosisMigrationTest do
     assert @version in versions
 
     assert columns(db_path, "job_heals") ==
-             @heal_columns_71 ++ @added ++ @tool_columns ++ @answer_columns
+             @heal_columns_71 ++ @added ++ @tool_columns ++ @answer_columns ++ @card_columns
 
     assert length(columns(db_path, "scheduled_jobs")) == @scheduled_job_width
     assert length(columns(db_path, "job_runs")) == @job_run_width
@@ -82,8 +84,9 @@ defmodule FermixCore.Memory.RepoJobHealsDiagnosisMigrationTest do
     # A store at 71 has none of the versions that widen its table.
     raw(db_path, """
     DROP INDEX IF EXISTS job_heals_watching;
-    #{Enum.map_join(@added ++ @tool_columns ++ @answer_columns, "\n", &"ALTER TABLE job_heals DROP COLUMN #{&1};")}
-    DELETE FROM schema_migrations WHERE version IN (#{@version}, 73, 74);
+    DROP INDEX IF EXISTS job_heals_card_token;
+    #{Enum.map_join(@added ++ @tool_columns ++ @answer_columns ++ @card_columns, "\n", &"ALTER TABLE job_heals DROP COLUMN #{&1};")}
+    DELETE FROM schema_migrations WHERE version IN (#{@version}, 73, 74, 76);
     """)
 
     assert columns(db_path, "job_heals") == @heal_columns_71
@@ -92,7 +95,7 @@ defmodule FermixCore.Memory.RepoJobHealsDiagnosisMigrationTest do
     reopen(repo, db_path, :second)
 
     assert columns(db_path, "job_heals") ==
-             @heal_columns_71 ++ @added ++ @tool_columns ++ @answer_columns
+             @heal_columns_71 ++ @added ++ @tool_columns ++ @answer_columns ++ @card_columns
 
     assert rows(db_path, "SELECT id, conclusion, decision FROM job_heals") == [
              ["jhl_kept", "first", nil]
@@ -107,7 +110,7 @@ defmodule FermixCore.Memory.RepoJobHealsDiagnosisMigrationTest do
     assert Enum.count(versions, &(&1 == @version)) == 1
 
     assert columns(db_path, "job_heals") ==
-             @heal_columns_71 ++ @added ++ @tool_columns ++ @answer_columns
+             @heal_columns_71 ++ @added ++ @tool_columns ++ @answer_columns ++ @card_columns
   end
 
   test "a table that holds neither column set is refused, never rewritten", %{

@@ -367,7 +367,9 @@ the `query` shorthand; multi-turn uses `turns`.
   (capability suites only): the runner posts cues to the eval daemon's door and
   a checker grades the rows they left; see *`drive: cue`* below. No `query`,
   `turns`, `image`, `rubric`, `score` or `expect`: the case's posts are its
-  turns and its json `checker` is its grade.
+  turns and its json `checker` is its grade. `owner_command` (capability suites
+  only): each turn is a command the owner types (`/confirm`, `/deny`), which the
+  gateway answers with no model; see *`drive: owner_command`* below.
 - `image` (string, optional) — path to a known local attachment (a picture, or
   any file: a GIF, a video, a PDF, a text file, a file Fermix cannot read)
   relative to the suite file and physically contained under `suites/fixtures/`.
@@ -829,6 +831,33 @@ its config must have `[fermix_core.realtime] enabled = true`, and its daemon
 must answer on `realtime.sock`; all three are checked before anything is
 driven. `--dry-run` validates the fixtures and prints the plan, opening no call.
 
+### `drive: owner_command` — the owner types a command, with no model
+
+```yaml
+- id: confirm_applies_the_recorded_change
+  drive: owner_command
+  command: {chat: inbox}         # optional; inbox (default) or trial
+  query: "/confirm"              # or turns: [{query: "/confirm"}, {query: "/deny"}]
+  checker:
+    script: suites/capability/checkers/job_proposal.py
+    mode: json
+    state: suites/fixtures/state/job_auto_heal_holds_proposal.json
+    expect: {job: holds, outcome: applied}
+```
+
+What only the owner's own typing can do: answer a card (M106 §5.7, a heal's proposal)
+with `/confirm` or `/deny`, in the chat the card went to. The runner seeds the
+case's `checker.state`, then sends each turn through `fermix ask` in order: with
+`command.chat: inbox`, in the owner's own local chat (`fermix ask`'s default session,
+`cli`, where a card bound to the CLI inbox answers from, `--owner-inbox-cli`); with
+`trial`, in the trial's own session, another chat. The gateway answers a command
+before any model, so no trace is polled: each reply is the turn's evidence
+(`replies` in the evidence file, beside an empty `tool_spans`), the json `checker`
+grades the store, and the trial spends no model tokens (its cost reads unknown, never
+$0, and `--estimate` prices no such turn). A command the daemon did not answer, or
+answered with nothing, makes the trial INVALID. Every turn is one line starting with
+`/`; no `expect`, `score`, `rubric` or `image`.
+
 ### `drive: cue` — cues into the eval daemon's door
 
 ```yaml
@@ -1011,7 +1040,7 @@ diagnoses it first, one model run on the home's main route, and code carries out
 decision, then sends its message. A seeded ok run after it closes the heal as healed.
 A spec's failed `runs` therefore seed what the owner was told, not only rows.
 `checkers/job_heal.py` grades that heal (its docstring has the gold), and
-`checkers/job_proposal.py` what stays true of a stored proposal nobody answered; both need
+`checkers/job_proposal.py` what became of a stored proposal and its card; both need
 a home seeded with `--owner-inbox-cli`, the one eval inbox a send reaches.
 
 When each run happened (`bin/seed_run_times.exs`, checked by
@@ -1066,7 +1095,10 @@ A run may also say (M106 §5.1, §5.5):
   `propose` change names `task`, `schedule`, `skill_name` or `timeout_seconds`, each
   `{"from", "to"}`, with the job still holding `from`, and is stored with the job's
   version it was drawn for (`Jobs.HealDecision.job_version/1`), which the owner's
-  answer to it is fenced on (M106 §5.7); `rerun` and `tell` carry
+  answer to it is fenced on (M106 §5.7), and goes out as a heal run sends it: its card
+  bound to the chat its answer must come from (the local CLI inbox's `cli` chat) and
+  sent, or, when the card could not hold it or no chat can answer one
+  (`Jobs.HealDecision.fit_card/3`), kept as `tell`, as the engine keeps it; `rerun` and `tell` carry
   none. A `propose` conclusion may add `owner_edit`, the owner's own edit after the
   proposal reached them (`schedule`, `task_prompt` or `timeout_seconds`, each a new
   value), made through `Jobs.Registry.update_job/3`, which closes the proposal

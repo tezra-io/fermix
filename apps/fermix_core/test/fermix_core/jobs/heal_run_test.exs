@@ -8,6 +8,7 @@ defmodule FermixCore.Jobs.HealRunTest do
   import ExUnit.CaptureLog, only: [with_log: 1]
 
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Jobs.HealDecision
   alias FermixCore.Jobs.HealRun
   alias FermixCore.Jobs.Registry
   alias FermixCore.Memory.ConversationStore
@@ -249,6 +250,46 @@ defmodule FermixCore.Jobs.HealRunTest do
     end
   end
 
+  # M106 §5.8, §5.9: a heal can send two messages, its first and its verdict.
+  # A channel that keys a send (the app timeline, iMessage's ledger) answers a
+  # repeated key as already sent, so each message has a key of its own, and
+  # every retry of one message keeps that message's key.
+  describe "the send key names the message" do
+    test "the first message and the verdict are keyed apart; each retry keeps its own", ctx do
+      start_channel(ctx, [
+        {:error, {:transport, :timeout}},
+        :ok,
+        {:error, {:transport, :timeout}},
+        :ok
+      ])
+
+      {job, heal} = claimed_heal!(ctx)
+      :ok = decide_raise!(ctx, heal)
+      {:ok, decided} = get_heal(ctx, heal.id)
+
+      run!(ctx, decided)
+      retry_at = DateTime.add(@now, 30, :second)
+      {:ok, again} = claim(ctx, retry_at)
+      run!(ctx, again, clock: fn -> retry_at end)
+      assert {:ok, %{state: "watching"}} = get_heal(ctx, heal.id)
+
+      failed_again = DateTime.add(@now, 3_600, :second)
+      {:ok, {_run, _job, %{heal: {:verdict, _id}}}} = fail!(ctx, job, failed_again)
+      verdict_at = DateTime.add(failed_again, 60, :second)
+      {:ok, verdict} = claim(ctx, verdict_at)
+      run!(ctx, verdict, clock: fn -> verdict_at end)
+      verdict_retry_at = DateTime.add(verdict_at, 30, :second)
+      {:ok, verdict_again} = claim(ctx, verdict_retry_at)
+      run!(ctx, verdict_again, clock: fn -> verdict_retry_at end)
+
+      keys = Enum.map(calls(ctx), &Keyword.fetch!(&1.opts, :proactive_key))
+      assert [first, first, verdict_key, verdict_key] = keys
+      assert first == "job_heal:" <> heal.id
+      assert verdict_key == "job_heal:" <> heal.id <> ":verdict"
+      assert {:ok, %{state: "closed", outcome: "still_failing"}} = get_heal(ctx, heal.id)
+    end
+  end
+
   describe "a failed send" do
     test "backs off by the ladder and resends the same text", ctx do
       start_channel(ctx, [{:error, {:transport, :timeout}}, {:error, {:http_status, 503}}, :ok])
@@ -404,6 +445,53 @@ defmodule FermixCore.Jobs.HealRunTest do
 
     {:ok, heal} = claim(ctx, @now)
     {job, heal}
+  end
+
+  # The heal's decision recorded as a raised limit, so its concluding write
+  # has it watch the job's next run (no model; the move itself is not made).
+  defp decide_raise!(ctx, heal) do
+    {:ok, job} = Repo.get_scheduled_job(heal.job_id, server: ctx.repo)
+
+    plan = %{
+      decision: "raise_limit",
+      note: "A longer limit gives the harbour page room.",
+      read_outside: false,
+      change: %{"timeout_seconds" => %{"from" => nil, "to" => 1_200}},
+      change_job_version: job.updated_at,
+      change_job_digest: HealDecision.job_version(job)
+    }
+
+    Repo.job_heals_call({:decided, heal.id, heal.lease_token, plan, @now}, server: ctx.repo)
+  end
+
+  # Another failed run of `job`, settled at `at`.
+  defp fail!(ctx, job, at) do
+    run_attrs = %{
+      id: "run_#{System.unique_integer([:positive])}",
+      job_id: job.id,
+      session_id: "cron_#{job.id}_2",
+      trigger: "schedule",
+      status: "queued",
+      claimed_at: at,
+      delivery_status: "none",
+      created_at: at,
+      updated_at: at
+    }
+
+    {:ok, {_job, run}} =
+      Repo.claim_job_now(job.id, %{state: "running", updated_at: at}, run_attrs, server: ctx.repo)
+
+    attrs =
+      Map.merge(run, %{
+        status: "timeout",
+        error: "wall-clock timeout after 600000ms",
+        failure_kind: "time_limit",
+        completed_at: at,
+        updated_at: at,
+        heal_facts: %{failure_text: "wall-clock timeout after 600000ms", provider: nil}
+      })
+
+    Repo.settle_job_run(attrs, {:failed, :other}, server: ctx.repo)
   end
 
   defp claim(ctx, now),

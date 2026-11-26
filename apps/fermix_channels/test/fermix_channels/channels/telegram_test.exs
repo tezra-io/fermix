@@ -1232,6 +1232,32 @@ defmodule FermixChannels.Channels.TelegramTest do
              ]
     end
 
+    # M106 §5.7, D5: a heal's proposal is the same card, answered with Approve
+    # and Deny, whose taps send the same `/confirm` and `/deny`.
+    test "a heal's proposal goes as the same card, with Approve and Deny" do
+      stub_telegram(self(), 200, %{"ok" => true})
+
+      spec = %{
+        card_spec(:job_change)
+        | lines: [~s(Job "Harbour <tides>" failed.), "Fermix has not made this change."],
+          actions: %{confirm: "Approve", deny: "Deny"}
+      }
+
+      assert :ok = Telegram.send_approval(card_message(), spec)
+
+      assert_received {:telegram_request, "/bottest-bot-token/sendMessage", body}
+      assert body["parse_mode"] == "HTML"
+      assert body["text"] =~ "<b>Job \"Harbour &lt;tides&gt;\" failed.</b>\n"
+      assert body["text"] =~ "<blockquote expandable>Details"
+
+      assert body["reply_markup"]["inline_keyboard"] == [
+               [
+                 %{"text" => "Approve", "callback_data" => "grant:cp_TOKEN"},
+                 %{"text" => "Deny", "callback_data" => "deny:cp_TOKEN"}
+               ]
+             ]
+    end
+
     test "a sandbox approval gets the one-tap buttons; a SOUL.md change its text alone" do
       stub_telegram(self(), 200, %{"ok" => true})
 

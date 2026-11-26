@@ -307,6 +307,34 @@ defmodule FermixCore.Delivery.OwnerInboxTest do
     end
   end
 
+  # M106 §5.7 (stage S4b): a card is held to the chat its answer comes from,
+  # a DM's or the local cli chat's, which only the owner types in.
+  describe "answer_origin/1" do
+    test "a DM answers as dm_origin/1 does; the local cli chat answers its own chat and user" do
+      dm = %{platform: "signal", destination: "+15550100", thread_scope: "root"}
+      assert OwnerInbox.answer_origin(dm) == OwnerInbox.dm_origin(dm)
+
+      assert OwnerInbox.answer_origin(%{
+               platform: "cli",
+               destination: "cli",
+               thread_scope: "root"
+             }) ==
+               {:ok, %{platform: "cli", chat_id: "cli", user_id: "cli"}}
+    end
+
+    test "any other inbox, and the cli for dm_origin/1, have none" do
+      for inbox <- [
+            %{platform: "slack", destination: "U1"},
+            %{platform: "daemon", destination: "local"},
+            %{platform: "cli", destination: ""}
+          ] do
+        assert OwnerInbox.answer_origin(inbox) == :error
+      end
+
+      assert OwnerInbox.dm_origin(%{platform: "cli", destination: "cli"}) == :error
+    end
+  end
+
   describe "configured_owners/0" do
     setup do
       previous = Map.new(@owner_channels, &{&1, Application.get_env(:fermix_channels, &1)})

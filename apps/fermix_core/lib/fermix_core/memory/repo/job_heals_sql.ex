@@ -82,6 +82,18 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
   the heal's claim clears; a heal run's move under a marked heal writes
   nothing (JOB-12). A proposal stored before 74 has no version, so applying
   it writes nothing.
+
+  A proposal is answered on its card (M106 §5.7, D5, stage S4b; the columns
+  migration 76 adds): the heal holds the card's token as the answer rail
+  holds a watcher card's, by its digest (`card_token_digest`, unique) and
+  the chat it was sent to (`card_platform`, `card_chat_id`, `card_user_id`),
+  bound once by the heal run before the first send (`{:bind_card, ...}`).
+  The token itself (`card_token`) is kept only so every retry of the send,
+  each a heal run of its own, carries the token the first carried: the
+  concluding write (delivered or dead letter) and any close set it NULL, and
+  no read but the bind ever selects it (`@read_columns`). The rail finds a
+  card by digest (`{:card_held, _}`, `{:card_by_digest, _}`) and lists those
+  delivered to a chat and still answerable (`{:cards_in_chat, origin}`).
   """
 
   require Logger
@@ -127,9 +139,17 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
   @tool_columns ~w(tool_json)
   @columns_73 @columns_71 ++ @diagnosis_columns ++ @tool_columns
   @answer_columns ~w(change_job_digest answer answered_at decided_from applied_at owner_wrote_at)
-  @columns @columns_73 ++ @answer_columns
-  @fields Enum.map(@columns, &String.to_atom/1)
-  @select "SELECT #{Enum.join(@columns, ", ")} FROM job_heals"
+  @columns_74 @columns_73 ++ @answer_columns
+  # The ones 76 adds for the proposal's card (M106 §5.7, D5): the token's
+  # digest and the chat it went to, and the token itself while its send is
+  # pending (the moduledoc).
+  @card_columns ~w(card_token card_token_digest card_platform card_chat_id card_user_id)
+  @columns @columns_74 ++ @card_columns
+  # What every read of a heal selects: every column but the card's token, so
+  # no heal row handed to a tool, a trace or a log can carry it.
+  @read_columns @columns -- ["card_token"]
+  @fields Enum.map(@read_columns, &String.to_atom/1)
+  @select "SELECT #{Enum.join(@read_columns, ", ")} FROM job_heals"
   @stamped ~w(last_failed_at opened_at updated_at waiting_since closed_at lease_until
               next_delivery_at delivered_at change_job_version rerun_at answered_at
               applied_at owner_wrote_at)a
@@ -141,6 +161,22 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
                 "AND answer IS NULL"
   # How long `list_jobs` shows a proposal after it closed: its quiet days.
   @listed_closed_days 7
+
+  # `card_token` exists only so a retried send of a proposal's card carries
+  # the token the first attempt carried (each attempt is a heal run of its
+  # own, and a digest cannot be turned back into its token); the concluding
+  # write of the send, delivered or dead letter, and any close of the heal
+  # set it NULL. The digest and the chat it went to stay: the rail answers by
+  # them.
+  @card_sql """
+  ALTER TABLE job_heals ADD COLUMN card_token TEXT;
+  ALTER TABLE job_heals ADD COLUMN card_token_digest TEXT;
+  ALTER TABLE job_heals ADD COLUMN card_platform TEXT;
+  ALTER TABLE job_heals ADD COLUMN card_chat_id TEXT;
+  ALTER TABLE job_heals ADD COLUMN card_user_id TEXT;
+  CREATE UNIQUE INDEX IF NOT EXISTS job_heals_card_token
+    ON job_heals(card_token_digest) WHERE card_token_digest IS NOT NULL;
+  """
 
   @answer_sql """
   ALTER TABLE job_heals ADD COLUMN change_job_digest TEXT;
@@ -241,7 +277,8 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
   What a heal run decided, as code carries it out (M106 §5.5): the
   `decision`, the run's `note`, whether the run `read_outside` content, the
   exact `change` (each of `update_job`'s fields it touches, with its `from`
-  and `to`) and the job's version it was drawn for.
+  and `to`) and the job's version it was drawn for; for a proposal, the
+  `message` its card shows (stage S4b).
   """
   @type plan :: %{
           required(:decision) => String.t(),
@@ -249,7 +286,8 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
           required(:read_outside) => boolean() | nil,
           required(:change) => map() | nil,
           optional(:change_job_version) => DateTime.t() | nil,
-          optional(:change_job_digest) => String.t() | nil
+          optional(:change_job_digest) => String.t() | nil,
+          optional(:message) => String.t()
         }
 
   @typedoc """
@@ -286,7 +324,7 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
     do: %{
       before: @columns_71 ++ @diagnosis_columns,
       after: @columns_73,
-      later: [@columns],
+      later: [@columns_74, @columns],
       sql: "ALTER TABLE job_heals ADD COLUMN tool_json TEXT;"
     }
 
@@ -295,10 +333,25 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
   owner's answer to it (M106 §5.7, D5) and an owner's write while the heal
   is diagnosing (JOB-12), as `tool_columns/0` adds 73's:
   added while the table holds 73's columns, nothing while it holds them and
-  these, refused for any other set.
+  these (or what 76 made of them), refused for any other set.
   """
-  @spec answer_columns() :: %{before: [String.t()], after: [String.t()], sql: String.t()}
-  def answer_columns, do: %{before: @columns_73, after: @columns, sql: @answer_sql}
+  @spec answer_columns() :: %{
+          before: [String.t()],
+          after: [String.t()],
+          later: [[String.t()]],
+          sql: String.t()
+        }
+  def answer_columns,
+    do: %{before: @columns_73, after: @columns_74, later: [@columns], sql: @answer_sql}
+
+  @doc """
+  The columns migration 76 adds to `job_heals` for a proposal's card (M106
+  §5.7, D5, stage S4b), and the unique index on its token's digest, as
+  `answer_columns/0` adds 74's: added while the table holds 74's columns,
+  nothing while it holds them and these, refused for any other set.
+  """
+  @spec card_columns() :: %{before: [String.t()], after: [String.t()], sql: String.t()}
+  def card_columns, do: %{before: @columns_74, after: @columns, sql: @card_sql}
 
   @doc """
   The columns migration 72 adds to `job_heals` for the diagnosis (M106 §5.5,
@@ -316,7 +369,7 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
     do: %{
       before: @columns_71,
       after: @columns_71 ++ @diagnosis_columns,
-      later: [@columns_73, @columns],
+      later: [@columns_73, @columns_74, @columns],
       sql: @diagnosis_sql
     }
 
@@ -433,11 +486,14 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
       when is_binary(id) and outcome in @rerun_outcomes,
       do: rerun_outcome(conn, id, outcome, now)
 
+  # The send's concluding writes let go of the card's token: no later send
+  # needs it, and the digest answers.
   def handle(conn, {:delivered, id, token, %DateTime{} = now}) do
     assignments = [
       {"delivery_status", "delivered"},
       {"delivered_at", CuesSql.stamp(now)},
-      {"next_delivery_at", nil}
+      {"next_delivery_at", nil},
+      {"card_token", nil}
     ]
 
     conclude(conn, id, token, assignments, now)
@@ -464,7 +520,8 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
       {"delivery_status", "dead_letter"},
       {"delivery_attempts", attempts},
       {"next_delivery_at", nil},
-      {"last_delivery_error", bounded(error, @delivery_error_max)}
+      {"last_delivery_error", bounded(error, @delivery_error_max)},
+      {"card_token", nil}
     ]
 
     conclude(conn, id, token, assignments, now)
@@ -472,6 +529,56 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
 
   def handle(conn, {:expire_waiting, %DateTime{} = now}),
     do: CuesSql.with_immediate_transaction(conn, fn -> expire_waiting(conn, now) end)
+
+  # The proposal's card bound to the chat its answer must come from, once,
+  # under the heal run's lease (M106 §5.7, D5): `card` is a freshly minted
+  # token, its digest and that chat. A heal that holds a card keeps it, and
+  # its token is answered, so every retry of the send carries the first one.
+  def handle(conn, {:bind_card, id, lease_token, card, %DateTime{} = now})
+      when is_binary(id) and is_binary(lease_token) and is_map(card) do
+    CuesSql.with_immediate_transaction(conn, fn ->
+      bind_card(conn, id, lease_token, card, now)
+    end)
+  end
+
+  def handle(conn, {:card_held, digest}) when is_binary(digest) do
+    sql = "SELECT 1 FROM job_heals WHERE card_token_digest = ? LIMIT 1"
+    with {:ok, rows} <- CuesSql.query_all(conn, sql, [digest]), do: {:ok, rows != []}
+  end
+
+  def handle(conn, {:card_by_digest, digest}) when is_binary(digest) do
+    sql =
+      "SELECT id, card_platform, card_chat_id, card_user_id FROM job_heals " <>
+        "WHERE card_token_digest = ?"
+
+    case CuesSql.query_all(conn, sql, [digest]) do
+      {:ok, [[id, platform, chat_id, user_id]]} ->
+        {:ok, %{id: id, origin: %{platform: platform, chat_id: chat_id, user_id: user_id}}}
+
+      {:ok, []} ->
+        {:ok, nil}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # The cards delivered to one chat whose proposal still waits for an answer,
+  # oldest first, with their job's name: what a bare `/confirm` there answers.
+  def handle(conn, {:cards_in_chat, %{platform: platform, chat_id: chat_id, user_id: user_id}})
+      when is_binary(platform) and is_binary(chat_id) and is_binary(user_id) do
+    sql = """
+    SELECT h.id, (SELECT j.name FROM scheduled_jobs j WHERE j.id = h.job_id)
+    FROM job_heals h
+    WHERE #{@answerable} AND delivery_status = 'delivered' AND card_platform = ?
+      AND card_chat_id = ? AND card_user_id = ?
+    ORDER BY opened_at, id
+    """
+
+    with {:ok, rows} <- CuesSql.query_all(conn, sql, [platform, chat_id, user_id]) do
+      {:ok, Enum.map(rows, fn [id, name] -> %{id: id, job_name: name} end)}
+    end
+  end
 
   @doc "Whether `claim` is a `claim()` of a well-formed shape."
   @spec claim?(term()) :: boolean()
@@ -912,11 +1019,13 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
 
   defp close_rows(_conn, _where, _params, _outcome, _at, []), do: :ok
 
+  # A close lets go of a card's token too: a heal closed while its card's
+  # send was still pending sends nothing more.
   defp close_rows(conn, where, params, outcome, at, _rows) do
     sql = """
     UPDATE job_heals
     SET state = 'closed', outcome = ?, closed_at = ?, updated_at = ?, lease_token = NULL,
-        lease_until = NULL
+        lease_until = NULL, card_token = NULL
     WHERE #{where}
     """
 
@@ -957,6 +1066,38 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
 
     params = [token, CuesSql.stamp(lease_until), CuesSql.stamp(now), heal.id]
     with :ok <- CuesSql.execute(conn, sql, params), do: get(conn, heal.id)
+  end
+
+  # The card's token read and, when the heal holds none, written with its
+  # digest and chat, in one transaction under the lease. A heal that holds a
+  # digest but no token any more has concluded its send: no card goes again.
+  defp bind_card(conn, id, lease_token, card, now) do
+    %{token: token, digest: digest, origin: origin} = card
+
+    sql =
+      "SELECT card_token, card_token_digest FROM job_heals " <>
+        "WHERE id = ? AND lease_token = ? AND state = 'diagnosing'"
+
+    case CuesSql.query_all(conn, sql, [id, lease_token]) do
+      {:ok, [[nil, nil]]} -> write_card(conn, id, lease_token, token, digest, origin, now)
+      {:ok, [[stored, _digest]]} when is_binary(stored) -> {:ok, stored}
+      {:ok, [[nil, _digest]]} -> {:error, :card_concluded}
+      {:ok, []} -> {:error, :lease_lost}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp write_card(conn, id, lease_token, token, digest, origin, now)
+       when is_binary(token) and is_binary(digest) do
+    assignments = [
+      {"card_token", token},
+      {"card_token_digest", digest},
+      {"card_platform", origin.platform},
+      {"card_chat_id", origin.chat_id},
+      {"card_user_id", origin.user_id}
+    ]
+
+    with :ok <- held_write(conn, id, lease_token, assignments, now), do: {:ok, token}
   end
 
   # A write of the heal run that holds the lease and keeps it.
@@ -1033,8 +1174,13 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
       {"change_json", change_json(plan.change)},
       {"change_job_version", optional_stamp(Map.get(plan, :change_job_version))},
       {"change_job_digest", Map.get(plan, :change_job_digest)}
-    ]
+    ] ++ card_message(plan)
   end
+
+  # A proposal's short ask, built and held to its card's bound with the
+  # decision, is stored with it, so what was checked is what is sent.
+  defp card_message(%{message: text}) when is_binary(text), do: [{"message", text}]
+  defp card_message(_plan), do: []
 
   defp flag(nil), do: nil
   defp flag(true), do: 1

@@ -95,15 +95,21 @@ defmodule FermixChannels.Gateway.OwnerInboxApproval do
   defp kind(_parked), do: :parked
 
   @doc """
-  Sends a mandate proposal (M60 §10.9) to the owner DM `inbox` that core
-  resolved and recorded on the proposal, through `Gateway.Delivery` as its
-  compact card (`spec`, `Cues.Card.spec/2`): Telegram draws it with Run and
-  Skip, whose taps send the same `/confirm <token>` and `/deny <token>` the
-  card's text answers for every other channel. Nothing is stored here: the
-  proposal and its token's digest are durable in core, which checks the
-  answer's origin. Core reaches this through `config :fermix_core,
-  :cue_proposal_sender`, registered by `FermixChannels.Application`. Seam:
-  `:adapter`.
+  Sends a card of the answer rail (`Cues.Proposals.send_card/3`): a mandate
+  proposal (M60 §10.9), or a heal's proposal for a job (M106 §5.7), to the
+  owner's chat `inbox` that core resolved and recorded on it, through
+  `Gateway.Delivery` as its compact card (`spec`, `Cues.Card.spec/2`):
+  Telegram draws it with its two answers, whose taps send the same
+  `/confirm <token>` and `/deny <token>` the card's text answers for every
+  other channel. The inbox must be one a card's answer can come from
+  (`OwnerInbox.answer_origin/1`: the owner's DM, or the local `cli` chat,
+  which a watcher's reach never chooses). A spec's `proactive_key` rides on
+  the message the channel is handed, so a channel whose helper answers a
+  repeated send by its key (iMessage) never shows a retried card twice.
+  Nothing is stored here: the card and its token's digest are durable in
+  core, which checks the answer's origin. Core reaches this through `config
+  :fermix_core, :cue_proposal_sender`, registered by
+  `FermixChannels.Application`. Seam: `:adapter`.
   """
   @spec send_cue_proposal(
           %{required(:platform) => String.t(), required(:destination) => String.t()},
@@ -112,9 +118,16 @@ defmodule FermixChannels.Gateway.OwnerInboxApproval do
         ) :: :ok | {:error, term()}
   def send_cue_proposal(%{platform: platform} = inbox, %{token: token} = spec, opts \\ [])
       when is_binary(platform) and is_binary(token) and is_list(opts) do
-    with {:ok, _origin} <- dm_inbox(inbox),
+    with {:ok, _origin} <- card_inbox(inbox),
          {:ok, adapter} <- adapter(platform, opts) do
       deliver_card(adapter, inbox, spec)
+    end
+  end
+
+  defp card_inbox(inbox) do
+    case OwnerInbox.answer_origin(inbox) do
+      {:ok, origin} -> {:ok, origin}
+      :error -> {:error, :no_owner_inbox}
     end
   end
 
@@ -170,8 +183,19 @@ defmodule FermixChannels.Gateway.OwnerInboxApproval do
   end
 
   defp deliver_card(adapter, inbox, spec) do
+    message = inbox_message(inbox)
+
+    message =
+      case Map.get(spec, :proactive_key) do
+        key when is_binary(key) ->
+          %{message | metadata: Map.put(message.metadata, :proactive_key, key)}
+
+        nil ->
+          message
+      end
+
     adapter
-    |> ReplyContext.new(inbox_message(inbox))
+    |> ReplyContext.new(message)
     |> Delivery.deliver({:approval_prompt, spec})
   end
 

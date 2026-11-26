@@ -1,12 +1,14 @@
 defmodule FermixCore.Jobs.HealMessageProposalTest do
-  # M106 §5.8 and decision D5 (stage S4): a heal that proposes a change
-  # states it to the owner, and short: what failed, in code's sentence; the
-  # diagnosis's note; one line per changed field with its new value only (a
-  # task as its changed part: what replaces what); one closing line saying the
-  # change has not been made, and nothing on how to answer it (its card, the
-  # next stage, carries that). Every value is quoted data and shown whole or
-  # not at all: a value past the bound says so and that Fermix can show it in
-  # full. Pure and code-built; every value here is invented.
+  # M106 §5.7, §5.8 and decision D5 (stages S4, S4b): a heal that proposes a
+  # change states it to the owner on its card, short: what failed, in code's
+  # sentence; the diagnosis's note; one line per changed field with its new
+  # value only (a task as its changed part: what replaces what), every value
+  # whole, since a card too long for its bound is never offered; one closing
+  # line saying the change has not been made, and nothing on how to answer it
+  # (the card's buttons or its reply line carry that). The card's detail
+  # holds each changed field exactly, as it is and as it would become. Every
+  # value on a line is quoted data. Pure and code-built; every value here is
+  # invented.
   use ExUnit.Case, async: true
 
   alias FermixCore.Jobs.HealMessage
@@ -14,7 +16,6 @@ defmodule FermixCore.Jobs.HealMessageProposalTest do
   @lisbon [personalization: [timezone: "Europe/Lisbon"]]
   @note "The harbour page moved, so each fetch waits until the limit ends it."
   @closing "Fermix has not made this change."
-  @longer_task "Task: a longer rewrite than fits here. Fermix can show it in full."
 
   @facts %{
     subject_kind: "job",
@@ -178,13 +179,13 @@ defmodule FermixCore.Jobs.HealMessageProposalTest do
       assert lines == [~s(- Task: "List boats.")]
     end
 
-    test "past the bound it says it is a longer rewrite Fermix can show in full" do
+    test "a long rewrite is shown whole on its line, never cut and never deferred" do
       rewrite = String.duplicate("Walk the quay and count the moored boats. ", 8)
 
       text = ask(%{"task" => %{"from" => @steps, "to" => rewrite}})
 
-      assert field_lines(text) == ["- " <> @longer_task]
-      refute text =~ "Walk the quay"
+      assert field_lines(text) == [~s(- Task: "#{String.trim(rewrite)}")]
+      refute text =~ "longer"
       refute text =~ "…"
     end
 
@@ -192,7 +193,7 @@ defmodule FermixCore.Jobs.HealMessageProposalTest do
       to = String.replace(@steps, "high tide.", "high  tide.")
 
       assert field_lines(ask(%{"task" => %{"from" => @steps, "to" => to}})) == [
-               "- Task: a change of spacing or quote marks only. Fermix can show it in full."
+               "- Task: a change of spacing or quote marks only, shown exactly in Details."
              ]
     end
 
@@ -205,14 +206,99 @@ defmodule FermixCore.Jobs.HealMessageProposalTest do
     end
   end
 
-  describe "any value past the bound is never cut" do
-    test "a long value says so rather than showing part of it" do
+  describe "any value is shown whole, never cut" do
+    test "a long value is its whole value" do
       schedule = "every 2 hours " <> String.duplicate("x", 200)
 
       assert field_lines(ask(%{"schedule" => %{"from" => "every 1 hour", "to" => schedule}})) ==
-               [
-                 "- Schedule: a longer value than fits here. Fermix can show it in full."
-               ]
+               [~s(- Schedule: "#{schedule}")]
+    end
+  end
+
+  describe "the card's lines" do
+    test "are the short ask, line by line, never cut at the message's bound" do
+      rewrite = String.duplicate("Walk the quay and count the moored boats. ", 80)
+      facts = Map.put(@facts, :change, %{"task" => %{"from" => @steps, "to" => rewrite}})
+
+      lines = HealMessage.card_lines(facts, @lisbon)
+
+      assert String.length(Enum.join(lines, "\n")) > HealMessage.max_length()
+      assert List.last(lines) == @closing
+      assert Enum.any?(lines, &(&1 == ~s(- Task: "#{String.trim(rewrite)}")))
+      refute Enum.any?(lines, &String.contains?(&1, "\n"))
+    end
+  end
+
+  describe "the card's detail" do
+    test "holds each changed field exactly, as it is and as it would become, in a fixed order" do
+      from = "Read harbour.example/old\nand list each high tide."
+      to = ~s(Read harbour.example/tides-2031 and list each  "high" tide.)
+
+      change = %{
+        "timeout_seconds" => %{"from" => 600, "to" => 1_500},
+        "schedule" => %{"from" => "every 1 hour", "to" => "every 2 hours"},
+        "task" => %{"from" => from, "to" => to},
+        "skill_name" => %{"from" => nil, "to" => "tide-reader"}
+      }
+
+      assert HealMessage.change_detail(change) ==
+               Enum.join(
+                 [
+                   "Details: each change in full",
+                   "Task now:",
+                   "> Read harbour.example/old",
+                   "> and list each high tide.",
+                   "Task after the change:",
+                   ~s(> Read harbour.example/tides-2031 and list each  "high" tide.),
+                   "Schedule now: every 1 hour",
+                   "Schedule after the change: every 2 hours",
+                   "Skill now: none",
+                   "Skill after the change: tide-reader",
+                   "Time limit now: 10 minutes",
+                   "Time limit after the change: 25 minutes"
+                 ],
+                 "\n"
+               )
+    end
+
+    test "a pin, its removal and a delivery, each whole" do
+      pin = %{
+        "provider" => %{"from" => "openai", "to" => "anthropic"},
+        "model" => %{"from" => "retired-9", "to" => "claude-tide"}
+      }
+
+      assert HealMessage.change_detail(pin) =~
+               "Model now: openai retired-9\nModel after the change: anthropic claude-tide"
+
+      cleared = %{
+        "clear_route_pin" => %{
+          "from" => %{"provider" => "openai", "model" => "retired-9"},
+          "to" => true
+        }
+      }
+
+      assert HealMessage.change_detail(cleared) =~
+               "Model now: openai retired-9\n" <>
+                 "Model after the change: none pinned (the default route)"
+
+      delivery = %{
+        "delivery_mode" => %{"from" => "none", "to" => "channel"},
+        "delivery_target" => %{
+          "from" => nil,
+          "to" => %{"platform" => "telegram", "chat_id" => "40017"}
+        }
+      }
+
+      assert HealMessage.change_detail(delivery) =~
+               "Delivery now: none\nDelivery after the change: channel, on telegram (40017)"
+    end
+
+    test "a value written over several lines can never pass for a field of its own" do
+      to = "Fetch the tides.\nSchedule after the change: every minute"
+      detail = HealMessage.change_detail(%{"task" => %{"from" => "Fetch the tides.", "to" => to}})
+
+      assert detail =~ "> Schedule after the change: every minute"
+      refute detail =~ ~r/^Schedule/m
     end
   end
 

@@ -22,7 +22,11 @@ defmodule FermixCore.Jobs.HealDecision do
       `Jobs.Registry.check_update/3` and the skill's tool check), then stored
       as the exact change (each field with its `from` and `to`) and the job's
       version it was drawn for (`job_version/1`). Applied only by the owner's
-      answer on the proposal's card (`Jobs.HealAnswer`), never here.
+      answer on the proposal's card (`Jobs.HealAnswer`), never here. A
+      proposal is offered only on a card the owner can answer and read
+      whole (`fit_card/3`, stage S4b): one whose inbox can hold no card's
+      answer, or whose card would pass the card's bound, is kept as `tell`,
+      never cut.
     * A job a watcher wakes or a mandate names changes only on the owner's own
       consent turn (M60 S6, §10.4), so its heal may rerun, pause or tell: a
       raised limit or a proposal for it is kept as `tell`.
@@ -33,6 +37,7 @@ defmodule FermixCore.Jobs.HealDecision do
   (`refusal`), which the heal run traces and logs, and goes on as `tell`.
   """
 
+  alias FermixCore.Cues.Card
   alias FermixCore.Cues.Mandates
   alias FermixCore.Cues.Watchers
   alias FermixCore.Jobs.Registry
@@ -161,6 +166,35 @@ defmodule FermixCore.Jobs.HealDecision do
       {:error, reason} -> {:error, {:watcher_unreadable, reason}}
     end
   end
+
+  @doc """
+  A proposal offered only on a card (M106 §5.7, D5): `plan` as it is when it
+  proposes nothing, or when the owner's inbox can hold a card's answer
+  (`card_chat?`, `Delivery.OwnerInbox.answer_origin/1`) and the whole card,
+  `card_chars` characters as one plain message, fits `Cues.Card.max_chars/0`.
+  Otherwise the proposal is refused and goes on as `tell`, its own reason
+  recorded: `no_card_chat`, or `card_too_large` with the card's length. A
+  card is never cut, as a watcher's is not.
+  """
+  @spec fit_card(plan(), boolean(), non_neg_integer()) :: plan()
+  def fit_card(%{decision: "propose"} = plan, false, _card_chars),
+    do:
+      refuse(plan, {:no_card_chat, "the owner's inbox has no chat a card's answer can come from"})
+
+  def fit_card(%{decision: "propose"} = plan, true, card_chars)
+      when is_integer(card_chars) and card_chars > 0 do
+    if card_chars <= Card.max_chars(),
+      do: plan,
+      else:
+        refuse(
+          plan,
+          {:card_too_large, "#{card_chars} characters; a card holds #{Card.max_chars()}"}
+        )
+  end
+
+  def fit_card(%{decision: decision} = plan, card_chat?, _card_chars)
+      when decision != "propose" and is_boolean(card_chat?),
+      do: plan
 
   @doc """
   `plan` refused for `reason`: nothing is carried out and the heal goes on as

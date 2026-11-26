@@ -52,6 +52,9 @@ defmodule FermixCore.Delivery.OwnerInbox do
   @derived_inbox_order ["telegram", "signal", "whatsapp", "imessage"]
   # Local targets are owner-private by construction — nobody else can read them.
   @local_channels ["cli", "daemon"]
+  # The user every message typed in the local `cli` chat carries
+  # (`FermixChannels.CLI`): only the owner types there.
+  @cli_user "cli"
   # Jobs-target destination keys, in `Jobs.DeliveryDefaults`' own precedence.
   @destination_keys ~w(chat_id channel_id recipient target reply_target)
   @root_scope "root"
@@ -97,6 +100,26 @@ defmodule FermixCore.Delivery.OwnerInbox do
   def dm_origin(%{platform: platform, destination: destination})
       when is_binary(platform) and is_binary(destination),
       do: :error
+
+  @doc """
+  Where an answer to a card sent to the owner's `inbox` comes from, so the
+  card can be held to that chat and that user (a heal's proposal, M106 §5.7):
+  a DM's origin (`dm_origin/1`), or the local `cli` chat's, which rung one
+  already takes as the owner's own because only the owner types there (its
+  chat is the inbox's destination, its user the one every message typed
+  there carries). `:error` for any other inbox. Who uses `dm_origin/1` for
+  their reach (a watcher's card, an access confirmation, a conversation's
+  history) is untouched by this.
+  """
+  @spec answer_origin(%{
+          required(:platform) => String.t(),
+          required(:destination) => String.t(),
+          optional(atom()) => term()
+        }) :: {:ok, dm_origin()} | :error
+  def answer_origin(%{platform: "cli", destination: chat}) when is_binary(chat) and chat != "",
+    do: {:ok, %{platform: "cli", chat_id: chat, user_id: @cli_user}}
+
+  def answer_origin(inbox), do: dm_origin(inbox)
 
   @doc """
   Resolves the owner's inbox through the full precedence.

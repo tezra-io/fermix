@@ -57,9 +57,11 @@ Code.require_file("seed_run_times.exs", __DIR__)
 
 defmodule SeedState do
   alias Exqlite.Sqlite3
+  alias FermixCore.Cues.Proposals
   alias FermixCore.Delivery.OwnerInbox
   alias FermixCore.Jobs.Degraded
   alias FermixCore.Jobs.Failure
+  alias FermixCore.Jobs.HealCard
   alias FermixCore.Jobs.HealDecision
   alias FermixCore.Jobs.HealMessage
   alias FermixCore.Jobs.Registry, as: Jobs
@@ -499,10 +501,7 @@ defmodule SeedState do
     {id, token} = claim_seeded_heal!(job, at, lease_until)
     {:ok, inbox} = OwnerInbox.for_approval(jobs_config: config.jobs, configured_owners: %{})
     :ok = Repo.job_heals_call({:put_inbox, id, token, inbox, at})
-    :ok = Repo.job_heals_call({:decided, id, token, seeded_plan(heal, job), at})
-    {:ok, facts} = Repo.job_heals_call({:message_facts, id})
-    text = HealMessage.build(facts, personalization: config.personalization)
-    :ok = Repo.job_heals_call({:put_message, id, token, text, at})
+    :ok = conclude_message!(seeded_plan(heal, job), {id, token}, inbox, at, config)
     :ok = Repo.job_heals_call({:delivered, id, token, at})
     record_rerun_outcome!(id, heal, at)
     owner_edit!(job, Map.get(heal, "owner_edit"))
@@ -516,6 +515,45 @@ defmodule SeedState do
   defp owner_edit!(job, edit) do
     attrs = Map.new(edit, fn {field, value} -> {Map.fetch!(@owner_edit_fields, field), value} end)
     {:ok, _edited} = Jobs.update_job(job.id, attrs, scheduler: nil)
+    :ok
+  end
+
+  # A proposal goes out as a heal run sends one (`Jobs.HealRun`, M106 §5.7, D5): its
+  # short ask, held to its card's bound and to an inbox whose chat can answer it
+  # (`HealDecision.fit_card/3`, which otherwise keeps it as `tell`), is stored with the
+  # decision, and the card is bound to that chat under a fresh token, as a send
+  # leaves it. Every other decision's message is built from the store's facts.
+  defp conclude_message!(%{decision: "propose"} = plan, {id, token}, inbox, at, config) do
+    {:ok, facts} = Repo.job_heals_call({:message_facts, id})
+    facts = Map.merge(facts, %{decision: "propose", note: plan.note, change: plan.change})
+    lines = HealMessage.card_lines(facts, personalization: config.personalization)
+    chars = lines |> HealCard.card(plan.change) |> HealCard.chars()
+    origin = OwnerInbox.answer_origin(inbox)
+
+    case HealDecision.fit_card(plan, match?({:ok, _}, origin), chars) do
+      %{decision: "propose"} = offered ->
+        offered = Map.put(offered, :message, Enum.join(lines, "\n"))
+        :ok = Repo.job_heals_call({:decided, id, token, offered, at})
+        {:ok, card_origin} = origin
+        bind_card!(id, token, card_origin, at)
+
+      kept ->
+        IO.puts(:stderr, "seed: heal #{id}'s proposal kept as tell: #{kept.refusal_detail}")
+        conclude_message!(kept, {id, token}, inbox, at, config)
+    end
+  end
+
+  defp conclude_message!(plan, {id, token}, _inbox, at, config) do
+    :ok = Repo.job_heals_call({:decided, id, token, plan, at})
+    {:ok, facts} = Repo.job_heals_call({:message_facts, id})
+    text = HealMessage.build(facts, personalization: config.personalization)
+    Repo.job_heals_call({:put_message, id, token, text, at})
+  end
+
+  defp bind_card!(id, token, origin, at) do
+    secret = Proposals.new_token()
+    card = %{token: secret, digest: Proposals.digest(secret), origin: origin}
+    {:ok, ^secret} = Repo.job_heals_call({:bind_card, id, token, card, at})
     :ok
   end
 
@@ -545,6 +583,9 @@ defmodule SeedState do
 
     %{
       decision: Map.fetch!(heal, "decision"),
+      requested: Map.fetch!(heal, "decision"),
+      refusal: nil,
+      refusal_detail: nil,
       note: Map.fetch!(heal, "note"),
       read_outside: Map.get(heal, "read_outside", true),
       change: change,

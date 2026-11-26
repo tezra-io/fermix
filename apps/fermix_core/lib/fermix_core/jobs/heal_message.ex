@@ -29,16 +29,19 @@ defmodule FermixCore.Jobs.HealMessage do
   Fermix did, and how it failed this time; after a change the owner
   approved, that the change did not fix it.
 
-  A proposal (stage S4, decision D5) is stated short: what failed, in code's
-  sentence; the note; then one line per changed field (`change_lines/2`) with
-  its new value only, a task as its changed part (the common start and end
-  trimmed to whole words: what replaces what, never both whole texts); then
-  one closing line saying Fermix has not made the change. It says nothing on
-  how to answer: the proposal's card, which the owner answers, is the next
-  stage. How often and when the job runs next are left out. A value is shown
-  whole or not at all: one past the bound, or a task change of spacing or
-  quote marks only (which a quoted line cannot show), says so and that Fermix
-  can show it in full, as `list_jobs` holds the exact change.
+  A proposal (stages S4 and S4b, decision D5) is its card (`Jobs.HealCard`),
+  stated short: what failed, in code's sentence; the note; then one line per
+  changed field (`change_lines/2`) with its new value only, a task as its
+  changed part (the common start and end trimmed to whole words: what
+  replaces what, never both whole texts), every value whole; then one closing
+  line saying Fermix has not made the change. It says nothing on how to
+  answer: the card's buttons, or its reply line in a chat with none, say
+  that. How often and when the job runs next are left out. `card_lines/2` is
+  that short ask line by line, never cut: a card too long for its bound is
+  never offered (`Jobs.HealDecision.fit_card/3`). A task change of spacing or
+  quote marks only, which a quoted line cannot show, says so and that the
+  card's detail shows it exactly. The detail (`change_detail/1`) holds each
+  changed field exactly, as it is and as it would become.
 
   Pure: the facts in, the text out, every instant on the owner's clock
   (`FermixCore.Clock`, whose options `build/2` passes on). Words Fermix did not
@@ -67,13 +70,18 @@ defmodule FermixCore.Jobs.HealMessage do
                    "this history."
   @proposal_lead "Fermix would change:"
   @proposal_closing "Fermix has not made this change."
-  @longer_task "a longer rewrite than fits here."
-  @longer_value "a longer value than fits here."
-  @spacing_only "a change of spacing or quote marks only."
-  @shown_in_full %{
-    proposed: "Fermix can show it in full.",
-    applied: "The job's settings show it in full."
+  @longer_task "a longer rewrite than fits here"
+  @longer_value "a longer value than fits here"
+  @spacing_only "a change of spacing or quote marks only"
+  # Where a value a line does not show can be read: a proposal's card shows
+  # it exactly in its detail; the account of an applied change points to the
+  # job's settings.
+  @shown_elsewhere %{
+    proposed: ", shown exactly in Details.",
+    applied: ". The job's settings show it in full."
   }
+  @detail_head "Details: each change in full"
+  @no_pin "none pinned (the default route)"
 
   @doc """
   A job's name as every message shows it inside its quotes: a double quote
@@ -103,9 +111,43 @@ defmodule FermixCore.Jobs.HealMessage do
     end
   end
 
+  @doc """
+  The send key of a heal's message (M106 §5.8, §5.9): what a channel that
+  keys a send (the app timeline, iMessage's ledger) answers a repeated key
+  by, so it names the message and not only the heal. A heal's first message,
+  its card form and every retry of that send carry `job_heal:<id>`; its
+  verdict, and every retry of the verdict, `job_heal:<id>:verdict`. Never
+  `job:`, the prefix `Companion.OriginBackfill` reads as a run. The heal run's
+  text send and the card's spec (`Jobs.HealCard.spec/3`) both take it here.
+  """
+  @spec send_key(%{required(:id) => String.t(), required(:conclusion) => String.t()}) ::
+          String.t()
+  def send_key(%{id: id, conclusion: "first"}) when is_binary(id), do: "job_heal:" <> id
+
+  def send_key(%{id: id, conclusion: "verdict"}) when is_binary(id),
+    do: "job_heal:" <> id <> ":verdict"
+
   @doc "The longest text `build/2` returns."
   @spec max_length() :: pos_integer()
   def max_length, do: @max_length
+
+  @doc """
+  The short ask of a job's proposal on its first conclusion, line by line and
+  never cut (M106 §5.7, D5): the lines of its card (`Jobs.HealCard`), whose
+  bound decides whether it is offered at all. No line holds a line break.
+  """
+  @spec card_lines(map(), keyword()) :: [String.t()]
+  def card_lines(
+        %{subject_kind: "job", conclusion: "first", decision: "propose", change: change} =
+          facts,
+        clock_opts
+      )
+      when is_map(change) and is_list(clock_opts) do
+    facts
+    |> lines(clock_opts)
+    |> List.flatten()
+    |> Enum.reject(&is_nil/1)
+  end
 
   @doc "The message for a heal's facts."
   @spec build(map(), keyword()) :: String.t()
@@ -313,13 +355,46 @@ defmodule FermixCore.Jobs.HealMessage do
   whole words, then the words added, the words removed, what replaces what,
   or the new text alone when nothing is in common, never both whole texts.
   Every value is quoted data (a double quote turned single, whitespace
-  flattened) and shown whole or not at all: past the bound, or a task change
-  of spacing or quote marks only, the line says so and where it can be read
-  in full (`tail`: `:proposed` for the proposal, `:applied` for the account
-  of a change the owner's answer made). No id or chat is ever shown.
+  flattened). On a proposal's card (`tail` `:proposed`) every value is shown
+  whole, and a task change of spacing or quote marks only says the detail
+  shows it exactly. In the account of a change the owner's answer made
+  (`:applied`, one reply line) a value is shown whole or not at all: past
+  the bound, or of spacing or quote marks only, the line says so and that
+  the job's settings show it in full. No id or chat is ever shown.
   """
   @spec change_lines(map(), :proposed | :applied) :: [String.t()]
-  def change_lines(change, tail) when is_map(change) and is_map_key(@shown_in_full, tail) do
+  def change_lines(change, tail) when is_map(change) and is_map_key(@shown_elsewhere, tail) do
+    change
+    |> changed_fields()
+    |> Enum.map(&field_line(&1, tail))
+  end
+
+  @doc """
+  Every field of a heal's proposal exactly, as it is and as it would become
+  (M106 §5.7, D5): the detail of its card, built by code from the stored
+  change, in `change_lines/2`'s order. A task, or any value written over
+  several lines, is set out line by line, each line marked as the value's,
+  so no value can pass for a field of its own; every other value follows
+  its label. A delivery names its mode, platform and destination.
+  """
+  @spec change_detail(map()) :: String.t()
+  def change_detail(change) when is_map(change) and map_size(change) > 0 do
+    [
+      task: detail_pair(Map.get(change, "task")),
+      schedule: detail_pair(Map.get(change, "schedule")),
+      skill: skill_detail(Map.get(change, "skill_name")),
+      timeout: timeout_detail(Map.get(change, "timeout_seconds")),
+      model: pin_detail(change),
+      delivery: delivery_detail(change)
+    ]
+    |> Enum.reject(fn {_field, pair} -> is_nil(pair) end)
+    |> Enum.flat_map(fn {field, {now, after_change}} ->
+      detail_value(field, "now", now) ++ detail_value(field, "after the change", after_change)
+    end)
+    |> then(&Enum.join([@detail_head | &1], "\n"))
+  end
+
+  defp changed_fields(change) do
     [
       task: Map.get(change, "task"),
       schedule: Map.get(change, "schedule"),
@@ -329,7 +404,93 @@ defmodule FermixCore.Jobs.HealMessage do
       delivery: delivery_change(change)
     ]
     |> Enum.reject(fn {_field, value} -> is_nil(value) end)
-    |> Enum.map(&field_line(&1, Map.fetch!(@shown_in_full, tail)))
+  end
+
+  @detail_labels %{
+    task: "Task",
+    schedule: "Schedule",
+    skill: "Skill",
+    timeout: "Time limit",
+    model: "Model",
+    delivery: "Delivery"
+  }
+
+  # A task, and any value over several lines, line by line under its label,
+  # each line marked as the value's; any other after its label.
+  defp detail_value(field, which, value) do
+    label = "#{Map.fetch!(@detail_labels, field)} #{which}"
+    value_lines = String.split(value, "\n")
+
+    if field == :task or length(value_lines) > 1,
+      do: [label <> ":" | Enum.map(value_lines, &("> " <> &1))],
+      else: ["#{label}: #{value}"]
+  end
+
+  defp detail_pair(nil), do: nil
+  defp detail_pair(%{"to" => to} = field), do: {text(Map.get(field, "from") || ""), text(to)}
+
+  defp skill_detail(nil), do: nil
+
+  defp skill_detail(%{"to" => to} = field),
+    do: {text(Map.get(field, "from") || "none"), text(to || "none")}
+
+  defp timeout_detail(nil), do: nil
+
+  defp timeout_detail(%{"to" => to} = field),
+    do: {limit_words(Map.get(field, "from")), limit_words(to)}
+
+  defp limit_words(seconds) when is_integer(seconds), do: duration(seconds)
+  defp limit_words(nil), do: "none of its own (the engine's default)"
+  defp limit_words(value), do: text(value)
+
+  defp pin_detail(%{"clear_route_pin" => %{"from" => from}}), do: {pin_words(from), @no_pin}
+
+  defp pin_detail(change) do
+    case {Map.get(change, "provider"), Map.get(change, "model")} do
+      {nil, nil} -> nil
+      {provider, model} -> {pin_part(provider, model, "from"), pin_part(provider, model, "to")}
+    end
+  end
+
+  defp pin_part(provider, model, end_key) do
+    case Enum.reject([end_of(provider, end_key), end_of(model, end_key)], &is_nil/1) do
+      [] -> @no_pin
+      parts -> Enum.map_join(parts, " ", &text/1)
+    end
+  end
+
+  defp end_of(%{} = field, end_key), do: Map.get(field, end_key)
+  defp end_of(nil, _end_key), do: nil
+
+  defp pin_words(%{"provider" => provider} = pin) when is_binary(provider),
+    do: Enum.map_join(Enum.reject([provider, pin["model"]], &is_nil/1), " ", &text/1)
+
+  defp pin_words(_none), do: @no_pin
+
+  defp delivery_detail(change) do
+    if Map.has_key?(change, "delivery_mode") or Map.has_key?(change, "delivery_target") do
+      mode = Map.get(change, "delivery_mode")
+      target = Map.get(change, "delivery_target")
+
+      {delivery_whole(end_of(mode, "from"), end_of(target, "from")),
+       delivery_whole(end_of(mode, "to"), end_of(target, "to"))}
+    end
+  end
+
+  # A mode, the platform it reaches and where on it, whole.
+  defp delivery_whole(mode, %{"platform" => platform} = target) do
+    where = "on #{text(platform)}" <> destination_words(target)
+    if is_binary(mode), do: "#{mode}, #{where}", else: where
+  end
+
+  defp delivery_whole(mode, _target) when is_binary(mode), do: mode
+  defp delivery_whole(nil, _target), do: "none"
+
+  defp destination_words(target) do
+    case Enum.find_value(~w(chat_id channel_id recipient target reply_target), &target[&1]) do
+      nil -> ""
+      destination -> " (#{text(destination)})"
+    end
   end
 
   defp pin_change(%{"clear_route_pin" => _cleared}), do: :cleared
@@ -347,56 +508,58 @@ defmodule FermixCore.Jobs.HealMessage do
       else: nil
   end
 
-  defp field_line({:task, %{"to" => new} = task}, in_full),
-    do: task_line(text(Map.get(task, "from") || ""), text(new), in_full)
+  defp field_line({:task, %{"to" => new} = task}, tail),
+    do: task_line(text(Map.get(task, "from") || ""), text(new), tail)
 
-  defp field_line({:schedule, %{"to" => value}}, in_full),
-    do: value_line("Schedule", value, in_full)
+  defp field_line({:schedule, %{"to" => value}}, tail),
+    do: value_line("Schedule", value, tail)
 
-  defp field_line({:skill, %{"to" => value}}, in_full), do: value_line("Skill", value, in_full)
+  defp field_line({:skill, %{"to" => value}}, tail), do: value_line("Skill", value, tail)
 
-  defp field_line({:timeout, %{"to" => seconds}}, _in_full) when is_integer(seconds),
+  defp field_line({:timeout, %{"to" => seconds}}, _tail) when is_integer(seconds),
     do: "Time limit: #{duration(seconds)}"
 
-  defp field_line({:timeout, %{"to" => value}}, in_full),
-    do: value_line("Time limit", value, in_full)
+  defp field_line({:timeout, %{"to" => value}}, tail),
+    do: value_line("Time limit", value, tail)
 
-  defp field_line({:model, :cleared}, _in_full), do: "Model: none pinned (the default route)"
-  defp field_line({:model, pin}, in_full), do: value_line("Model", pin, in_full)
-  defp field_line({:delivery, words}, in_full), do: value_line("Delivery", words, in_full)
+  defp field_line({:model, :cleared}, _tail), do: "Model: " <> @no_pin
+  defp field_line({:model, pin}, tail), do: value_line("Model", pin, tail)
+  defp field_line({:delivery, words}, tail), do: value_line("Delivery", words, tail)
 
-  defp value_line(label, value, in_full),
-    do: parts_line(label, [text(value)], &hd/1, @longer_value, in_full)
+  defp value_line(label, value, tail),
+    do: parts_line(label, [text(value)], &hd/1, @longer_value, tail)
 
   # What replaces what in a task, by the part that changed (`task_part/2`).
-  defp task_line(from, new, in_full) do
+  defp task_line(from, new, tail) do
     {old_part, new_part, whole?} = task_part(from, new)
 
     cond do
       shown(old_part) == shown(new_part) ->
-        "Task: #{@spacing_only} #{in_full}"
+        "Task: " <> @spacing_only <> Map.fetch!(@shown_elsewhere, tail)
 
       whole? ->
-        parts_line("Task", [new_part], &hd/1, @longer_task, in_full)
+        parts_line("Task", [new_part], &hd/1, @longer_task, tail)
 
       shown(old_part) == "" ->
-        parts_line("Task", [new_part], &"adds #{hd(&1)}", @longer_task, in_full)
+        parts_line("Task", [new_part], &"adds #{hd(&1)}", @longer_task, tail)
 
       shown(new_part) == "" ->
-        parts_line("Task", [old_part], &"removes #{hd(&1)}", @longer_task, in_full)
+        parts_line("Task", [old_part], &"removes #{hd(&1)}", @longer_task, tail)
 
       true ->
-        parts_line("Task", [old_part, new_part], &replaced/1, @longer_task, in_full)
+        parts_line("Task", [old_part, new_part], &replaced/1, @longer_task, tail)
     end
   end
 
   defp replaced([old, new]), do: "#{old} becomes #{new}"
 
-  # A line whose every part is shown whole and quoted, or none of them.
-  defp parts_line(label, parts, render, longer, in_full) do
-    if Enum.all?(parts, &(String.length(shown(&1)) <= @value_max)),
+  # A line whose every part is shown whole and quoted. On a card every part
+  # is (the card's own bound refuses one too long); in the account of an
+  # applied change, one line, every part or none of them.
+  defp parts_line(label, parts, render, longer, tail) do
+    if tail == :proposed or Enum.all?(parts, &(String.length(shown(&1)) <= @value_max)),
       do: "#{label}: " <> render.(Enum.map(parts, &("\"" <> shown(&1) <> "\""))),
-      else: "#{label}: #{longer} #{in_full}"
+      else: "#{label}: #{longer}" <> Map.fetch!(@shown_elsewhere, tail)
   end
 
   # The part of `from` and `to` that differs, its ends moved out to whole

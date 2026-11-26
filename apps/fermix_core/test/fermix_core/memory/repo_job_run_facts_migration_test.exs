@@ -23,6 +23,8 @@ defmodule FermixCore.Memory.RepoJobRunFactsMigrationTest do
   # The columns 74 adds to `job_heals` (`RepoJobHealsAnswerMigrationTest`),
   # which a store from before 69 does not have either.
   @answer_columns ~w(change_job_digest answer answered_at decided_from applied_at owner_wrote_at)
+  # The card's columns (76), dropped with its index for the same reason.
+  @card_columns ~w(card_token card_token_digest card_platform card_chat_id card_user_id)
 
   # `job_runs` as an engine at home format 1 reads it, in order.
   @job_run_columns ~w(id job_id session_id trigger status claimed_at started_at completed_at
@@ -177,8 +179,9 @@ defmodule FermixCore.Memory.RepoJobRunFactsMigrationTest do
     raw(db_path, """
     DROP TABLE job_run_facts;
     ALTER TABLE job_heals DROP COLUMN tool_json;
-    #{Enum.map_join(@answer_columns, "\n", &"ALTER TABLE job_heals DROP COLUMN #{&1};")}
-    DELETE FROM schema_migrations WHERE version IN (#{@version}, 73, 74);
+    DROP INDEX IF EXISTS job_heals_card_token;
+    #{Enum.map_join(@answer_columns ++ @card_columns, "\n", &"ALTER TABLE job_heals DROP COLUMN #{&1};")}
+    DELETE FROM schema_migrations WHERE version IN (#{@version}, 73, 74, 76);
     """)
 
     assert columns(db_path, "job_run_facts") == []

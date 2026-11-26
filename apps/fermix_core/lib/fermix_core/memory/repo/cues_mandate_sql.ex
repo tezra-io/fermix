@@ -169,6 +169,13 @@ defmodule FermixCore.Memory.Repo.CuesMandateSql do
     end)
   end
 
+  # Whether a proposal holds a `cp_` token's digest: the answer rail's lookup
+  # for its mandate holder (`Cues.CardHolder`).
+  def handle(conn, {:token_held, digest}) when is_binary(digest) do
+    sql = "SELECT 1 FROM cue_proposals WHERE token_digest = ? LIMIT 1"
+    with {:ok, rows} <- CuesSql.query_all(conn, sql, [digest]), do: {:ok, rows != []}
+  end
+
   # The owner's confirm: `waiting → confirmed`, fenced on the token, the chat it
   # was sent to and the expiry. `{:error, why}` names why nothing changed.
   def handle(conn, {:confirm_proposal, digest, origin, %DateTime{} = now})

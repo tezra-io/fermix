@@ -390,6 +390,62 @@ def test_a_capability_case_seeds_with_checker_state_not_state(tmp_path):
     assert any("seeds its state with `checker.state`" in p for p in exc.value.problems)
 
 
+# --- drive: owner_command (a typed /confirm or /deny, no model) --------------
+
+def _command_suite(tmp_path, suite="cap_cmd", **case):
+    """A capability suite with one owner_command case; its state spec exists."""
+    spec = tmp_path / "fixtures" / "state" / "w.json"
+    spec.parent.mkdir(parents=True, exist_ok=True)
+    spec.write_text('{"jobs": []}')
+    body = {"id": "confirm", "drive": "owner_command", "query": "/confirm",
+            "checker": {"script": "suites/capability/checkers/job_proposal.py", "mode": "json",
+                        "state": "fixtures/state/w.json",
+                        "expect": {"job": "holds", "outcome": "applied"}}}
+    body.update(case)
+    body = {key: value for key, value in body.items() if value is not None}
+    doc = {"suite": suite, "title": "Cap cmd", "risk": "isolated_mutation",
+           "scenarios": [{"id": "scn", "title": "Scenario", "cases": [body]}]}
+    with open(os.path.join(str(tmp_path), f"{suite}.yaml"), "w", encoding="utf-8") as fh:
+        yaml.safe_dump(doc, fh)
+    return str(tmp_path)
+
+
+def test_an_owner_command_case_loads_typed_in_the_inbox_chat_by_default(tmp_path):
+    [suite] = suites.load_all(_command_suite(tmp_path))
+    case = suite.scenarios[0].cases[0]
+    assert case.drive == "owner_command" and case.command == {"chat": "inbox"}
+    assert [turn.query for turn in case.turns] == ["/confirm"]
+
+
+def test_an_owner_command_case_may_type_in_the_trials_own_session(tmp_path):
+    [suite] = suites.load_all(_command_suite(
+        tmp_path, command={"chat": "trial"},
+        turns=[{"query": "/confirm"}, {"query": "/deny"}], query=None))
+    case = suite.scenarios[0].cases[0]
+    assert case.command == {"chat": "trial"} and len(case.turns) == 2
+
+
+@pytest.mark.parametrize("change, why", [
+    ({"query": "please go ahead"}, "typed command starting with `/`"),
+    ({"command": {"chat": "telegram"}}, "`command` is a map with only `chat`"),
+    ({"command": {"chat": "inbox", "user": "x"}}, "`command` is a map with only `chat`"),
+    ({"expect": {"status": "ok"}}, "leaves no trace to grade"),
+    ({"checker": {"script": "suites/capability/checkers/job_proposal.py", "mode": "json"}},
+     "over its seeded `checker.state`"),
+    ({"drive": "ask", "command": {"chat": "inbox"}}, "`command` needs `drive: owner_command`"),
+])
+def test_an_owner_command_case_is_refused_what_it_cannot_take(tmp_path, change, why):
+    with pytest.raises(suites.SuiteError) as exc:
+        suites.load_all(_command_suite(tmp_path, **change))
+    assert any(why in p for p in exc.value.problems), exc.value.problems
+
+
+def test_an_owner_command_case_belongs_to_a_capability_suite(tmp_path):
+    with pytest.raises(suites.SuiteError) as exc:
+        suites.load_all(_command_suite(tmp_path, suite="cmd_behavioral"))
+    assert any("belongs to a capability suite" in p for p in exc.value.problems)
+
+
 # --- requires_tools_all (case level) ----------------------------------------
 
 def test_requires_tools_all_defaults_to_empty(tmp_path):

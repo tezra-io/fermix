@@ -24,13 +24,16 @@ defmodule FermixCore.Reply do
   not a degraded state.
 
   A watcher's card (`:follow_up`, and a mandate's proposal, `:mandate`;
-  `FermixCore.Cues.Card`) also carries its visible `lines`, its expandable
-  `detail` and its `actions`' words (a follow-up's card adds Always allow), so
-  a channel with buttons draws it compactly; `text` is the whole card for
-  every other chat.
+  `FermixCore.Cues.Card`) and a heal's proposal for a job (`:job_change`,
+  `FermixCore.Jobs.HealCard`) also carry their visible `lines`, their
+  expandable `detail` and their `actions`' words (a follow-up's card adds
+  Always allow), so a channel with buttons draws them compactly; `text` is the
+  whole card for every other chat. A heal's card carries its send key
+  (`proactive_key`), so a channel that answers a repeated send by its key
+  never shows it twice.
   """
   @type approval_spec :: %{
-          required(:kind) => :sandbox | :soul | :follow_up | :mandate,
+          required(:kind) => :sandbox | :soul | :follow_up | :mandate | :job_change,
           required(:text) => String.t(),
           required(:token) => String.t(),
           optional(:detail) => String.t() | nil,
@@ -40,7 +43,8 @@ defmodule FermixCore.Reply do
             required(:confirm) => String.t(),
             required(:deny) => String.t(),
             optional(:always_allow) => String.t()
-          }
+          },
+          optional(:proactive_key) => String.t()
         }
   @type approval_prompt ::
           {:approval_prompt, text :: String.t(), token :: String.t()}

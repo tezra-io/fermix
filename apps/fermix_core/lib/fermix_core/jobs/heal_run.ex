@@ -28,19 +28,34 @@ defmodule FermixCore.Jobs.HealRun do
        the owner changed while the diagnosis ran gets no move, and the
        decision is recorded as `tell`, refused as `job_changed`, so the
        message never claims a move; any other decision is recorded alone,
-       under the lease. A provider's heal, a plugin's (M106 §6), a kind no
-       model can help with, and a verdict run no model;
+       under the lease. A proposal is offered only on its card (stage S4b,
+       `Jobs.HealCard`): its short ask is built from the facts with the
+       decision, and kept as `tell` when the inbox has no chat a card's
+       answer can come from (`Delivery.OwnerInbox.answer_origin/1`) or the
+       whole card would pass its bound (`Jobs.HealDecision.fit_card/3`);
+       otherwise the short ask is stored with the decision, so what was
+       held to the bound is what is sent. A provider's heal, a plugin's
+       (M106 §6), a kind no model can help with, and a verdict run no model;
     3. builds the message once with `Jobs.HealMessage` from the store's facts
        and stores it, so every later attempt sends the same text;
-    4. sends it once through `Delivery.ChannelSend` under the key
-       `job_heal:<id>` (never `job:`, the prefix `Companion.OriginBackfill`
-       reads as a run), naming the job as its origin, link previews off;
+    4. sends it once: a proposal on its first conclusion as its card, bound
+       first to the inbox's chat under a `cp_` token that every retry of the
+       send carries (`{:bind_card, ...}`), through the answer rail's one card
+       sender (`Cues.Proposals.send_card/3`); anything else through
+       `Delivery.ChannelSend`, naming the job as its origin, link previews
+       off. Each send carries its message's key (`HealMessage.send_key/1`):
+       `job_heal:<id>` for the first message, its card form and every retry
+       of it, `job_heal:<id>:verdict` for the verdict and its retries, so a
+       channel that answers a repeated key as already sent never takes the
+       verdict for the first (never `job:`, the prefix
+       `Companion.OriginBackfill` reads as a run);
     5. on a confirmed send, FIRST marks the delivery delivered, which takes
        the heal where its decision says (watching after a rerun or a raised
        limit, waiting otherwise, closed still failing on a verdict), THEN
-       writes the message to that conversation's history, every line of it
-       but the note, which a model wrote after reading outside content
-       (`HealMessage.history_copy/2`), only for an inbox
+       writes the message to that conversation's history (for a card, its
+       lines and its detail), every line of it but the note, which a model
+       wrote after reading outside content (`HealMessage.history_copy/2`),
+       only for an inbox
        keyed as a turn there is (`OwnerInbox.dm_origin/1`), and THEN asks for
        a rerun's one run through the path "run now" takes, once per heal (the
        ask stamped by that same write), recording what came of it
@@ -72,11 +87,13 @@ defmodule FermixCore.Jobs.HealRun do
 
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Cues.Proposals
   alias FermixCore.Delivery.ChannelSend
   alias FermixCore.Delivery.Error
   alias FermixCore.Delivery.OwnerInbox
   alias FermixCore.Jobs.Delivery
   alias FermixCore.Jobs.Failure
+  alias FermixCore.Jobs.HealCard
   alias FermixCore.Jobs.HealDecision
   alias FermixCore.Jobs.HealDiagnosis
   alias FermixCore.Jobs.HealMessage
@@ -121,7 +138,9 @@ defmodule FermixCore.Jobs.HealRun do
   @doc """
   Starts the run for a claimed heal. `opts`: `:heal` (the claimed row),
   `:repo`, `:conversation_store`, `:delivery_opts` (`ChannelSend`'s `:adapter`
-  or `:channels`), `:inbox_opts` (`OwnerInbox.for_approval/1`'s seams), `:clock`
+  or `:channels`), `:card_sender` (the card sender `Cues.Proposals.send_card/3`
+  takes as `:proposal_sender`; the registered one otherwise), `:inbox_opts`
+  (`OwnerInbox.for_approval/1`'s seams), `:clock`
   and `:clock_opts` (`FermixCore.Clock`'s); for the diagnosis
   `:capability_registry`, `:skill_registry`, `:scheduler` (the name the
   Scheduler a rerun's "run now" asks is registered under, never a pid, so a
@@ -147,6 +166,7 @@ defmodule FermixCore.Jobs.HealRun do
       repo: Keyword.fetch!(opts, :repo),
       conversation_store: Keyword.get(opts, :conversation_store, ConversationStore),
       delivery_opts: Keyword.get(opts, :delivery_opts, []),
+      card_sender: Keyword.get(opts, :card_sender),
       inbox_opts: Keyword.get(opts, :inbox_opts, []),
       clock: Keyword.get(opts, :clock, &DateTime.utc_now/0),
       clock_opts: Keyword.get(opts, :clock_opts, []),
@@ -166,7 +186,7 @@ defmodule FermixCore.Jobs.HealRun do
   @impl true
   def handle_continue(:run, state) do
     with {:ok, inbox} <- inbox(state),
-         {:ok, state} <- diagnosis(state),
+         {:ok, state} <- diagnosis(state, inbox),
          {:ok, text} <- message(state) do
       deliver(state, inbox, text)
     else
@@ -212,8 +232,8 @@ defmodule FermixCore.Jobs.HealRun do
 
   # --- the diagnosis (M106 §5.5) ---------------------------------------------------
 
-  defp diagnosis(%{heal: heal} = state) do
-    if diagnosable?(heal), do: diagnose(state), else: {:ok, state}
+  defp diagnosis(%{heal: heal} = state, inbox) do
+    if diagnosable?(heal), do: diagnose(state, inbox), else: {:ok, state}
   end
 
   # A provider's heal is told without a model: the provider that failed is
@@ -225,16 +245,39 @@ defmodule FermixCore.Jobs.HealRun do
 
   defp diagnosable?(_heal), do: false
 
-  defp diagnose(state) do
+  defp diagnose(state, inbox) do
     with {:ok, job} <- Repo.get_scheduled_job(state.heal.job_id, server: state.repo),
          {:ok, runs} <- recent_runs(state, job) do
       {ending, decision} = HealDiagnosis.run(diagnosis_args(state, job, runs))
+      plan = HealDecision.resolve(decision, job, checks(state))
 
-      decision
-      |> HealDecision.resolve(job, checks(state))
-      |> carry_out(job, stored(ending), state)
+      with {:ok, plan} <- offer_card(plan, state, inbox),
+           do: carry_out(plan, job, stored(ending), state)
     end
   end
+
+  # A proposal is offered on its card only (stage S4b): its short ask built
+  # from the facts as the decision will stand, held to the card's bound and
+  # to an inbox whose chat can answer it, and then stored with the decision;
+  # otherwise kept as tell with its own reason (`HealDecision.fit_card/3`).
+  defp offer_card(%{decision: "propose", change: change} = plan, state, inbox) do
+    with {:ok, facts} <- Repo.job_heals_call({:message_facts, state.heal.id}, server: state.repo) do
+      facts = Map.merge(facts, %{decision: "propose", note: plan.note, change: change})
+      lines = HealMessage.card_lines(facts, state.clock_opts)
+      chars = lines |> HealCard.card(change) |> HealCard.chars()
+      chat? = match?({:ok, _origin}, OwnerInbox.answer_origin(inbox))
+
+      case HealDecision.fit_card(plan, chat?, chars) do
+        %{decision: "propose"} = offered ->
+          {:ok, Map.put(offered, :message, Enum.join(lines, "\n"))}
+
+        refused ->
+          {:ok, refused}
+      end
+    end
+  end
+
+  defp offer_card(plan, _state, _inbox), do: {:ok, plan}
 
   defp recent_runs(state, job),
     do: Repo.list_job_runs(%{job_id: job.id}, server: state.repo, limit: @recent_runs)
@@ -319,7 +362,15 @@ defmodule FermixCore.Jobs.HealRun do
 
   # What the heal keeps of a plan, and of the run that made it.
   defp stored_plan(plan),
-    do: Map.take(plan, [:decision, :note, :change, :change_job_version, :change_job_digest])
+    do:
+      Map.take(plan, [
+        :decision,
+        :note,
+        :change,
+        :change_job_version,
+        :change_job_digest,
+        :message
+      ])
 
   defp stored(ending), do: %{read_outside: read_outside?(ending)}
 
@@ -368,16 +419,66 @@ defmodule FermixCore.Jobs.HealRun do
   # --- the one send ----------------------------------------------------------------
 
   defp deliver(state, inbox, text) do
-    case send_once(state, inbox, text) do
-      :ok -> delivered(state, inbox, text)
-      {:error, reason} -> send_failed(state, inbox, reason)
+    with {:ok, outgoing} <- outgoing(state, inbox, text) do
+      case send_once(state, inbox, outgoing) do
+        :ok -> delivered(state, inbox, history_text(outgoing))
+        {:error, reason} -> send_failed(state, inbox, reason)
+      end
+    else
+      {:error, reason} -> log_unsent(state, reason)
     end
   end
 
-  defp send_once(state, inbox, text) do
+  # A proposal on its first conclusion goes as its card, bound to the chat its
+  # answer must come from under the token every retry carries; a heal decided
+  # before cards were (whose inbox no card's answer can come from) and every
+  # other message go as text.
+  defp outgoing(
+         %{heal: %{conclusion: "first", decision: "propose", change: change}} = state,
+         inbox,
+         text
+       )
+       when is_map(change) do
+    case OwnerInbox.answer_origin(inbox) do
+      {:ok, origin} -> card_out(state, origin, text, change)
+      :error -> {:ok, {:text, text}}
+    end
+  end
+
+  defp outgoing(_state, _inbox, text), do: {:ok, {:text, text}}
+
+  defp card_out(state, origin, text, change) do
+    candidate = Proposals.new_token()
+    card = %{token: candidate, digest: Proposals.digest(candidate), origin: origin}
+
+    with {:ok, token} <- write_card(state, card) do
+      shown = text |> String.split("\n") |> HealCard.card(change)
+      {:ok, {:card, shown, HealCard.spec(shown, token, state.heal)}}
+    end
+  end
+
+  defp write_card(state, card),
+    do:
+      Repo.job_heals_call({:bind_card, state.heal.id, token(state), card, now(state)},
+        server: state.repo
+      )
+
+  defp history_text({:text, text}), do: text
+  defp history_text({:card, card, _spec}), do: HealCard.history_text(card)
+
+  # The card through the answer rail's one sender, watched as a text is.
+  defp send_once(state, inbox, {:card, _card, spec}) do
+    sender = if state.card_sender, do: [proposal_sender: state.card_sender], else: []
+
+    @send_timeout_ms
+    |> ChannelSend.with_timeout(fn -> Proposals.send_card(inbox, spec, sender) end)
+    |> Error.normalize()
+  end
+
+  defp send_once(state, inbox, {:text, text}) do
     send_opts =
       Delivery.put_origin(
-        [proactive_key: "job_heal:#{state.heal.id}", link_previews: false],
+        [proactive_key: HealMessage.send_key(state.heal), link_previews: false],
         :job,
         job_name(state)
       )

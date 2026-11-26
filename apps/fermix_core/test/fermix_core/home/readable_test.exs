@@ -142,7 +142,14 @@ defmodule FermixCore.Home.ReadableTest do
     # table that engine reads and writes. SQLite keeps the index on every
     # write whichever engine makes it, and every read that engine runs returns
     # the rows it did: the format stays.
-    @migrations Enum.to_list(1..39) ++ [41, 42, 43] ++ Enum.to_list(45..75)
+    # 76 (M106 §5.7, D5, stage S4b, a proposal's card: its token's digest, the
+    # chat it went to, and the token while its send is pending) adds columns
+    # and a unique index to `job_heals` only, a table an engine at this
+    # format never reads; every heal row is kept as it was. `job_runs` and
+    # `scheduled_jobs` keep their widths. A card that engine never sent is no
+    # card it answers, and an answer a newer engine applied is a value in a
+    # column it already reads: the format stays.
+    @migrations Enum.to_list(1..39) ++ [41, 42, 43] ++ Enum.to_list(45..76)
     @manifest_keys ~w(created_at engine_version files format home_format home_root host links
                       primary_epoch)
     @entry_keys ~w(bytes mode path sha256)

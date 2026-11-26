@@ -255,11 +255,12 @@ defmodule FermixChannels.Channels.Telegram do
   Deliver a kind-aware approval. A sandbox approval gets the one-tap buttons
   `send_approval/3` draws. A SOUL.md change is answered with its own `/soul`
   commands, never `/confirm`, so it goes as its text alone. A watcher's card
-  (`:follow_up`, `:mandate`; M60_WATCHER_CODING_RUNS.md §6.2) goes as raw
-  HTML: its lines, the first in bold, its detail as an expandable quote (Bot
-  API 7.3), which a phone shows as one line until it is tapped, and its
-  answers as buttons whose taps send the same `/confirm` and `/deny`, and on a
-  follow-up's card a second row with Always allow, whose tap sends `/always`.
+  (`:follow_up`, `:mandate`; M60_WATCHER_CODING_RUNS.md §6.2) and a heal's
+  proposal for a job (`:job_change`, M106 §5.7) go as raw HTML: its lines,
+  the first in bold, its detail as an expandable quote (Bot API 7.3), which a
+  phone shows as one line until it is tapped, and its answers as buttons
+  whose taps send the same `/confirm` and `/deny`, and on a follow-up's card
+  a second row with Always allow, whose tap sends `/always`.
   """
   @impl true
   @spec send_approval(Message.t(), map()) :: :ok | {:error, term()}
@@ -273,7 +274,8 @@ defmodule FermixChannels.Channels.Telegram do
         %Message{reply_target: reply_target, thread_ts: thread_ts},
         %{kind: kind, token: token, lines: [_title | _rest] = lines, detail: detail} = spec
       )
-      when kind in [:follow_up, :mandate] and is_binary(token) and is_binary(detail) do
+      when kind in [:follow_up, :mandate, :job_change] and is_binary(token) and
+             is_binary(detail) do
     markup = %{inline_keyboard: card_buttons(spec.actions, token)}
     opts = [parse_mode: "HTML", reply_markup: markup]
     opts = if thread_ts, do: Keyword.put(opts, :message_thread_id, thread_ts), else: opts

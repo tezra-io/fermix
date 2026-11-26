@@ -878,8 +878,12 @@ lease after its due scan on every due and reconcile tick and when a run or a
 heal run ends, and starts its run under `Jobs.RunnerSupervisor`, one at a time,
 monitored and never waited on. The run resolves the owner's inbox once
 (`Delivery.OwnerInbox.for_approval/1`), builds the message once with the pure
-`Jobs.HealMessage` from the store's facts, sends it once under the key
-`job_heal:<id>`, and on a failed send backs off by the harness ladder, a dead
+`Jobs.HealMessage` from the store's facts, sends it once under its message's
+key (`HealMessage.send_key/1`: `job_heal:<id>` for the first message, its card
+and their retries, `job_heal:<id>:verdict` for the verdict and its retries, so
+a channel that answers a repeated key as already sent, the app timeline or
+iMessage's ledger, never takes the verdict for the first), and on a failed
+send backs off by the harness ladder, a dead
 letter after 20 attempts, a day, or an error no wait clears. The reconcile pass
 closes a heal waiting 7 days as `expired`, and removing a job takes its heal.
 A failure's sentence is Fermix's own, one per kind on `Jobs.Failure`'s closed
@@ -986,13 +990,38 @@ and closed `still_failing`, whose quiet days keep a third failure silent; an ok
 run closes it `healed` and sends nothing; a heal watching 7 days expires as a
 waiting one does.
 
-A proposal is stated and stored (M106 §5.7, D5); the card that answers it is
-not built yet, and no model or chat reply can answer it. `Jobs.HealMessage`
-states it short: one line per changed field with its new value only, a task
-as its changed part, and one closing line saying Fermix has not made the
-change, with nothing on how to answer. `Jobs.HealAnswer` is the apply and the
-leave that card will call, with no production caller yet and no turn in it:
-given the heal, the surface the answer came from (`decided_from`) and, as
+A proposal is stored and answered on its card (M106 §5.7, D5, stage S4b),
+never by a model or a chat reply. `Jobs.HealCard` makes it the approval card a
+watcher's proposal is (`Cues.Card`, kind `:job_change`): its lines the short
+ask `Jobs.HealMessage.card_lines/2` builds (what failed, the note, one line
+per changed field with its new value, a task as its changed part, every value
+whole, and that Fermix has not made the change), its detail every changed
+field exactly as it is and as it would become (`HealMessage.change_detail/1`),
+its answers Approve and Deny, and its text, for a chat with no buttons, ending
+with how to reply. The heal run offers it only when the inbox has a chat an
+answer can come from (`Delivery.OwnerInbox.answer_origin/1`: a DM, or the
+local `cli` chat, owner-private by construction) and the whole card fits
+`Cues.Card.max_chars/0`; otherwise `Jobs.HealDecision.fit_card/3` keeps it as
+`tell`, refused as `no_card_chat` or `card_too_large`, never cut. The short
+ask is stored with the decision, so what was held to the bound is what is
+sent. Before the first send the heal run binds the card to that chat under a
+`cp_` token (`job_heals.card_token_digest`, unique, and `card_platform`,
+`card_chat_id`, `card_user_id`, migration 76); the token itself
+(`card_token`) is kept only until the send's concluding write, so every retry
+of the send carries the first token, and no read of a heal but the bind
+selects it. The card goes through the answer rail's one sender
+(`Cues.Proposals.send_card/3`, the registered `:cue_proposal_sender`) with
+the heal's send key. On the rail (`Cues.Proposals`, whose holders implement
+`Cues.CardHolder`: a mandate's proposal, a follow-up's card, a heal's card,
+in that order) `/confirm` and `/deny` with the token, a Telegram tap, or a
+bare command (the heal's id from the chat's list) reach it only from the
+chat and user it went to, with the cues feature off as well as on; `/always`
+is refused by the rail. The apps' proposal family (`waiting_cards/1`,
+`decide/4`, the companion's and the management socket's lists) stays the
+watcher cards' alone. `Jobs.HealAnswer` is the apply and the leave the card
+calls, with no turn in it:
+given the heal, the surface the answer came from (`decided_from`, the rail's
+own `<platform>:<chat>:<user>` for a chat) and, as
 data, the checks a heal run's decision takes, `apply_change/4` re-runs an
 owner's edit's checks (`Jobs.HealDecision.check_change/3`), holds the result
 to the recorded values field by field, and writes exactly the recorded change
@@ -1020,8 +1049,8 @@ run through the paths an owner's edit takes, in one transaction with its
 record, fenced on the heal's lease and on the job's definition being the one
 the decision was resolved against, and a change to what the job does or where
 it reports is only ever stored. Only the owner's own answer on the
-proposal's card (not built yet; `Jobs.HealAnswer`) applies a stored change,
-and exactly as stored; no model can.
+proposal's card, from the chat it went to (`Jobs.HealCard`, `Jobs.HealAnswer`),
+applies a stored change, and exactly as stored; no model can.
 
 ### `FermixCore.Cues`: Cues and Watchers
 

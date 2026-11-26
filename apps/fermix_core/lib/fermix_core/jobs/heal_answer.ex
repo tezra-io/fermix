@@ -5,8 +5,8 @@ defmodule FermixCore.Jobs.HealAnswer do
   and the change, and nothing here reads a turn: what the answer is checked
   against is given as data, the checks `Jobs.HealDecision.resolve/3` takes,
   and where it came from as the card rail's surface label (`decided_from`).
-  It has no production caller yet: the proposal's card, which will call it,
-  is the next stage.
+  Its caller is the answer rail: a heal's card answered from its chat
+  (`Jobs.HealCard`, stage S4b).
 
     * `apply_change/4` makes exactly the change the heal recorded. The change
       is checked again as an owner's edit is (`HealDecision.check_change/3`:
@@ -22,8 +22,9 @@ defmodule FermixCore.Jobs.HealAnswer do
   Each returns `{:ok, :applied | :left, sentence}` or
   `{:error, reason, sentence}`: Fermix's own account of what was done, or
   that nothing was and why, which the rail shows the owner. A recorded answer
-  is the heal's `answered` phase, and a heal it closed its `closed` phase
-  (`Jobs.Telemetry`).
+  is the heal's `answered` phase, with the kind of surface it came from as its
+  `platform` (the label's first part), and a heal it closed its `closed`
+  phase (`Jobs.Telemetry`).
   """
 
   alias FermixCore.Jobs.HealDecision
@@ -91,7 +92,7 @@ defmodule FermixCore.Jobs.HealAnswer do
     with {:ok, heal, job} <- waiting(heal_id, checks) do
       case Repo.job_heals_call({:leave, heal.id, answer(decided_from, checks)}, repo(checks)) do
         {:ok, _closed} ->
-          trace_answer(job, heal, "leave", false)
+          trace_answer(job, heal, "leave", false, decided_from)
           trace_closed(job, heal, "skipped")
 
           {:ok, :left,
@@ -265,11 +266,11 @@ defmodule FermixCore.Jobs.HealAnswer do
 
     case Registry.heal_write(heal.id, job.id, {:update, attrs}, {:answer, answer}, registry_opts) do
       {:ok, {:written, written, _moved}} ->
-        trace_answer(job, heal, "apply", true)
+        trace_answer(job, heal, "apply", true, answer.decided_from)
         {:ok, :applied, applied(written, heal.change)}
 
       {:ok, {:moved_on, _closed}} ->
-        trace_answer(job, heal, "apply", false)
+        trace_answer(job, heal, "apply", false, answer.decided_from)
         trace_closed(job, heal, "superseded")
         superseded(job)
 
@@ -293,13 +294,16 @@ defmodule FermixCore.Jobs.HealAnswer do
 
   defp answer(decided_from, checks), do: %{at: checks.now, decided_from: decided_from}
 
-  defp trace_answer(job, heal, given, applied?) do
+  # Where the answer came from, as a trace may say it: the surface's kind
+  # (`telegram`, `companion`), never a chat or a user.
+  defp trace_answer(job, heal, given, applied?, decided_from) do
     JobTelemetry.heal("answered", %{
       heal_id: heal.id,
       job_id: job.id,
       decision: "propose",
       answer: given,
-      applied: applied?
+      applied: applied?,
+      platform: decided_from |> String.split(":", parts: 2) |> hd()
     })
   end
 

@@ -21,6 +21,7 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
   alias FermixCore.Cues.Proposals, as: CueProposals
   alias FermixCore.Cues.ProposalView
   alias FermixCore.Memory.Repo
+  alias FermixTestSupport.HealCards
   alias FermixTestSupport.MandateFixtures, as: F
   alias FermixTestSupport.ParentProcess
 
@@ -341,6 +342,29 @@ defmodule FermixChannels.Companion.ConnectionProposalsTest do
 
     refute_receive {:executed, _tool, _args, _context}, 100
     assert [{^id, "waiting"}] = F.proposals(ctx.fixture.conn)
+  end
+
+  # M106 §5.7, D5 (stage S4b): a heal's proposal is an approval card for its
+  # chat, never one of the proposal events the Mac decodes as a watcher's
+  # card (a third shape would close its connection at every hello). Waiting
+  # beside a mandate's proposal, it is neither listed nor sent after the
+  # hello, and the app cannot answer it by id.
+  test "a heal's waiting card is no proposal event: not listed, not sent, not answered", ctx do
+    id = propose!(ctx)
+    %{heal: heal} = HealCards.waiting_card!(ctx.fixture.repo, owner_origin())
+
+    assert [%{"t" => "proposal", "proposal" => %{"proposal_id" => ^id}}] =
+             Proposals.waiting(ctx.context.cue_mandate_opts)
+
+    owner = hello(ctx.socket_path, 8)
+    assert %{"type" => "proposal", "proposal" => %{"proposal_id" => ^id}} = recv(owner)
+
+    # The next line answers the next request: no other card followed the hello.
+    send_line(owner, answer("mac-h1", heal.id, "confirm"))
+    assert %{"type" => "error", "client_msg_id" => "mac-h1"} = recv(owner)
+
+    assert {:ok, %{state: "waiting", answer: nil}} =
+             Repo.job_heals_call({:get, heal.id}, server: ctx.fixture.repo)
   end
 
   test "an answer after the proposal expired runs nothing", ctx do
