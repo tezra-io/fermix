@@ -36,10 +36,11 @@ defmodule FermixCore.ComputerUse.ComputerDriver do
   `stop/1` ends the watch, which lets go of the computer's screen.
 
   **Every turn names itself.** The tool puts its turn on each request
-  (`with_turn/2`), so each invocation carries that turn's origin and ids and
-  the computer checks them; a request the session makes on its own (the
-  helper's `probe`, the release of held input) carries the turn that started
-  it.
+  (`with_turn/2`), on this machine's screen as on a computer's: the session
+  reads it (`turn_id/1`) to hold a Stop against the turn that asked, and here
+  each invocation carries that turn's origin and ids and the computer checks
+  them; a request the session makes on its own (the helper's `probe`, the
+  release of held input) carries the turn that started it.
 
   Its errors are the local driver's where the meaning is the same (the
   helper's refusal, its timeout, its exit, a person at the computer), so the
@@ -76,7 +77,11 @@ defmodule FermixCore.ComputerUse.ComputerDriver do
     :computer
   ]
 
-  @doc "The request key a turn rides under, which the session never reads."
+  @doc """
+  The request key a turn rides under. The session reads it (`turn_id/1`) and
+  no helper takes it: this driver hands it to the computer beside the request,
+  and this machine's own (`ComputerUse.PortDriver`) leaves it off the wire.
+  """
   @spec turn_key() :: String.t()
   def turn_key, do: @turn_key
 
@@ -88,6 +93,14 @@ defmodule FermixCore.ComputerUse.ComputerDriver do
   @spec with_turn(map(), map()) :: map()
   def with_turn(request, context) when is_map(request) and is_map(context),
     do: Map.put(request, @turn_key, turn(context))
+
+  @doc """
+  The id of the turn `request` names (`with_turn/2`), or nil when it names
+  none: a request without the key, or a turn whose context had no `session_id`.
+  """
+  @spec turn_id(map()) :: String.t() | nil
+  def turn_id(%{@turn_key => %{session_id: id}}) when is_binary(id), do: id
+  def turn_id(request) when is_map(request), do: nil
 
   @doc """
   The driver spec for `computer` from the turn whose loop context is

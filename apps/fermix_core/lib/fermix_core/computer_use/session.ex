@@ -48,6 +48,7 @@ defmodule FermixCore.ComputerUse.Session do
   alias FermixCore.ComputerUse.Background
   alias FermixCore.ComputerUse.Capabilities
   alias FermixCore.ComputerUse.CaptureHealth
+  alias FermixCore.ComputerUse.ComputerDriver
   alias FermixCore.ComputerUse.Config
   alias FermixCore.ComputerUse.Controls
   alias FermixCore.ComputerUse.Courtesy
@@ -402,7 +403,13 @@ defmodule FermixCore.ComputerUse.Session do
         target_generation: 0,
         action_count: 0,
         session_id: session_id,
+        # The turn that opened this session, for the lifecycle rows.
         parent_session: Keyword.get(opts, :parent_session),
+        # The turn whose request this session last admitted to act on, and so
+        # the one a Stop holds (`OperatorStop`). A session outlives the turn that
+        # opened it, so this starts as that turn and moves with each admitted
+        # request; one that names no turn leaves nothing to hold.
+        turn: Keyword.get(opts, :parent_session),
         agent: Keyword.get(opts, :agent, "computer_use"),
         started_at: now_ms(),
         # Coexistence (V3 R0): `paused` is the human's `/pause` reclaim; `last_action_at`
@@ -547,16 +554,18 @@ defmodule FermixCore.ComputerUse.Session do
   # starts a fresh helper … repeat this action only if" — an invitation to carry
   # on, handed to a model in the middle of a turn the person has just stopped.
   # The reply below says the opposite, and `OperatorStop` makes it stick: every
-  # later `computer_use` call from this same turn is refused before a driver is
-  # started, because ending a session is not the same as stopping the work and
-  # the turn cancellation that would stop it lives a layer above core.
+  # later `computer_use` call from the turn whose request this session last
+  # admitted is refused before a driver is started, because ending a session is
+  # not the same as stopping the work and the turn cancellation that would stop
+  # it lives a layer above core. That turn, not the one that opened the session,
+  # which may have ended long before the person pressed Stop.
   def handle_info({:operator_control, :stop}, state) do
     state =
       state
       |> mark_paused(:indicator)
       |> reply_pending({:error, {:operator_stopped, :unknown}})
 
-    OperatorStop.record(conversation_key(state.registered_name), state.parent_session)
+    OperatorStop.record(conversation_key(state.registered_name), state.turn)
     announce_operator_stop(state)
     {:stop, :normal, state}
   end
@@ -956,6 +965,7 @@ defmodule FermixCore.ComputerUse.Session do
   # leave the caller waiting. Whether an action is under way is no longer published
   # for `/pause` to read: the helper's own acknowledgement names the request it is
   # still running, which is the same fact from the side that actually knows it.
+  # The turn the request names is now the one a Stop holds.
   defp dispatch_execute(request, from, state) do
     ActionWorker.execute(
       state.worker,
@@ -963,7 +973,7 @@ defmodule FermixCore.ComputerUse.Session do
       Map.take(state, @pipeline_reads ++ @pipeline_keys)
     )
 
-    {:noreply, %{state | pending: from}}
+    {:noreply, %{state | pending: from, turn: ComputerDriver.turn_id(request)}}
   end
 
   # Apply what the pipeline changed, and nothing else: `paused` and the worker are

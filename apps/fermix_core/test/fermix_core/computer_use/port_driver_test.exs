@@ -1,6 +1,7 @@
 defmodule FermixCore.ComputerUse.PortDriverTest do
   use ExUnit.Case, async: true
 
+  alias FermixCore.ComputerUse.ComputerDriver
   alias FermixCore.ComputerUse.PortDriver
 
   @fake Path.expand("fake_compux_sidecar.pl", __DIR__)
@@ -21,6 +22,17 @@ defmodule FermixCore.ComputerUse.PortDriverTest do
     # (protocol 11), which the fake mints exactly as the helper does.
     assert {:ok, %{"ok" => true, "observation_id" => "boot-fake-1"}} =
              PortDriver.execute(state, %{"action" => "screenshot"})
+
+    assert :ok = PortDriver.stop(state)
+  end
+
+  # The turn a request names is the session's to read (`OperatorStop`) and no
+  # action's field, which the helper refuses, so it never reaches the wire.
+  test "the turn a request names is not sent to the helper" do
+    {:ok, state} = PortDriver.start(binary_path: @fake)
+    request = ComputerDriver.with_turn(%{"action" => "screenshot"}, %{session_id: "main-turn-1"})
+
+    assert {:ok, %{"ok" => true}} = PortDriver.execute(state, request)
 
     assert :ok = PortDriver.stop(state)
   end

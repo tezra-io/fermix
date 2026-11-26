@@ -1372,7 +1372,8 @@ defmodule FermixCore.Tools.ComputerUse do
   #
   # On a computer (`Computers.Choice` chose one, M97 §6.4) the session drives
   # that computer's screen through `ComputerDriver`, with the config its reading
-  # gives (`Reach.config/1`), and each request carries this turn.
+  # gives (`Reach.config/1`); each request carries this turn there as here
+  # (`perform/4`).
   defp dispatch(params, context, computer, reading) do
     case resolve_session(context, computer) do
       {:ok, session} -> with_cu_session(run(session, params, context, reading), session)
@@ -1734,12 +1735,12 @@ defmodule FermixCore.Tools.ComputerUse do
   defp format_points([{x, y}]), do: "(#{x},#{y})"
   defp format_points([{fx, fy}, {tx, ty}]), do: "(#{fx},#{fy})→(#{tx},#{ty})"
 
-  # A request to a computer carries this turn, so the computer checks the turn
-  # that asked rather than the one that started the session (`ComputerDriver`).
+  # Every request carries this turn, on this machine as on a computer: the
+  # session holds a Stop against the turn that asked (`OperatorStop`), and a
+  # computer checks that turn rather than the one that started the session
+  # (`ComputerDriver`).
   defp perform(session, request, context, reading) do
-    request =
-      if Remote.computer(context), do: ComputerDriver.with_turn(request, context), else: request
-
+    request = ComputerDriver.with_turn(request, context)
     perform_result(Session.execute(session, request), request, reading)
   end
 

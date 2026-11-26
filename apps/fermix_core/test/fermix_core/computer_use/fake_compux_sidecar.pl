@@ -234,10 +234,13 @@ sub refuse_addressing {
     my ($target) = $line =~ /"target_id":"([^"]*)"/;
 
     my $code;
+    # The turn a Fermix request names (`ComputerDriver.with_turn/2`) is no
+    # action's field, so the helper refuses one that reaches it.
+    if ($line =~ /"fermix_turn":/) { $code = 'unknown_field'; }
     # v11: a target on an action that does not act inside one window is a field
     # the helper does not accept there, and an action INSIDE a bound window
     # carries every refusal the binding can produce.
-    if (defined $target && !$TARGETABLE{$action}) { $code = 'unknown_field'; }
+    elsif (defined $target && !$TARGETABLE{$action}) { $code = 'unknown_field'; }
     elsif (defined $target && $TARGET_ERROR)      { $code = $TARGET_ERROR; }
     if (!defined $code) {
         if ($ADDRESSED{$action}) {
