@@ -1006,7 +1006,10 @@ announced after a later reply's), and a page and a live event can carry the
 same row. So a client keeps a cursor, the last `server_seq` it shows, and:
 
 - pulls `history_pull{after_seq: cursor}` after every `server_hello`, and again
-  while a page's `next_after_seq` is below its `history_head_seq`;
+  while a page's `next_after_seq` is below its `history_head_seq`; a pull, here
+  or on a gap, may start below the cursor, so one page brings held rows again
+  together with the rows after it, and the pull after a page that says more
+  starts no lower than that page's `next_after_seq`;
 - applies a live row (a `row`, or a `text_done` at its `server_seq`) when its
   seq is `cursor + 1`, drops one at or below the cursor, and on a gap pulls
   from the cursor (unless a pull is already out) instead of showing it;
