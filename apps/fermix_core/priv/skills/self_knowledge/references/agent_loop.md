@@ -7,7 +7,7 @@
 - If the provider still refuses the request as too large, the loop compresses more and re-issues the call, at most three times, and never re-runs a tool.
 - A request that still does not fit fails the turn with a sentence saying so; a scheduled job's notice carries the same sentence and the raw reason. Superseded looks aside, a run that never nears its window is unchanged.
 - Only the newest look at a page stays: an earlier `browser` result carrying the page text of the same tab and the same whole address (its `#` fragment too, so each screen of a hash-routed app is a page of its own) is superseded. Once superseded looks add up to about 32 KB they are all replaced at once, without a model call, by the same result with its page text swapped for a one-line note that names its call id, as a digest does, so `tool_result_recall` reads the original back on a run that has it. A look at another address or in another tab is kept, and so is the step being answered.
-- Between turns, auto-compaction summarizes the conversation at a threshold (default 0.85; Mac Settings > Memory > **Compact a conversation at**); `/compact` forces it.
+- Between turns, auto-compaction summarizes the conversation at a threshold (default 0.85; Mac Settings > Memory > **Compact a conversation at**); `/compact` forces it. Each summary is built on the one before it, so what an earlier compaction kept carries forward, and the history is replaced whole or not at all.
 
 ## Caps and fan-out
 

@@ -7,27 +7,30 @@
 | Pane | Holds |
 |---|---|
 | Providers | each provider's sign-in or key, **Model**, **Reasoning effort**, **Fast mode** (OpenAI, Anthropic), **Details…** > **Use as primary**; Model behavior > **Sub-agent model** |
-| Personality | About you: **Your name**, **Time zone**, **Style**, **Call the assistant**; **Suggest new skills from tasks you repeat** |
+| Personality | About you: **Your name**, **Time zone**, **Style**, **Call the assistant**; **Suggest new skills from tasks you repeat**; **Check in on things you plan to do by a date** (open loops) |
 | Memory | **Compact a conversation at**, **Review memory every** |
 | Channels | each chat channel; Editors > **Accept editor connections** (ACP) |
 | Integrations | plugins, MCP servers, plugin sign-in clients |
+| Cues | **Run cues**, **Let watchers act**, **Screen**, sources and mandates; shown where this Fermix serves cues (see the `cues` reference) |
 | Voice, Meetings | the voice companion; the notetaker |
+| Phone calls | the calls Fermix places, apart from voice: **Phone calls**, **Status**, the Telnyx caller number and connection, **OpenAI key** (see the `phone_calls` reference) |
 | Computer | **Computer use** (**Work inside one window**), **Computer history** (**Apps**, **Summarize with**) |
 | Coding agents | **This Mac** (this computer's own: **Allow coding agents to run on this Mac**; **This computer** off a Mac; after a move, the server's, under its name: **Allow coding agents to run on this server**), **Preferred tool** |
 | Search | **Web search** backend and its key (the Brave key also powers place search) |
 | Images | **Images** backend, **Model**, its key |
 | Sandbox | **Sandbox** mode, **Command profile**, **Allowed environment variables** |
 | Browser | which browser tasks run in (read-only), **Run tasks**, **Most open tabs**, **Private hosts the browser may open**; downloads Chromium when none is installed |
+| Always On | moving the home to the owner's own server and back, its backups and its computers; see the `always_on_screen` reference |
 | Permissions | macOS permissions, each with the identity that holds it, **Notifications** among them (a reminder or timer ringing on this Mac); see the `macos_app` reference |
 
 - **Linux and dev installs**: `fermix settings` (below; works over SSH with no browser), browser setup (`fermix setup` opens it with a one-time `/setup?t=…` link; the durable setup token never goes in a URL), the terminal wizard (`fermix setup --terminal`), `fermix setup --<flag>` for headless values, or `config.toml`, then `fermix restart`.
-- **Needs a restart** (read at boot): providers, routing, the outbound proxy, voice, channels, ACP, sandbox (except `[sandbox.env]`, read per command), coding harness, skill curation, meetings, computer use, computer history. Setup and the app say which change is waiting.
+- **Needs a restart** (read at boot): providers, routing, the outbound proxy, voice, channels, ACP, sandbox (except `[sandbox.env]`, read per command), coding harness, skill curation, open loops, meetings, computer use, computer history, cues (except their sources, screen, decision model and mandates, applied at once). Setup and the app say which change is waiting.
 
 ### `fermix settings` (terminal, no browser)
 
 Reads and changes the same sections the Mac panes show, through the running service, which checks every key before it writes any, so a refusal saves nothing.
 
-- `fermix settings` lists the sections: `providers.<provider>` (`openai_codex`, `openai`, `anthropic`, `xai`, `openrouter`, `mistral`, `venice`, `vercel`, `ollama`), `routing`, `personalization`, `memory`, `channels.<channel>`, `editors`, `channels.mobile`, `realtime`, `transcription`, `meetings`, `computer_use`, `computer_history`, `harness_machine`, `harness`, `web_search`, `generate_image`, `sandbox`, `browser`, `secrets`, `snapshots`.
+- `fermix settings` lists the sections: `providers.<provider>` (`openai_codex`, `openai`, `anthropic`, `xai`, `openrouter`, `mistral`, `venice`, `vercel`, `ollama`), `routing`, `personalization`, `memory`, `channels.<channel>`, `editors`, `channels.mobile`, `cues`, `realtime`, `transcription`, `meetings`, `phone_calls`, `computer_use`, `computer_history`, `harness_machine`, `harness`, `web_search`, `generate_image`, `sandbox`, `browser`, `secrets`, `snapshots`.
 - `fermix settings show SECTION [--info]` prints each key, its value and whether it needs a restart. `fermix settings set SECTION KEY=VALUE [KEY=VALUE...]` changes keys (`true`/`false`, a number, a comma-separated list, or text; `KEY=` empties a text value or list), e.g. `fermix settings set providers.openai default_model=<model>`. A refused value prints the daemon's own sentence. Rows that follow a choice (web search, images, voice) appear only once that choice is saved, so set the choice in its own `set` first.
 - **Secrets are never arguments** (one would sit in `ps` and shell history): `fermix settings secret set ID` prompts with no echo, or `... | fermix settings secret set ID --stdin` reads it piped. The `fermix setup` wizard hides its key and token questions the same way. A hidden prompt shows only how many characters arrived, so "nothing appeared when I pasted" is expected, and a missing count means the paste did not land. `show` prints the exact ID on every secret row (`openai_api_key`, `tavily_api_key`, `telegram_bot_token`, …); `env:NAME` stores a command's own variable (see `sandbox_env`), `mcp:<server>/env/<NAME>` (or `/header/<Header-Name>`, `/client_secret`) a value an MCP server declares, `plugin:<name>` a plugin token, `anthropic_setup_token` a `claude setup-token`. A secret typed as an argument is refused (exit 2) and should be rotated. `fermix settings secret clear ID` forgets one.
 - **A machine's own settings are the owner's.** From a process Fermix started (a command it runs), `fermix settings set` of `sandbox`, `browser`, `harness_machine`, `computer_use`, `computer_history` or `accessories`, and `secret set` or `secret clear` of an `env:NAME`, are refused with "Only the owner can change a computer's own settings, its sandbox among them: use the Fermix app or the setup page." and nothing is saved, on every home. The owner's own terminal is unaffected. To widen the sandbox or store a command's variable, tell the owner what to set and where.
@@ -60,7 +63,7 @@ Reads and changes the same sections the Mac panes show, through the running serv
 | `[fermix_core.meetings]` | `enabled` (off by default), `bot_name`, `announce`, `announce_message`, `transcription_backend`, `retain_audio`, the Zoom RTMS values `zoom_account_id`, `zoom_client_id`, `zoom_client_secret` (kept in the keychain) and `zoom_ws_subscription_id` |
 | `[fermix_core.harness]` | `enabled`, `default_vendor`, `cloud_enabled`; its `approved`, `codex_home` and `claude_config_dir` are this computer's, in `machine.toml` |
 | `[fermix_core.skill_curation]` | `enabled` |
-| `[fermix_core.open_loops]` | `enabled` (off by default; see the `open_loops` reference); nothing else |
+| `[fermix_core.open_loops]` | `enabled` (on by default; `false` turns them off; see the `open_loops` reference); nothing else |
 | `[fermix_core.jobs\|memory\|realtime\|plugins]` | per-feature settings |
 | `[fermix_core.oauth.<provider>]` | plugin sign-in clients (`google`, `github`, `notion`, `x`, `slack`, `tesla`): `client_id`, `client_secret` (keychain) |
 | `[fermix_core.plugin_secrets]` | api_key plugin tokens, keyed by plugin name (keychain) |

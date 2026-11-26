@@ -13,7 +13,7 @@ Never shell-scrape a JavaScript site.
 
 ## `web_search` backends
 
-The default backend is keyless DuckDuckGo. Others (Brave, Exa, Tavily, Firecrawl and more) take a key: Mac Settings > Search (**Web search** and its key), or `[fermix_core.tools.web_search]`. When a configured non-DuckDuckGo backend hard-fails (auth, credits or HTTP 402, transport, rate limit), `web_search` degrades once to DuckDuckGo, loudly: a warning log plus `degraded`, `primary_backend` and `fallback_reason` in the trace. Empty results and bad queries do not degrade.
+The default backend is keyless DuckDuckGo. The backends are offered in one order, Parallel, Brave, DuckDuckGo, Tavily, Exa, Perplexity, Firecrawl, and every one but DuckDuckGo takes a key: Mac Settings > Search (**Web search** and its key), or `[fermix_core.tools.web_search]`. When a configured non-DuckDuckGo backend is unavailable (out of credits or HTTP 402 and other provider errors, transport, rate limit, a response shape it no longer understands), `web_search` degrades once to DuckDuckGo, loudly: a warning log plus `degraded`, `primary_backend` and `fallback_reason` in the trace. A rejected or missing key (`auth_failed`), empty results and bad queries do not degrade: they surface so they get fixed.
 
 ## `place_search`
 
