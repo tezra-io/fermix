@@ -86,7 +86,11 @@ companion protocols, and traces.
 `FermixCore.Application.start/2` first picks a `BootProfile` (`:app_engine`,
 `:standalone_cli`, `:linux_package_cli`, or `:source`) from the compiled-in
 `BuildInfo`. A CLI verb that needs no daemon runs and halts before the sibling
-applications start. Otherwise it checks `auth.json` permissions, installs the
+applications start. A daemon's boot first takes the home's lock, the file
+beside its control socket (`Fermix.CLI.Daemon.Lock`), and holds it until the
+application stops: a boot that finds it held starts nothing and writes
+nothing, so one engine at a time serves a home and settles what the one
+before it left. Then it checks `auth.json` permissions, installs the
 redacting logger, attaches telemetry, and starts the core tree under
 `:rest_for_one`, in this order:
 

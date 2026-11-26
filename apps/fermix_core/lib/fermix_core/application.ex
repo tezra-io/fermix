@@ -7,6 +7,7 @@ defmodule FermixCore.Application do
   alias Burrito.Util, as: BurritoUtil
   alias Burrito.Util.Args, as: BurritoArgs
   alias Fermix.CLI.Daemon
+  alias Fermix.CLI.Daemon.Lock
   alias Fermix.CLI.Setup
   alias FermixCore.Agents.AgentSupervisor
   alias FermixCore.Agents.MainAgent
@@ -94,6 +95,10 @@ defmodule FermixCore.Application do
   # side effect, so it is gated OUT of `:test` here (never in `mix test`).
   @compiled_env Mix.env()
 
+  # What `start/2` hands `prep_stop/1` and `stop/1`: the home's lock a daemon
+  # boot holds for the life of the application, nil on any other boot.
+  @type state :: %{home_lock: Lock.t() | nil}
+
   @impl true
   def start(_type, _args) do
     profile =
@@ -137,9 +142,9 @@ defmodule FermixCore.Application do
   # say them: its only handler is the kernel's on stdout, which the app's
   # launch agent sends nowhere. Saying them reads no file.
   defp start_tree_naming_retired_settings do
-    with {:ok, pid} <- start_supervision_tree() do
+    with {:ok, pid, state} <- start_supervision_tree() do
       :ok = ConfigStore.say_retired_settings()
-      {:ok, pid}
+      {:ok, pid, state}
     end
   end
 
@@ -160,14 +165,14 @@ defmodule FermixCore.Application do
   # for `SetupSeeder`, then halts before sibling OTP apps start.
   defp cli_dispatch(_profile, ["setup" | _] = argv) do
     if Setup.supervision_required?(tl(argv)) do
-      {:ok, _pid} = start_supervision_tree()
+      {:ok, _pid, _state} = start_supervision_tree()
     end
 
     System.halt(run_cli(argv))
   end
 
   defp cli_dispatch(_profile, ["memory" | _] = argv) do
-    {:ok, _pid} = start_supervision_tree()
+    {:ok, _pid, _state} = start_supervision_tree()
     System.halt(run_cli(argv))
   end
 
@@ -184,16 +189,92 @@ defmodule FermixCore.Application do
   defp run_daemon(profile, argv) do
     :ok = BootProfile.prepare(profile, ConfigStore.fermix_home())
 
-    with {:ok, pid} <- start_supervision_tree() do
+    with {:ok, pid, state} <- start_supervision_tree() do
       spawn(fn -> run_cli(argv) end)
-      {:ok, pid}
+      {:ok, pid, state}
     end
   end
 
-  defp start_supervision_tree do
-    # First, before anything writes to the home or opens `memory.db`: a home
-    # that moved refuses to open as the primary here, by name, and the boot
-    # fails (M75 step 1). Every later child list is filtered by this role.
+  # The home's lock first (`start_holding_home_lock/3`): a daemon boot holds it
+  # before it reads or writes anything else in the home and before any child
+  # starts, beside the socket its daemon listens on.
+  defp start_supervision_tree,
+    do: start_holding_home_lock(daemon_boot?(), Daemon.default_socket_path(), &start_tree/0)
+
+  # Starts the engine with `start` under the home's lock.
+  # One engine serves a home at a time, and the proof is the lock beside its
+  # control socket (`Fermix.CLI.Daemon.Lock`): a daemon boot (`daemon?`) takes
+  # it beside `socket_path`, making only the lock's directory and file, before
+  # `start` runs, and so before anything in it reads or writes the home or
+  # claims it. A lock another holds answers `{:another_daemon_running,
+  # socket_path}` and starts nothing; any other failure to take it is returned
+  # as it is. The lock is held in the returned state until `stop/1`, and let go
+  # of when `start` fails or raises. Any other boot (`mix test`, `fermix
+  # memory`, a supervised `fermix setup`) takes no lock, as before. Public
+  # (@doc false) so tests pin the order without booting a second tree.
+  @doc false
+  @spec start_holding_home_lock(boolean(), Path.t(), (-> {:ok, pid()} | {:error, term()})) ::
+          {:ok, pid(), state()} | {:error, term()}
+  def start_holding_home_lock(daemon?, socket_path, start)
+      when is_boolean(daemon?) and is_binary(socket_path) and socket_path != "" and
+             is_function(start, 0) do
+    case take_home_lock(daemon?, socket_path) do
+      {:ok, lock} -> start_holding(lock, start)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp take_home_lock(false, _socket_path), do: {:ok, nil}
+
+  defp take_home_lock(true, socket_path) do
+    dir = Path.dirname(socket_path)
+
+    case File.mkdir_p(dir) do
+      :ok -> acquire_home_lock(socket_path)
+      {:error, reason} -> {:error, {:lock_dir_failed, dir, reason}}
+    end
+  end
+
+  defp acquire_home_lock(socket_path) do
+    case Lock.acquire(socket_path) do
+      {:ok, lock} -> {:ok, lock}
+      {:error, :held} -> {:error, {:another_daemon_running, socket_path}}
+      {:error, failure} -> {:error, failure}
+    end
+  end
+
+  # A start that raises lets go of the lock before the raise goes on, so the
+  # boot fails as it would have and leaves no lock held.
+  defp start_holding(lock, start) do
+    case start.() do
+      {:ok, pid} ->
+        {:ok, pid, %{home_lock: lock}}
+
+      {:error, reason} ->
+        :ok = release_home_lock(lock)
+        {:error, reason}
+    end
+  catch
+    kind, reason ->
+      stacktrace = __STACKTRACE__
+      :ok = release_home_lock(lock)
+      :erlang.raise(kind, reason, stacktrace)
+  end
+
+  defp release_home_lock(nil), do: :ok
+
+  defp release_home_lock(lock) do
+    case Lock.release(lock) do
+      :ok -> :ok
+      {:error, failed} -> Logger.error("Daemon lock not released: #{inspect(failed)}")
+    end
+  end
+
+  defp start_tree do
+    # First after the home's lock, before anything writes to the home or opens
+    # `memory.db`: a home that moved refuses to open as the primary here, by
+    # name, and the boot fails (M75 step 1). Every later child list is filtered
+    # by this role.
     :ok =
       Role.remember!(ConfigStore.fermix_home(), Application.get_env(:fermix_core, :engine, []))
 
@@ -233,7 +314,17 @@ defmodule FermixCore.Application do
     state
   end
 
-  # What a boot writes into its home before any child starts. A candidate
+  # Once the tree is down, the home's lock a daemon boot took before it
+  # started (`start_holding_home_lock/3`) is let go of: from here a client
+  # reads the home as stopped. A failed release is logged; the operating
+  # system lets go of it when the engine's OS process ends either way.
+  @impl true
+  @spec stop(state()) :: :ok
+  def stop(%{home_lock: lock}), do: release_home_lock(lock)
+
+  # What a boot writes into its home before any child starts, and in a daemon
+  # boot only once it holds the home's lock (`start_holding_home_lock/3`), so a
+  # second daemon on a home whose engine runs writes none of it. A candidate
   # (M75 §2) writes nothing there: its home is where a move will rename a
   # restored one into place, so it gets no workspace, no epoch, no prompt
   # files and no token-file check. A primary first finishes a candidate's
@@ -454,7 +545,9 @@ defmodule FermixCore.Application do
         # with no restart. Admission re-reads readiness on every start, so a
         # home with phone calls off, or durable memory off, dials nothing.
         # Primary-only (`Home.Role`). Its boot reconciliation, prune and
-        # delivery ticks run only in the home's daemon (`phone_calls_opts/0`).
+        # delivery ticks run only in a daemon boot (`phone_calls_opts/0`), and
+        # a daemon boot gets here only holding the home's lock, so only in the
+        # home's one daemon.
         {PhoneCallsSupervisor, phone_calls_opts()},
         maybe_daemon_socket(),
         maybe_native_host(),
@@ -640,12 +733,15 @@ defmodule FermixCore.Application do
   # processes (one drain lease, retained Doctor sessions, retained jobs), so
   # they start with the socket and never independently of it: a management
   # method whose owner is absent would answer `unavailable` for the life of the
-  # daemon.
+  # daemon. The socket starts late in the tree, but the lock beside it that a
+  # client asks does not: a daemon boot took it before the first child started
+  # (`start_holding_home_lock/3`), and this list is built only after that.
   defp maybe_daemon_socket do
     if Application.get_env(:fermix_core, :daemon_socket_enabled, false) do
       # The ownership marker is rewritten by the engine that is actually serving
-      # this home, which is exactly the set of boots that can claim it. A source
-      # run or a test tree serves no socket and claims nothing.
+      # this home, which is exactly the set of boots that can claim it: one that
+      # holds the home's lock, so a second daemon refused at the lock claims
+      # nothing. A source run or a test tree serves no socket and claims nothing.
       :ok = EngineOwner.record()
 
       [
@@ -821,7 +917,8 @@ defmodule FermixCore.Application do
 
   # A real in-process daemon run (`fermix run` / `mix fermix.dev`) — both enable
   # the daemon control socket before the tree builds — and never `mix test`,
-  # `fermix setup`, or `fermix memory`.
+  # `fermix setup`, or `fermix memory`. Only this boot takes the home's lock
+  # (`start_holding_home_lock/3`).
   defp daemon_boot? do
     @compiled_env != :test and
       Application.get_env(:fermix_core, :daemon_socket_enabled, false)
@@ -888,11 +985,12 @@ defmodule FermixCore.Application do
   # resolved when it runs.
   #
   # Boot reconciliation, the retention prune and the delivery ticks belong to
-  # the home's running engine only (`daemon_boot?/0`): a command that boots
-  # the tree in a process of its own (`fermix memory`, a supervised `fermix
-  # setup`, a mix task) must not settle the daemon's live call as unowned or
-  # hang it up, and its stop, its off switch and the owner's word leave the
-  # daemon's calls to the daemon (`daemon:`).
+  # the home's running engine only (`daemon_boot?/0`; a second daemon on a home
+  # whose engine runs is refused at the home's lock before any child starts):
+  # a command that boots the tree in a process of its own (`fermix memory`, a
+  # supervised `fermix setup`, a mix task) must not settle the daemon's live
+  # call as unowned or hang it up, and its stop, its off switch and the owner's
+  # word leave the daemon's calls to the daemon (`daemon:`).
   @doc false
   @spec phone_calls_opts() :: keyword()
   def phone_calls_opts, do: phone_calls_opts(daemon_boot?(), @compiled_env)
