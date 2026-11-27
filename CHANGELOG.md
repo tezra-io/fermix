@@ -46,14 +46,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   minute of the call ending: confirmed, in the other person's own words,
   unavailable, options, needs you, finished when the conversation ended with
   nothing confirmed in it, or unknown when Fermix could not tell what
-  happened. Reporting is all Fermix does by itself after a call: the
-  message that brings the report is written with no tools, so Fermix looks
-  nothing up and sends, changes or starts nothing on what was said, and what
-  happens next waits for your own next message. The report then stays in the
-  conversation, so that next request is answered with it in view, and since
-  it answers what the other person said, another call it asks for (or
-  anything else that needs your yes after outside content) waits for your
-  confirmation; a message after that one is an ordinary request. While a call
+  happened. Reporting is all Fermix does by itself after a call: the message
+  that brings the report is written with no tools, so Fermix looks nothing up
+  and sends, changes or starts nothing on what was said, and what happens next
+  waits for your own next message. A report for a call asked in a chat then
+  stays in that conversation, so that next request is answered with it in
+  view, and since it answers what the other person said, another call it asks
+  for (or anything else that needs your yes after outside content) waits for
+  your confirmation; a message after that one is an ordinary request. The
+  report of a call asked by voice (sent to your inbox), of one you stopped, or
+  of one whose report could not be brought back as that message is a plain
+  message, and a reply to it is an ordinary request. While a call
   is in progress Fermix refuses `fermix restart`, the setup page's **Apply &
   restart**, and a change of the OpenAI key or the connection's password (the
   Linux app's Restart and an app's Restart of an Always On server are not

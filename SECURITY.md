@@ -163,9 +163,12 @@ What this deliberately does not cover:
   in such a turn is marked, and the later turn its due note rides, or that
   lists, settles or notes it again, counts as having read outside content; the
   owner's message that answers a phone call's report counts as having read the
-  call (that message only: once the owner has sent another, the report is only
-  replayed); and on a GPT-Live or Grok voice call, once one task has read it,
-  every later task of that call has.
+  call when the report came into the conversation that asked for it as a
+  follow-up turn (that message only: once the owner has sent another, the
+  report is only replayed; a report sent as a plain message carries nothing: a
+  voice-asked call's, to the inbox, that of a call the owner stopped, and one
+  whose follow-up turn could not be started); and on a GPT-Live or Grok voice
+  call, once one task has read it, every later task of that call has.
 - A finished coding run reports back as a follow-up turn, which may start the
   next run of the chain without asking (the owner's choice): with the same
   coding agent and the same starting folder as the run that finished, once per

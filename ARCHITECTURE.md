@@ -1632,16 +1632,19 @@ full is reported as not checked instead of sinking the result; a reading that
 establishes none of the results on a call that ended by a hang-up somebody
 chose (`Call.Ending`'s `:hangup`) is `finished`, a word only `extract/4`
 names, since it alone knows how the call ended, kept by `Call.EndReport` only
-where the provider confirmed that end, and `unknown` is kept for a result
-never read, nobody reached or a call cut short; one place decides a result was not read, its reader's own
-failure included, and such a result keeps each speaker's last words as its
-evidence, `Call.LastWords`) and sends the Manager one end report.
+where the provider confirmed that end, and a reading that established nothing
+on a call cut short, or whose end was never confirmed, stays `unknown`, as do
+a call that reached nobody and a result never read; one place decides a result
+was not read, its reader's own failure included, and such a result keeps each
+speaker's last words as its evidence, `Call.LastWords`) and sends the Manager
+one end report.
 An engine stop shortens that ending: the first application to stop runs
 `Manager.drain_for_stop/0` from its `prep_stop/1`, while every tree, the
 call's backend among them, still runs: it asks each live call to hang up, and
 no outcome is read. The Manager writes the terminal row once and hands it off:
-a chat origin re-enters its conversation (`PhoneCalls.Continuation`, through
-the dispatcher `Delivery.Continuation` resolves for every run kind) as a turn
+a chat origin whose call the owner did not stop re-enters its conversation
+(`PhoneCalls.Continuation`, through the dispatcher `Delivery.Continuation`
+resolves for every run kind) as a turn
 that can only report: the turn carrying a finished call's marker runs on
 `RuntimeContext.reply_only_profile/1`, with no capability offered or
 dispatchable, so after a call Fermix does nothing on what was said in it and
@@ -1653,8 +1656,9 @@ conversation's most recent user-role message carries the stored
 any other call it decides after outside content; once the owner has sent
 another message the report is only replayed (M94 D26). Anything
 else or a failed dispatch is one send (`PhoneCalls.Delivery`, over
-`Delivery.FrozenSend`, to the origin `Delivery.FrozenOrigin.resolve/2` froze
-on the row), and `DeliveryWorker` owns the bounded rest.
+`Delivery.FrozenSend`, to the destination frozen on the row: the asking chat
+by `Delivery.FrozenOrigin`, or for a call asked by voice the owner's inbox by
+`Delivery.OwnerInbox.resolve/1`), and `DeliveryWorker` owns the bounded rest.
 `Report.view/2` is the one view of a call, rendered for a person (`text/1`) and
 for a model (`notice/1`, the recipient's and OpenAI's words framed as
 untrusted). While a call is in progress (a ledger row not yet ended, failing
