@@ -1628,7 +1628,12 @@ provider failure, all inside `Limits.result_extraction_timeout_ms/0`, then
 brief says must be confirmed rests on the recipient's own words or on their
 yes as the very next turn after the one assistant line it answers, each fact
 is marked `verified` or `read`, and a brief's time the words do not state in
-full is reported as not checked instead of sinking the result; one place decides a result was not read, its reader's own
+full is reported as not checked instead of sinking the result; a reading that
+establishes none of the results on a call that ended by a hang-up somebody
+chose (`Call.Ending`'s `:hangup`) is `finished`, a word only `extract/4`
+names, since it alone knows how the call ended, kept by `Call.EndReport` only
+where the provider confirmed that end, and `unknown` is kept for a result
+never read, nobody reached or a call cut short; one place decides a result was not read, its reader's own
 failure included, and such a result keeps each speaker's last words as its
 evidence, `Call.LastWords`) and sends the Manager one end report.
 An engine stop shortens that ending: the first application to stop runs

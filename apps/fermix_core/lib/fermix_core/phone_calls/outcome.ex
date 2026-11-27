@@ -13,6 +13,26 @@ defmodule FermixCore.PhoneCalls.Outcome do
   `verify/3` decides what survives of it. A failed or malformed extraction is
   no exception: the outcome is `unknown`, with its failure class kept.
 
+  ## A call that finished
+
+  A call that was answered, in which the recipient spoke, whose reading ran
+  and established none of the other results, and that ended by a hang-up is
+  `finished`: it ran to its end and was read, and nothing in it was
+  confirmed. The word confirms nothing either way: the other side may hold
+  what a check refused, which the reason then says. Who hung up (the
+  recipient, or a backend turn that was done or could not go on) is the
+  row's failure words, never this word's. What
+  verification left is kept as it is: its reason (a verification code, or
+  none when the reader itself said `unknown`), its excerpts, the reading's
+  note and the notes. Only `extract/4` names it, because only it knows how
+  the call ended: `verify/3` has no transport and answers `unknown` for the
+  same claim, and the reader never says it (`Outcome.Claim`'s five words). A
+  call decided in code, a failed reading and any other end (`deadline`, a
+  bound of the call's, its backend-turn limit among them; `cancelled`;
+  `connection_lost`; `failed`, a provider's own close among them) stay
+  `unknown`, kept for a result Fermix really does not know, and so does one
+  whose end the provider never confirmed (`Call.EndReport`).
+
   ## What code decides
 
   `verify/3` is pure and is the authority. The extraction's words are a
@@ -131,7 +151,11 @@ defmodule FermixCore.PhoneCalls.Outcome do
   alias FermixCore.PhoneCalls.Transcript
   alias FermixCore.Text
 
-  @words [:confirmed, :unavailable, :options, :needs_owner, :unknown]
+  # The reader's words (`Outcome.Claim`), all `verify/3` reads.
+  @claim_words [:confirmed, :unavailable, :options, :needs_owner, :unknown]
+  # Every outcome word: the reader's, and `finished`, which only `extract/4`
+  # names (see the moduledoc).
+  @words @claim_words ++ [:finished]
   # How the worker's `Call.Ending` reads each end (`Ending.end_reason/1`).
   @end_reasons [:no_answer, :failed, :voicemail, :hangup, :deadline, :cancelled, :connection_lost]
 
@@ -195,7 +219,7 @@ defmodule FermixCore.PhoneCalls.Outcome do
             confirmation: nil,
             extraction: :not_needed
 
-  @type word :: :confirmed | :unavailable | :options | :needs_owner | :unknown
+  @type word :: :confirmed | :unavailable | :options | :needs_owner | :finished | :unknown
   @type end_reason ::
           :no_answer | :failed | :voicemail | :hangup | :deadline | :cancelled | :connection_lost
   @typedoc "What the transport proved: whether the call was answered, and how it ended."
@@ -274,7 +298,8 @@ defmodule FermixCore.PhoneCalls.Outcome do
   `:started_at` (required, a `DateTime`, dates the brief the extraction
   reads), `:session_id` (required, the call's own), and the extraction's
   `:routes` and `:timeout_ms`. Always `{:ok, outcome}`: a failed extraction
-  is an `unknown` outcome with its class kept.
+  is an `unknown` outcome with its class kept, and a reading that established
+  nothing on a call that ended by a hang-up is `finished`.
   """
   @spec extract(Brief.t(), [Transcript.entry()], transport(), keyword()) :: {:ok, t()}
   def extract(
@@ -296,11 +321,13 @@ defmodule FermixCore.PhoneCalls.Outcome do
 
   @doc """
   What survives of `claim` (`Outcome.Claim`) against `brief` and
-  `transcript`. Pure; see the module doc for the rules.
+  `transcript`. Pure; see the module doc for the rules. It never answers
+  `finished`: it has no transport, so a claim that establishes nothing is
+  `unknown` here, and `extract/4` alone makes it `finished` on a hang-up.
   """
   @spec verify(Brief.t(), [Transcript.entry()], Claim.t()) :: t()
   def verify(%Brief{} = brief, transcript, %{outcome: outcome} = claim)
-      when is_list(transcript) and outcome in @words,
+      when is_list(transcript) and outcome in @claim_words,
       do: checked(brief, Transcript.turns(transcript), claim)
 
   @doc """
@@ -308,7 +335,9 @@ defmodule FermixCore.PhoneCalls.Outcome do
   contract the view (`PhoneCalls.Report`) renders. Every word for an owner
   is the view's: this carries codes (`vocabulary/0`) and what was said.
 
-    * `outcome`: `confirmed`, `unavailable`, `options`, `needs_owner` or
+    * `outcome`: `confirmed`, `unavailable`, `options`, `needs_owner`,
+      `finished` (a call hung up with nothing established: it confirms
+      nothing either way) or
       `unknown`.
     * `outcome_facts` (`nil` when empty), under string keys:
       * `reason`: why the outcome is what it is, a code; absent for a
@@ -337,7 +366,7 @@ defmodule FermixCore.PhoneCalls.Outcome do
   Fitted to the ledger's bounds after encoding (`fit_report/1`).
   """
   @spec to_report(t()) :: report()
-  def to_report(%__MODULE__{} = outcome) do
+  def to_report(%__MODULE__{outcome: word} = outcome) when word in @words do
     fit_report(%{
       outcome: Atom.to_string(outcome.outcome),
       outcome_facts: report_facts(outcome),
@@ -406,7 +435,7 @@ defmodule FermixCore.PhoneCalls.Outcome do
 
   # -- the extraction -------------------------------------------------------------
 
-  defp extracted(brief, turns, _transport, opts) do
+  defp extracted(brief, turns, transport, opts) do
     started_at = Keyword.fetch!(opts, :started_at)
     {messages, cut?} = Extraction.messages(brief, turns, started_at)
 
@@ -414,6 +443,7 @@ defmodule FermixCore.PhoneCalls.Outcome do
       {:ok, claim} ->
         brief
         |> checked(turns, claim)
+        |> finished(transport)
         |> Map.put(:extraction, :ok)
         |> noted(cut?)
 
@@ -421,6 +451,13 @@ defmodule FermixCore.PhoneCalls.Outcome do
         extraction_failed(class, detail, Keyword.fetch!(opts, :session_id))
     end
   end
+
+  # A reading that established nothing, on a call that ended by a hang-up:
+  # the call finished (see the moduledoc). Only the word changes.
+  defp finished(%__MODULE__{outcome: :unknown} = outcome, %{end_reason: :hangup}),
+    do: %{outcome | outcome: :finished}
+
+  defp finished(outcome, _transport), do: outcome
 
   defp extraction_failed(class, detail, session_id) do
     Logger.warning(

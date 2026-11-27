@@ -186,8 +186,15 @@ scenarios:
               Call my cell at (646) 555-0175 and remind me that the plumber from
               Bellwether Plumbing comes at 9 am on Tuesday, February 9, 2027.
           - await: call_report
+          - query: "Check that call's record for me: did the plumber reminder get through?"
+            expect:
+              # The owner answered, said thanks and the call was hung up: the
+              # record of an ordinary call that finished is never unknown,
+              # read from the record or said from the report in view.
+              tool_evidence_match_none: ['(?i)outcome\W+unknown']
+              reply_not_matches: '(?i)\boutcome\b[^.\n]{0,40}\bunknown\b'
         expect:
-          max_cost_usd: 1.5
+          max_cost_usd: 2.0
           fixture_state: &owner_floor
             - { path: phone.creates, equals: 1 }
             - { path: phone.extra_creates, absent: true }

@@ -12,7 +12,7 @@ defmodule FermixCore.PhoneCalls.Ledger do
 
       Call:    admitted → dispatching → connecting → ringing → active → closing → ended
                            ↘ dispatch_unknown      ↘ failed          ↘ closure_unconfirmed
-      Outcome: pending | confirmed | unavailable | options | needs_owner | unknown
+      Outcome: pending | confirmed | unavailable | options | needs_owner | finished | unknown
       Usage:   provisional | voice_duration_confirmed | incomplete
       Report:  pending | written | delivery_unconfirmed
 
@@ -71,6 +71,10 @@ defmodule FermixCore.PhoneCalls.Ledger do
   writer: `terminalize/4` (once only, `:already_terminal` after) and
   `fail_undispatched/4` (only from `admitted`). `ended` never implies
   `confirmed`: an outcome defaults to `unknown`, and `confirmed` needs evidence.
+  `finished`, a call that was answered, read and hung up with nothing
+  established (`PhoneCalls.Outcome`), is only an `ended` call's, with
+  evidence or none: a call whose end was never confirmed has not been shown
+  to finish.
   """
 
   alias FermixCore.Memory.Repo
@@ -320,8 +324,9 @@ defmodule FermixCore.PhoneCalls.Ledger do
   uncertain, stored bounded as `outcome_uncertainty`) and `next_delivery_at`
   (the hand-off lease). The provider's session id is never set here: it is
   written once, by its own guarded step. `confirmed` needs at least one
-  evidence excerpt and an `ended` or `closure_unconfirmed` call;
-  `dispatch_unknown` is always `unknown`.
+  evidence excerpt and an `ended` or `closure_unconfirmed` call; `finished`
+  needs an `ended` call, with evidence or none; `dispatch_unknown` is always
+  `unknown`.
   """
   @spec terminalize(String.t(), String.t(), map(), server_opts()) ::
           {:ok, row()}
@@ -573,18 +578,27 @@ defmodule FermixCore.PhoneCalls.Ledger do
       outcome not in PhoneCallsSql.terminal_outcomes() ->
         {:error, {:invalid, :outcome, outcome}}
 
+      outcome == "finished" ->
+        check_status_admits(status, ~w(ended), :finished_on)
+
       status == "dispatch_unknown" and outcome != "unknown" ->
         {:error, {:invalid, :outcome, outcome}}
 
       outcome == "confirmed" and evidence == [] ->
         {:error, {:invalid, :outcome, :no_evidence}}
 
-      outcome == "confirmed" and status not in ~w(ended closure_unconfirmed) ->
-        {:error, {:invalid, :outcome, {:confirmed_on, status}}}
+      outcome == "confirmed" ->
+        check_status_admits(status, ~w(ended closure_unconfirmed), :confirmed_on)
 
       true ->
         :ok
     end
+  end
+
+  # `finished` is only a call's that ended, `confirmed` one's that ended or
+  # whose closure is unconfirmed.
+  defp check_status_admits(status, admitted, refusal) do
+    if status in admitted, do: :ok, else: {:error, {:invalid, :outcome, {refusal, status}}}
   end
 
   # An uncertain end never had its final usage confirmed.

@@ -116,6 +116,7 @@ defmodule FermixCore.Memory.Repo do
   @job_heal_answer_migration_version 74
   @owner_hours_index_migration_version 75
   @job_heal_card_migration_version 76
+  @phone_call_finished_migration_version 77
   @sqlite_open_intent :readwritecreate
 
   # The home's requests about notes from every machine (M97 §8), all served by
@@ -5594,9 +5595,36 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_job_run_tally_migration(conn, versions),
          :ok <- apply_job_heal_answer_migration(conn, versions),
          :ok <- apply_owner_hours_index_migration(conn, versions),
-         :ok <- apply_job_heal_card_migration(conn, versions) do
+         :ok <- apply_job_heal_card_migration(conn, versions),
+         :ok <- apply_phone_call_finished_migration(conn, versions) do
       :ok
     end
+  end
+
+  # M94: a call hung up with nothing established reads `finished`, one more word in the call
+  # ledger's outcome CHECK, with the version in one transaction, after 76. A
+  # CHECK changes only by making the table again, so the table 68 rebuilt is
+  # rebuilt once more into the one definition (`PhoneCallsSql.finished_rebuild/0`),
+  # every call kept with every column. Reapplying it changes nothing: a table
+  # that already takes the word (a fresh store, which 67 lays down, or one 68
+  # made from the definition) is recognised by it and left as it is, and a
+  # table whose columns are not the ledger's is refused, never cut.
+  defp apply_phone_call_finished_migration(conn, versions) do
+    if Enum.member?(versions, @phone_call_finished_migration_version) do
+      :ok
+    else
+      with :ok <- Sqlite3.execute(conn, "BEGIN;") do
+        conn
+        |> phone_call_finished_rebuild()
+        |> record_version(conn, @phone_call_finished_migration_version)
+        |> commit_migration(conn)
+      end
+    end
+  end
+
+  defp phone_call_finished_rebuild(conn) do
+    with {:ok, rebuilds} <- pending_rebuilds(conn, [PhoneCallsSql.finished_rebuild()]),
+         do: execute_each(conn, Enum.map(rebuilds, & &1.sql))
   end
 
   # M106 §5.7, D5 (stage S4b): a proposal's card, held as the answer rail

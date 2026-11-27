@@ -27,7 +27,7 @@ defmodule FermixCore.Memory.Repo.PhoneCallsSql do
   @uncertain ~w(dispatch_unknown closure_unconfirmed)
   @terminal ~w(ended failed) ++ @uncertain
   @statuses @non_terminal ++ @terminal
-  @outcomes ~w(pending confirmed unavailable options needs_owner unknown)
+  @outcomes ~w(pending confirmed unavailable options needs_owner finished unknown)
   @usage_states ~w(provisional voice_duration_confirmed incomplete)
   @report_statuses ~w(pending written delivery_unconfirmed)
   # Why an uncertain call's slot was released: the owner's word that they saw
@@ -95,10 +95,12 @@ defmodule FermixCore.Memory.Repo.PhoneCallsSql do
     OR (status IN (#{@uncertain_sql}) AND slot_released_at IS NULL AND slot_expires_at > ?))
   """
 
-  # The table as it stands (M94 §09, §12), one definition for both ways a
+  # The table as it stands (M94 §09, §12), one definition for every way a
   # store reaches it: a fresh store, which migration 67 lays it down on
-  # (`schema_sql/0`), and a store 67 laid down first, which migration 68
-  # rebuilds into it (`ledger_rebuild/0`). Both store this same text.
+  # (`schema_sql/0`), a store 67 laid down first, which migration 68
+  # rebuilds into it (`ledger_rebuild/0`), and a store 68 rebuilt before a
+  # call could read `finished`, which migration 77 rebuilds into it
+  # (`finished_rebuild/0`). All store this same text.
   @table_body """
     id TEXT PRIMARY KEY CHECK (
       length(id) = 15 AND id GLOB 'pc_[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'
@@ -205,6 +207,19 @@ defmodule FermixCore.Memory.Repo.PhoneCallsSql do
   #{@index_sql}
   """
 
+  # Migration 77 (M94): a call hung up with nothing established reads `finished`, one more word
+  # in the outcome's CHECK. The columns are 68's, unchanged, so the table 68
+  # made is set aside, the table is made from its one definition, every call
+  # is copied across column for column, the old table goes with its indexes,
+  # and the indexes are made.
+  @finished_rebuild_sql """
+  ALTER TABLE phone_calls RENAME TO phone_calls_68;
+  #{@create_table};
+  INSERT INTO phone_calls (#{@select}) SELECT #{@select} FROM phone_calls_68;
+  DROP TABLE phone_calls_68;
+  #{@index_sql}
+  """
+
   @doc "Why an uncertain call's slot may be released."
   @spec release_reasons() :: [String.t(), ...]
   def release_reasons, do: @release_reasons
@@ -234,6 +249,32 @@ defmodule FermixCore.Memory.Repo.PhoneCallsSql do
       after: Enum.map(@columns, &Atom.to_string/1),
       marker: "parent_session TEXT",
       sql: @ledger_rebuild_sql
+    }
+  end
+
+  @doc """
+  Migration 77's rebuild, for `Memory.Repo`'s guarded rebuilds: pending while
+  the table holds 68's columns and its outcome CHECK has no `finished`, done
+  once it has, and refused for any other set of columns. Done on a fresh store
+  and on one 68 rebuilt, each made from the one definition, so the migration
+  chain can run again over a store at this schema and leave it as it is.
+  """
+  @spec finished_rebuild() :: %{
+          table: String.t(),
+          before: [String.t()],
+          after: [String.t()],
+          marker: String.t(),
+          sql: String.t()
+        }
+  def finished_rebuild do
+    columns = Enum.map(@columns, &Atom.to_string/1)
+
+    %{
+      table: "phone_calls",
+      before: columns,
+      after: columns,
+      marker: "'finished'",
+      sql: @finished_rebuild_sql
     }
   end
 

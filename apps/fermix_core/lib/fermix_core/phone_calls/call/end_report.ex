@@ -18,12 +18,15 @@ defmodule FermixCore.PhoneCalls.Call.EndReport do
 
   The outcome is the extraction's (`Outcome.to_report/1`'s shape), or
   `unknown` when none ran. A call its backend turn ended as needing the owner
-  reports `needs_owner` with whatever options the extraction heard, and the
+  reports `needs_owner` with whatever options the extraction heard, whatever
+  the reading's word (`finished` too), and the
   turn's note rides in `outcome_facts` as `"note"`, after which the report is
   fitted to the ledger's bounds again (`Outcome.fit_report/1`, the contract
   for anything added after `Outcome.to_report/1`). `confirmed` is kept only
   where the ledger admits it (an `ended` or `closure_unconfirmed` call with
-  evidence), so a report is never refused for it and lost.
+  evidence), and `finished` only on an `ended` call, since a call whose end
+  was never confirmed has not been shown to finish; elsewhere either is
+  reported `unknown`, so a report is never refused for it and lost.
   """
 
   alias FermixCore.PhoneCalls.Ledger
@@ -99,21 +102,21 @@ defmodule FermixCore.PhoneCalls.Call.EndReport do
       evidence: extracted.evidence,
       uncertainty: extracted.uncertainty
     }
-    |> finished(facts.finish)
+    |> with_finish(facts.finish)
     |> Outcome.fit_report()
     |> admitted(status)
   end
 
   defp outcome(facts, _status) do
     %{outcome: "unknown", outcome_facts: nil, evidence: [], uncertainty: nil}
-    |> finished(facts.finish)
+    |> with_finish(facts.finish)
   end
 
-  defp finished(report, %{reason: :needs_owner, note: note}),
+  defp with_finish(report, %{reason: :needs_owner, note: note}),
     do: report |> Map.put(:outcome, "needs_owner") |> put_note(note)
 
-  defp finished(report, %{note: note}), do: put_note(report, note)
-  defp finished(report, nil), do: report
+  defp with_finish(report, %{note: note}), do: put_note(report, note)
+  defp with_finish(report, nil), do: report
 
   defp put_note(report, nil), do: report
 
@@ -121,11 +124,16 @@ defmodule FermixCore.PhoneCalls.Call.EndReport do
     do: Map.put(report, :outcome_facts, Map.put(report.outcome_facts || %{}, "note", note))
 
   # The ledger admits `confirmed` only with evidence, on a call that ended or
-  # whose closure is unconfirmed; anything else would refuse the whole report.
+  # whose closure is unconfirmed, and `finished` only on a call that ended,
+  # evidence or none; anything else would refuse the whole report.
   defp admitted(%{outcome: "confirmed", evidence: [_ | _]} = report, status)
        when status in ["ended", "closure_unconfirmed"],
        do: report
 
-  defp admitted(%{outcome: "confirmed"} = report, _status), do: %{report | outcome: "unknown"}
+  defp admitted(%{outcome: "finished"} = report, "ended"), do: report
+
+  defp admitted(%{outcome: word} = report, _status) when word in ["confirmed", "finished"],
+    do: %{report | outcome: "unknown"}
+
   defp admitted(report, _status), do: report
 end

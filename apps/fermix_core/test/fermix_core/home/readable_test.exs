@@ -149,7 +149,12 @@ defmodule FermixCore.Home.ReadableTest do
     # `scheduled_jobs` keep their widths. A card that engine never sent is no
     # card it answers, and an answer a newer engine applied is a value in a
     # column it already reads: the format stays.
-    @migrations Enum.to_list(1..39) ++ [41, 42, 43] ++ Enum.to_list(45..76)
+    # 77 (M94, a call hung up with nothing established reads `finished`) rebuilds `phone_calls`
+    # with one more word in its outcome CHECK, every row and column kept. An
+    # engine at this format either never reads that table or says a word its
+    # view does not know as an unknown outcome, and every word it writes the
+    # wider CHECK takes: the format stays.
+    @migrations Enum.to_list(1..39) ++ [41, 42, 43] ++ Enum.to_list(45..77)
     @manifest_keys ~w(created_at engine_version files format home_format home_root host links
                       primary_epoch)
     @entry_keys ~w(bytes mode path sha256)

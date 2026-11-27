@@ -18,14 +18,20 @@ defmodule FermixCore.PhoneCalls.Call.Ending do
   | `{:finish, :done}`, `{:finish, :needs_owner}` | `:hangup` | none |
   | `{:finish, :cannot_proceed}` | `:hangup` | `cannot_proceed` |
   | `{:finish, :voicemail}` | `:voicemail` | none |
-  | `:core_turn_limit` | `:hangup` | `core_turn_limit_reached` |
+  | `:core_turn_limit` | `:deadline` | `core_turn_limit_reached` |
   | `:call_failed` | `:failed` | `call_failed` |
   | `{:remote_closed, "remote_hangup" or "close_requested"}` | `:hangup` | none |
   | `{:remote_closed, "expired"}` | `:deadline` | `provider_session_expired` |
   | `{:remote_closed, "connection_lost"}` | `:connection_lost` | `provider_connection_lost` |
   | `{:remote_closed, "content"}` | `:failed` | `provider_closed_for_content` |
-  | `{:remote_closed, _other}` | `:hangup` | `provider_closed` |
+  | `{:remote_closed, _other}` | `:failed` | `provider_closed` |
   | `:sideband_lost`, `:attach_failed`, `:attach_timeout`, `:session_not_recorded` | `:connection_lost` | the cause's own name |
+
+  `:hangup` is an end somebody chose, the recipient or the call's backend
+  turn, and only such a call can read `finished` (`Outcome.extract/4`). A
+  bound of the call's is `:deadline`, its limit of backend turns among them,
+  and a close the provider gave no reason Fermix knows for is `:failed`, as
+  its close for content is.
 
   The stages, in order and each skippable: `:speech` (a reply still being
   spoken gets `Limits.max_speech_checks/0` quiet windows, none on voicemail
@@ -132,7 +138,7 @@ defmodule FermixCore.PhoneCalls.Call.Ending do
   defp words({:finish, :voicemail}), do: {:voicemail, nil}
   defp words({:finish, :cannot_proceed}), do: {:hangup, "cannot_proceed"}
   defp words({:finish, reason}) when reason in [:done, :needs_owner], do: {:hangup, nil}
-  defp words(:core_turn_limit), do: {:hangup, "core_turn_limit_reached"}
+  defp words(:core_turn_limit), do: {:deadline, "core_turn_limit_reached"}
   defp words(:call_failed), do: {:failed, "call_failed"}
   defp words({:remote_closed, reason}), do: remote_closed(reason)
 
@@ -145,5 +151,5 @@ defmodule FermixCore.PhoneCalls.Call.Ending do
   defp remote_closed("expired"), do: {:deadline, "provider_session_expired"}
   defp remote_closed("connection_lost"), do: {:connection_lost, "provider_connection_lost"}
   defp remote_closed("content"), do: {:failed, "provider_closed_for_content"}
-  defp remote_closed(_other), do: {:hangup, "provider_closed"}
+  defp remote_closed(_other), do: {:failed, "provider_closed"}
 end

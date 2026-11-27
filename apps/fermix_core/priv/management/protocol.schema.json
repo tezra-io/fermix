@@ -7535,13 +7535,13 @@
         "contact_name": { "type": ["string", "null"] },
         "destination_kind": { "enum": ["owner", "business", null] },
         "outcome": {
-          "enum": ["pending", "confirmed", "unavailable", "options", "needs_owner", "unknown"]
+          "enum": ["pending", "confirmed", "unavailable", "options", "needs_owner", "finished", "unknown"]
         },
         "outcome_sentence": { "type": ["string", "null"], "minLength": 1, "description": "Null for a call never placed, which the state's sentence already says." },
         "uncertain": { "type": "boolean" },
         "holds_slot": { "type": "boolean" },
         "sentence": { "type": "string", "minLength": 1 },
-        "label": { "type": "string", "minLength": 1, "maxLength": 40, "description": "How the call went in a few words, for a list that draws one line a call: the outcome's own word where it has one (Confirmed, Not available, Options offered, Needs a decision), else what happened (In progress, Stopping, Not dialed, Nobody answered, Voicemail, Result not read, Placement unknown, Termination unconfirmed, Failed, Outcome unknown). Optional: a client that finds none draws the state's sentence." },
+        "label": { "type": "string", "minLength": 1, "maxLength": 40, "description": "How the call went in a few words, for a list that draws one line a call: the outcome's own word where it has one (Confirmed, Not available, Options offered, Needs a decision, Finished), else what happened (In progress, Stopping, Not dialed, Nobody answered, Voicemail, Result not read, Placement unknown, Termination unconfirmed, Failed, Outcome unknown). Optional: a client that finds none draws the state's sentence." },
         "slot": { "type": ["string", "null"], "minLength": 1, "description": "How a call whose termination is unconfirmed holds the one-call slot, and how that ends; null for every other call." },
         "usage": { "$ref": "#/$defs/phoneCallUsage" },
         "why_stopped": { "type": ["string", "null"], "minLength": 1, "description": "Why the call stopped, in one sentence per failure the engine wrote; null for an ordinary end." },

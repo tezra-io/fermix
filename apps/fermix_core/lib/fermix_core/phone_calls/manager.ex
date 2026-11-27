@@ -117,7 +117,7 @@ defmodule FermixCore.PhoneCalls.Manager do
 
       %{
         status: "ended" | "failed" | "dispatch_unknown" | "closure_unconfirmed",
-        outcome: "confirmed" | "unavailable" | "options" | "needs_owner" | "unknown",
+        outcome: "confirmed" | "unavailable" | "options" | "needs_owner" | "finished" | "unknown",
         outcome_facts: map() | nil,
         evidence: [%{speaker: String.t(), text: String.t()}],
         usage: map() | nil,

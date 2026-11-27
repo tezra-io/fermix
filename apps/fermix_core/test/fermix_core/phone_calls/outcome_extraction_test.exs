@@ -8,6 +8,7 @@ defmodule FermixCore.PhoneCalls.OutcomeExtractionTest do
 
   alias FermixCore.PhoneCalls.Brief
   alias FermixCore.PhoneCalls.Outcome
+  alias FermixCore.PhoneCalls.Outcome.Claim
   alias FermixCore.PhoneCalls.Outcome.Extraction
 
   @now ~U[2026-11-18 16:00:00Z]
@@ -237,7 +238,7 @@ defmodule FermixCore.PhoneCalls.OutcomeExtractionTest do
                Outcome.extract(brief(), call(), @answered, opts(turn(fenced)))
     end
 
-    test "the verdict is verify's: a claimed booking with no recipient words behind it is unknown" do
+    test "the verdict is verify's: a claimed booking with no recipient words behind it is no booking" do
       claim =
         claim_json()
         |> Jason.decode!()
@@ -245,7 +246,7 @@ defmodule FermixCore.PhoneCalls.OutcomeExtractionTest do
         |> Jason.encode!()
 
       assert {:ok,
-              %Outcome{outcome: :unknown, reason: :assistant_only_confirmation, extraction: :ok}} =
+              %Outcome{outcome: :finished, reason: :assistant_only_confirmation, extraction: :ok}} =
                Outcome.extract(brief(), call(), @answered, opts(turn(claim)))
     end
 
@@ -472,6 +473,105 @@ defmodule FermixCore.PhoneCalls.OutcomeExtractionTest do
                Outcome.to_report(outcome)
 
       assert outcome.uncertainty == nil
+    end
+  end
+
+  # A call answered, with the recipient's words, read, establishing none of
+  # the other results and ended by a hang-up finished, and
+  # claims nothing was agreed. Only how it ended tells it from `unknown`.
+  describe "a call that finished" do
+    defp reader_unknown_json,
+      do:
+        Jason.encode!(%{
+          "outcome" => "unknown",
+          "commitment" => "none",
+          "note" => "They said to call back on Monday."
+        })
+
+    defp refused_booking_json,
+      do:
+        claim_json()
+        |> Jason.decode!()
+        |> Map.put("confirmation_quote", "Is it booked?")
+        |> Jason.encode!()
+
+    test "a reader's own unknown on a hang-up is finished, with no reason and its note kept" do
+      assert {:ok, outcome} =
+               Outcome.extract(brief(), call(), @answered, opts(turn(reader_unknown_json())))
+
+      assert %Outcome{outcome: :finished, reason: nil, extraction: :ok, excerpts: []} = outcome
+      assert outcome.uncertainty == "They said to call back on Monday."
+
+      assert %{outcome: "finished", outcome_facts: nil, evidence: []} =
+               Outcome.to_report(outcome)
+    end
+
+    # Everything but the word is what verification left: its reason, the
+    # excerpts it kept and the reading's note.
+    test "a refused booking on a hang-up is finished, keeping its reason and excerpts" do
+      {:ok, claim} = Claim.parse(refused_booking_json())
+      verified = Outcome.verify(brief(), call(), claim)
+
+      assert {:ok, outcome} =
+               Outcome.extract(brief(), call(), @answered, opts(turn(refused_booking_json())))
+
+      assert outcome == %{verified | outcome: :finished, extraction: :ok}
+      assert outcome.reason == :assistant_only_confirmation
+      assert [_ | _] = outcome.excerpts
+
+      assert %{outcome: "finished", outcome_facts: %{"reason" => "assistant_only_confirmation"}} =
+               Outcome.to_report(outcome)
+    end
+
+    test "the same readings on any other end stay unknown" do
+      for ended <- [:deadline, :cancelled, :connection_lost, :failed],
+          {json, reason} <- [
+            {reader_unknown_json(), nil},
+            {refused_booking_json(), :assistant_only_confirmation}
+          ] do
+        transport = %{answered: true, end_reason: ended}
+
+        assert {:ok, %Outcome{outcome: :unknown, reason: ^reason, extraction: :ok}} =
+                 Outcome.extract(brief(), call(), transport, opts(turn(json))),
+               inspect(ended)
+      end
+    end
+
+    test "a reading that failed stays unknown on a hang-up, whatever its class" do
+      refusal =
+        {:ok,
+         %{content: "", tool_calls: [], provider_state: %{stop_reason: "refusal"}, model: "m"}}
+
+      # Only the reading that never answers is given a short bound to run out.
+      for {answer, extra, reason} <- [
+            {turn("not json"), [], :extraction_malformed},
+            {refusal, [], :extraction_refused},
+            {{:error, :overloaded}, [], :extraction_provider_error},
+            {{:raise, "boom"}, [], :extraction_crashed},
+            {:hang, [timeout_ms: 100], :extraction_timeout}
+          ] do
+        assert {:ok, %Outcome{outcome: :unknown, reason: ^reason}} =
+                 Outcome.extract(brief(), call(), @answered, opts(answer, extra))
+      end
+    end
+
+    test "a call decided in code stays unknown on a hang-up" do
+      only_us = [said(:assistant, "Hello? Is anyone there?", 0)]
+
+      for {entries, transport, reason} <- [
+            {[], %{answered: false, end_reason: :hangup}, :not_answered},
+            {only_us, @answered, :no_recipient_speech}
+          ] do
+        assert {:ok, %Outcome{outcome: :unknown, reason: ^reason}} =
+                 Outcome.extract(brief(), entries, transport, opts(turn(reader_unknown_json())))
+      end
+
+      voicemail = %{answered: true, end_reason: :voicemail}
+
+      assert {:ok, %Outcome{outcome: :unknown, reason: :voicemail}} =
+               Outcome.extract(brief(), call(), voicemail, opts(turn(reader_unknown_json())))
+
+      refute_received {:extraction_call, _, _, _}
     end
   end
 

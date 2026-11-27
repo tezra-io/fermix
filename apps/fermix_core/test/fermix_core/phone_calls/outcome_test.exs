@@ -1123,6 +1123,32 @@ defmodule FermixCore.PhoneCalls.OutcomeTest do
       assert outcome.options == ["8:00 PM"]
       assert [%{text: "We need a card to hold it"} | _] = outcome.excerpts
     end
+
+    # `finished` is how the call ended, which verification never sees: only
+    # `extract/4` names it, and the reader's words are the claim's five.
+    test "verification answers unknown for a reading that established nothing, never finished" do
+      nothing =
+        claim(%{
+          "outcome" => "unknown",
+          "commitment" => "none",
+          "confirmation_quote" => nil,
+          "criteria" => [],
+          "facts" => []
+        })
+
+      outcome = Outcome.verify(brief(), booked_call(), nothing)
+      assert {outcome.outcome, outcome.reason} == {:unknown, nil}
+
+      refused = claim(%{"confirmation_quote" => "Is that booked?"})
+      assert Outcome.verify(brief(), booked_call(), refused).outcome == :unknown
+
+      assert {:error, {:malformed, _}} =
+               Claim.from_map(%{"outcome" => "finished", "commitment" => "none"})
+
+      assert_raise FunctionClauseError, fn ->
+        Outcome.verify(brief(), booked_call(), %{nothing | outcome: :finished})
+      end
+    end
   end
 
   describe "bounds and the report" do

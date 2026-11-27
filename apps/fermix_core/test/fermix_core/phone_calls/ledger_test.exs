@@ -65,6 +65,73 @@ defmodule FermixCore.PhoneCalls.LedgerTest do
     ended
   end
 
+  # A call the provider gave a session, still live, so it holds the slot.
+  defp dialed!(ctx) do
+    row = admit!(ctx)
+    {:ok, _row} = Ledger.claim_dispatch(row.id, @t0, ctx.opts)
+    {:ok, row} = Ledger.record_session(row.id, "sess_#{row.id}", @t0, ctx.opts)
+    row
+  end
+
+  # An uncertain call holds the slot past its end until the owner's word.
+  defp slot_freed!(ctx, %{status: status} = row)
+       when status in ["closure_unconfirmed", "dispatch_unknown"] do
+    {:ok, _row} = Ledger.release_slot(row.id, :owner_confirmed, at(10), ctx.opts)
+    :ok
+  end
+
+  defp slot_freed!(_ctx, _row), do: :ok
+
+  # One call of every outcome a store before `finished` could hold, each made
+  # by the write that makes it, its slot freed for the next.
+  defp calls_of_every_outcome!(ctx) do
+    said = [%{speaker: "recipient", text: "Yes, two at seven thirty is booked."}]
+
+    confirmed = %{
+      outcome: "confirmed",
+      evidence: said,
+      outcome_facts: %{"local_time" => "19:30"},
+      usage: %{"seconds" => 120},
+      voice_seconds: 120,
+      usage_state: "voice_duration_confirmed",
+      uncertainty: "Whether the patio is open that night."
+    }
+
+    for {status, fields} <- [
+          {"ended", confirmed},
+          {"ended", %{outcome: "unavailable", evidence: said}},
+          {"ended", %{outcome: "options", outcome_facts: %{"options" => ["8:00 PM"]}}},
+          {"ended", %{outcome: "needs_owner", backend_usage: %{"turns" => 1}}},
+          {"closure_unconfirmed", %{outcome: "unknown", failure_reason: "sideband_lost"}},
+          {"dispatch_unknown", %{outcome: "unknown", vendor_message: "No word on the create."}},
+          {"failed", %{outcome: "unknown", failure_reason: "call_failed"}}
+        ] do
+      row = dialed!(ctx)
+      fields = Map.put(fields, :ended_at, at(9))
+      {:ok, ended} = Ledger.terminalize(row.id, status, fields, ctx.opts)
+      :ok = slot_freed!(ctx, ended)
+      ended
+    end
+  end
+
+  defp reopen!(ctx, tag) do
+    name = :"#{ctx.repo}_#{tag}"
+    start_supervised!({Repo, name: name, enabled: true, database_path: ctx.db_path}, id: name)
+    name
+  end
+
+  # One statement on the store with its Repo stopped: its own answer.
+  defp raw(db_path, sql) do
+    {:ok, conn} = Sqlite3.open(db_path)
+    result = Sqlite3.execute(conn, sql)
+    :ok = Sqlite3.close(conn)
+    result
+  end
+
+  # A terminal call's outcome set to `finished` past the Ledger: the table's
+  # own CHECK alone decides.
+  defp finished_sql(id), do: "UPDATE phone_calls SET outcome = 'finished' WHERE id = '#{id}'"
+
   # A create that placed nothing: claimed, then failed with no session (the
   # provider refused it, or it provably never left).
   defp refused_create!(ctx, now) do
@@ -669,6 +736,39 @@ defmodule FermixCore.PhoneCalls.LedgerTest do
     end
   end
 
+  # A call that was answered, read and hung up with nothing established.
+  describe "a finished outcome" do
+    test "is kept on an ended call, with or without evidence", ctx do
+      said = [%{speaker: "recipient", text: "Thanks, that's all I needed."}]
+
+      for evidence <- [[], said] do
+        row = dialed!(ctx)
+        fields = %{ended_at: at(9), outcome: "finished", evidence: evidence}
+
+        assert {:ok, finished} = Ledger.terminalize(row.id, "ended", fields, ctx.opts)
+        assert {finished.status, finished.outcome} == {"ended", "finished"}
+        assert length(finished.evidence || []) == length(evidence)
+        :ok = slot_freed!(ctx, finished)
+      end
+    end
+
+    test "is refused on a call not shown to end: failed, placement or closure unknown", ctx do
+      row = dialed!(ctx)
+
+      for status <- ["failed", "dispatch_unknown", "closure_unconfirmed"] do
+        assert {:error, {:invalid, :outcome, {:finished_on, ^status}}} =
+                 Ledger.terminalize(
+                   row.id,
+                   status,
+                   %{ended_at: at(9), outcome: "finished"},
+                   ctx.opts
+                 )
+      end
+
+      assert {:ok, %{status: "connecting", outcome: "pending"}} = Ledger.get(row.id, ctx.opts)
+    end
+  end
+
   describe "reports" do
     test "a terminal row's pending report is due once its lease ends", ctx do
       row = admit!(ctx)
@@ -818,7 +918,7 @@ defmodule FermixCore.PhoneCalls.LedgerTest do
     end
 
     # Other features' upgrade tests forget every version after an old one and
-    # reopen the store, so 67 and 68 run again over a table already at the
+    # reopen the store, so 67, 68 and 77 run again over a table already at the
     # latest shape: each must recognise its own work and end where a fresh
     # store ends.
     test "a store at the latest schema rolled back to before 67 reopens as a fresh one", ctx do
@@ -837,12 +937,108 @@ defmodule FermixCore.PhoneCalls.LedgerTest do
       )
 
       assert {:ok, versions} = Repo.migration_versions(server: reopened)
-      assert Enum.count(versions, &(&1 in [67, 68])) == 2
+      assert Enum.count(versions, &(&1 in [67, 68, 77])) == 3
       assert {:ok, %{id: id}} = Ledger.get(row.id, server: reopened)
       assert id == row.id
       :ok = stop_supervised(reopened)
 
       assert PhoneCallStores.schema!(ctx.db_path) == fresh
+    end
+
+    # Migration 77: a call hung up with nothing established reads `finished`, one more word in
+    # the outcome's CHECK, which SQLite changes only by making the table again.
+    test "a store 68 rebuilt is rebuilt on open, every call and column kept, then takes finished",
+         ctx do
+      [first | _rest] = rows = calls_of_every_outcome!(ctx)
+      live = dialed!(ctx)
+      ids = Enum.map(rows ++ [live], & &1.id)
+      before = Enum.map(ids, &Ledger.get(&1, ctx.opts))
+      fresh = PhoneCallStores.schema!(ctx.db_path)
+      :ok = stop_supervised(ctx.repo)
+
+      :ok = PhoneCallStores.as_68!(ctx.db_path)
+      refute PhoneCallStores.schema!(ctx.db_path) == fresh
+      assert {:error, _check} = raw(ctx.db_path, finished_sql(first.id))
+
+      reopened = reopen!(ctx, :at_68)
+      assert {:ok, versions} = Repo.migration_versions(server: reopened)
+      assert Enum.count(versions, &(&1 == 77)) == 1
+      assert Enum.map(ids, &Ledger.get(&1, server: reopened)) == before
+
+      assert {:ok, %{outcome: "finished"}} =
+               Ledger.terminalize(
+                 live.id,
+                 "ended",
+                 %{ended_at: at(9), outcome: "finished"},
+                 server: reopened
+               )
+
+      :ok = stop_supervised(reopened)
+      assert PhoneCallStores.schema!(ctx.db_path) == fresh
+    end
+
+    # A fresh store's table is made from the one definition, which takes the
+    # word already: 77 finds its work done and leaves the table as it is (an
+    # index of the test's own, which a rebuild would drop, is still there).
+    test "a fresh store takes finished as it stands, and 77 run again leaves it alone", ctx do
+      row = admit!(ctx, %{request_id: "req_left_alone"})
+      assert {:ok, versions} = Repo.migration_versions(server: ctx.repo)
+      assert Enum.count(versions, &(&1 == 77)) == 1
+      assert :ok = Repo.migrate(server: ctx.repo)
+      :ok = stop_supervised(ctx.repo)
+
+      probe = "CREATE INDEX idx_phone_calls_probe ON phone_calls(platform)"
+      :ok = raw(ctx.db_path, probe)
+      :ok = raw(ctx.db_path, "DELETE FROM schema_migrations WHERE version = 77")
+      with_probe = PhoneCallStores.schema!(ctx.db_path)
+
+      reopened = reopen!(ctx, :fresh_again)
+      assert {:ok, versions} = Repo.migration_versions(server: reopened)
+      assert Enum.count(versions, &(&1 == 77)) == 1
+      assert {:ok, %{id: id}} = Ledger.get(row.id, server: reopened)
+      assert id == row.id
+      :ok = stop_supervised(reopened)
+
+      assert PhoneCallStores.schema!(ctx.db_path) == with_probe
+    end
+
+    test "a store 67 laid down goes through 68 and 77 and ends at the one definition", ctx do
+      ended = dialed_and_ended!(ctx, @t0)
+      fresh = PhoneCallStores.schema!(ctx.db_path)
+      :ok = stop_supervised(ctx.repo)
+      :ok = PhoneCallStores.as_67!(ctx.db_path)
+      assert {:error, _check} = raw(ctx.db_path, finished_sql(ended.id))
+
+      reopened = reopen!(ctx, :through_68)
+      assert {:ok, versions} = Repo.migration_versions(server: reopened)
+      assert Enum.count(versions, &(&1 in [68, 77])) == 2
+
+      assert {:ok, %{outcome: "unknown", parent_session: parent}} =
+               Ledger.get(ended.id, server: reopened)
+
+      assert parent == ended.request_id
+      :ok = stop_supervised(reopened)
+
+      assert PhoneCallStores.schema!(ctx.db_path) == fresh
+      assert :ok = raw(ctx.db_path, finished_sql(ended.id))
+    end
+
+    test "a call ledger of any other shape is refused, never cut", ctx do
+      _row = admit!(ctx)
+      :ok = stop_supervised(ctx.repo)
+      :ok = PhoneCallStores.as_68!(ctx.db_path)
+      :ok = raw(ctx.db_path, "ALTER TABLE phone_calls ADD COLUMN invented_extra TEXT")
+      odd = PhoneCallStores.schema!(ctx.db_path)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, _reason} =
+                 start_supervised(
+                   {Repo, name: :"#{ctx.repo}_odd", enabled: true, database_path: ctx.db_path},
+                   id: :odd
+                 )
+      end)
+
+      assert PhoneCallStores.schema!(ctx.db_path) == odd
     end
 
     test "the table refuses a row past admitted with no dispatch claim", ctx do

@@ -951,6 +951,10 @@ defmodule FermixCore.Management.ProtocolContractTest do
                ["stopping"] ++ PhoneCallsSql.terminal_statuses()
 
     assert call["outcome"]["enum"] == ["pending" | PhoneCallsSql.terminal_outcomes()]
+    # A call hung up with nothing established reads `finished`, its label among
+    # the outcome's own words.
+    assert "finished" in call["outcome"]["enum"]
+    assert call["label"]["description"] =~ "Needs a decision, Finished)"
     assert call["report"]["enum"] == PhoneCallsSql.report_statuses()
 
     # A call never placed claims no voice time, so its state is null too.

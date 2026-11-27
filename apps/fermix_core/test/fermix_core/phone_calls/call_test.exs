@@ -1304,6 +1304,25 @@ defmodule FermixCore.PhoneCalls.CallTest do
              }
     end
 
+    test ":done on a call its reading found nothing confirmed in ends finished, note kept",
+         ctx do
+      Fakes.script(:extract, {:result, {:ok, %Outcome{outcome: :finished, extraction: :ok}}})
+      call = live!(ctx)
+      request = running!(call, "del_1")
+      note = "The reminder was passed on."
+
+      assert :ok =
+               CallControls.finish(call.id, request.handle, :done, note, registry: ctx.registry)
+
+      answer!(call, request, "Goodbye.")
+      quiet!(ctx, call)
+      fire!(call, :speech)
+
+      report = hung_up_and_closed!(call, 50)
+      assert {report.status, report.outcome} == {"ended", "finished"}
+      assert report.outcome_facts == %{"note" => note}
+    end
+
     test ":needs_owner ends as needs_owner with the options heard and the turn's note", ctx do
       heard = %Outcome{
         outcome: :options,

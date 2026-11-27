@@ -44,8 +44,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   calling for you, is told never to pay, take a deposit or give card details,
   and to hang up on voicemail. The report arrives by itself within about a
   minute of the call ending: confirmed, in the other person's own words,
-  unavailable, options, needs you, or unknown when Fermix could not establish
-  what was agreed. Reporting is all Fermix does by itself after a call: the
+  unavailable, options, needs you, finished when the conversation ended with
+  nothing confirmed in it, or unknown when Fermix could not tell what
+  happened. Reporting is all Fermix does by itself after a call: the
   message that brings the report is written with no tools, so Fermix looks
   nothing up and sends, changes or starts nothing on what was said, and what
   happens next waits for your own next message. The report then stays in the

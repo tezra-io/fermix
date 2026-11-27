@@ -177,6 +177,7 @@ defmodule FermixCore.PhoneCalls.Report do
     "needs_owner" =>
       "The call needs a fact or a decision the brief did not give. Calling again is a new " <>
         "request.",
+    "finished" => "The call finished, and nothing in it was confirmed.",
     "unknown" => "Fermix could not tell what was agreed, if anything."
   }
   @unreached "Nobody was reached, so nothing was agreed."
@@ -185,7 +186,8 @@ defmodule FermixCore.PhoneCalls.Report do
     "confirmed" => "Confirmed",
     "unavailable" => "Not available",
     "options" => "Options offered",
-    "needs_owner" => "Needs a decision"
+    "needs_owner" => "Needs a decision",
+    "finished" => "Finished"
   }
 
   @progress %{

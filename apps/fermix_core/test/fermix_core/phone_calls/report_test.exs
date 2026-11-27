@@ -340,6 +340,83 @@ defmodule FermixCore.PhoneCalls.ReportTest do
     end
   end
 
+  # A call answered, read and hung up with nothing established
+  # (`Outcome.extract/4`'s `finished`): it claims nothing was agreed.
+  describe "a finished call" do
+    defp finished_row do
+      row(%{
+        outcome: "finished",
+        evidence: [%{"speaker" => "recipient", "text" => "Got it, thanks. Bye."}],
+        usage_state: "voice_duration_confirmed",
+        voice_seconds: 74
+      })
+    end
+
+    @finished "The call finished, and nothing in it was confirmed."
+    @carrier "Carrier charges: Telnyx bills the minutes to the account the call went " <>
+               "through, and Fermix does not know them."
+
+    test "reads to a person as finished, with what was said" do
+      assert Report.text(finished_row()) ==
+               lines([
+                 "Phone call to Marrow & Sage (a business), +13125550123",
+                 "The call ended.",
+                 "Outcome: " <> @finished,
+                 "What was said:",
+                 ~s(- The recipient: "Got it, thanks. Bye."),
+                 "Voice time: 1 minute 14 seconds, confirmed by OpenAI.",
+                 @carrier,
+                 "Backend work: no backend turns."
+               ])
+    end
+
+    test "reads to a model as finished, what was said framed" do
+      assert Report.notice(finished_row()) ==
+               lines([
+                 "[phone call pc_0a1b2c3d4e5f] The call ended.",
+                 "To: Marrow & Sage (a business), +13125550123",
+                 "Outcome: finished. " <> @finished,
+                 recipient(
+                   lines(["What was said:", ~s(- the recipient: "Got it, thanks. Bye.")])
+                 ),
+                 "Voice time: 1 minute 14 seconds, confirmed by OpenAI.",
+                 @carrier,
+                 "Backend work: no backend turns."
+               ])
+    end
+
+    # A booking verification held back, on a call that finished: its reason
+    # is kept and said after the outcome's sentence, in both renderings.
+    test "says why nothing was confirmed when verification held a result back" do
+      refused =
+        Outcome.verify(
+          brief(),
+          booked_call(),
+          claim(%{"confirmation_quote" => "Is that booked?"})
+        )
+
+      assert {refused.outcome, refused.reason} == {:unknown, :assistant_only_confirmation}
+      call = outcome_row(%{refused | outcome: :finished}, %{})
+      why = "Only the assistant stated the result; the recipient never confirmed it."
+
+      assert Report.text(call) =~ "\nOutcome: #{@finished} #{why}\nWhat was said:\n"
+      assert Report.notice(call) =~ "\nOutcome: finished. #{@finished} #{why}\n"
+      refute Report.text(call) =~ "last words"
+
+      view = Report.status_view(call, @t0)
+
+      assert {view.outcome, view.outcome_meaning, view.outcome_reason} ==
+               {"finished", @finished, why}
+
+      assert Report.view(call).label == "Finished"
+    end
+
+    test "its sentence and its label are among the words the view can say" do
+      assert @finished in Report.sentences()
+      assert "Finished" in Report.sentences()
+    end
+  end
+
   # Each verified fact brings its own quote, often a piece of a line already
   # shown: a piece is not shown again (by the outcome's own words,
   # `Transcript.words/1`), and the stored record keeps every excerpt.
@@ -638,6 +715,7 @@ defmodule FermixCore.PhoneCalls.ReportTest do
             {%{outcome: "unavailable"}, "Not available"},
             {%{outcome: "options"}, "Options offered"},
             {%{outcome: "needs_owner"}, "Needs a decision"},
+            {%{outcome: "finished"}, "Finished"},
             {%{status: "closure_unconfirmed", outcome: "confirmed"}, "Confirmed"},
             {%{status: "closure_unconfirmed"}, "Termination unconfirmed"},
             {%{status: "dispatch_unknown"}, "Placement unknown"},
