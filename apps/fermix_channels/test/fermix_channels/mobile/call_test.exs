@@ -151,7 +151,9 @@ defmodule FermixChannels.Mobile.CallTest do
 
   describe "a whole call" do
     test "opens, carries audio both ways and a control, detaches and resumes reconciled", ctx do
-      {driver, client} = ready_phone!(ctx)
+      # The silence watch is out of reach here: only the closed session's
+      # :DOWN detaches the call below.
+      {driver, client} = ready_phone!(ctx, quiet_ms: 60_000)
       {client, voice} = call_up!(driver, client, 2)
 
       # Up: raw PCM reaches the session as the bytes it is.
@@ -816,9 +818,14 @@ defmodule FermixChannels.Mobile.CallTest do
       assert_receive {:voice, ^voice, {:interrupt, nil}}
 
       await(call, &(&1.audio.queued == 1))
-      Agent.update(clock, &(&1 + 300))
+      now = Agent.get_and_update(clock, &{&1 + 300, &1 + 300})
       send(voice, {:push, %{type: "audio_delta", audio: Base.encode64(@pcm), playback_id: "p1"}})
-      _ = :sys.get_state(call)
+      # This push's frame heads the queue only once the call has taken the
+      # push and aged the second one's out, the take that would interrupt
+      # again; the voice answers the test only after what the call asked of
+      # it, so an interrupt for this push would be here by then.
+      await(call, &match?({:value, {^now, _id, _pcm}}, :queue.peek(&1.audio.queue)))
+      _ = :sys.get_state(voice)
       refute_received {:voice, ^voice, {:interrupt, nil}}
     end
 
@@ -1411,13 +1418,31 @@ defmodule FermixChannels.Mobile.CallTest do
     call
   end
 
-  # Bounded round trips through the call's mailbox, never a sleep.
-  defp await(call, ready?, rounds \\ 200)
-  defp await(_call, _ready?, 0), do: flunk("the call never reached the state awaited")
+  # Round trips through the call's mailbox, never a sleep, until the call is
+  # in the state awaited, within assert_receive's bound. What is awaited
+  # reaches the call from another process (the voice's push, a killed
+  # relay's :DOWN), which no round trip of the test's is ordered with, so a
+  # count of rounds bounds only the time the rounds take: 200 were over
+  # before the voice had passed its push on, on a runner running this test
+  # alone as well as under the whole suite.
+  defp await(call, ready?) do
+    bound_ms = ExUnit.configuration()[:assert_receive_timeout]
+    await_until(call, ready?, System.monotonic_time(:millisecond) + bound_ms)
+  end
 
-  defp await(call, ready?, rounds) do
+  defp await_until(call, ready?, deadline) do
     state = :sys.get_state(call)
-    if ready?.(state), do: state, else: await(call, ready?, rounds - 1)
+
+    cond do
+      ready?.(state) ->
+        state
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        flunk("the call never reached the state awaited")
+
+      true ->
+        await_until(call, ready?, deadline)
+    end
   end
 
   defp ready_phone!(ctx, call_options \\ []),
