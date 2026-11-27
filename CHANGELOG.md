@@ -29,37 +29,40 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   then reports what was said and agreed. GPT-Live speaks on the call (not
   Grok, whichever voice you talk to Fermix with), from your own Telnyx number;
   calls are outbound only, and that number takes no incoming calls. Fermix
-  calls only a business or your own phone, never another person, and only a
-  number in the 50 US states or DC: a number elsewhere on +1 (Canada, the
-  Caribbean, Puerto Rico and the other US territories) or an emergency,
-  service, toll-free or premium number is refused before anything is dialed.
-  One call runs at a time, with at most twenty attempts in any 24 hours, and a
-  call hangs up at ten minutes. A request made after Fermix read something
+  calls only a business or your own phone, never another person, which is what
+  the request states and not something Fermix can check from a number, and
+  only a number in the 50 US states or DC, which it does check: a number
+  elsewhere on +1 (Canada, the Caribbean, Puerto Rico and the other US
+  territories) or an emergency, service, toll-free or premium number is
+  refused before anything is dialed. One call runs at a time, with at most
+  twenty attempts in any 24 hours, and Fermix asks for the hang-up at ten
+  minutes while it is running. A request made after Fermix read something
   someone else wrote (a forwarded message, a web page, its own search for the
   number) waits up to five minutes for your yes in your chat, and such a
   request made by voice is refused; a scheduled job, a guest or a watcher
   cannot start a call at all. On the line the assistant says it is an AI
   calling for you, is told never to pay, take a deposit or give card details,
-  and hangs up on voicemail. The report arrives by itself within about a
+  and to hang up on voicemail. The report arrives by itself within about a
   minute of the call ending: confirmed, in the other person's own words,
   unavailable, options, needs you, or unknown when Fermix could not establish
   what was agreed. Reporting is all Fermix does by itself after a call: the
   message that brings the report is written with no tools, so Fermix looks
   nothing up and sends, changes or starts nothing on what was said, and what
   happens next waits for your own next message. The report then stays in the
-  conversation, so that next request is answered with it in view. While a
-  call is in progress Fermix refuses a restart you
-  ask for and a change of the OpenAI key or the connection's password; a call
-  whose end OpenAI never confirmed keeps the one call slot for a little over
-  two hours, or until you confirm in the Phone calls tab or with
-  `fermix settings phone-calls confirm-ended` that it ended. Calls are not
-  recorded. It needs a Telnyx number with a credential connection and that
-  connection's username and password, and an OpenAI API key (a ChatGPT sign-in
-  or a SpaceXAI key does not place a call); only the computer your home runs
-  on places calls. Turn it on in the setup page's new **Phone calls** tab or
-  with `fermix settings` (section `phone_calls`). No Fermix app shows phone
-  calls yet: the Mac app's Settings > Phone calls pane comes with the app
-  release that carries it.
+  conversation, so that next request is answered with it in view. While a call
+  is in progress Fermix refuses `fermix restart`, the setup page's **Apply &
+  restart**, and a change of the OpenAI key or the connection's password (the
+  Linux app's Restart and an app's Restart of an Always On server are not
+  held, and hang the call up); a call whose end OpenAI never confirmed keeps
+  the one call slot for a little over two hours, or until you confirm in the
+  Phone calls tab or with `fermix settings phone-calls confirm-ended` that it
+  ended. Calls are not recorded. It needs a Telnyx number with a credential
+  connection and that connection's username and password, and an OpenAI API
+  key (a ChatGPT sign-in or a SpaceXAI key does not place a call); only the
+  computer your home runs on places calls. Turn it on in the setup page's new
+  **Phone calls** tab or with `fermix settings` (section `phone_calls`). No
+  Fermix app shows phone calls yet: the Mac app's Settings > Phone calls pane
+  comes with the app release that carries it.
 
 - **Auto Heal: Fermix notices a scheduled job that fails, and tells you
   once.** A run of a repeating job that fails before it did anything, on

@@ -882,8 +882,10 @@ does not hold it) and `delivery_id` (the row's `cue_delivery_id`, the
 and `trigger_id` (its trigger); none of the four is on any other run. The
 runner puts `watcher_id`, `cue_id` and `trigger_id` on the run map, so they are
 on the bookends it emits only: a `run_error` the Scheduler emits for a dead
-runner reads the run row, so for a follow-up run it carries `trigger` alone
-(for a cue run, `trigger` and `delivery_id`). The Opik
+runner reads the run row, so for a follow-up run it carries `trigger` alone.
+The Scheduler emits no `run_error` for a dead cue run: it settles that run
+through `CueAdmission.settle/3`, whose `retry` or `exhausted` lifecycle event
+(reason `reaped`) carries `delivery_id` and `watcher_id`. The Opik
 run trace's metadata carries `trigger`, `watcher_id`, `delivery_id`, `cue_id`
 and `trigger_id`, and `mix opik.replay` keeps them. A cue run's tools are
 ordinary `[:fermix, :tool, :exec]` events under the run's session, one per model call:

@@ -166,7 +166,7 @@ Set it from the web setup **Voice notes** tab, or with `fermix setup --transcrip
 | `SLACK_SIGNING_SECRET` | If Slack is enabled | Slack request signing secret |
 | `SIGNAL_ACCOUNT` | If Signal is enabled | Signal phone/account identifier |
 | `SIGNAL_CLI_PATH` | No | Override the `signal-cli` executable path |
-| `FERMIX_APNS_KEY` | If mobile push is enabled | APNs `.p8` signing key for direct push to an iPhone; unused today, since only the Android app can pair; resolved from the keychain first |
+| `FERMIX_APNS_KEY` | If mobile push is enabled | APNs `.p8` signing key for direct push to an iPhone; used only for an iPhone paired earlier, since only the Android app can pair today; a nonblank value overrides the stored key |
 | `FERMIX_HOME` | No | Override the persisted config and workspace root |
 | `FERMIX_TRACE_DIR` | No | Override the trace output directory |
 | `FERMIX_LOG_FILE` | No | Override the log file path |
