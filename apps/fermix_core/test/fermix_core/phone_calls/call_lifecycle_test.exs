@@ -184,6 +184,26 @@ defmodule FermixCore.PhoneCalls.CallLifecycleTest do
     Map.put(call, :sideband, sideband)
   end
 
+  # Moves the monotonic clock past any speech the worker has taken in, so an
+  # end does not wait for it. The worker stamps a line as said only once it has
+  # left, after this test has heard it leave, so the clock moves only once the
+  # worker has answered a call of its own: the stamp is then behind it.
+  defp quiet!(ctx, call) do
+    _state = :sys.get_state(call.worker)
+    :atomics.add(ctx.clock, 1, 60_000)
+  end
+
+  # What the Manager did not do is read only once it has answered a call of
+  # its own: it emits a call's closer before it asks for that call's cleanup,
+  # and a hang-up it asked for stays in its state until the answer is in.
+  # `manager` is the pid from before the worker was lost, so a Manager that
+  # died and came back is not read as one that asked for nothing.
+  defp no_cleanup_asked!(manager) when is_pid(manager) do
+    assert %{cleanups: cleanups} = :sys.get_state(manager)
+    assert cleanups == %{}
+    refute_received {:manager_hangup, _session}
+  end
+
   defp closer! do
     assert_receive {:telemetry, [:fermix, :phone_call, _closer], _measurements, meta}
     meta
@@ -282,6 +302,7 @@ defmodule FermixCore.PhoneCalls.CallLifecycleTest do
       Fakes.script(:extract, :wait)
       repo = repo!(ctx, true)
       names = subtree!(ctx, repo)
+      manager = GenServer.whereis(names.manager)
       call = names |> start_call!() |> live!()
 
       closed = %{reason: "remote_hangup", seconds: 30, event_id: nil}
@@ -295,15 +316,16 @@ defmodule FermixCore.PhoneCalls.CallLifecycleTest do
       capture_log(fn -> kill!(call, names) end)
 
       assert closer!().status == "ended"
-      refute_received {:manager_hangup, _session}
+      no_cleanup_asked!(manager)
       refute_received {:create, _task, _request}
     end
 
     test "one hangup for the session across the worker and the Manager", ctx do
       repo = repo!(ctx, true)
       names = subtree!(ctx, repo)
+      manager = GenServer.whereis(names.manager)
       call = names |> start_call!() |> live!()
-      :atomics.add(ctx.clock, 1, 60_000)
+      quiet!(ctx, call)
 
       :ok = Call.cancel(call.worker, :owner)
       assert_receive {:hangup, _task, @session}
@@ -313,8 +335,8 @@ defmodule FermixCore.PhoneCalls.CallLifecycleTest do
       capture_log(fn -> kill!(call, names) end)
 
       assert closer!().status == "closure_unconfirmed"
+      no_cleanup_asked!(manager)
       assert row!(repo, call.id).cleanup_attempts == 1
-      refute_received {:manager_hangup, _session}
       refute_received {:hangup, _task, _session}
     end
 
