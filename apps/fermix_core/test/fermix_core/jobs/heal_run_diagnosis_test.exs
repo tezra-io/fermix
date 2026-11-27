@@ -1240,6 +1240,25 @@ defmodule FermixCore.Jobs.HealRunDiagnosisTest do
     end
   end
 
+  # A look that failed is `HealDiagnosis`'s warning, with its reason; the
+  # look's own end line would say it twice. As for a refused decision, the
+  # absent info line is proved through the builder fed the event emitted.
+  test "a look that failed is one line in the log, the diagnosis's warning", ctx do
+    start_channel(ctx, [:ok])
+    {_job, heal} = claimed_heal!(ctx)
+    TelemetryCapture.attach([@run_error], heal_id: heal.id)
+
+    {_result, log} = with_log(fn -> run!(ctx, heal, script([:crash])) end)
+
+    assert [_line] =
+             log
+             |> String.split("\n")
+             |> Enum.filter(&(&1 =~ "Job heal #{heal.id}: its diagnosis failed"))
+
+    assert_received {:telemetry, @run_error, %{duration_ms: ms}, %{status: "error"} = failed}
+    assert JobTelemetry.look_line(:error, Map.put(failed, :duration_ms, ms)) == nil
+  end
+
   # The loop is linked to the heal run and monitored, as a job run's loop is
   # (JOB-8): it dies with the heal run, and the watchdog's kill never reaches
   # the heal run.

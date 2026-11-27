@@ -11,6 +11,7 @@ defmodule FermixCore.Jobs.HealRunTest do
   alias FermixCore.Jobs.HealDecision
   alias FermixCore.Jobs.HealRun
   alias FermixCore.Jobs.Registry
+  alias FermixCore.Jobs.Telemetry, as: JobTelemetry
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
   alias FermixTestSupport.SafeRm
@@ -283,6 +284,29 @@ defmodule FermixCore.Jobs.HealRunTest do
                get_heal(ctx, heal.id)
 
       assert error =~ "no_delivery_target"
+    end
+
+    # A message that never reached a send is this run's warning; the
+    # delivery_failed step's own line would say it twice. This module is async
+    # and the suite's level is :warning, so the absent line is proved through
+    # the builder fed the event this run emitted.
+    test "a message never sent is one line in the log, the run's warning", ctx do
+      start_channel(ctx, [])
+      {_job, heal} = claimed_heal!(ctx)
+      TelemetryCapture.attach([@heal_event], heal_id: heal.id)
+      gone = %{heal | lease_token: "lease_#{heal.id}_taken_by_a_later_pass"}
+
+      {_result, log} = with_log(fn -> run!(ctx, gone) end)
+
+      assert [line] = log |> String.split("\n") |> Enum.filter(&(&1 =~ heal.id))
+      assert line =~ "Job heal #{heal.id}: its message was not sent (:lease_lost)"
+      assert calls(ctx) == []
+
+      assert_received {:telemetry, @heal_event, _measurements,
+                       %{phase: "delivery_failed", dead_letter: false} = unsent}
+
+      refute Map.has_key?(unsent, :attempts)
+      assert JobTelemetry.heal_line("delivery_failed", unsent) == nil
     end
 
     # A run that ends between its mark and its history leaves a delivered

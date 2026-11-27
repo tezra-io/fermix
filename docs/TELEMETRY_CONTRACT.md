@@ -922,9 +922,14 @@ failed runs in a row`, a `warning`), the owner not told because a heal for the
 same failure closed lately (`heal: "quiet"`), or no heal opened because the
 job was not set up by the owner (`heal: "out_of_scope"`), two of them in the
 same line when both hold; `info` otherwise. A failure a heal opened, joined
-or concluded adds none here: the heal's own line follows. The words "quiet
-retry" keep it apart from the Runner's in-run transient retries, which log
-`retry <n>/<max>`. Never the run's `error`.
+or concluded is said by the heal's own line, so it adds none here, but for
+quiet retries used up: that is said here, and the heal's `opened`, `joined`
+or `verdict` line follows, the two saying different things. An ok run whose
+tool never worked (M106 §6) has no `run_error`; when it is kept quiet,
+`heal_settled/3` writes its one line, `Scheduled job <job_id> run <run_id>
+ended ok without working (tool_never_succeeded); the owner is not told: ...`.
+The words "quiet retry" keep it apart from the Runner's in-run transient
+retries, which log `retry <n>/<max>`. Never the run's `error`.
 
 ### Scheduled job heals
 
@@ -985,19 +990,33 @@ Each phase is also one line in the engine log, written beside the event by
 `failure_kind`, the subject, `decision`, `outcome`, `platform`, `answer` and
 `applied`, a failed send's attempt), never `error`, the heal run's note or a
 change's values, which can hold outside content. A job's heal is placed by
-its job once; a provider's or a plugin's names its subject on every line. The
-line is a `warning` for a `verdict`, a `delivery_failed` whose send is tried
-again, and a `closed` with `outcome: "still_failing"`, and `info` for the
-rest. A step its caller already logs adds no line, so no step is two lines: a
-`decided` with a `refusal` (`Jobs.HealRun` warns what was asked and what
-Fermix carries out), a `rerun` other than `started` (`Jobs.HealRun` logs
-`running` at info, `refused` and `unanswered` as warnings), and a
-`delivery_failed` that is a dead letter or counted no attempt (a warning each
-in `Jobs.HealRun`). Every value is said as one token, checked where it is
-said: letters, digits and `_ . : @ + / -`, any other byte as `?`, at most 64
-bytes; a value that is not a string, an atom or an integer is not said. The
-builder is total: a phase whose fact is missing still gets a plain line with
-the ids it has.
+its job once; a provider's or a plugin's names its subject on every line whose
+facts carry it. A `closed` with `outcome: "healed"` carries only the ok run
+that closed it and that run's job, which for a provider's or a plugin's heal
+is whichever job's run proved it, so the line names them as that run
+(`closed as healed: job <job_id> run <run_id> ended ok`), never as the heal's
+own job. The line is a `warning` for a `verdict`, a `delivery_failed` whose
+attempt was not its last, and a `closed` with `outcome: "still_failing"`, and
+`info` for the rest. A step its caller already logs adds no line, so no step
+is two lines: a `decided` with a `refusal` (`Jobs.HealRun` warns what was
+asked and what Fermix carries out), a `rerun` other than `started`
+(`Jobs.HealRun` logs `running` at info, `refused` and `unanswered` as
+warnings), and a `delivery_failed` that is a dead letter or counted no
+attempt (a warning each in `Jobs.HealRun`). A failure has two lines in one
+case only, which say different things: quiet retries used up, the run's line,
+then the heal's `opened`, `joined` or `verdict`. The lines the callers keep
+are theirs, not these: a refused or redirected decision's carries its
+`refusal_detail`, and a dead letter's, a message never sent's and a rerun
+refused or unanswered's quote the error, each of which can hold a provider's
+or a chat app's words; only the lines `Jobs.Telemetry` writes hold ids and
+Fermix's vocabulary alone. Every value is said as one token, checked where it
+is said: letters, digits and `_ . : @ + / -`, any other byte as `?`, at most
+512 bytes, so every id Fermix makes is whole (a look's session is its job id
+and 28 bytes, whole for any job whose name is under about 470 characters); a
+value past that keeps its first and last 254 bytes around `...`, so a session
+keeps its time and suffix. A value that is not a string, an atom or an
+integer is not said. The builder is total: a phase whose fact is missing
+still gets a plain line with the ids it has.
 
 ### Job heal runs
 

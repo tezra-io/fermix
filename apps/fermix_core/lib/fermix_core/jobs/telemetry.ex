@@ -35,10 +35,11 @@ defmodule FermixCore.Jobs.Telemetry do
   Each step of a heal is also one line in the engine log, written beside its
   event by a pure builder (`heal_line/2`, `look_line/2` for the look), and so
   is what became of a failed scheduled run (`run_line/3`): `info`, or
-  `warning` for a step that says something went wrong. A step its caller
-  already logs adds none. A line holds ids and Fermix's own words, each
-  value one bounded token, never a failure's words, a note or a change's
-  values.
+  `warning` for a step that says something went wrong. A line written here
+  holds ids and Fermix's own words, each value one bounded token, never a
+  failure's words, a note or a change's values. A step its caller already
+  logs adds none here, and the caller's line may quote an error or a check's
+  refusal, which can hold a provider's or a chat app's words.
   """
 
   require Logger
@@ -65,8 +66,14 @@ defmodule FermixCore.Jobs.Telemetry do
     platform: "platform",
     session_id: "session"
   }
-  # The most bytes of one value a log line says.
-  @token_max 64
+  # The most bytes of one value a log line says. The ids Fermix makes are
+  # whole under it: a heal id is 20 bytes, a run id 15, a job id its name's
+  # slug and a counter (no length limit), and a look's session its job id and
+  # 28 bytes, so a session is whole for any job whose name is under about 470
+  # characters. A value past it keeps its head and its tail, so a session
+  # keeps its time and suffix and two looks at one job stay apart.
+  @token_max 512
+  @token_keep div(@token_max - 3, 2)
 
   @trace_event_definitions [
     %{
@@ -195,12 +202,16 @@ defmodule FermixCore.Jobs.Telemetry do
   one, and when it runs or that it is the job's next run), its quiet retries
   used up (a `warning`), the owner not told because a heal for the same
   failure closed lately (`quiet`), or no heal opened because the job is not
-  the owner's (`out_of_scope`), two of them joined when both hold.
+  the owner's (`out_of_scope`), two of them joined when both hold. A run
+  whose `status` is `ok` is said as one that ended ok without working (M106
+  §6): its settle passes it only when it was kept quiet (`heal_settled/3`).
 
-  Nil for a failure a heal opened, joined or concluded, whose own line
-  follows (`heal_line/2`), and for a run with no settlement (a cue run's).
-  Total over its facts: any maps give a line or nil. Ids, the run's
-  `failure_kind` and the settlement's numbers only, never the run's error.
+  A failure a heal opened, joined or concluded is said by the heal's own
+  line (`heal_line/2`), so this line is nil for it, but for quiet retries
+  used up: that is said here, and the heal's `opened`, `joined` or `verdict`
+  line follows. Nil for a run with no settlement (a cue run's). Total over
+  its facts: any maps give a line or nil. Ids, the run's `failure_kind` and
+  the settlement's numbers only, never the run's error.
   """
   @spec run_line(map(), map(), term()) :: log_line() | nil
   def run_line(job, run, settlement) when is_map(job) and is_map(run) do
@@ -212,11 +223,21 @@ defmodule FermixCore.Jobs.Telemetry do
 
       said ->
         prefix =
-          "Scheduled job #{id_said(Map.get(job, :id))} run #{id_said(Map.get(run, :id))} failed"
+          "Scheduled job #{id_said(Map.get(job, :id))} run #{id_said(Map.get(run, :id))} " <>
+            ended_said(run)
 
-        {run_level(settlement), prefix <> kind_said(run) <> "; " <> Enum.join(said, "; ")}
+        kind = kind_said(kind_of(run, settlement))
+        {run_level(settlement), prefix <> kind <> "; " <> Enum.join(said, "; ")}
     end
   end
+
+  defp ended_said(%{status: "ok"}), do: "ended ok without working"
+  defp ended_said(_failed), do: "failed"
+
+  # A failed run's kind is its own; an ok run has none, and its kind is the
+  # one its heal took it as.
+  defp kind_of(%{status: "ok"}, settlement), do: Map.get(settlement, :failure_kind)
+  defp kind_of(run, _settlement), do: Map.get(run, :failure_kind)
 
   defp retry_said(%{disposition: :retry} = settlement),
     do: "quiet retry" <> attempt_said(settlement) <> retry_when(Map.get(settlement, :retry_at))
@@ -264,10 +285,10 @@ defmodule FermixCore.Jobs.Telemetry do
   defp run_level(%{disposition: :exhausted}), do: :warning
   defp run_level(_settlement), do: :info
 
-  defp kind_said(run) do
-    case token(Map.get(run, :failure_kind)) do
+  defp kind_said(kind) do
+    case token(kind) do
       nil -> ""
-      kind -> " (#{kind})"
+      said -> " (#{said})"
     end
   end
 
@@ -277,6 +298,8 @@ defmodule FermixCore.Jobs.Telemetry do
   `subject_kind` and `subject_id` (an ok run's included, M106 §6), and
   `closed` (outcome `healed`) for each heal an ok run closed. A failure
   retried, kept quiet or out of scope causes none; its `run_error` says which.
+  An ok run that did not work and was kept quiet has no `run_error`, so its
+  one log line is written here (`run_line/3`).
   """
   @spec heal_settled(map(), map(), map()) :: :ok
   def heal_settled(job, run, %{heal: heal, healed: healed} = settlement) when is_list(healed) do
@@ -287,12 +310,20 @@ defmodule FermixCore.Jobs.Telemetry do
         taken = Map.take(settlement, [:failure_kind, :subject_kind, :subject_id])
         heal(Atom.to_string(phase), ids |> Map.merge(taken) |> Map.put(:heal_id, heal_id))
 
-      _none_quiet_or_out_of_scope ->
+      :quiet ->
+        write_log(quiet_ok_line(job, run, settlement))
+
+      _none_or_out_of_scope ->
         :ok
     end
 
     Enum.each(healed, &heal("closed", Map.merge(ids, %{heal_id: &1, outcome: "healed"})))
   end
+
+  # A failed run's quiet is said with its `run_error`; only an ok run's is
+  # said by its settle.
+  defp quiet_ok_line(job, %{status: "ok"} = run, settlement), do: run_line(job, run, settlement)
+  defp quiet_ok_line(_job, _failed_run, _settlement), do: nil
 
   @doc """
   One phase of a heal's life (`opened`, `joined`, `verdict`, `decided`,
@@ -337,19 +368,23 @@ defmodule FermixCore.Jobs.Telemetry do
   row carries: the heal's id, what happened, and the ids and Fermix's own
   words that place it (job, run, failure kind, subject, platform). A job's
   heal is placed by its job once; a provider's or a plugin's by its subject
-  on every step. Never the failure's words (`error`), the look's note or a
-  change's values, which can hold outside content.
+  on every line whose facts carry it. An ok run's close carries only that
+  run and its job, so it names them as the run that closed the heal. Never
+  the failure's words (`error`), the look's note or a change's values,
+  which can hold outside content.
 
   `warning` for a step that says something went wrong (a run the heal
-  watched that did not work either, a send that failed and is tried again, a
-  heal closed `still_failing`), `info` for the rest.
+  watched that did not work either, a send that failed on an attempt that
+  was not its last, a heal closed `still_failing`), `info` for the rest.
 
   Nil for a step its caller already logs with more said, so no step is two
   lines: a refused or redirected decision (`Jobs.HealRun` warns what was
   asked and what Fermix carries out), a rerun that started no run of its own
   (`Jobs.HealRun` logs `running`, `refused` and `unanswered` where it asks),
   a dead letter, and a message that never reached a send (no attempt
-  counted), each a warning in `Jobs.HealRun`.
+  counted), each a warning in `Jobs.HealRun`. A failed run whose quiet
+  retries are used up has its own line before its heal's (`run_line/3`):
+  the two say different things.
 
   Total over its facts: a step whose fact is missing or odd still gets a
   plain line naming the step and the ids it has.
@@ -359,22 +394,26 @@ defmodule FermixCore.Jobs.Telemetry do
     case heal_step(phase, facts) do
       nil -> nil
       {level, said} -> {level, heal_said(facts, said, placed_keys(phase))}
+      {level, said, keys} -> {level, heal_said(facts, said, keys)}
     end
   end
 
   defp heal_step("opened", _facts), do: {:info, "opened"}
   defp heal_step("joined", _facts), do: {:info, "joined by a later run"}
 
-  # A watched run that failed, or that ended ok while its tool never worked.
+  # A watched run that failed, or that ended ok while its tool never worked;
+  # the heal is open again, and what it sends next is the verdict.
   defp heal_step("verdict", _facts),
     do:
-      {:warning, "a run it watched did not work either, so the owner is told the job still fails"}
+      {:warning,
+       "a run it watched did not work either; its next message says the job still fails"}
 
   defp heal_step("decided", %{refusal: refusal}) when not is_nil(refusal), do: nil
 
   defp heal_step("decided", facts) do
     case token(Map.get(facts, :decision)) do
       nil -> {:info, "its decision was recorded"}
+      "none" -> {:info, "its look gave no decision"}
       decision -> {:info, "its decision is #{decision}"}
     end
   end
@@ -389,10 +428,11 @@ defmodule FermixCore.Jobs.Telemetry do
   defp heal_step("delivered", facts), do: {:info, "its #{message_said(facts)} was delivered"}
   defp heal_step("delivery_failed", %{dead_letter: true}), do: nil
 
+  # Not a dead letter: the attempt is counted and another is to come.
   defp heal_step("delivery_failed", %{dead_letter: false, attempts: attempts} = facts)
        when is_integer(attempts) do
     said = "its #{message_said(facts)} could not be sent on attempt #{token(attempts)}"
-    {:warning, said <> "; it is tried again later"}
+    {:warning, said <> ", which was not the last"}
   end
 
   defp heal_step("delivery_failed", %{dead_letter: false}), do: nil
@@ -400,11 +440,22 @@ defmodule FermixCore.Jobs.Telemetry do
   defp heal_step("delivery_failed", facts),
     do: {:warning, "its #{message_said(facts)} could not be sent"}
 
+  # An ok run's close carries only that run and its job, which for a
+  # provider's or a plugin's heal is whichever job's run proved it: it is
+  # named as the run that closed the heal, never as the heal's own job.
   defp heal_step("closed", facts) do
-    case token(Map.get(facts, :outcome)) do
-      nil -> {:info, "closed"}
-      "still_failing" -> {:warning, "closed as still_failing"}
-      outcome -> {:info, "closed as #{outcome}"}
+    case {token(Map.get(facts, :outcome)), ran_said(facts)} do
+      {nil, _ran} ->
+        {:info, "closed"}
+
+      {"healed", ran} when is_binary(ran) ->
+        {:info, "closed as healed: #{ran} ended ok", [:subject, :platform]}
+
+      {"still_failing", _ran} ->
+        {:warning, "closed as still_failing"}
+
+      {outcome, _ran} ->
+        {:info, "closed as #{outcome}"}
     end
   end
 
@@ -420,6 +471,15 @@ defmodule FermixCore.Jobs.Telemetry do
 
   defp placed_keys(phase) when phase in ["opened", "joined", "verdict"], do: @failure_placed
   defp placed_keys(_phase), do: @placed
+
+  # A run by its own id and its job's, when the facts have its id.
+  defp ran_said(facts) do
+    case {token(Map.get(facts, :job_id)), token(Map.get(facts, :run_id))} do
+      {_job, nil} -> nil
+      {nil, run} -> "run #{run}"
+      {job, run} -> "job #{job} run #{run}"
+    end
+  end
 
   defp message_said(%{conclusion: "verdict"}), do: "verdict"
   defp message_said(_first_or_none), do: "message"
@@ -496,13 +556,16 @@ defmodule FermixCore.Jobs.Telemetry do
   # A value as one token of a log line, checked here where it is said:
   # letters, digits and `_ . : @ + / -` kept, every other byte (a line break,
   # a control character, a space, any byte of a non-ASCII character) said as
-  # `?`, and at most 64 bytes. A string, an atom or an integer; anything else,
-  # and an empty value, is not said.
+  # `?`, and at most `@token_max` bytes, cut in the middle. A string, an atom
+  # or an integer; anything else, and an empty value, is not said.
   defp token(value) when is_binary(value) and value != "" do
     safe = String.replace(value, ~r/[^A-Za-z0-9_.:@+\/-]/, "?")
+    size = byte_size(safe)
 
-    if byte_size(safe) > @token_max,
-      do: binary_part(safe, 0, @token_max) <> "...",
+    if size > @token_max,
+      do:
+        binary_part(safe, 0, @token_keep) <>
+          "..." <> binary_part(safe, size - @token_keep, @token_keep),
       else: safe
   end
 
