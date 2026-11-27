@@ -8,6 +8,7 @@ defmodule FermixCore.Agents.RuntimeContextTest do
   alias FermixCore.HostFacts
   alias FermixCore.Memory.PromptFiles
   alias FermixCore.Prompt.BootstrapPaths
+  alias FermixCore.Prompt.RuntimeSections
 
   defmodule FakeMod do
     def execute(_args, _ctx, _extra \\ nil), do: {:ok, :ok}
@@ -383,6 +384,24 @@ defmodule FermixCore.Agents.RuntimeContextTest do
     assert "read_tool" in advertised
     assert "x_whoami" in dispatchable
     assert "read_tool" in dispatchable
+  end
+
+  # The profile of a turn that may only write its reply (M94 D23): nothing is
+  # offered and nothing can be dispatched, and its runtime section says so
+  # instead of steering the model at tools it does not have.
+  test "reply_only_profile/1 carries no capability and a runtime section that says so" do
+    for trust <- [:operator, :guest] do
+      profile = RuntimeContext.reply_only_profile(trust)
+
+      assert profile.trust == trust
+      assert profile.capabilities == []
+      assert profile.dispatchable == []
+      assert profile.runtime_message == %{role: "system", content: RuntimeSections.reply_only()}
+      assert profile.runtime_accounting.name == :runtime
+    end
+
+    assert RuntimeSections.reply_only() =~ "has no tools"
+    refute RuntimeSections.reply_only() =~ "Built-in Capability Catalog"
   end
 
   test "accounting_for/2 returns base + runtime accounting", %{

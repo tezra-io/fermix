@@ -327,7 +327,8 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   the call's transcript, and so does the turn its result starts in the
   owner's conversation, whose message frames the person's words
   (`Agents.TurnRunner`, from the result's own marker). Never a coding run's,
-  so a confirmation raised in either turn names the call.
+  so a confirmation the backend turn raises names the call; the result's turn
+  has no tools and raises none (M94 D23).
   """
   @spec phone_call_source() :: outside_source()
   def phone_call_source, do: {:phone_call, "a phone call"}
@@ -337,8 +338,7 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   `/confirm` (a directory grant, a coding run's vendor-config acknowledgment),
   so the re-run is the same request rather than a clean one: the outside
   sources the turn had read and, on a finished coding run's follow-up turn, its
-  chain depth and that run's id, or on a phone call's result turn its depth and
-  that call's id (`phone_call_result`), and the owner request's identity
+  chain depth and that run's id, and the owner request's identity
   (`request_id`, `Agents.RequestIdentity`), so a tool whose effect outlives the
   turn (a phone call) finds what the parked request already started. The
   gateway keeps it with the resume intent and `Agents.TurnRunner` seeds it on
@@ -350,7 +350,6 @@ defmodule FermixCore.Capabilities.UntrustedContent do
     %{outside_sources: provenance_sources(context)}
     |> put_positive(:harness_continuation_depth, Map.get(context, :harness_continuation_depth))
     |> put_binary(:harness_run_id, Map.get(context, :harness_run_id))
-    |> put_binary(:phone_call_result, Map.get(context, :phone_call_result))
     |> put_request(Map.get(context, :request_id))
   end
 

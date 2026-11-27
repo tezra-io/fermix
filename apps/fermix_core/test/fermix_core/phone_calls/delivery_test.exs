@@ -178,7 +178,8 @@ defmodule FermixCore.PhoneCalls.DeliveryTest do
       assert {:ok, notice} = Continuation.notice(row)
       assert notice.content =~ "[phone call pc_0a1b2c3d4e5f] The call ended."
       assert notice.content =~ ~s(<untrusted_tool_result source="phone_call_recipient">)
-      assert notice.content =~ "Do not place another call from this turn"
+      assert notice.content =~ "This turn has no tools"
+      refute notice.content =~ "Do not place another call"
       assert notice.metadata.harness_continuation == true
       assert notice.metadata.harness_continuation_depth == 1
       # Its own marker names the call, so the turn reads a phone call, not a coding run.

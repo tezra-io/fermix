@@ -1636,7 +1636,11 @@ An engine stop shortens that ending: the first application to stop runs
 call's backend among them, still runs: it asks each live call to hang up, and
 no outcome is read. The Manager writes the terminal row once and hands it off:
 a chat origin re-enters its conversation (`PhoneCalls.Continuation`, through
-the dispatcher `Delivery.Continuation` resolves for every run kind), anything
+the dispatcher `Delivery.Continuation` resolves for every run kind) as a turn
+that can only report: the turn carrying a finished call's marker runs on
+`RuntimeContext.reply_only_profile/1`, with no capability offered or
+dispatchable, so after a call Fermix does nothing on what was said in it and
+what happens next is the owner's own new request (M94 D23). Anything
 else or a failed dispatch is one send (`PhoneCalls.Delivery`, over
 `Delivery.FrozenSend`, to the origin `Delivery.FrozenOrigin.resolve/2` froze
 on the row), and `DeliveryWorker` owns the bounded rest.
@@ -2354,7 +2358,13 @@ Current channels:
   answered inline), in mailbox order. A turn it tracks settles from the
   Queue's outcome: a companion turn's replies are held and written, with
   `text_done`, only on `{:completed}`, while a phone turn streams and writes
-  its own rows and is only settled. Both transports' turns run in the chat's
+  its own rows and is only settled. A report Fermix starts in the chat (a
+  finished phone call's or coding run's notice, handed to `Turns` by the
+  continuation dispatcher as `ChannelRegistry.agent/1` names it) is tracked
+  the same way and shown to no client as a turn: nothing of it is streamed,
+  and each reply is written on `{:completed}` as a delivery, a `row` every
+  watcher hears, or, when its turn failed, one row that says the report could
+  not be written. Both transports' turns run in the chat's
   one queue lane, so each waits for the other, and a stop names its own
   turn's message id there. A `cancel` from either transport
   (`Requests.cancel`) is recorded on the request (`cancelled_at`) before
@@ -2406,7 +2416,8 @@ Current channels:
   (`VoiceCall.excluded_categories/1`): a call in the chat may start a coding
   run, which reports back into the chat, and a private call may not. While a
   call in the chat is up, `Companion.Turns` tells it each chat turn it hands off and that turn's
-  answer (`Voice.ChatMirror`), finding the call in Core's `CallRegistry`, and
+  answer (`Voice.ChatMirror`), a report Fermix starts aside, which nobody
+  typed and which is told to no call, finding the call in Core's `CallRegistry`, and
   each such turn is told the call is up (`Voice.Bridge.chat_call/2`): it can
   read the call (`voice_call_context`) and may end with no reply, which its
   runner tells the companion stream and `Companion.Turns` ends with

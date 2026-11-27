@@ -19,6 +19,7 @@ defmodule FermixCore.Agents.TurnRunnerOutsideSourcesTest do
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
   alias FermixCore.OpenLoops.Registry, as: OpenLoopsRegistry
+  alias FermixCore.Prompt.RuntimeSections
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Tools.Shell
   alias FermixTestSupport.SafeRm
@@ -31,14 +32,19 @@ defmodule FermixCore.Agents.TurnRunnerOutsideSourcesTest do
     @behaviour FermixCore.Providers.Adapter
 
     @impl true
-    def chat(messages, _capabilities, opts) do
-      send(Keyword.fetch!(opts, :test_pid), {:first_call, messages})
+    def chat(messages, capabilities, opts) do
+      test_pid = Keyword.fetch!(opts, :test_pid)
+      send(test_pid, {:first_call, messages})
+      send(test_pid, {:offered, capabilities})
       call = %{id: "c1", call_id: "c1", name: "record_context", arguments: "{}"}
       {:ok, turn("", [call])}
     end
 
     @impl true
-    def continue(_provider_state, _tool_results, _opts), do: {:ok, turn("done", [])}
+    def continue(_provider_state, tool_results, opts) do
+      send(Keyword.fetch!(opts, :test_pid), {:tool_results, tool_results})
+      {:ok, turn("done", [])}
+    end
 
     @impl true
     def to_provider_tools(capabilities), do: capabilities
@@ -142,29 +148,33 @@ defmodule FermixCore.Agents.TurnRunnerOutsideSourcesTest do
     )
   end
 
+  defp turn_state(ctx, state_extra \\ []) do
+    test_pid = self()
+
+    Enum.into(state_extra, %{
+      adapter: RecordingAdapter,
+      adapter_opts: [model: "mock-model", test_pid: test_pid],
+      provider: nil,
+      adapter_overrides: [],
+      capability_registry: ctx.registry,
+      conversation_store: ctx.store,
+      runtime_context: runtime_context(recorder(test_pid)),
+      memory_agent_id: "main",
+      memory_owner_id: "default",
+      skill_registry: nil,
+      agent_supervisor: nil,
+      task_supervisor: self(),
+      journal_base_dir: nil,
+      memory_store: nil,
+      memory_repo: nil,
+      sandbox_config: ctx.sandbox
+    })
+  end
+
   defp run_turn(ctx, msg, state_extra \\ []) do
     test_pid = self()
     {stream_callback, state_extra} = Keyword.pop(state_extra, :stream_callback)
-
-    turn_state =
-      Enum.into(state_extra, %{
-        adapter: RecordingAdapter,
-        adapter_opts: [model: "mock-model", test_pid: test_pid],
-        provider: nil,
-        adapter_overrides: [],
-        capability_registry: ctx.registry,
-        conversation_store: ctx.store,
-        runtime_context: runtime_context(recorder(test_pid)),
-        memory_agent_id: "main",
-        memory_owner_id: "default",
-        skill_registry: nil,
-        agent_supervisor: nil,
-        task_supervisor: self(),
-        journal_base_dir: nil,
-        memory_store: nil,
-        memory_repo: nil,
-        sandbox_config: ctx.sandbox
-      })
+    turn_state = turn_state(ctx, state_extra)
 
     deliver = fn part ->
       send(test_pid, {:delivered, part})
@@ -488,11 +498,12 @@ defmodule FermixCore.Agents.TurnRunnerOutsideSourcesTest do
   end
 
   # A finished phone call's result re-enters through the same dispatcher with
-  # the continuation marker and its own (M94 §04): its content frames the
-  # words of the person called, so its source names the call and never a
-  # coding run, it is no attended owner turn, and its message is stored as not
-  # the owner's words.
-  test "a phone call's result turn carries the call's provenance, not a coding run's", ctx do
+  # the continuation marker and its own (M94 §04). Its content frames the
+  # words of the person called, so the turn it starts can only write its reply
+  # (M94 D23): no tool is offered, a tool its model names anyway is answered
+  # as not there and never run, the prompt says so, and its message is stored
+  # as not the owner's words.
+  test "a phone call's result turn is offered no tool and runs none", ctx do
     chat_id = chat_id()
 
     msg =
@@ -506,27 +517,25 @@ defmodule FermixCore.Agents.TurnRunnerOutsideSourcesTest do
         }
       })
 
-    {_messages, context} = run_turn(ctx, msg)
+    assert {:ok, "done", _tokens} = TurnRunner.run(msg, turn_state(ctx), fn _part -> :ok end)
 
-    assert context.outside_sources == MapSet.new([UntrustedContent.phone_call_source()])
-    assert context.phone_call_result == "pc_0a1b2c3d4e5f"
-    assert context.harness_run_id == nil
-    refute FermixCore.Temporal.Access.attended_operator_turn?(context)
-    assert UntrustedContent.resume_provenance(context).phone_call_result == "pc_0a1b2c3d4e5f"
+    assert_receive {:first_call, messages}, 10_000
+    assert_receive {:offered, []}, 10_000
+    assert_receive {:tool_results, [refused]}, 10_000
+    assert refused.output == "Error: Tool 'record_context' not found"
+    refute_received {:tool_context, _context}
 
-    assert {:ok, %{success: false}} = unlock_from(context, ctx)
-    refute_received {:unlocked, _}
-    assert {:ok, %{success: false, error: refusal}} = shell_from(context, ctx)
-    refute_received {:ran, _args}
-    assert refusal =~ "(a phone call)"
-    refute refusal =~ "coding run"
+    system = messages |> Enum.filter(&(&1.role == "system")) |> Enum.map_join("\n", & &1.content)
+    assert system =~ RuntimeSections.reply_only()
+    refute system =~ "runtime contract"
 
     [stored | _] = ConversationStore.get_history({"telegram", chat_id, :root}, server: ctx.store)
     assert stored.role == "user"
     assert stored.harness_continuation == true
   end
 
-  test "a coding run's continuation names the run, never a call", ctx do
+  # Only a call's report is held to its reply: a coding run's keeps its tools.
+  test "a coding run's continuation keeps its tools", ctx do
     msg =
       owner_msg(chat_id(), %{
         content: "the coding run finished; here is its summary",
@@ -534,13 +543,13 @@ defmodule FermixCore.Agents.TurnRunnerOutsideSourcesTest do
       })
 
     {_messages, context} = run_turn(ctx, msg)
+    assert_received {:offered, [%{name: "record_context"}]}
     assert context.outside_sources == MapSet.new([UntrustedContent.harness_continuation_source()])
-    assert context.phone_call_result == nil
     refute Map.has_key?(UntrustedContent.resume_provenance(context), :phone_call_result)
   end
 
   # A call's marker means nothing on a turn the owner typed: only a
-  # continuation carries it.
+  # continuation carries it, so the turn is an ordinary one, tools and all.
   test "a call's marker on an owner-typed turn is not a call's result", ctx do
     msg =
       owner_msg(chat_id(), %{
@@ -549,8 +558,8 @@ defmodule FermixCore.Agents.TurnRunnerOutsideSourcesTest do
       })
 
     {_messages, context} = run_turn(ctx, msg)
+    assert_received {:offered, [%{name: "record_context"}]}
     assert context.outside_sources == MapSet.new()
-    assert context.phone_call_result == nil
   end
 
   # The gate reads the finished run from the ledger by the id the notice

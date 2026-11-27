@@ -88,6 +88,21 @@ defmodule FermixCore.Prompt.RuntimeSections do
     |> Enum.join("\n\n")
   end
 
+  @doc """
+  The runtime section of a turn that may only write its reply
+  (`Agents.RuntimeContext.reply_only_profile/1`): it has no tools, and says so
+  where every other turn's section says how to use them.
+  """
+  @spec reply_only() :: String.t()
+  def reply_only do
+    """
+    ## Runtime Contract
+    - This turn has no tools: it can only write its reply. Nothing can be looked up, sent, changed or started from it.
+    - When something should happen next, say what it is and ask. Doing it is the owner's own new request, which their next message makes.
+    """
+    |> String.trim()
+  end
+
   # Which Fermix this is and the machine it runs on (M76 §4.2), read once at
   # boot. It leads the Runtime Contract, whose rules name the OS they hold on
   # (`open -a`, AppleScript on macOS), so the model reads the machine first.

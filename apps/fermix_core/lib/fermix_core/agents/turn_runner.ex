@@ -556,7 +556,8 @@ defmodule FermixCore.Agents.TurnRunner do
         source_trust,
         state.capability_registry,
         advertise_context,
-        voice_call
+        voice_call,
+        phone_call_result(msg)
       )
 
     emit_runtime_context_cache_telemetry(state, cache_status, profile)
@@ -705,10 +706,6 @@ defmodule FermixCore.Agents.TurnRunner do
       # follow-up turn start the next run of the chain without asking, only in
       # its folder and with its coding agent.
       harness_run_id: harness_run_id(msg),
-      # The finished phone call whose result this synthesized message carries
-      # (M94 §04), nil on every other turn: the turn's outside source names the
-      # call, and a request it parks for `/confirm` hands it on.
-      phone_call_result: phone_call_result(msg),
       # Reaction capability resolved by the gateway (nil on no-reaction channels).
       # Plain data, never the channel module — the `react` tool reads it to gate
       # its own advertisement and build the emoji enum (EMOJI_REACTION_ACKS §5.4).
@@ -876,7 +873,8 @@ defmodule FermixCore.Agents.TurnRunner do
 
   # A phone call's result marker (M94 §04), read like the coding run's: under
   # its atom key, on a continuation only, which only the continuation
-  # dispatcher and the grant resume hand the gateway.
+  # dispatcher hands the gateway. It names the turn's outside source, and it
+  # is what gives the turn its reply-only profile (`profile_for_turn/6`).
   defp phone_call_result(msg) do
     metadata = Map.get(msg, :metadata) || %{}
     call_id = Map.get(metadata, :phone_call_result)
@@ -2057,6 +2055,17 @@ defmodule FermixCore.Agents.TurnRunner do
     )
   end
 
+  # The turn that reports a finished phone call can only write its reply (M94
+  # D23, the owner's rule): what its message frames is what the person called
+  # said, and whatever Fermix did next would be done on their word. So it runs
+  # on the reply-only profile, whatever its trust: no capability is offered or
+  # can be dispatched, and the prompt says so. What should happen next is the
+  # owner's own new request, in their next message, which is their turn.
+  defp profile_for_turn(_ctx, trust, _registry, _advertise_context, _voice_call, call_id)
+       when is_binary(call_id) do
+    RuntimeContext.reply_only_profile(profile_trust(trust))
+  end
+
   # The voice capability boundary (M41 §5.1): a Live delegation runs on the
   # operator surface minus `VoiceCall.excluded_categories/1` for its call's
   # mode — the SAME list `LivePrompt` advertises to the voice model, so prose
@@ -2068,13 +2077,13 @@ defmodule FermixCore.Agents.TurnRunner do
   # this one is a registry read plus string assembly (the expensive half — the
   # file-backed prompt base — stays cached and is reused from `ctx`), against a
   # delegation that is seconds of speech away from the next one.
-  defp profile_for_turn(ctx, trust, registry, _advertise_context, {:ok, voice_call}) do
+  defp profile_for_turn(ctx, trust, registry, _advertise_context, {:ok, voice_call}, nil) do
     RuntimeContext.build_profile(profile_trust(trust), ctx.available_skills, registry,
       excluded_categories: VoiceCall.excluded_categories(voice_call.conversation)
     )
   end
 
-  defp profile_for_turn(ctx, trust, registry, advertise_context, :none) do
+  defp profile_for_turn(ctx, trust, registry, advertise_context, :none, nil) do
     profile_for_trust(ctx, trust, registry, advertise_context)
   end
 

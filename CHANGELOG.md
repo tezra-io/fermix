@@ -43,7 +43,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and hangs up on voicemail. The report arrives by itself within about a
   minute of the call ending: confirmed, in the other person's own words,
   unavailable, options, needs you, or unknown when Fermix could not establish
-  what was agreed. While a call is in progress Fermix refuses a restart you
+  what was agreed. Reporting is all Fermix does by itself after a call: the
+  message that brings the report is written with no tools, so Fermix looks
+  nothing up and sends, changes or starts nothing on what was said, and what
+  happens next waits for your own next message. The report then stays in the
+  conversation, so that next request is answered with it in view. While a
+  call is in progress Fermix refuses a restart you
   ask for and a change of the OpenAI key or the connection's password; a call
   whose end OpenAI never confirmed keeps the one call slot for a little over
   two hours, or until you confirm in the Phone calls tab or with

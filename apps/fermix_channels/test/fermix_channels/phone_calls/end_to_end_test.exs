@@ -28,14 +28,12 @@ defmodule FermixChannels.PhoneCalls.EndToEndTest do
   alias FermixCore.Capabilities.BuiltinSeeder
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
-  alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
   alias FermixCore.PhoneCalls.CallControls
   alias FermixCore.PhoneCalls.Ledger
   alias FermixCore.PhoneCalls.Manager
   alias FermixCore.PhoneCalls.Tools, as: PhoneCallTools
-  alias FermixCore.Temporal.Access
   alias FermixCore.Tools.PhoneCallEnd
   alias FermixCore.Tools.PhoneCallPressKeys
   alias FermixTestSupport.PhoneCallFakes, as: Fakes
@@ -691,21 +689,21 @@ defmodule FermixChannels.PhoneCalls.EndToEndTest do
     })
   end
 
-  # The report's own turn in the owner's chat: it reads the report, is not
-  # the owner's attended turn, and its `phone_call` start is refused.
-  defp result_turn_cannot_call!(call) do
-    {model, {:chat, messages, _tools}} = model_asked!()
+  # The report's own turn in the owner's chat (M94 D23): it reads the report
+  # and can only write its reply. It is offered no tool, and a tool its model
+  # names anyway, the owner's own among them, is answered as not there and
+  # never run, so nothing the person called said can make Fermix act.
+  defp result_turn_runs_nothing!(call) do
+    {model, {:chat, messages, tools}} = model_asked!()
     assert List.last(messages).content =~ "[phone call #{call.id}] The call ended."
+    assert tools == []
     start = {"phone_call", %{"action" => "start", "brief" => @brief}}
     answer(model, {:tools, [{"record_context", %{}}, start]})
 
-    assert_receive {:tool_context, result_turn}, @arrival
-    refute Access.attended_operator_turn?(result_turn)
-    assert result_turn.phone_call_result == call.id
-    assert MapSet.member?(result_turn.outside_sources, UntrustedContent.phone_call_source())
-
-    {model, {:continue, [_recorded, again]}} = model_asked!()
-    assert again.output =~ "phone_call was not run"
+    {model, {:continue, [recorded, again]}} = model_asked!()
+    assert recorded.output == "Error: Tool 'record_context' not found"
+    assert again.output == "Error: Tool 'phone_call' not found"
+    refute_received {:tool_context, _context}
     answer(model, {:reply, "The bistro confirmed your table for two on Saturday at 7:30 PM."})
     assert_receive {:channel_reply, _result_message, "The bistro confirmed" <> _rest}, @arrival
   end
@@ -777,7 +775,7 @@ defmodule FermixChannels.PhoneCalls.EndToEndTest do
     assert notice.content =~ "[phone call #{call.id}] The call ended."
     assert notice.content =~ "Outcome: confirmed"
     assert notice.content =~ ~s(<untrusted_tool_result source="phone_call_recipient">)
-    result_turn_cannot_call!(call)
+    result_turn_runs_nothing!(call)
 
     assert_receive {:DOWN, ref, :process, _worker, :normal}, @arrival
     assert ref == call.worker_ref
