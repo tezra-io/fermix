@@ -596,3 +596,21 @@ in `delivery.ex` and unchanged. So no modelled step changed, and
 moved up with the removal. The ones into `repo.ex`, two thousand lines short
 after the file's growth, now name the harness functions they cite, and the
 core tree's range in HARNESS-3 follows `application.ex`.
+
+## Re-read for the channel's own agent (2026-11-26)
+
+`5adb44fd8` staled the channels `continuation_dispatcher.ex` pin, pinned whole.
+The notice is still one message built here and handed to `Gateway.ingest/2`,
+whose verdict is still this function's return. What changed is the agent the
+ingest names: the one the channel's own transport hands its turns to
+(`ChannelRegistry.agent/1`), where it was always the Queue.
+- For every channel but the Mac app's chat that agent is the Queue, as
+  before.
+- In the Mac app's chat it is `Companion.Turns`, which takes the hand-off
+  without waiting and hands the turn to the same Queue in its next step. A
+  `Turns` that is not running refuses the hand-off, and ingest returns that
+  refusal, so the run's delivery stays pending, as for any refused ingest.
+- The liveness check before the ingest still names the Queue.
+
+So a dispatch succeeds or fails as the spec says, and no check's setup or
+verdict moves.

@@ -630,6 +630,14 @@ this spec models is the one engine's: a second daemon is refused before the
 scheduler starts, which `engine_boot` checks. No modelled step changed, and
 the `application.ex` lines cited above moved with the code.
 
+Re-read on 2026-11-26 for a turn's one id (`5adb44fd8`), which staled the
+`mobile.ex` pin, pinned whole. `turn_id/1` now asks
+`Companion.Turns.turn_id/1`, the id a turn ends by, where it minted one for
+a message that carried none, and `new_turn_id/0` is gone. A reminder is a
+delivery no turn streamed: its send names no turn, so it reaches the phones
+as the row it is, with its dedupe key and its push, as before. No delivery
+path the spec models changed.
+
 ## Code and doc drift
 
 - `delivery_worker.ex:160-163` says a claim past the validity boundary "cannot

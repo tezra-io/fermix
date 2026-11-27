@@ -164,7 +164,7 @@ watch was added to the model).
 
 - The LLM and tools (one "loop" step), streaming drafts, and typing.
 - The access gate's parked confirmation. `run_message_loop` hands AgentLoop
-  the owner-inbox closure and the Live call id (`turn_runner.ex:672`,
+  the owner-inbox closure and the Live call id (`turn_runner.ex:673`,
   `:676`). A parked call is a held tool result inside the one loop step, and
   the owner's confirm later runs it on a task outside the Queue, not as a
   new turn.
@@ -452,7 +452,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
 - **Fix (ACP):**
   - `hand_off` (`peer.ex:597-605`) resolves the Queue's name to a pid with
     `GenServer.whereis`, as `Companion.Turns` does at its hand-off
-    (`turns.ex:275-280`), gives the prompt to that pid, and monitors it.
+    (`turns.ex:322-327`), gives the prompt to that pid, and monitors it.
     The monitor is on the process that holds the prompt, so it also covers a
     Queue that dies during the hand-off. No Queue registered: the prompt is
     refused at once (`{:queue_unavailable, name}`, the existing "could not be
@@ -640,3 +640,17 @@ or answer the spec models changed, and the one line reference into
 `conversation_store.ex` (`:176`, `append_stopped_marker`) still points at
 the code. QUEUE-3's note on the compaction a stop aborts now says what is
 true of the database as well as of the cache.
+
+## Re-read for a call's report that only reports (M94 D23, 2026-11-26)
+
+`ff0cfdc1b` staled the `turn_runner.ex` pin. `run_message_loop` now hands a
+finished phone call's marker (`phone_call_result/1`) to the turn's profile
+choice, and the turn that reports the call runs on a profile with no
+capability (`RuntimeContext.reply_only_profile/1`). The turn's context no
+longer carries the marker, which only a parked request's resume read.
+
+Which tools a turn is offered is not modelled here: that turn is claimed,
+started, stopped, committed and answered as any other. No claim, start,
+stop, result or answer the spec models changed. The line references into
+`turn_runner.ex` moved with the code, and so did the one into `turns.ex`,
+which `5adb44fd8` moved.

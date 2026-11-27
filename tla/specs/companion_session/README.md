@@ -405,7 +405,7 @@ the checks that show a rule needs it):
 - `AnnouncesEveryRow`: every row written outside a turn's completion is
   announced as a `row` as it is written: the user's row (`announce_user_row`,
   `connection.ex:1378-1379`) and a delivery (`announce_written`,
-  `channels/companion.ex:443-444`), both built by `Companion.Output.row` and
+  `channels/companion.ex:455-456`), both built by `Companion.Output.row` and
   sent through `Companion.Fanout.announce`. `FALSE` announces no user row.
 - `SingleAnswer`: `Confirmations.take` is an `:ets.take`, the sole consumer of
   a token (`confirmations.ex:21-31`).
@@ -423,8 +423,8 @@ the checks that show a rule needs it):
 - `CancelMarksRequest`: a cancel is recorded on its request first
   (`Requests.cancel`, `requests.ex:192-208`; `cancel_request`,
   `mobile_sql.ex:821-840`). `Turns` reads the mark and enqueues in one step
-  (`hand_off`, `turns.ex:338-352`), and sends every stop of a turn it handed
-  off itself, after the enqueue (`turns.ex:253-256`, `stop_in_queue`,
+  (`hand_off`, `turns.ex:385-399`), and sends every stop of a turn it handed
+  off itself, after the enqueue (`turns.ex:300-303`, `stop_in_queue`,
   `:449-460`). `FALSE` is the code before 431d5663: the Connection called
   `Queue.stop_turn` directly.
 - `OutcomeEndsTurn`: a turn ends on the wire only from the Queue's outcome, in
@@ -435,12 +435,12 @@ the checks that show a rule needs it):
   answered without a turn stayed `running`, and the next boot ran it again.
 - `SettleUnlessHandedOff`: `Turns` settles that request only if no turn was
   handed off for it (`handle_cast({:settle_unless_handed_off, ...})`,
-  `turns.ex:298-304`). `FALSE` completes it regardless, as the code before did
+  `turns.ex:345-351`). `FALSE` completes it regardless, as the code before did
   for every `command`, so a command that became a turn (`/ultra`) had its reply
   refused.
 - `FailsUnsettled`: a settlement that fails is followed by one failure write
   for the attempt and by `error{request_failed, client_msg_id}` to the client
-  that sent the request (`settle_inline`, `run_settle`, `turns.ex:371-406`;
+  that sent the request (`settle_inline`, `run_settle`, `turns.ex:426-461`;
   `fail_attempt`, `report_failure`, `requests.ex:383-403`), through the
   transport's `report_failure`, which the connection writes as a failed
   worker's error (`connection.ex:1366-1373`, `:331-332`). `FALSE` only logs the
@@ -627,7 +627,7 @@ of an entity its rules are about. All still hold:
 - A phone's revocation. `Turns` runs it in its own mailbox as a cancel of
   every unsettled request the device claimed: one step marks them all and
   stops each turn it handed off (`handle_cast({:revoke_device, ...})`,
-  `turns.ex:306-318`), so the device registry that forgot the phone never
+  `turns.ex:353-365`), so the device registry that forgot the phone never
   waits on the store.
 - A cancel that arrives before its request is claimed. There is no request to
   mark, so `cancel_request` answers `not_found`. `PROTOCOL.md` scopes the
@@ -638,16 +638,16 @@ of an entity its rules are about. All still hold:
 - A daemon restart and boot recovery. Recovery hands a request off through the
   same `Turns` step, so it reads the mark (431d5663); the model has no boot
   step to check that.
-- A Queue crash (`Turns` ends its turns as `interrupted`, `turns.ex:321-327`),
+- A Queue crash (`Turns` ends its turns as `interrupted`, `turns.ex:368-374`),
   and a hand-off `Turns` cannot complete (a mark it cannot read, a Queue
   already gone), which ends like a marked one. A cancel whose stop finds its
-  Queue gone is left to that `:DOWN`: `stop_in_queue` (`turns.ex:459-470`)
+  Queue gone is left to that `:DOWN`: `stop_in_queue` (`turns.ex:525-536`)
   waits with no timeout, so its call exits only when the Queue was already dead
   (`:noproc`) or dies during the stop (its exit reason), and it catches only
   that exit of its own call; until the review's third round (its R3-2) a Queue
   that died during the stop crashed `Turns`. A store call that exits inside
   `Turns` is logged as that request's error and the turn still ends once
-  (`guarded/3`, `turns.ex:606-616`). A raise in `Turns`' own code or store
+  (`guarded/3`, `turns.ex:714-724`). A raise in `Turns`' own code or store
   calls is a defect: it crashes `Turns` to `Companion.Supervisor`
   (`rest_for_one`), which releases the requests it fenced. A request worker's
   crash.
@@ -994,3 +994,29 @@ a turn, and no property here is about them. Their answers go through the
 answer rail and the sandbox confirmations, unchanged in what this spec pins.
 The `approvals.ex`, `companion.ex` and `sandbox.ex` citations in the spec and
 above Findings moved with the code and were updated.
+
+The re-read for a report Fermix starts (2026-11-26) found `Turns` tracking
+one more kind of turn, and `PROTOCOL.md`'s *Streaming a turn* saying what it
+shows (`5adb44fd8`). A finished phone call's or coding run's notice re-enters the
+chat through the continuation dispatcher, which now hands it to `Turns`, as
+the chat's own transport hands its turns (`ChannelRegistry.agent/1`), where
+it went straight to the Queue. `Turns` hands it on and tracks it as it
+tracks a resumed request, with no request behind it: no cancel mark is read
+and nothing is settled. No client started that turn, so none is shown one:
+`build_raw_stream_callback` streams nothing of it, and at its outcome `Turns`
+writes each reply through `Channels.Companion.send_message`, the delivery
+write the job's row stands for, in the step that writes a turn's replies,
+and sends no `text_done`, `turn_done` or `turn_error` for it. Before, that
+reply was written through the same call as soon as it arrived, as an
+untracked message's still is. `turn_id/1` is the one id a turn with no
+request behind it is named by, where each adapter minted its own. A
+report whose turn failed leaves one row that says it could not be written,
+through the same delivery write, and one that was stopped writes nothing.
+A call in the chat is told nothing of a report, and `MainAgent.live_call/3`
+tells a report of no call, so it is never offered the ending with no reply
+(`ff0cfdc1b`). The spec's turns are the ones a client's request starts: each is
+handed off, stopped, ended and settled as before, an owner's typed turn is
+told of a call as before, a report's row is one more row of the writer the
+job stands for, which writes at any time, and no client rule changed. So
+nothing the spec models changed. The line references into `turns.ex` and
+`channels/companion.ex` moved with the code.
