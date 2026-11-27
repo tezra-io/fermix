@@ -286,10 +286,10 @@ reminders, coding runs, meetings and calls as they were.
   that a check refused installed nothing, so the restart (and at night the
   reboot) is still decided; the next run tries again. A server set up before the five-minute timer
   existed gets it when its command runs again.
-  So from its first install (Always On's command for the server names that
-  release) a server stays on the newest Fermix that every computer keeping
-  its backups has a published app to read, and the home can always move
-  back to one of them.
+  So a server starts on the release of the computer that set it up (Always
+  On's command for the server names it) and then stays on the newest Fermix
+  that every computer keeping its backups has a published app to read, and
+  the home can always move back to one of them.
 - **Memory.** Out of memory the kernel stops one process. The swap file makes
   that rarer, and on Linux the engine starts Chrome, and so every Chrome
   process, with `oom_score_adj` 1000, so the kernel stops Chrome before the

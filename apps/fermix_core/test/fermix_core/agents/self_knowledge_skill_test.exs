@@ -488,7 +488,7 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
           "may or may not have been placed",
           "**termination is unconfirmed**",
           "the owner's own restart of Fermix",
-          "An app's restart to apply does not ask yet",
+          "An app's restart is refused the same way when the app asks for it with `lifecycle.prepare_restart`",
           "when Fermix looked the number up itself",
           "changes no outcome",
           "each side's last words",

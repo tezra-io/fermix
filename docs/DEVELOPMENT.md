@@ -48,7 +48,7 @@ Run everything from the umbrella **root** (per-app runs break on `runtime.exs`);
 with paths:
 
 ```bash
-scripts/dev/gate.py                                   # the gate before a push: every tree check CI runs, once, on the final tree
+scripts/dev/gate.py                                   # the gate before a push: the tree checks CI runs that one machine can, once, on the final tree
 scripts/dev/gate.py --force                           # the same, even if this tree already passed
 mix test                                              # full umbrella (hermetic — config/test.exs pins FERMIX_HOME)
 mix test apps/fermix_core/test/fermix_core/management # one area
@@ -64,7 +64,10 @@ uv run scripts/ci/flaky_report.py                    # tests CI flagged flaky, m
 While working, run the tests you touched. Before a push, run `scripts/dev/gate.py` once on
 the final tree: format, compile, credo, the release, CI and dev script suites and the TLA+
 runner's tests, the benchmark harness tests and dry run, the whole suite, then the TLA+
-specs. A pass is remembered by the tree's content and the toolchain, so a second run on the
+specs. CI still owns the rest: the other platforms, the stress run, the suite's time
+budget, the macOS Apple Maps helper check and the Linux Landlock proof, published-artifact
+checksums and the release cross-compiles. A pass is remembered by the tree's content and
+the toolchain, so a second run on the
 same tree (after committing it, say) skips straight to the specs; never rerun the whole
 suite to reconfirm it. Each test database starts as a copy of one migrated template
 (`test/support/repo_template.ex`), so a broken migration fails before any test. The suite

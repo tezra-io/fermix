@@ -59,7 +59,7 @@ of it compiling OTP. If it fails, the provisioning log is saved to
 | | Pinned? | Why |
 |---|---|---|
 | OTP 28, Elixir 1.19.5 | yes, **verified** | via `mise`. OTP 28 is **compiled** (~30-45 min): Erlang Solutions publishes no noble component past 27 and Ubuntu's own is older, so no prebuilt 28 exists for this distro. Dropping to 27 would test a toolchain we do not ship. Paid once, into the image; a mismatch aborts before the image is accepted |
-| Rust (rustup), `uv` | no | NIF build; harness |
+| Rust (rustup), `uv` | no | Rust is installed and its presence checked, but no build uses it: the NIF is C, compiled with `build-essential`; `uv` runs the harness |
 | `claude`, `codex` CLIs | no, **presence verified** | the harness must work against what you actually run, so pinning would test a fossil. Override with `CLAUDE_CLI_VERSION` / `CODEX_CLI_VERSION` |
 | warm `deps/` + `_build/` (dev + test) | — | ~214 MB of deps and the compiled C NIF (`fermix_nif`), reused instead of rebuilt |
 

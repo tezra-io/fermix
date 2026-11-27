@@ -107,16 +107,18 @@ redacting logger, attaches telemetry, and starts the core tree under
    `RestartState`, `Sandbox.EnvHealth`)
 8. `AgentSupervisor` and `MainAgent`
 9. the job, meeting, and temporal schedulers with their delivery supervisors,
-   `OpenLoops.Scheduler` and `OpenLoops.CheckInSupervisor` (in a daemon with
-   open loops and memory on), `Harness.Supervisor`, and `PhoneCalls.Supervisor`
-   (always, primary-only)
+   `OpenLoops.Scheduler` and `OpenLoops.CheckInSupervisor` (outside
+   `mix test`, on a primary with open loops and memory on),
+   `Harness.Supervisor`, and `PhoneCalls.Supervisor` (always, primary-only)
 10. children gated by config, platform or role: the daemon socket
     (`Fermix.CLI.Daemon` and the management workers), the native host,
     `Realtime`, `ComputerUse` and its screen seat, `ComputerHistory` (on the
     primary and on a machine with a recorder), and `SkillCuration.Scheduler`
-11. the primary's late children: the companion origin backfill, the move's
-    progress, `Computers.Registry` and `Computers.Calls`, the trip placer and
-    day turn, `Home.ReleaseTable`, and `Home.Snapshot.Scheduler`
+11. late children, the primary's except the move's progress
+    (`Home.MoveProgress`, which a linked computer runs too): the companion
+    origin backfill, the move's progress, `Computers.Registry` and
+    `Computers.Calls`, the trip placer and day turn, `Home.ReleaseTable`, and
+    `Home.Snapshot.Scheduler`
 12. `Cues.Supervisor`, last, only with cues enabled (see `FermixCore.Cues`
     below)
 
@@ -523,8 +525,8 @@ read; `Archive.RestoredConfig` rebases the old home path, leaves the old
 machine's own settings out (coding-agent consent among them, M98 D5) and moves a keyring-mode home to the file store on a keyring-less host
 in the restored `config.toml` through `Archive.ConfigText`, a restore with a
 fresh history renews the computer-history home token in the restored database
-(`ComputerHistorySql.renew_home_token/1`; a move back's continued stream keeps
-its own), and a restore writes
+(`ComputerHistorySql.renew_home_token/1`; a move's or a move back's continued
+stream keeps its own), and a restore writes
 the archived epoch plus one. `Home.Snapshot` is the streaming twin of the
 archive: `write/4` captures a running home (`Snapshot.Capture`: the archive's
 `collect/2` set, each file copied once while hashed, `memory.db` by
@@ -1118,9 +1120,9 @@ and `open_loop_update` arguments into a stored or settled loop, and
 chat or the owner's own voice call, so guests, group chats, shared Buzz
 sessions, and scheduled, background and delegated runs never see, record or
 settle one. A loop noted on a turn that read outside content is stamped, and
-its words come back framed, unless they are found in what the owner typed on
-that turn. Its delivery is resolved once, at capture: the conversation it came
-from when that is the owner's own inbox on its platform
+its words come back framed, unless they and the loop's date are found in what
+the owner typed on that turn. Its delivery is resolved once, at capture: the
+conversation it came from when that is the owner's own inbox on its platform
 (`Delivery.OwnerInbox.on_platform/2`), otherwise the owner-inbox ladder.
 `OpenLoops.Lifecycle` is the pure state machine, whose column changes
 `Memory.Repo` applies under a live-state guard.
@@ -1136,7 +1138,8 @@ model run that may call exactly `memory_recall`, `open_loop_list` and
 `open_loop_respond`, whose one decision (speak, silent, later, close) only code
 carries out, sending at most one message. `OpenLoops.Reactions` records what
 the owner said next, read back as their own words. The two processes start
-only in a daemon with open loops and memory on, read once at boot.
+in every boot of the tree outside `mix test`, on a primary with open loops and
+memory on, read once at boot.
 
 Architecture Invariant: a check-in's model causes only the decisions in
 `open_loop_respond`'s list, and it can never note or settle a loop; the
@@ -1354,7 +1357,7 @@ in the caller and `Trips.Ops`, pure, applies in the Repo's one transaction. A
 stop's `place` is a place's own name or a link a search in the conversation
 returned: before the transaction opens, `Trips.Placing` runs the call over the
 trip as read to learn each stop's day, and `Trips.Lookup` resolves the words
-with the configured place search around that day (`PlaceSearch.lookup/3`, at
+with the configured place search around that day (`PlaceSearch.searcher/2`, at
 most 40 a call, four at a time, 45 s; on Brave they queue for the home's one
 pacer, `PlaceSearch.Brave.Pacer`) and the links from the conversation's
 30-minute place index (`ReplyBlocks.place_by_url/3`); every lookup's record
@@ -1519,12 +1522,14 @@ cosign-verified install.
 ### `FermixCore.ComputerUse`, `ComputerHistory`, and `Browser`
 
 `ComputerUse` controls the desktop through the `compux` sidecar (macOS arm64
-and Linux x86_64). `ready?/0` (enabled, sidecar installed and OS permissions
-granted) is the gate for both the `computer_use` tool and
-`ComputerUse.Supervisor` on this machine; a primary that may drive a linked
-computer's screen (`drives_computers?/1`) also registers the tool and offers it
-only while a screen is in reach, and a linked computer that is driven starts
-its screen seat (`ComputerUse.Seat`). `SidecarInstaller`
+and Linux x86_64). `ready?/0` (enabled and sidecar installed; OS permissions
+are a diagnostic, `ComputerUse.Probe`, never part of the gate) is the gate for
+both the `computer_use` tool and `ComputerUse.Supervisor` for this machine's
+own screen; a primary, which may drive a linked computer's screen
+(`drives_computers?/1`), registers the tool and starts the supervisor either
+way and offers the tool only while a screen is in reach
+(`ComputerUse.Reach.reachable?/1`), and a linked computer that is driven starts
+the supervisor and its screen seat (`ComputerUse.Seat`). `SidecarInstaller`
 fetches a sha256-pinned binary into `FERMIX_HOME/plugins/compux/`, and `Safety`
 refuses state-changing actions under strict access and host sessions outside an
 attended chat or voice turn. `SessionManager.ensure/3`, the one door a session
@@ -1811,7 +1816,7 @@ renderer of the Always On summary like the apps and the setup page: it collects 
 step needs (masked secrets or flags, never argv), sends one `home.act`, and follows the
 step with `home.status {after, wait_ms}`, bounded at 45 minutes and reconnecting for 90 s
 across a move's restart; it never sequences calls itself. Mix tasks: `fermix.dev`, `fermix.setup`,
-`fermix.resource.*`, `fermix.cues.*`, `fermix.iroh_helper`, and the eval tasks in core; `fermix.bench*` in channels;
+`fermix.resource.*`, `fermix.cues.*`, `fermix.iroh_helper`, `fermix.memory_write_latency`, and the eval tasks in core; `fermix.bench*` in channels;
 `opik.ping` and `opik.replay` in opik. `Release.AppEngineManifest` records the
 version, source commit, tree digest, and protocol ranges that the macOS app
 verifies.
@@ -1863,9 +1868,10 @@ unattended-upgrades and installs two root timers over one script,
 `fermix-update`: `fermix-follow.timer` every five minutes (`--follow`) and
 `fermix-update.timer` at 04:00 UTC. Each installs `fermix home status
 --json`'s `update_ceiling`, which is `update.eligible` (the newest release,
-at or above the one running, that a published app of each system whose
-computers keep the home's backups carries, read from the release table
-`Home.ReleaseTable` keeps, `FermixCore.Home.Releases.eligible/3`) when it is newer than the
+at or above the one running, whose home a published app of each system whose
+computers keep the home's backups reads, by the home formats the release
+table names; read from the release table `Home.ReleaseTable` keeps,
+`FermixCore.Home.Releases.eligible/3`) when it is newer than the
 installed release in `dpkg --compare-versions`' order, never back down
 and nothing when there is none, never through the site's installer:
 `install_checked` installs the release's `.deb` only when fermix.ai's
@@ -1876,8 +1882,8 @@ the identity pinned in the update script) agree, and the release's
 checks; then `fermix restart` as the engine
 account when `fermix service status` says the running engine is behind
 the installed one (not while `fermix home status` shows a pending move
-phase, nor when either read fails), so the server takes its computers'
-release within minutes. Only the night runs `systemctl reboot` when
+phase, nor when either read fails), so the server runs the release it
+installed within minutes. Only the night runs `systemctl reboot` when
 `/run/reboot-required` exists, which a move may defer at most two nights
 in a row (a root-owned count under `/var/lib/fermix-update`); a follow
 run never reboots. Each run stops before the restart and the reboot when
@@ -1925,8 +1931,8 @@ every command line it starts), then in throwaway Debian containers against
 stand-ins for systemd, curl, apt, `tailscale` and `fermix`, and once with the
 real apt and Chromium.
 
-Architecture Invariant: a server installs only a release that a published
-app of every system keeping the home's backups carries, so the home can
+Architecture Invariant: a server installs only a release whose home a
+published app of every system keeping the home's backups reads, so the home can
 always move back to one of them, and a move's review refuses a server whose
 home this computer could not read back unless a published update for this
 computer's system reads it (`Home.Releases.restorable?/3`, `Home.MoveReadiness`).
@@ -2054,10 +2060,10 @@ Current channels:
   pushed to the phones while their channel runs, as the phone's own deliveries
   are, since the two draw one timeline.
 - `Mobile` serves the phone companion on its own Bandit TLS listener (port 4031,
-  Noise sessions, a pairing window, APNs push to an iPhone and relayed push to
-  an Android phone). A phone pairs only with Android key attestation
-  (`Mobile.Attestation`, against `priv/mobile/attestation_roots.json` and
-  `android_signers.json`, which lists the app's development and release
+  Noise sessions, a pairing window, APNs push to an iPhone paired earlier and
+  relayed push to an Android phone). A phone pairs only with Android key
+  attestation (`Mobile.Attestation`, against `priv/mobile/attestation_roots.json`
+  and `android_signers.json`, which lists the app's development and release
   signing keys, compiled in). It is on by default, its
   listener dormant until the first pairing window creates the identity and
   its mDNS announcement off unless `advertise_mdns` is set, and
@@ -2522,8 +2528,8 @@ env and `FERMIX_OPIK_ENABLED` (or the `:fermix_opik, :enabled` config), and when
 disabled it attaches no telemetry handler. The reporter covers agent, provider,
 tool, job (job heals among them), memory, harness, curation, plugin, MCP,
 reminder, open-loop, cue, realtime and voice, meeting, phone-call, management,
-doctor, accessory, computer-invocation and computer-use events and nests runs
-by `session_id` and `parent_session`. `mix opik.ping` and `mix opik.replay` help debug the export.
+doctor, accessory, list, trip, attachment, timeout, computer-invocation and
+computer-use events and nests runs by `session_id` and `parent_session`. `mix opik.ping` and `mix opik.replay` help debug the export.
 
 Architecture Invariant: observability export is opt-in and side-car. The handler
 only casts to a bounded aggregator; it never sits on the reply path, and its

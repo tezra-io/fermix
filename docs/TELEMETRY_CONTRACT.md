@@ -879,7 +879,11 @@ check read a cue run as a scheduled one. The bookends carry `trigger`
 does not hold it) and `delivery_id` (the row's `cue_delivery_id`, the
 `cue_deliveries.id` the run held). A watcher's follow-up run (`trigger:
 "watcher"`) carries `watcher_id` too, with `cue_id` (the cue that set it off)
-and `trigger_id` (its trigger); none of the four is on any other run. The Opik
+and `trigger_id` (its trigger); none of the four is on any other run. The
+runner puts `watcher_id`, `cue_id` and `trigger_id` on the run map, so they are
+on the bookends it emits only: a `run_error` the Scheduler emits for a dead
+runner reads the run row, so for a follow-up run it carries `trigger` alone
+(for a cue run, `trigger` and `delivery_id`). The Opik
 run trace's metadata carries `trigger`, `watcher_id`, `delivery_id`, `cue_id`
 and `trigger_id`, and `mix opik.replay` keeps them. A cue run's tools are
 ordinary `[:fermix, :tool, :exec]` events under the run's session, one per model call:

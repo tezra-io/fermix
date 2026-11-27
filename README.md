@@ -22,7 +22,7 @@ Fermix is a personal, self-hosted AI agent: it runs as a background service on y
 - **One runtime.** Everything is a single Elixir/OTP application in one BEAM VM — no HTTP bridges, no external worker pool, no message broker. Persistent agents, concurrent conversations, and in-process sub-agents all fall out of that design.
 - **Reaches you anywhere.** Telegram, WhatsApp, Slack, Discord, Signal, iMessage (on a Mac), and a local CLI all terminate in the same agent loop. The daemon side of a first-party phone companion — the `mobile` channel and its pairing ceremony — ships alongside them as groundwork until the phone app is released.
 - **Bring your own model.** Nine providers — OpenAI, OpenAI Codex, Anthropic, SpaceXAI, OpenRouter, Mistral, Venice, Vercel AI Gateway, and a keyless local Ollama — chosen as one primary with an automatic fallback chain. Sub-agents and scheduled jobs can be pinned to their own cheaper model.
-- **Always on.** Scheduled jobs run digests, watchers, reminders, and checks — each isolated, bounded, stored durably, and delivered back through your channels. Work survives reboots, and a job that fails is retried quietly when waiting can clear it, or told to you once, in your own inbox, with any change Fermix proposes waiting for your approval.
+- **Always on.** Scheduled jobs run digests, watchers, reminders, and checks — each isolated, bounded, stored durably, and delivered back through your channels. Work survives reboots, and a repeating job that fails is retried quietly when waiting can clear it; any other failure of a job you set up is told to you once, in your own inbox, with any change Fermix proposes waiting for your approval.
 - **Self-contained.** Ships as one self-extracting binary per platform and installs an OS service unit on first run.
 
 Provider auth modes (API key vs. OAuth), channel setup, and scheduling are covered in [Configure](#configure) and [Use](#use) below.
@@ -122,7 +122,7 @@ chat_id = "8217352118"
 
 `chat_id` is the external channel conversation id, such as a Telegram chat id; it is not a Fermix session id. Delivery settings are resolved into each job when the job is created, so changing the default later does not silently retarget existing jobs. Jobs can also set an optional `expires_at` ISO8601 timestamp; when it is reached, Fermix marks the job expired through scheduler state.
 
-A failed run of a job you set up is not delivered to the job's target. A run that failed before it did anything, on something waiting can clear (a provider's rate limit or outage, a lost connection), is run again quietly, up to three times; any other failure is told to you once, in your own inbox. Fermix may on its own run the job once more, raise its time limit or pause it, and proposes anything else on an approval card (**Approve** / **Deny**, or `/confirm` and `/deny` in the chat the card went to).
+A failed run of a job you set up is not delivered to the job's target. A run of a repeating job that failed before it did anything, on something waiting can clear (a provider's rate limit or outage, a lost connection), is run again quietly, up to three times; any other failure, and any failure of a one-off job, is told to you once, in your own inbox. Fermix may on its own run the job once more, raise its time limit or pause it, and proposes anything else on an approval card (**Approve** / **Deny**, or `/confirm` and `/deny` in the chat the card went to).
 
 ### Transcription
 
@@ -166,14 +166,14 @@ Set it from the web setup **Voice notes** tab, or with `fermix setup --transcrip
 | `SLACK_SIGNING_SECRET` | If Slack is enabled | Slack request signing secret |
 | `SIGNAL_ACCOUNT` | If Signal is enabled | Signal phone/account identifier |
 | `SIGNAL_CLI_PATH` | No | Override the `signal-cli` executable path |
-| `FERMIX_APNS_KEY` | If mobile push is enabled | APNs `.p8` signing key for direct push to the iPhone companion; resolved from the keychain first |
+| `FERMIX_APNS_KEY` | If mobile push is enabled | APNs `.p8` signing key for direct push to an iPhone; unused today, since only the Android app can pair; resolved from the keychain first |
 | `FERMIX_HOME` | No | Override the persisted config and workspace root |
 | `FERMIX_TRACE_DIR` | No | Override the trace output directory |
 | `FERMIX_LOG_FILE` | No | Override the log file path |
 | `FERMIX_HTTP_BIND` | No | Web endpoint bind address; defaults to `127.0.0.1` (loopback). `0.0.0.0` serves on the network but also exposes the setup/reconfig surface — gate it behind a trusted network |
 | `FERMIX_REALTIME_ENABLED` | No | Enable the local Realtime voice companion mode |
-| `FERMIX_REALTIME_PROVIDER` | No | Voice provider, `openai` or `xai` (Grok); it must be the one the voice model's engine takes |
-| `FERMIX_REALTIME_MODEL` | No | Override the voice model |
+| `FERMIX_REALTIME_PROVIDER` | No | Voice provider, `openai` or `xai` (Grok). It follows from `engine` in `[fermix_core.realtime]` and no variable sets the engine, so it never switches provider: a value that is not the engine's refuses the start |
+| `FERMIX_REALTIME_MODEL` | No | Override the voice model with another model of the engine `[fermix_core.realtime]` names; a model of another engine refuses the start |
 | `FERMIX_REALTIME_VOICE` | No | Override the Realtime voice |
 | `FERMIX_REALTIME_MAX_SESSION_MINUTES` | No | Per-session voice duration cap |
 | `FERMIX_REALTIME_MAX_COST_CENTS` | No | Per-session estimated/reported cost cap |
@@ -261,7 +261,7 @@ Telegram, Discord, and Signal use long-poll or persistent client transports and 
 |---------|-------------|
 | `fermix setup [--reconfigure]` | Install + start the service and open the browser setup (or a terminal wizard with `--cli`) |
 | `fermix auth login [--provider PROVIDER]` | Complete or refresh a provider OAuth login |
-| `fermix auth status\|logout` | Show the stored provider sign-ins, or remove one |
+| `fermix auth status\|logout [--provider PROVIDER]` | Show one provider's stored sign-in, or remove it (ChatGPT unless `--provider anthropic` or `xai`) |
 | `fermix run` | Start the daemon in the foreground (used by service units) |
 | `fermix service install [--user\|--system]` | Write and enable the OS service unit |
 | `fermix service uninstall [--user\|--system]` | Remove the OS service unit |
@@ -276,6 +276,7 @@ Telegram, Discord, and Signal use long-poll or persistent client transports and 
 | `fermix devices list\|revoke ID` | List paired phones, or revoke one and drop its live socket (revoking needs the mobile channel running) |
 | `fermix settings [list\|show\|set\|secret\|primary\|reload]` | Read and change the running daemon's settings sections and secrets; `fermix settings phone-calls recovery` and `confirm-ended CALL_ID` settle a phone call whose end is unconfirmed |
 | `fermix acp` | Bridge an Agent Client Protocol client's stdio to the daemon |
+| `fermix acp forget NPUB\|--all` | Forget one remembered ACP client identity, or every one, so its next turn runs without it |
 | `fermix browser bridge install\|uninstall\|status` | Manage the browser extension bridge |
 | `fermix home ...` | Export, import, enroll, and inspect this home and its snapshots |
 | `fermix always-on [ACTION]` | Show Always On, or take one of its steps |
@@ -360,7 +361,7 @@ fermix/ (umbrella)
 ├── apps/fermix_channels/   # Telegram, WhatsApp, Slack, Discord, Signal, iMessage, ACP, companion, mobile, voice, CLI
 ├── apps/fermix_web/        # Phoenix: setup LiveView, health, webhook ingress
 ├── apps/fermix_opik/       # Telemetry export to Opik (opt-in)
-└── apps/fermix_nif/        # C NIF (elixir_make): kill_pgid process-group signal shim, macOS disclaim exec shim
+└── apps/fermix_nif/        # C NIF (elixir_make): kill_pgid process-group signal shim, macOS disclaim exec shim and accessory serial helper, Linux Landlock exec shim; the macOS Apple Maps helper (Swift)
 ```
 
 The Mac app ([fermix.ai/download](https://fermix.ai/download/)) talks to the daemon over the local management, Realtime and companion sockets.
@@ -431,7 +432,7 @@ The current built-in capability set is:
 | `request_directory_access` | Ask the owner to grant a directory, approved with `/confirm` |
 | `phone_call` | Place, check, or stop one outbound phone call the owner asked for; offered on the owner's attended turn while phone calls are on or a call is still in progress |
 
-Some are registered only when their feature is ready: `computer_use` when Computer Use is enabled and its sidecar and OS permissions are ready (or on an Always On server that can drive a linked computer's screen); the meeting tools (`join_meeting`, `leave_meeting`, `list_meetings`) when meetings are enabled and can place one; the cue tools (`manage_watcher`, `list_cues`, `cue_history`) when cues are on; the coding-agent tools (`codex_run`, `claude_code_run`, `list_coding_runs`, `get_coding_run`, `cancel_coding_run`) when coding agents are enabled and their CLI is installed; and `tool_search`, `tool_describe` and `tool_call`, behind which plugin and MCP tools sit, while tool deferral is on (the default).
+`computer_use` is offered only on a turn that can reach a screen: Computer Use is enabled and its sidecar is installed on this machine, or a linked computer offers its screen (a missing OS permission does not hide it; `fermix doctor` reports it). The rest are registered only when their feature is ready: the meeting tools (`join_meeting`, `leave_meeting`, `list_meetings`) when meetings are enabled and can place one, or on an Always On server whenever meetings are on; the cue tools (`manage_watcher`, `list_cues`, `cue_history`) when cues are on; the coding-agent tools (`codex_run`, `claude_code_run`, `list_coding_runs`, `get_coding_run`, `cancel_coding_run`) when coding agents are enabled and their CLI is installed; and `tool_search`, `tool_describe` and `tool_call`, behind which plugin and MCP tools sit, while tool deferral is on (the default).
 
 Observability:
 
@@ -453,7 +454,7 @@ mix test --only integration
 scripts/dev/gate.py # the gate before a push
 ```
 
-`scripts/dev/gate.py` runs every check of the tree that CI runs (format, compile, credo, the script and benchmark-harness tests, the whole suite, then the TLA+ specs), once, on the final tree; a pass is remembered for that exact tree, so a second run on it skips to the specs. While working, run the tests you touched. The git pre-commit hook enforces format, compile, credo, and tests. `mix quality` adds dialyzer, which CI does not run.
+`scripts/dev/gate.py` runs the checks of the tree that CI runs and one machine can (format, compile, credo, the script and benchmark-harness tests, the whole suite, then the TLA+ specs), once, on the final tree; a pass is remembered for that exact tree, so a second run on it skips to the specs. While working, run the tests you touched. The git pre-commit hook enforces format, compile, credo, and tests. `mix quality` (format, compile, credo, dialyzer, tests) is not the gate: it runs dialyzer, which CI does not, and none of the script, benchmark-harness or TLA+ checks.
 
 ### Running the daemon in dev
 

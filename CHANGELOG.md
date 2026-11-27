@@ -43,34 +43,41 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and hangs up on voicemail. The report arrives by itself within about a
   minute of the call ending: confirmed, in the other person's own words,
   unavailable, options, needs you, or unknown when Fermix could not establish
-  what was agreed. Calls are not recorded. It needs a Telnyx number with a
-  credential connection and that connection's username and password, and an
-  OpenAI API key (a ChatGPT sign-in or a SpaceXAI key does not place a call);
-  only the computer your home runs on places calls. Turn it on in the setup
-  page's new **Phone calls** tab or with `fermix settings` (section
-  `phone_calls`). No Fermix app shows phone calls yet: the Mac app's
-  Settings > Phone calls pane comes with the app release that carries it.
+  what was agreed. While a call is in progress Fermix refuses a restart you
+  ask for and a change of the OpenAI key or the connection's password; a call
+  whose end OpenAI never confirmed keeps the one call slot for a little over
+  two hours, or until you confirm in the Phone calls tab or with
+  `fermix settings phone-calls confirm-ended` that it ended. Calls are not
+  recorded. It needs a Telnyx number with a credential connection and that
+  connection's username and password, and an OpenAI API key (a ChatGPT sign-in
+  or a SpaceXAI key does not place a call); only the computer your home runs
+  on places calls. Turn it on in the setup page's new **Phone calls** tab or
+  with `fermix settings` (section `phone_calls`). No Fermix app shows phone
+  calls yet: the Mac app's Settings > Phone calls pane comes with the app
+  release that carries it.
 
-- **Auto Heal: Fermix notices a scheduled job that fails, and tells you once.**
-  A run that fails before it did anything, on something waiting can clear (a
-  provider's rate limit or outage, a lost connection), is run again quietly, up
-  to three times. Any other failure opens a heal: one message in your own
-  inbox, written from Fermix's own facts (the job, what failed and when, how
-  often lately, when it runs next), in place of an error sent where the job
-  delivers. Later failures of the same job join it and send nothing, and every
-  job failing on one provider shares one message. A job that keeps ending ok
-  while one of its tools never once succeeds, three runs in a row, is noticed
-  the same way. Before the message Fermix takes one short look at the job and
-  may, on its own, run it once more, raise its time limit (never past 30
-  minutes) or pause it. Anything else, such as a different task, schedule or
-  skill, it only proposes, on an approval card with **Approve** and **Deny**
-  (or `/confirm` and `/deny` in the chat the card went to): a yes makes
-  exactly the change shown, and only if the job is still as it was when the
-  change was drawn. Editing, pausing or resuming the job yourself closes a
-  proposal still waiting. A fix that does not hold is said once, and a heal
-  nobody answers closes after seven days. A failed run's error now reads as a
-  plain sentence wherever it is shown, such as a time limit in minutes that
-  names the tool still running, or a missing skill by name.
+- **Auto Heal: Fermix notices a scheduled job that fails, and tells you
+  once.** A run of a repeating job that fails before it did anything, on
+  something waiting can clear (a provider's rate limit or outage, a lost
+  connection), is run again quietly, up to three times. Any other failure, and
+  any failure of a one-off job, opens a heal: one message in your own inbox,
+  written from Fermix's own facts (the job, what failed and when, how often
+  lately, when it runs next), in place of an error sent where the job delivers
+  (a job a guest set up keeps its error there and is not healed). Later
+  failures of the same job join it and send nothing, and every job failing on
+  one provider shares one message. A job that keeps ending ok while one of its
+  tools never once succeeds, three runs in a row, is noticed the same way.
+  Before the message Fermix takes one short look at the job and may, on its
+  own, run it once more, raise its time limit (never past 30 minutes) or pause
+  it. Anything else, such as a different task, schedule or skill, it only
+  proposes, on an approval card with **Approve** and **Deny** (or `/confirm`
+  and `/deny` in the chat the card went to): a yes makes exactly the change
+  shown, and only if the job is still as it was when the change was drawn.
+  Editing, pausing or resuming the job yourself closes a proposal still
+  waiting. A fix that does not hold is said once, and a heal nobody answers
+  closes after seven days. A failed run's error now reads as a plain sentence
+  wherever it is shown, such as a time limit in minutes that names the tool
+  still running, or a missing skill by name.
 
 - **Vercel AI Gateway is a provider.** Save an AI Gateway API key under
   Providers and Vercel AI Gateway joins the fallback chain after Venice, ahead
@@ -299,6 +306,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   whose recorder runs with no apps chosen for computer history records
   nothing, which its status did not say; it now reads "no apps chosen there,
   so nothing is recorded".
+
+- **An empty model list no longer tells you to run `ollama pull`.** On the
+  setup page, a provider other than Ollama whose list came back empty showed
+  Ollama's hint; it now says the provider listed no models Fermix can use and
+  to enter a model id.
 
 ## [0.20.0] - 2026-11-15
 
