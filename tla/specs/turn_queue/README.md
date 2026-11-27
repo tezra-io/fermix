@@ -654,3 +654,22 @@ started, stopped, committed and answered as any other. No claim, start,
 stop, result or answer the spec models changed. The line references into
 `turn_runner.ex` moved with the code, and so did the one into `turns.ex`,
 which `5adb44fd8` moved.
+
+## Re-read for the owner's answer to a call's report (M94 D26, 2026-11-27)
+
+`3b772f72d` staled the `turn_runner.ex` pin and the `conversation_store.ex` pin,
+pinned whole. `run_message_loop` now hands the history it replays to the
+seed of the turn's outside sources, which adds the phone call's source when
+the owner has sent nothing since a call's report. `persist_user_message`
+stores a flag of its own on such a report (`phone_call_result`, beside the
+continuation's), and the store carries that flag wherever it carries the
+continuation's: the hot path, a reload and a history replace.
+
+What a turn has read and which markers a stored message keeps are not
+modelled here: a message is still persisted once, in the same step and
+order, and that turn is claimed, started, stopped, committed and answered
+as any other. No claim, start, stop, result or answer the spec models
+changed. The line reference into `turn_runner.ex` (`persist_user_message`,
+which had drifted before this change) points at the function again, and
+the one into `conversation_store.ex` (`:176`, `append_stopped_marker`)
+still points at the code.
