@@ -581,8 +581,9 @@ defmodule FermixCore.Management.PhoneCalls do
 
   @doc """
   Whether the owner's restart may run now (`lifecycle.prepare_restart`, which
-  `fermix restart` takes, and the setup page's Restart; the apps' restart to
-  apply takes `lifecycle.prepare`, so it is not asked yet): `:ok`, or this
+  `fermix restart` and the Mac app's Restart take, and the setup page's
+  Restart; an app that still asks with `lifecycle.prepare`, as the Linux app
+  does, is not asked): `:ok`, or this
   family's refusal while a phone call is in progress,
   since the restart would hang it up with no outcome read
   (`PhoneCalls.CallHold.check_restart/1`). A stop that is not the owner's

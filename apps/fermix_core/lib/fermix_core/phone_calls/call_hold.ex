@@ -18,8 +18,10 @@ defmodule FermixCore.PhoneCalls.CallHold do
       (`call_in_progress/1`), and a ledger that cannot be read holds the
       change, since a call may be reading the credential.
     * **The owner's restart** (`check_restart/1`): `lifecycle.prepare_restart`,
-      which `fermix restart` takes, and the setup page's Restart. The apps'
-      restart to apply takes `lifecycle.prepare` and so is not asked here yet.
+      which `fermix restart` and an app's own restart take (the Mac app's
+      Restart, from the release that carries it), and the setup page's
+      Restart. An app that still asks with `lifecycle.prepare`, as the Linux
+      app does, is not asked here.
       The engine's stop would end the call and read no
       outcome. Refused only when a call is positively in progress: its worker
       runs (`live_call?/1`, the subtree's call registry,
