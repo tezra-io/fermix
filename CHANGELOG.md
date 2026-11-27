@@ -90,9 +90,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   shown, and only if the job is still as it was when the change was drawn.
   Editing, pausing or resuming the job yourself closes a proposal still
   waiting. A fix that does not hold is said once, and a heal nobody answers
-  closes after seven days. A failed run's error now reads as a plain sentence
-  wherever it is shown, such as a time limit in minutes that names the tool
-  still running, or a missing skill by name.
+  closes after seven days. Each step of a heal, and what became of each failed
+  run, is also one line in the engine log. A failed run's error now reads as a
+  plain sentence wherever it is shown, such as a time limit in minutes that
+  names the tool still running, or a missing skill by name.
 
 - **Vercel AI Gateway is a provider.** Save an AI Gateway API key under
   Providers and Vercel AI Gateway joins the fallback chain after Venice, ahead

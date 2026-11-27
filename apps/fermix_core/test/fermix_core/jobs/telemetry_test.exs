@@ -1,7 +1,22 @@
 defmodule FermixCore.Jobs.TelemetryTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog, only: [capture_log: 2]
+
   alias FermixCore.Jobs.Telemetry, as: JobTelemetry
+
+  # What a line must never carry: words someone else wrote, the look's note,
+  # a proposed change's values. Each fact below holds one of these.
+  @outside_words ["Harbourview feed", "Quayside said", "Kestrel note", "Marlow Lane 14"]
+
+  @heal_phases ~w(opened joined verdict decided rerun delivered delivery_failed closed answered)
+  @heal_keys ~w(heal_id job_id run_id subject_kind subject_id failure_kind outcome attempts
+                dead_letter platform conclusion decision requested refusal read_outside
+                rerun_outcome answer applied error)a
+  @look_keys ~w(heal_id job_id run_id session_id parent_session agent failure_kind decision
+                status duration_ms error)a
+  # Values no caller sends today, which a line must still survive.
+  @odd_values [nil, :odd, 42, -3, 4.2, true, %{"x" => 1}, ["x"], {:x, 1}, "", "x\ny"]
 
   setup do
     events = [
@@ -254,5 +269,613 @@ defmodule FermixCore.Jobs.TelemetryTest do
     JobTelemetry.run_complete(job, run, %{response: "the digest"})
     assert_receive {:job_event, [:fermix, :job, :run_complete], _m2, complete_meta}
     assert complete_meta.output == "the digest"
+  end
+
+  # The engine log's line for each step of a heal: a pure builder over the
+  # facts the trace row carries, giving the line with its level.
+  describe "heal_line/2" do
+    test "says each step of a heal at its level, with its ids and Fermix's own words" do
+      for {phase, facts, said} <- heal_steps() do
+        assert JobTelemetry.heal_line(phase, facts) == said, "phase #{phase}"
+      end
+
+      assert heal_steps() |> Enum.map(&elem(&1, 0)) |> Enum.uniq() |> Enum.sort() ==
+               Enum.sort(@heal_phases)
+    end
+
+    test "a verdict's message is said as the verdict" do
+      facts = Map.merge(heal_run_facts("jhl_51"), %{conclusion: "verdict", platform: "slack"})
+
+      assert JobTelemetry.heal_line("delivered", facts) ==
+               {:info, "Job heal jhl_51: its verdict was delivered (job job-7, platform slack)"}
+
+      failed = Map.merge(facts, %{attempts: 3, dead_letter: false})
+
+      assert JobTelemetry.heal_line("delivery_failed", failed) ==
+               {:warning,
+                "Job heal jhl_51: its verdict could not be sent on attempt 3; it is tried " <>
+                  "again later (job job-7, platform slack)"}
+    end
+
+    test "is nil for a step its caller already logs with more said" do
+      facts = heal_run_facts("jhl_52")
+
+      for outcome <- ["running", "refused", "unanswered"] do
+        refute JobTelemetry.heal_line("rerun", Map.put(facts, :rerun_outcome, outcome)), outcome
+      end
+
+      # A dead letter, and a message that never reached a send (no attempt
+      # counted), each have their warning where they happen.
+      dead = Map.merge(facts, %{attempts: 20, dead_letter: true})
+      refute JobTelemetry.heal_line("delivery_failed", dead)
+      refute JobTelemetry.heal_line("delivery_failed", Map.put(facts, :dead_letter, false))
+
+      # A refused or redirected decision: `HealRun`'s warning says what was
+      # asked and what Fermix carries out instead.
+      for {asked, carried, refusal} <- [
+            {"raise_limit", "tell", "not_upward"},
+            {"raise_limit", "propose", "past_ceiling"}
+          ] do
+        refused = Map.merge(facts, %{decision: carried, requested: asked, refusal: refusal})
+        refute JobTelemetry.heal_line("decided", refused), refusal
+      end
+    end
+
+    test "a step whose fact is missing still says the step and the ids it has" do
+      bare = %{heal_id: "jhl_56", job_id: "job-7"}
+
+      assert JobTelemetry.heal_line("decided", bare) ==
+               {:info, "Job heal jhl_56: its decision was recorded (job job-7)"}
+
+      assert JobTelemetry.heal_line("closed", bare) ==
+               {:info, "Job heal jhl_56: closed (job job-7)"}
+
+      assert JobTelemetry.heal_line("answered", bare) ==
+               {:info, "Job heal jhl_56: the owner answered (job job-7)"}
+
+      assert JobTelemetry.heal_line("rerun", bare) ==
+               {:info, "Job heal jhl_56: its rerun was asked for (job job-7)"}
+
+      assert JobTelemetry.heal_line("delivery_failed", bare) ==
+               {:warning, "Job heal jhl_56: its message could not be sent (job job-7)"}
+
+      assert JobTelemetry.heal_line("opened", %{}) == {:info, "Job heal ?: opened"}
+    end
+
+    test "is total: bare facts and odd values give a line or nil, never a raise" do
+      for phase <- @heal_phases, facts <- odd_facts(@heal_keys) do
+        assert_said(JobTelemetry.heal_line(phase, facts))
+      end
+    end
+
+    test "makes every value one safe token: no fact forges a line or carries outside words" do
+      for {phase, facts, _said} <- heal_steps(), forged <- forged_facts(@heal_keys) do
+        said = JobTelemetry.heal_line(phase, Map.merge(facts, forged))
+        assert said, "phase #{phase} said nothing for #{inspect(forged)}"
+        assert_safe(said)
+      end
+
+      {:info, line} =
+        JobTelemetry.heal_line("opened", %{heal_id: "jhl_58", subject_id: "x\nERROR fake"})
+
+      assert line == "Job heal jhl_58: opened"
+
+      {:info, line} =
+        JobTelemetry.heal_line("opened", %{
+          heal_id: "jhl_58",
+          subject_kind: "provider",
+          subject_id: "x\nERROR fake"
+        })
+
+      assert line == "Job heal jhl_58: opened (subject provider x?ERROR?fake)"
+    end
+  end
+
+  # What became of a failed scheduled run, in one line (M106 §5.3, §5.4).
+  describe "run_line/3" do
+    test "says a quiet retry being set, and its quiet retries used up", %{job: job, run: run} do
+      run = Map.put(run, :failure_kind, "provider_rate_limit")
+
+      assert JobTelemetry.run_line(job, run, retry(2, ~U[2026-11-20 07:02:50.123456Z])) ==
+               {:info,
+                "Scheduled job job-7 run run_abc failed (provider_rate_limit); quiet retry 2 " <>
+                  "runs at 2026-11-20T07:02:50Z"}
+
+      # A time in another zone is said in UTC, to the second.
+      lisbon = %DateTime{
+        year: 2026,
+        month: 7,
+        day: 20,
+        hour: 8,
+        minute: 2,
+        second: 50,
+        microsecond: {250_000, 6},
+        time_zone: "Europe/Lisbon",
+        zone_abbr: "WEST",
+        utc_offset: 0,
+        std_offset: 3600
+      }
+
+      assert {:info, summer} = JobTelemetry.run_line(job, run, retry(1, lisbon))
+      assert summer =~ "; quiet retry 1 runs at 2026-07-20T07:02:50Z"
+
+      assert JobTelemetry.run_line(job, run, retry(1, nil)) ==
+               {:info,
+                "Scheduled job job-7 run run_abc failed (provider_rate_limit); quiet retry 1 " <>
+                  "is the job's next run"}
+
+      reaped = Map.put(run, :failure_kind, "reaped")
+      exhausted = Map.put(exhausted(4), :heal, {:opened, "jhl_9"})
+
+      assert JobTelemetry.run_line(job, reaped, exhausted) ==
+               {:warning,
+                "Scheduled job job-7 run run_abc failed (reaped); its quiet retries are used up " <>
+                  "after 4 failed runs in a row"}
+    end
+
+    test "says a failure no heal tells the owner of, with its retries in the same one line", %{
+      job: job,
+      run: run
+    } do
+      run = Map.put(run, :failure_kind, "provider_unavailable")
+
+      quiet = %{
+        heal: :quiet,
+        failure_kind: "provider_unavailable",
+        subject_kind: "provider",
+        subject_id: "openai"
+      }
+
+      assert JobTelemetry.run_line(job, run, Map.merge(none(), quiet)) ==
+               {:info,
+                "Scheduled job job-7 run run_abc failed (provider_unavailable); the owner is not " <>
+                  "told: a heal for the same failure closed lately (subject provider openai)"}
+
+      assert JobTelemetry.run_line(job, run, Map.merge(exhausted(4), quiet)) ==
+               {:warning,
+                "Scheduled job job-7 run run_abc failed (provider_unavailable); its quiet " <>
+                  "retries are used up after 4 failed runs in a row; the owner is not told: a " <>
+                  "heal for the same failure closed lately (subject provider openai)"}
+
+      # The job's own heal is said as the job, once.
+      own = %{quiet | subject_kind: "job", subject_id: "job-7"}
+
+      assert JobTelemetry.run_line(job, run, Map.merge(none(), own)) ==
+               {:info,
+                "Scheduled job job-7 run run_abc failed (provider_unavailable); the owner is not " <>
+                  "told: a heal for the same failure closed lately"}
+
+      assert JobTelemetry.run_line(job, run, Map.put(none(), :heal, :out_of_scope)) ==
+               {:info,
+                "Scheduled job job-7 run run_abc failed (provider_unavailable); no heal opens: " <>
+                  "the job was not set up by the owner"}
+    end
+
+    test "says no kind when the run carries none", %{job: job, run: run} do
+      assert JobTelemetry.run_line(job, run, retry(3, nil)) ==
+               {:info,
+                "Scheduled job job-7 run run_abc failed; quiet retry 3 is the job's next run"}
+    end
+
+    test "is nil for a failure a heal took, whose own line follows, and with no settlement", %{
+      job: job,
+      run: run
+    } do
+      for heal <- [{:opened, "jhl_9"}, {:joined, "jhl_9"}, {:verdict, "jhl_9"}] do
+        refute JobTelemetry.run_line(job, run, Map.put(none(), :heal, heal))
+      end
+
+      refute JobTelemetry.run_line(job, run, nil)
+    end
+
+    test "is total over every disposition, with a bare run and odd values", %{job: job} do
+      for job <- [job, %{}, %{id: :odd}],
+          run <- [%{}, %{id: "run_bare"}, %{id: 42, failure_kind: :time_limit}],
+          settlement <- odd_settlements() do
+        assert_said(JobTelemetry.run_line(job, run, settlement))
+      end
+
+      assert JobTelemetry.run_line(%{}, %{}, retry(2, nil)) ==
+               {:info, "Scheduled job ? run ? failed; quiet retry 2 is the job's next run"}
+    end
+
+    test "makes every value one safe token and never carries the run's error or reply", %{
+      run: run
+    } do
+      run =
+        Map.merge(run, %{
+          id: "run_x\nERROR forged",
+          failure_kind: "provider\r\nunavailable",
+          error: Enum.at(@outside_words, 0),
+          final_response: Enum.at(@outside_words, 1)
+        })
+
+      settlement =
+        Map.merge(exhausted(4), %{
+          heal: :quiet,
+          subject_kind: "provider",
+          subject_id: "open\u2028ai\e[31m",
+          failure_text: Enum.at(@outside_words, 2)
+        })
+
+      said = JobTelemetry.run_line(%{id: String.duplicate("z", 300)}, run, settlement)
+      assert said
+      assert_safe(said)
+    end
+  end
+
+  # Fermix's look at a failed job (M106 §5.5): its start with its session, its end.
+  describe "look_line/2" do
+    test "says a look's start with its session, and its end with how it ended and took" do
+      look = look_facts("jhl_60")
+
+      assert JobTelemetry.look_line(:start, look) ==
+               {:info,
+                "Job heal jhl_60: its look started (job job-7, run run_abc, session " <>
+                  "heal_job-7_20261120_070250_a1b2c3)"}
+
+      assert JobTelemetry.look_line(
+               :complete,
+               Map.merge(look, %{decision: "none", duration_ms: 8123})
+             ) ==
+               {:info,
+                "Job heal jhl_60: its look finished in 8123 ms (job job-7, session " <>
+                  "heal_job-7_20261120_070250_a1b2c3)"}
+
+      timed_out = Map.merge(look, %{status: "timeout", duration_ms: 120_000, error: "watchdog"})
+
+      assert JobTelemetry.look_line(:error, timed_out) ==
+               {:warning,
+                "Job heal jhl_60: its look ran out of time after 120000 ms (job job-7, session " <>
+                  "heal_job-7_20261120_070250_a1b2c3)"}
+    end
+
+    test "is nil for a look that failed, which its caller already warns of" do
+      failed = Map.merge(look_facts("jhl_61"), %{status: "error", duration_ms: 40})
+      refute JobTelemetry.look_line(:error, failed)
+    end
+
+    test "is total over bare facts and odd values, and makes each value a safe token" do
+      for stage <- [:start, :complete, :error],
+          facts <- odd_facts(@look_keys) ++ forged_facts(@look_keys) do
+        said = JobTelemetry.look_line(stage, facts)
+        assert_said(said)
+        if said, do: assert_safe(said)
+      end
+
+      assert JobTelemetry.look_line(:start, %{}) == {:info, "Job heal ?: its look started"}
+      assert JobTelemetry.look_line(:complete, %{}) == {:info, "Job heal ?: its look finished"}
+      assert JobTelemetry.look_line(:error, %{}) == {:warning, "Job heal ?: its look ended"}
+    end
+  end
+
+  # The test env's level is :warning (config/test.exs); these raise it to
+  # :info for the module's own run and put it back.
+  describe "the engine log" do
+    setup do
+      previous = Logger.level()
+      Logger.configure(level: :info)
+      on_exit(fn -> Logger.configure(level: previous) end)
+    end
+
+    test "each step is one line at its level", %{job: job, run: run} do
+      heal_id = "jhl_#{System.unique_integer([:positive])}"
+      run = Map.merge(run, %{id: "run_#{heal_id}", failure_kind: "provider_rate_limit"})
+      failed = %{job_id: "job-7", run_id: run.id, subject_kind: "job", subject_id: "job-7"}
+      look = heal_run(heal_id)
+
+      log =
+        capture_log([level: :info], fn ->
+          JobTelemetry.heal(
+            "opened",
+            Map.merge(failed, %{
+              heal_id: heal_id,
+              failure_kind: "time_limit",
+              error: Enum.at(@outside_words, 0)
+            })
+          )
+
+          JobTelemetry.heal_run_start(look, 120_000)
+          JobTelemetry.heal_run_error(look, "timeout", 120_000, Enum.at(@outside_words, 1))
+
+          JobTelemetry.heal(
+            "verdict",
+            Map.merge(failed, %{heal_id: heal_id, failure_kind: "tool_never_succeeded"})
+          )
+
+          JobTelemetry.run_error(
+            job,
+            run,
+            "error",
+            Enum.at(@outside_words, 2),
+            retry(2, ~U[2026-11-20 07:02:50.000000Z])
+          )
+        end)
+
+      assert [opened, started, timed_out, verdict, retried] =
+               log |> String.split("\n") |> Enum.filter(&(&1 =~ run.id or &1 =~ heal_id))
+
+      assert opened =~ "[info] Job heal #{heal_id}: opened (job job-7, run #{run.id}, failure"
+      assert started =~ "[info] Job heal #{heal_id}: its look started (job job-7, run #{run.id}"
+      assert started =~ "session #{look.session_id})"
+
+      assert timed_out =~
+               "[warning] Job heal #{heal_id}: its look ran out of time after 120000 ms"
+
+      assert verdict =~ "[warning] Job heal #{heal_id}: a run it watched did not work either"
+
+      assert retried =~
+               "[info] Scheduled job job-7 run #{run.id} failed (provider_rate_limit); quiet " <>
+                 "retry 2 runs at 2026-11-20T07:02:50Z"
+
+      for words <- @outside_words, do: refute(log =~ words)
+    end
+
+    test "a step its caller logs, a refused decision and a failure a heal took add no line", %{
+      job: job,
+      run: run
+    } do
+      heal_id = "jhl_#{System.unique_integer([:positive])}"
+      run = Map.put(run, :id, "run_#{heal_id}")
+
+      log =
+        capture_log([level: :info], fn ->
+          JobTelemetry.heal("delivery_failed", %{
+            heal_id: heal_id,
+            attempts: 20,
+            dead_letter: true,
+            error: :no_delivery_target
+          })
+
+          JobTelemetry.heal("rerun", %{
+            heal_id: heal_id,
+            rerun_outcome: "refused",
+            error: :expired
+          })
+
+          JobTelemetry.heal("decided", %{
+            heal_id: heal_id,
+            decision: "tell",
+            requested: "raise_limit",
+            refusal: "not_upward"
+          })
+
+          JobTelemetry.heal_run_error(heal_run(heal_id), "error", 40, :provider_down)
+
+          JobTelemetry.run_error(
+            job,
+            run,
+            "error",
+            "auth",
+            Map.put(none(), :heal, {:opened, heal_id})
+          )
+        end)
+
+      refute log =~ heal_id
+      refute log =~ run.id
+    end
+  end
+
+  # A line or nil, and a line is a string at a level the log writes.
+  defp assert_said(nil), do: :ok
+
+  defp assert_said(said) do
+    assert {level, line} = said
+    assert level in [:info, :warning]
+    assert is_binary(line)
+  end
+
+  # One line of printable ASCII, every value a bounded token, and none of the
+  # words someone else wrote.
+  defp assert_safe({_level, line}) do
+    assert String.printable?(line)
+    refute line =~ ~r/[\x00-\x1f\x7f]/
+    refute line =~ ~r/[^\x20-\x7e]/
+    refute line =~ String.duplicate("z", 65)
+
+    # 64 bytes of a value, and the "..." that says it was cut (a token may
+    # hold a colon, so splitting on it only shortens what is measured).
+    for word <- String.split(line, [" ", ",", "(", ")", ";", ":"]),
+        do: assert(byte_size(word) <= 67, "#{word} is longer than one token")
+
+    for words <- @outside_words, do: refute(line =~ words)
+  end
+
+  # Bare facts, and every key holding each odd value in turn.
+  defp odd_facts(keys) do
+    [%{}, %{heal_id: "jhl_57"}] ++
+      for value <- @odd_values, do: Map.new(keys, &{&1, value})
+  end
+
+  # Every key a line may say holds a forged line break, a control character,
+  # a separator or an overlong value; every key it never says holds words
+  # someone else wrote.
+  defp forged_facts(keys) do
+    outside = %{
+      error: Enum.at(@outside_words, 0),
+      failure_words: Enum.at(@outside_words, 1),
+      failure_text: Enum.at(@outside_words, 1),
+      note: Enum.at(@outside_words, 2),
+      change: %{"prompt" => %{"from" => "x", "to" => Enum.at(@outside_words, 3)}},
+      requested: Enum.at(@outside_words, 3)
+    }
+
+    forged =
+      for value <- [
+            "x\nERROR fake",
+            "x\r\n[error] forged",
+            "tele\u2028gram\e[31m",
+            "x\ty\u0000",
+            String.duplicate("z", 300)
+          ] do
+        keys
+        |> Map.new(&{&1, value})
+        |> Map.drop([:refusal, :requested, :error, :dead_letter, :attempts, :applied])
+        |> Map.merge(outside)
+      end
+
+    [outside | forged]
+  end
+
+  defp odd_settlements do
+    shapes =
+      for disposition <- [:none, :retry, :exhausted, :odd, "retry", nil],
+          attempts <- [nil, 2, :x, "2", %{}],
+          retry_at <- [nil, ~U[2026-11-20 07:02:50Z], "2026", 5],
+          heal <- [:quiet, :out_of_scope, {:opened, 1}, :odd, nil, %{}] do
+        %{
+          disposition: disposition,
+          attempts: attempts,
+          retry_at: retry_at,
+          heal: heal,
+          subject_kind: :odd,
+          subject_id: 7
+        }
+      end
+
+    [nil, %{}, :odd, "settled" | shapes]
+  end
+
+  defp retry(attempts, retry_at),
+    do: %{disposition: :retry, attempts: attempts, retry_at: retry_at, heal: :none, healed: []}
+
+  defp exhausted(attempts), do: %{disposition: :exhausted, attempts: attempts, retry_at: nil}
+  defp none, do: %{disposition: :none, attempts: 0, retry_at: nil}
+
+  # What a look's bookends carry (`HealDiagnosis`'s correlation).
+  defp look_facts(heal_id) do
+    %{
+      heal_id: heal_id,
+      job_id: "job-7",
+      run_id: "run_abc",
+      session_id: "heal_job-7_20261120_070250_a1b2c3",
+      parent_session: "cron_job-7_20261120",
+      agent: "job_heal:job-7",
+      failure_kind: "time_limit"
+    }
+  end
+
+  defp heal_run(heal_id) do
+    %{
+      look_facts(heal_id)
+      | run_id: "run_#{heal_id}",
+        session_id: "heal_job-7_20261120_070250_#{heal_id}"
+    }
+  end
+
+  # One heal's every step, as its caller traces it, and its line. A job's
+  # heal is placed by its job once; a provider's or a plugin's by its subject.
+  defp heal_steps do
+    [
+      {"opened",
+       %{
+         heal_id: "jhl_41",
+         job_id: "job-7",
+         run_id: "run_abc",
+         failure_kind: "time_limit",
+         subject_kind: "job",
+         subject_id: "job-7"
+       }, {:info, "Job heal jhl_41: opened (job job-7, run run_abc, failure time_limit)"}},
+      {"joined",
+       %{
+         heal_id: "jhl_42",
+         job_id: "job-9",
+         run_id: "run_def",
+         failure_kind: "tool_never_succeeded",
+         subject_kind: "plugin",
+         subject_id: "harbour_id"
+       },
+       {:info,
+        "Job heal jhl_42: joined by a later run (job job-9, run run_def, failure " <>
+          "tool_never_succeeded, subject plugin harbour_id)"}},
+      {"verdict",
+       %{
+         heal_id: "jhl_43",
+         job_id: "job-7",
+         run_id: "run_ghi",
+         failure_kind: "tool_never_succeeded",
+         subject_kind: "job",
+         subject_id: "job-7"
+       },
+       {:warning,
+        "Job heal jhl_43: a run it watched did not work either, so the owner is told the job " <>
+          "still fails (job job-7, run run_ghi, failure tool_never_succeeded)"}},
+      {"decided",
+       Map.merge(heal_run_facts("jhl_44"), %{
+         decision: "pause",
+         requested: "pause",
+         refusal: nil,
+         read_outside: true
+       }), {:info, "Job heal jhl_44: its decision is pause (job job-7)"}},
+      {"decided", Map.merge(heal_run_facts("jhl_59"), %{decision: "none", refusal: nil}),
+       {:info, "Job heal jhl_59: its decision is none (job job-7)"}},
+      {"rerun",
+       Map.merge(heal_run_facts("jhl_45"), %{rerun_outcome: "started", run_id: "run_jkl"}),
+       {:info, "Job heal jhl_45: its rerun started (job job-7, run run_jkl)"}},
+      {"delivered", Map.put(heal_run_facts("jhl_46"), :platform, "telegram"),
+       {:info, "Job heal jhl_46: its message was delivered (job job-7, platform telegram)"}},
+      {"delivered", Map.merge(provider_facts("jhl_55"), %{platform: "telegram"}),
+       {:info,
+        "Job heal jhl_55: its message was delivered (subject provider openai, platform " <>
+          "telegram)"}},
+      {"delivery_failed", Map.merge(heal_run_facts("jhl_47"), %{attempts: 2, dead_letter: false}),
+       {:warning,
+        "Job heal jhl_47: its message could not be sent on attempt 2; it is tried again " <>
+          "later (job job-7)"}},
+      {"closed", %{heal_id: "jhl_48", job_id: "job-7", run_id: "run_mno", outcome: "healed"},
+       {:info, "Job heal jhl_48: closed as healed (job job-7, run run_mno)"}},
+      {"closed", Map.merge(heal_run_facts("jhl_49"), %{outcome: "still_failing"}),
+       {:warning, "Job heal jhl_49: closed as still_failing (job job-7)"}},
+      {"closed", Map.put(provider_facts("jhl_54"), :outcome, "expired"),
+       {:info, "Job heal jhl_54: closed as expired (subject provider openai)"}},
+      {"answered",
+       %{
+         heal_id: "jhl_50",
+         job_id: "job-7",
+         decision: "propose",
+         answer: "apply",
+         applied: true,
+         platform: "companion"
+       },
+       {:info,
+        "Job heal jhl_50: the owner answered apply; the change was applied (job job-7, " <>
+          "platform companion)"}},
+      {"answered",
+       %{
+         heal_id: "jhl_53",
+         job_id: "job-7",
+         decision: "propose",
+         answer: "leave",
+         applied: false,
+         platform: "telegram"
+       },
+       {:info,
+        "Job heal jhl_53: the owner answered leave; the change was not applied (job job-7, " <>
+          "platform telegram)"}}
+    ]
+  end
+
+  # A provider's heal: no job of its own (the Scheduler's expiry and
+  # `HealRun`'s traces pass the heal's nil `job_id`).
+  defp provider_facts(heal_id) do
+    %{
+      heal_id: heal_id,
+      job_id: nil,
+      subject_kind: "provider",
+      subject_id: "openai",
+      failure_kind: "provider_quota"
+    }
+  end
+
+  # What every trace a heal run writes carries (`HealRun`'s `trace/3`).
+  defp heal_run_facts(heal_id) do
+    %{
+      heal_id: heal_id,
+      job_id: "job-7",
+      subject_kind: "job",
+      subject_id: "job-7",
+      failure_kind: "time_limit",
+      conclusion: "first"
+    }
   end
 end

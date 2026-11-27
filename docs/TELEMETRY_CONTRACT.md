@@ -913,6 +913,19 @@ found (a monitored crash, a reap) has a `run_error` of its own, emitted by
 run is an ordinary job run whose bookends carry `trigger: "retry"`. The Opik
 run trace's metadata and `mix opik.replay` keep all three retry fields.
 
+What became of a scheduled run's failure is also one line in the engine log,
+written beside the event by `Jobs.Telemetry.run_error/5` from its settlement
+(`run_line/3`): `Scheduled job <job_id> run <run_id> failed (<failure_kind>);`
+then a quiet retry set (`quiet retry <n> runs at <time>`, to the second in
+UTC, or `is the job's next run`), its quiet retries used up (`after <n>
+failed runs in a row`, a `warning`), the owner not told because a heal for the
+same failure closed lately (`heal: "quiet"`), or no heal opened because the
+job was not set up by the owner (`heal: "out_of_scope"`), two of them in the
+same line when both hold; `info` otherwise. A failure a heal opened, joined
+or concluded adds none here: the heal's own line follows. The words "quiet
+retry" keep it apart from the Runner's in-run transient retries, which log
+`retry <n>/<max>`. Never the run's `error`.
+
 ### Scheduled job heals
 
 A failure that is not retried goes to a heal (M106 §5.4), and the run's
@@ -966,6 +979,26 @@ makes each phase its own self-closing trace named `job_heal:<phase>`, tagged
 `mix opik.replay` reads the row back as the same event. The Opik run trace's
 metadata and the replay keep `heal` and `heal_id` on a run's error.
 
+Each phase is also one line in the engine log, written beside the event by
+`Jobs.Telemetry.heal/2` from the same facts (`heal_line/2`): `Job heal
+<heal_id>: ...` with only ids and Fermix's own vocabulary (`job_id`, `run_id`,
+`failure_kind`, the subject, `decision`, `outcome`, `platform`, `answer` and
+`applied`, a failed send's attempt), never `error`, the heal run's note or a
+change's values, which can hold outside content. A job's heal is placed by
+its job once; a provider's or a plugin's names its subject on every line. The
+line is a `warning` for a `verdict`, a `delivery_failed` whose send is tried
+again, and a `closed` with `outcome: "still_failing"`, and `info` for the
+rest. A step its caller already logs adds no line, so no step is two lines: a
+`decided` with a `refusal` (`Jobs.HealRun` warns what was asked and what
+Fermix carries out), a `rerun` other than `started` (`Jobs.HealRun` logs
+`running` at info, `refused` and `unanswered` as warnings), and a
+`delivery_failed` that is a dead letter or counted no attempt (a warning each
+in `Jobs.HealRun`). Every value is said as one token, checked where it is
+said: letters, digits and `_ . : @ + / -`, any other byte as `?`, at most 64
+bytes; a value that is not a string, an atom or an integer is not said. The
+builder is total: a phase whose fact is missing still gets a plain line with
+the ids it has.
+
 ### Job heal runs
 
 A job's heal of a kind a model could help with is diagnosed by one isolated
@@ -984,9 +1017,14 @@ run) and `failure_kind`; `start` adds `max_duration_ms` (the watchdog, the
 exporter's sweep floor), `complete` adds `decision` (what the run asked, or
 `none`), `error` adds `status` (`timeout | error`) and `error` (bounded to
 500 characters). What code then made of the decision is the heal's `decided`
-phase above. The run's tools are ordinary `[:fermix, :tool, :exec]` events
-through `Tools.Telemetry.exec/5` and its model calls go through
-`Providers.Telemetry.emit_call/3`; a refused `job_heal_respond` call carries
+phase above. Each bookend is also one engine log line (`look_line/2`), with
+the same token rule: `start` an `info` line naming the job, the failed run
+and the `session_id`, the key to the look's trace; `complete` an `info` line
+with its `duration_ms`; an `error` with `status: "timeout"` a `warning` with
+how long it ran. An `error` with `status: "error"` adds none, since
+`Jobs.HealDiagnosis` warns of it with its reason. The run's tools are
+ordinary `[:fermix, :tool, :exec]` events through `Tools.Telemetry.exec/5`
+and its model calls go through `Providers.Telemetry.emit_call/3`; a refused `job_heal_respond` call carries
 `error_code` (its failure-mode tag, or `not_heal_run`) and `error_summary`.
 
 `Trace.TelemetryHandler` registers the three as `agent_event` rows

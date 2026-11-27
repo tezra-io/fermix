@@ -20,8 +20,8 @@ defmodule FermixCore.Jobs.Telemetry do
   owner's edit supersedes a waiting proposal; and `answered` (M106 §5.7, D5)
   when the owner's answer to a proposal is recorded, followed by `closed`
   when that answer closed it (`skipped`, or `superseded` for an apply to a
-  job that moved on); `Jobs.HealAnswer` emits those two, and has no
-  production caller until the proposal's card is built. Each
+  job that moved on); `Jobs.HealAnswer` emits those two, called by the
+  proposal's card (`Jobs.HealCard`) when the owner answers it. Each
   carries `heal_id`, and `job_id` and `run_id` when a run moved it. A settle
   that took a failure says its `failure_kind`, `subject_kind` and
   `subject_id`: an ok run whose tool never worked three runs in a row (M106
@@ -31,7 +31,17 @@ defmodule FermixCore.Jobs.Telemetry do
   the agent loop under the session `heal_<job id>_<time>_<6 hex>`, the failed
   run's session as its `parent_session`, bracketed by
   `[:fermix, :job, :heal_run_start | :heal_run_complete | :heal_run_error]`.
+
+  Each step of a heal is also one line in the engine log, written beside its
+  event by a pure builder (`heal_line/2`, `look_line/2` for the look), and so
+  is what became of a failed scheduled run (`run_line/3`): `info`, or
+  `warning` for a step that says something went wrong. A step its caller
+  already logs adds none. A line holds ids and Fermix's own words, each
+  value one bounded token, never a failure's words, a note or a change's
+  values.
   """
+
+  require Logger
 
   alias FermixCore.Telemetry
 
@@ -44,6 +54,19 @@ defmodule FermixCore.Jobs.Telemetry do
   @heal_run_complete_event [:fermix, :job, :heal_run_complete]
   @heal_run_error_event [:fermix, :job, :heal_run_error]
   @heal_run_decisions ~w(rerun raise_limit pause propose tell none)
+  # What places a step in its log line, and the word each is said with.
+  @placed [:job_id, :run_id, :subject, :platform]
+  @failure_placed [:job_id, :run_id, :failure_kind, :subject, :platform]
+  @look_placed [:job_id, :session_id]
+  @place_labels %{
+    job_id: "job",
+    run_id: "run",
+    failure_kind: "failure",
+    platform: "platform",
+    session_id: "session"
+  }
+  # The most bytes of one value a log line says.
+  @token_max 64
 
   @trace_event_definitions [
     %{
@@ -105,6 +128,9 @@ defmodule FermixCore.Jobs.Telemetry do
           required(:failure_kind) => String.t()
         }
 
+  @typedoc "One engine log line and the level it is written at."
+  @type log_line :: {:info | :warning, String.t()}
+
   @spec trace_event_definitions() :: [map()]
   def trace_event_definitions, do: @trace_event_definitions
 
@@ -146,7 +172,8 @@ defmodule FermixCore.Jobs.Telemetry do
   `"exhausted"`), `retry_attempts` and, for a retry with a time, `retry_at`,
   and what the heals made of it (§5.4): `heal` (`"none"`, `"opened"`,
   `"joined"`, `"quiet"` or `"out_of_scope"`) and, for one opened or joined,
-  `heal_id`; a cue run's passes none.
+  `heal_id`; a cue run's passes none. What became of a scheduled run's
+  failure is also one log line (`run_line/3`).
   """
   @spec run_error(map(), map(), String.t(), term(), map() | nil) :: :ok
   def run_error(job, run, status, error, settlement \\ nil) when is_binary(status) do
@@ -159,6 +186,89 @@ defmodule FermixCore.Jobs.Telemetry do
       |> Map.merge(heal_disposition_metadata(settlement))
 
     execute(@run_error_event, %{count: 1, duration_ms: run_duration_ms(run)}, metadata)
+    write_log(run_line(job, run, settlement))
+  end
+
+  @doc """
+  The engine log's line for what became of a failed scheduled run (M106
+  §5.3, §5.4), from its settlement, in one line: a quiet retry set (which
+  one, and when it runs or that it is the job's next run), its quiet retries
+  used up (a `warning`), the owner not told because a heal for the same
+  failure closed lately (`quiet`), or no heal opened because the job is not
+  the owner's (`out_of_scope`), two of them joined when both hold.
+
+  Nil for a failure a heal opened, joined or concluded, whose own line
+  follows (`heal_line/2`), and for a run with no settlement (a cue run's).
+  Total over its facts: any maps give a line or nil. Ids, the run's
+  `failure_kind` and the settlement's numbers only, never the run's error.
+  """
+  @spec run_line(map(), map(), term()) :: log_line() | nil
+  def run_line(job, run, settlement) when is_map(job) and is_map(run) do
+    settlement = if is_map(settlement), do: settlement, else: %{}
+
+    case Enum.reject([retry_said(settlement), kept_said(settlement, job)], &is_nil/1) do
+      [] ->
+        nil
+
+      said ->
+        prefix =
+          "Scheduled job #{id_said(Map.get(job, :id))} run #{id_said(Map.get(run, :id))} failed"
+
+        {run_level(settlement), prefix <> kind_said(run) <> "; " <> Enum.join(said, "; ")}
+    end
+  end
+
+  defp retry_said(%{disposition: :retry} = settlement),
+    do: "quiet retry" <> attempt_said(settlement) <> retry_when(Map.get(settlement, :retry_at))
+
+  defp retry_said(%{disposition: :exhausted} = settlement),
+    do: "its quiet retries are used up" <> in_a_row(settlement)
+
+  defp retry_said(_none_or_unknown), do: nil
+
+  defp attempt_said(%{attempts: attempts}) when is_integer(attempts), do: " #{token(attempts)}"
+  defp attempt_said(_settlement), do: ""
+
+  # A retry's time to the second, in UTC.
+  defp retry_when(%DateTime{} = at) do
+    utc = at |> DateTime.to_unix() |> DateTime.from_unix!()
+    " runs at #{token(DateTime.to_iso8601(utc))}"
+  end
+
+  defp retry_when(nil), do: " is the job's next run"
+  defp retry_when(_unsaid), do: " is set"
+
+  defp in_a_row(%{attempts: attempts}) when is_integer(attempts),
+    do: " after #{token(attempts)} failed runs in a row"
+
+  defp in_a_row(_settlement), do: ""
+
+  # A failure no heal took: kept quiet by one that closed lately for the same
+  # subject and kind, so nothing reaches the owner, or a job that is not the
+  # owner's (`Memory.Repo.JobHealsSql.settle/5`).
+  defp kept_said(%{heal: :quiet} = settlement, job) do
+    subject =
+      settlement
+      |> Map.take([:subject_kind, :subject_id])
+      |> Map.put(:job_id, Map.get(job, :id))
+
+    "the owner is not told: a heal for the same failure closed lately" <>
+      placed(subject, [:subject])
+  end
+
+  defp kept_said(%{heal: :out_of_scope}, _job),
+    do: "no heal opens: the job was not set up by the owner"
+
+  defp kept_said(_taken_retried_or_unknown, _job), do: nil
+
+  defp run_level(%{disposition: :exhausted}), do: :warning
+  defp run_level(_settlement), do: :info
+
+  defp kind_said(run) do
+    case token(Map.get(run, :failure_kind)) do
+      nil -> ""
+      kind -> " (#{kind})"
+    end
   end
 
   @doc """
@@ -195,7 +305,7 @@ defmodule FermixCore.Jobs.Telemetry do
   (`started`, `running`, `refused` or `unanswered`), and on `answered` the
   owner's `answer` (`apply` or `leave`), whether the change was `applied`
   and, as its `platform`, the kind of surface the answer came from, the
-  phase knows.
+  phase knows. The step is also one line in the engine log (`heal_line/2`).
   """
   @spec heal(String.t(), map()) :: :ok
   def heal(phase, %{heal_id: heal_id} = facts)
@@ -216,42 +326,237 @@ defmodule FermixCore.Jobs.Telemetry do
       })
 
     execute(@heal_event, %{count: 1}, metadata)
+    write_log(heal_line(phase, metadata))
   end
 
   defp heal_error(nil), do: nil
   defp heal_error(error), do: error |> format_error() |> String.slice(0, 500)
 
   @doc """
+  The engine log's line for one step of a heal, from the facts its `job_heal`
+  row carries: the heal's id, what happened, and the ids and Fermix's own
+  words that place it (job, run, failure kind, subject, platform). A job's
+  heal is placed by its job once; a provider's or a plugin's by its subject
+  on every step. Never the failure's words (`error`), the look's note or a
+  change's values, which can hold outside content.
+
+  `warning` for a step that says something went wrong (a run the heal
+  watched that did not work either, a send that failed and is tried again, a
+  heal closed `still_failing`), `info` for the rest.
+
+  Nil for a step its caller already logs with more said, so no step is two
+  lines: a refused or redirected decision (`Jobs.HealRun` warns what was
+  asked and what Fermix carries out), a rerun that started no run of its own
+  (`Jobs.HealRun` logs `running`, `refused` and `unanswered` where it asks),
+  a dead letter, and a message that never reached a send (no attempt
+  counted), each a warning in `Jobs.HealRun`.
+
+  Total over its facts: a step whose fact is missing or odd still gets a
+  plain line naming the step and the ids it has.
+  """
+  @spec heal_line(String.t(), map()) :: log_line() | nil
+  def heal_line(phase, facts) when phase in @heal_phases and is_map(facts) do
+    case heal_step(phase, facts) do
+      nil -> nil
+      {level, said} -> {level, heal_said(facts, said, placed_keys(phase))}
+    end
+  end
+
+  defp heal_step("opened", _facts), do: {:info, "opened"}
+  defp heal_step("joined", _facts), do: {:info, "joined by a later run"}
+
+  # A watched run that failed, or that ended ok while its tool never worked.
+  defp heal_step("verdict", _facts),
+    do:
+      {:warning, "a run it watched did not work either, so the owner is told the job still fails"}
+
+  defp heal_step("decided", %{refusal: refusal}) when not is_nil(refusal), do: nil
+
+  defp heal_step("decided", facts) do
+    case token(Map.get(facts, :decision)) do
+      nil -> {:info, "its decision was recorded"}
+      decision -> {:info, "its decision is #{decision}"}
+    end
+  end
+
+  defp heal_step("rerun", %{rerun_outcome: outcome})
+       when outcome in ["running", "refused", "unanswered"],
+       do: nil
+
+  defp heal_step("rerun", %{rerun_outcome: "started"}), do: {:info, "its rerun started"}
+  defp heal_step("rerun", _facts), do: {:info, "its rerun was asked for"}
+
+  defp heal_step("delivered", facts), do: {:info, "its #{message_said(facts)} was delivered"}
+  defp heal_step("delivery_failed", %{dead_letter: true}), do: nil
+
+  defp heal_step("delivery_failed", %{dead_letter: false, attempts: attempts} = facts)
+       when is_integer(attempts) do
+    said = "its #{message_said(facts)} could not be sent on attempt #{token(attempts)}"
+    {:warning, said <> "; it is tried again later"}
+  end
+
+  defp heal_step("delivery_failed", %{dead_letter: false}), do: nil
+
+  defp heal_step("delivery_failed", facts),
+    do: {:warning, "its #{message_said(facts)} could not be sent"}
+
+  defp heal_step("closed", facts) do
+    case token(Map.get(facts, :outcome)) do
+      nil -> {:info, "closed"}
+      "still_failing" -> {:warning, "closed as still_failing"}
+      outcome -> {:info, "closed as #{outcome}"}
+    end
+  end
+
+  defp heal_step("answered", facts) do
+    answered =
+      case token(Map.get(facts, :answer)) do
+        nil -> "the owner answered"
+        answer -> "the owner answered #{answer}"
+      end
+
+    {:info, answered <> applied_said(Map.get(facts, :applied))}
+  end
+
+  defp placed_keys(phase) when phase in ["opened", "joined", "verdict"], do: @failure_placed
+  defp placed_keys(_phase), do: @placed
+
+  defp message_said(%{conclusion: "verdict"}), do: "verdict"
+  defp message_said(_first_or_none), do: "message"
+
+  defp applied_said(true), do: "; the change was applied"
+  defp applied_said(false), do: "; the change was not applied"
+  defp applied_said(_unsaid), do: ""
+
+  @doc """
+  The engine log's line for Fermix's look at a heal (M106 §5.5), from the
+  facts its bookend carries: `:start` with the look's session (the key to
+  its trace) and the failed run; `:complete` with how long it took (the
+  heal's `decided` line says what it decided); `:error` for a look the
+  watchdog stopped, a `warning` with how long it ran. Nil for a look that
+  failed, which `Jobs.HealDiagnosis` warns of with its reason. Total over its
+  facts, as `heal_line/2` is.
+  """
+  @spec look_line(:start | :complete | :error, map()) :: log_line() | nil
+  def look_line(stage, facts) when stage in [:start, :complete, :error] and is_map(facts) do
+    case look_step(stage, facts) do
+      nil -> nil
+      {level, said, keys} -> {level, heal_said(facts, said, keys)}
+    end
+  end
+
+  defp look_step(:start, _facts), do: {:info, "its look started", [:job_id, :run_id, :session_id]}
+
+  defp look_step(:complete, facts),
+    do: {:info, "its look finished" <> took("in", facts), @look_placed}
+
+  defp look_step(:error, %{status: "error"}), do: nil
+
+  defp look_step(:error, %{status: "timeout"} = facts),
+    do: {:warning, "its look ran out of time" <> took("after", facts), @look_placed}
+
+  defp look_step(:error, facts),
+    do: {:warning, "its look ended" <> took("after", facts), @look_placed}
+
+  defp took(word, %{duration_ms: ms}) when is_integer(ms), do: " #{word} #{token(ms)} ms"
+  defp took(_word, _facts), do: ""
+
+  defp heal_said(facts, said, keys),
+    do: "Job heal #{id_said(Map.get(facts, :heal_id))}: #{said}#{placed(facts, keys)}"
+
+  # The ids and words that place a step, each only when the step knows it.
+  defp placed(facts, keys) do
+    case Enum.flat_map(keys, &place(&1, facts)) do
+      [] -> ""
+      parts -> " (" <> Enum.join(parts, ", ") <> ")"
+    end
+  end
+
+  # A subject that is the line's own job is said once, as the job.
+  defp place(:subject, facts) do
+    kind = token(Map.get(facts, :subject_kind))
+    id = token(Map.get(facts, :subject_id))
+
+    cond do
+      is_nil(kind) or is_nil(id) -> []
+      kind == "job" and id == token(Map.get(facts, :job_id)) -> []
+      true -> ["subject #{kind} #{id}"]
+    end
+  end
+
+  defp place(key, facts) do
+    case token(Map.get(facts, key)) do
+      nil -> []
+      value -> ["#{Map.fetch!(@place_labels, key)} #{value}"]
+    end
+  end
+
+  defp id_said(id), do: token(id) || "?"
+
+  # A value as one token of a log line, checked here where it is said:
+  # letters, digits and `_ . : @ + / -` kept, every other byte (a line break,
+  # a control character, a space, any byte of a non-ASCII character) said as
+  # `?`, and at most 64 bytes. A string, an atom or an integer; anything else,
+  # and an empty value, is not said.
+  defp token(value) when is_binary(value) and value != "" do
+    safe = String.replace(value, ~r/[^A-Za-z0-9_.:@+\/-]/, "?")
+
+    if byte_size(safe) > @token_max,
+      do: binary_part(safe, 0, @token_max) <> "...",
+      else: safe
+  end
+
+  defp token(value) when is_integer(value), do: value |> Integer.to_string() |> token()
+
+  defp token(value) when is_atom(value) and not is_nil(value),
+    do: value |> Atom.to_string() |> token()
+
+  defp token(_unsaid), do: nil
+
+  # The one effect a line has: the engine log, at its level.
+  defp write_log(nil), do: :ok
+
+  defp write_log({level, line}) when level in [:info, :warning] and is_binary(line),
+    do: Logger.log(level, line)
+
+  @doc """
   A heal run's opener (M106 §5.5), before its loop starts: its correlation
-  and `max_duration_ms`, its watchdog and the exporter's sweep floor.
+  and `max_duration_ms`, its watchdog and the exporter's sweep floor. Its
+  line in the engine log names the look's session (`look_line/2`).
   """
   @spec heal_run_start(heal_run(), pos_integer()) :: :ok
   def heal_run_start(%{session_id: session_id} = run, max_duration_ms)
       when is_binary(session_id) and is_integer(max_duration_ms) and max_duration_ms > 0 do
     metadata = Map.put(heal_run_metadata(run), :max_duration_ms, max_duration_ms)
     execute(@heal_run_start_event, %{count: 1}, metadata)
+    write_log(look_line(:start, metadata))
   end
 
   @doc """
   A heal run whose loop finished: the `decision` it asked for (`none` when
   it gave none), before code's checks, which the heal's `decided` phase says.
+  Its line says how long the look took.
   """
   @spec heal_run_complete(heal_run(), String.t(), non_neg_integer()) :: :ok
   def heal_run_complete(run, decision, duration_ms)
       when decision in @heal_run_decisions and is_integer(duration_ms) do
     metadata = Map.put(heal_run_metadata(run), :decision, decision)
     execute(@heal_run_complete_event, %{duration_ms: duration_ms}, metadata)
+    write_log(look_line(:complete, Map.put(metadata, :duration_ms, duration_ms)))
   end
 
   @doc """
   A heal run whose loop did not finish: the watchdog stopped it (`timeout`)
-  or it failed (`error`), with its reason bounded to 500 characters.
+  or it failed (`error`), with its reason bounded to 500 characters. A
+  timeout's line is a warning with how long it ran; a failure's is
+  `Jobs.HealDiagnosis`'s own.
   """
   @spec heal_run_error(heal_run(), String.t(), non_neg_integer(), term()) :: :ok
   def heal_run_error(run, status, duration_ms, error)
       when status in ["timeout", "error"] and is_integer(duration_ms) do
     metadata = Map.merge(heal_run_metadata(run), %{status: status, error: heal_error(error)})
     execute(@heal_run_error_event, %{count: 1, duration_ms: duration_ms}, metadata)
+    write_log(look_line(:error, Map.put(metadata, :duration_ms, duration_ms)))
   end
 
   defp heal_run_metadata(run),

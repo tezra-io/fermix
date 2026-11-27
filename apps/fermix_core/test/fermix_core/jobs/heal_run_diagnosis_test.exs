@@ -23,6 +23,7 @@ defmodule FermixCore.Jobs.HealRunDiagnosisTest do
   alias FermixCore.Jobs.Runner
   alias FermixCore.Jobs.RunnerSupervisor
   alias FermixCore.Jobs.Scheduler
+  alias FermixCore.Jobs.Telemetry, as: JobTelemetry
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
   alias FermixCore.Tools.GetJobRun
@@ -718,6 +719,30 @@ defmodule FermixCore.Jobs.HealRunDiagnosisTest do
                        %{phase: "decided", decision: "tell", requested: "raise_limit"} = meta}
 
       assert meta.refusal == "not_upward"
+    end
+
+    # The refusal's warning names what was asked and what Fermix carries out,
+    # so the decided step's own line would say it twice. This module is async
+    # and the suite's level is :warning, so the info line is proved absent
+    # through the builder fed the decided event this run emitted.
+    test "a refused decision is one line in the log, the refusal's", ctx do
+      start_channel(ctx, [:ok])
+      {_job, heal} = claimed_heal!(ctx, timeout_seconds: 600)
+      TelemetryCapture.attach([@heal_event], heal_id: heal.id)
+
+      decision = %{"decision" => "raise_limit", "timeout_seconds" => 300, "note" => @note}
+      {_result, log} = with_log(fn -> run!(ctx, heal, script([respond(decision)])) end)
+
+      assert [line] =
+               log
+               |> String.split("\n")
+               |> Enum.filter(&(&1 =~ heal.id and &1 =~ ~r/\btell\b/))
+
+      assert line =~ "its run asked raise_limit, which Fermix carries out as tell (not_upward"
+
+      assert_received {:telemetry, @heal_event, _measurements, %{phase: "decided"} = decided}
+      assert decided.refusal == "not_upward"
+      assert JobTelemetry.heal_line("decided", decided) == nil
     end
 
     test "pause pauses the job through the registry, and the heal waits", ctx do
