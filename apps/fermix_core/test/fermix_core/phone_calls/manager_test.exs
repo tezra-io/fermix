@@ -837,6 +837,23 @@ defmodule FermixCore.PhoneCalls.ManagerTest do
       refute Manager.slot_held?(@t0, manager.manager)
     end
 
+    # The provider's own text rides in the failure words, and a `;` in it
+    # starts a part that can lead with anything: the Manager settles the call
+    # and goes on to its next one.
+    test "an end whose failure words carry the provider's own text is settled", ctx do
+      manager = start_manager(ctx)
+      call = start_call!(manager)
+      reason = "create_rejected: HTTP 403: Forbidden; Retry later;"
+      report = %{status: "failed", outcome: "unknown", failure_reason: reason}
+
+      :ok = in_worker(call, &Manager.report_end(&1.manager, &1.call_id, report))
+      assert_receive {:telemetry, [:fermix, :phone_call, :run_error], _measurements, _meta}
+      _state = :sys.get_state(manager.pid)
+
+      assert row!(ctx, call.id).failure_reason == reason
+      refute Manager.slot_held?(@t0, manager.manager)
+    end
+
     test "an uncertain call holds it until its slot expires", ctx do
       manager = start_manager(ctx)
       call = start_call!(manager)

@@ -49,7 +49,8 @@ defmodule FermixCore.PhoneCalls.Continuation do
   alias FermixCore.PhoneCalls.Report
 
   @depth 1
-  # The failure word `PhoneCalls.Manager` writes for the owner's own stop.
+  # The failure word `PhoneCalls.Manager` and the call's worker write first
+  # for the owner's own stop.
   @owner_halt "cancelled_by_owner"
   @closing "This is Fermix reporting the phone call you started for the owner. Tell the owner " <>
              "what happened in your own words, keeping anything uncertain uncertain, and if " <>
@@ -60,7 +61,12 @@ defmodule FermixCore.PhoneCalls.Continuation do
   @doc "Whether `row`'s result re-enters its conversation: a chat origin, not an owner's stop."
   @spec continuable?(map()) :: boolean()
   def continuable?(row) when is_map(row),
-    do: Map.get(row, :origin_kind) == "chat" and Map.get(row, :failure_reason) != @owner_halt
+    do: Map.get(row, :origin_kind) == "chat" and not owner_halt?(Map.get(row, :failure_reason))
+
+  # The row's failure words start with why the call ended
+  # (`Call.Ending.failure_reason/2`): an owner's stop stays one whatever the
+  # end added after it, the engine stopping or a hang-up that failed.
+  defp owner_halt?(reason), do: Report.reason_code(reason) == @owner_halt
 
   @doc "The notice's text (pure): the report a model reads, then Fermix's closing."
   @spec notice_text(map()) :: String.t()

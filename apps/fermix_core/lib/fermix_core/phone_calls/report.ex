@@ -373,16 +373,40 @@ defmodule FermixCore.PhoneCalls.Report do
   The codes a failure reason holds, each part's leading word and never its
   detail: `"sideband_lost; hangup timeout after 5000 ms"` is
   `["sideband_lost", "hangup"]`. What a log may carry of why a call stopped.
+  The codes are the engine's own, written before the reason's first `:`:
+  what follows one is detail, the provider's own text among it, and no word
+  of that is a code. A part with no code word names none.
   """
   @spec reason_codes(String.t() | nil) :: [String.t()]
   def reason_codes(reason) when is_binary(reason) do
     reason
+    |> String.split(":", parts: 2)
+    |> hd()
     |> String.split(";")
-    |> Enum.flat_map(&Regex.run(~r/^\s*([a-z][a-z_]*)/, &1, capture: :all_but_first))
-    |> List.flatten()
+    |> Enum.flat_map(&leading_code/1)
   end
 
   def reason_codes(_none), do: []
+
+  defp leading_code(part) do
+    case Regex.run(~r/^\s*([a-z][a-z_]*)/, part, capture: :all_but_first) do
+      [code] -> [code]
+      nil -> []
+    end
+  end
+
+  @doc """
+  The word a failure reason starts with, before anything the end added after
+  a `;` or a `:`: the cause's own where the cause has one, which the worker
+  and the Manager write first. `nil` for no reason, and an empty word for a
+  reason that starts with none.
+  """
+  @spec reason_code(String.t() | nil) :: String.t() | nil
+  def reason_code(reason) when is_binary(reason) do
+    reason |> String.split([";", ":"], parts: 2) |> hd() |> String.trim()
+  end
+
+  def reason_code(_none), do: nil
 
   @doc "Every failure word `reason_sentence/1` has its own sentence for."
   @spec reasons() :: [String.t(), ...]
@@ -652,12 +676,6 @@ defmodule FermixCore.PhoneCalls.Report do
   defp never_placed?(code), do: code in @never_placed or not is_nil(readiness_reason(code))
 
   defp readiness_reason(code), do: Enum.find(Readiness.reasons(), &(Atom.to_string(&1) == code))
-
-  defp reason_code(reason) when is_binary(reason) do
-    reason |> String.split([";", ":"], parts: 2) |> hd() |> String.trim()
-  end
-
-  defp reason_code(_none), do: nil
 
   # --- outside text ---------------------------------------------------------------
 

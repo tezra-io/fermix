@@ -6,6 +6,7 @@ defmodule FermixCore.PhoneCalls.DeliveryTest do
   import ExUnit.CaptureLog
 
   alias FermixCore.Memory.Repo
+  alias FermixCore.PhoneCalls.Call.Ending
   alias FermixCore.PhoneCalls.Continuation
   alias FermixCore.PhoneCalls.Delivery
   alias FermixCore.PhoneCalls.DeliveryWorker
@@ -197,6 +198,32 @@ defmodule FermixCore.PhoneCalls.DeliveryTest do
                origin_kind: "chat",
                failure_reason: "cancelled_by_owner"
              })
+    end
+
+    # The row's failure words start with why the call ended, as the worker
+    # writes them (`Call.Ending.failure_reason/2`); what the end added after
+    # an owner's stop (the engine stopping, a hang-up that failed, the
+    # provider's own text) leaves it the owner's stop, and the same additions
+    # after another end leave that one a call to report on.
+    test "an owner's stop is told by the first failure word, whatever follows it" do
+      refused = "rejected, HTTP 400: Session is not active."
+
+      for added <- [
+            %{engine_stopping?: true, closed?: true, hangup_error: nil},
+            %{engine_stopping?: false, closed?: false, hangup_error: refused},
+            %{engine_stopping?: true, closed?: false, hangup_error: "rejected, HTTP 403: a; B"}
+          ] do
+        stopped = Ending.failure_reason(Ending.new({:cancelled, :owner}), added)
+        assert stopped != "cancelled_by_owner"
+        refute Continuation.continuable?(%{origin_kind: "chat", failure_reason: stopped}), stopped
+
+        lost = Ending.failure_reason(Ending.new(:sideband_lost), added)
+        assert Continuation.continuable?(%{origin_kind: "chat", failure_reason: lost}), lost
+      end
+
+      # The word further on, in the provider's own text, is not the call's end.
+      later = "sideband_lost; hangup rejected, HTTP 400: x; cancelled_by_owner"
+      assert Continuation.continuable?(%{origin_kind: "chat", failure_reason: later})
     end
   end
 

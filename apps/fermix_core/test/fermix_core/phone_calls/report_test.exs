@@ -737,6 +737,45 @@ defmodule FermixCore.PhoneCalls.ReportTest do
       assert Report.reason_codes("create_rejected: HTTP 400") == ["create_rejected"]
       assert Report.reason_codes(nil) == []
     end
+
+    # The codes are the engine's own, written before the first `:`; what
+    # follows one is detail, the provider's own text among it, and a word of
+    # that text is never a code, whatever it looks like.
+    test "the provider's own text names no code" do
+      assert Report.reason_codes("cancelled_by_owner; hangup rejected, HTTP 403: a; retry later") ==
+               ["cancelled_by_owner", "hangup"]
+
+      assert Report.reason_codes("create_rejected: bad request; try again") ==
+               ["create_rejected"]
+    end
+
+    # A part that leads with no code word (a trailing `;`, nothing at all)
+    # names none.
+    test "a part that leads with no code word names none" do
+      assert Report.reason_codes("cancelled_by_owner; hangup rejected, HTTP 403: a; B") ==
+               ["cancelled_by_owner", "hangup"]
+
+      assert Report.reason_codes("no_answer; hangup rejected, HTTP 502: <p>x;}") ==
+               ["no_answer", "hangup"]
+
+      assert Report.reason_codes("sideband_lost;") == ["sideband_lost"]
+      assert Report.reason_codes("") == []
+    end
+
+    test "the reason's first word is why the call ended, whatever follows it" do
+      assert Report.reason_code("cancelled_by_owner; hangup rejected, HTTP 400: x") ==
+               "cancelled_by_owner"
+
+      assert Report.reason_code("create_rejected: HTTP 400") == "create_rejected"
+      assert Report.reason_code("worker_lost") == "worker_lost"
+      assert Report.reason_code(nil) == nil
+
+      # A reason that starts with no word has an empty one, which is no word
+      # anything knows.
+      for blank <- ["", " ", "; engine_stopped"] do
+        assert Report.reason_code(blank) == "", inspect(blank)
+      end
+    end
   end
 
   describe "the backend's work" do
