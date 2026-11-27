@@ -204,6 +204,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   form, its start and its end naming two different turns on the app and on
   the phone, and now ends as any other reply does.
 
+- **An Always On server's log no longer fills with one Messages warning.**
+  While the Mac that carries Messages for a home was linked and Fermix
+  Messages was not running on it, the server asked it again every five seconds
+  and logged a warning each time, about seven hundred lines an hour, which
+  buried everything else in the log. Why Messages cannot be reached is now
+  logged once, and again only when the reason changes, with one line when it
+  works again. The server keeps asking for as long as that Mac offers
+  Messages, at waits that grow from five seconds to one minute.
+
 - **Fermix no longer loses the start of a long conversation.** When a
   conversation outgrows its limit, Fermix summarizes the older turns and keeps
   the summary. Saving the shortened conversation also deleted the stored copy

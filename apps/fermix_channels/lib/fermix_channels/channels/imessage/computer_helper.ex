@@ -35,9 +35,14 @@ defmodule FermixChannels.Channels.IMessage.ComputerHelper do
   **Notifications** come on one long-lived invocation, `imessage.watch`
   (`IMessage.Watch` on the Mac), asked again as soon as it answers, naming
   the last event taken, so a lost answer loses nothing: the Mac answers
-  again from there. When the Mac's link comes back, or the listener
-  attaches, the watch starts afresh: the Mac answers with its helper's
-  state, the listener hears `{:imessage_helper, :up, handshake}` and
+  again from there. A watch that ends without an answer is asked again
+  after #{5} s, then #{10}, #{20} and #{40} s, then every #{60} s for as long
+  as the Mac offers Messages: it is never given up. Why it ended is logged
+  once, and again only when the reason changes; when it answers again, one
+  line says it works and the next end waits #{5} s again. When the Mac's
+  link comes back the watch starts afresh, from the first wait and with
+  nothing of it said yet: the Mac answers with its helper's state, the
+  listener hears `{:imessage_helper, :up, handshake}` and
   catches up from the cursor it keeps for that computer (the handshake
   carries the computer's device id and name, `"carrier"` and
   `"carrier_name"`).
@@ -45,7 +50,8 @@ defmodule FermixChannels.Channels.IMessage.ComputerHelper do
   Options: `:name`, `:home` (this engine's FERMIX_HOME), `:computers`
   (0-arity, the home's computers, `FermixCore.Computers.list/1`'s),
   `:call_opts` (`FermixCore.Computers.call/6`'s seams) and `:poll_ms`,
-  `:retry_ms` (tests shrink these).
+  `:retry_ms` (the watch's first wait, which makes the longest #{12} times
+  it; tests shrink these).
   """
 
   use GenServer
@@ -66,6 +72,8 @@ defmodule FermixChannels.Channels.IMessage.ComputerHelper do
 
   @poll_ms 5_000
   @retry_ms 5_000
+  # The longest wait before the watch is asked again, in first waits.
+  @retry_cap 12
   @name_bytes 128
 
   @type health :: %{status: :ready | :away | :degraded, detail: String.t() | nil}
@@ -291,6 +299,8 @@ defmodule FermixChannels.Channels.IMessage.ComputerHelper do
       watch: nil,
       boot: nil,
       seq: nil,
+      retry: nil,
+      said: nil,
       away?: false
     }
 
@@ -442,9 +452,15 @@ defmodule FermixChannels.Channels.IMessage.ComputerHelper do
     %{stop_watch(state) | bridge: nil, handshake: nil} |> tell({:imessage_helper, :down, class})
   end
 
-  # A fresh watch: the Mac answers with its helper's state now.
-  defp start_over(state),
-    do: state |> stop_watch() |> Map.merge(%{boot: nil, seq: nil}) |> rewatch()
+  # A fresh watch: the Mac answers with its helper's state now, the wait
+  # before asking again is the first one, and nothing of it is said yet.
+  defp start_over(state) do
+    state
+    |> stop_watch()
+    |> cancel_retry()
+    |> Map.merge(%{boot: nil, seq: nil, said: nil})
+    |> rewatch()
+  end
 
   # -- the watch ---------------------------------------------------------------------------
 
@@ -478,18 +494,49 @@ defmodule FermixChannels.Channels.IMessage.ComputerHelper do
          {:ok, %Outcome{result: %{"boot" => boot, "seq" => seq, "events" => events}}}
        )
        when is_list(events) do
-    state = %{state | watch: nil, boot: boot, seq: seq}
+    state = %{works(state) | watch: nil, boot: boot, seq: seq}
     state |> events(events) |> rewatch()
   end
 
   defp watched(state, {_ok_or_error, %Outcome{} = outcome}) do
-    Logger.warning("the Messages watch ended: #{Outcome.sentence(outcome, bridge_name(state))}")
-    retry(%{state | watch: nil, boot: nil, seq: nil})
+    state = %{state | watch: nil, boot: nil, seq: nil}
+    state |> ended(Outcome.sentence(outcome, bridge_name(state))) |> retry()
   end
 
+  # It answered: the next end waits the first wait, and an end that was said
+  # is followed by one line that the watch works.
+  defp works(%{said: nil} = state), do: cancel_retry(state)
+
+  defp works(state) do
+    Logger.info("the Messages watch works again")
+    %{cancel_retry(state) | said: nil}
+  end
+
+  # Why the watch ended, said only when it is not what was said last.
+  defp ended(state, sentence) do
+    line = "the Messages watch ended: #{sentence}"
+    if line != state.said, do: Logger.warning(line)
+    %{state | said: line}
+  end
+
+  # Asked again after the first wait, then twice the last, at most
+  # `@retry_cap` first waits, for as long as the Mac offers Messages.
   defp retry(state) do
-    Process.send_after(self(), :rewatch, state.retry_ms)
-    state
+    delay = next_wait(state)
+    timer = Process.send_after(self(), :rewatch, delay)
+    %{state | retry: %{timer: timer, delay_ms: delay}}
+  end
+
+  defp next_wait(%{retry: nil, retry_ms: first}), do: first
+
+  defp next_wait(%{retry: %{delay_ms: last}, retry_ms: first}),
+    do: min(last * 2, first * @retry_cap)
+
+  defp cancel_retry(%{retry: nil} = state), do: state
+
+  defp cancel_retry(%{retry: %{timer: timer}} = state) do
+    _left = Process.cancel_timer(timer)
+    %{state | retry: nil}
   end
 
   defp events(state, events), do: Enum.reduce(events, state, &event/2)
