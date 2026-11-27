@@ -22,11 +22,17 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
     web-triggered like WhatsApp and runs no child.
   - `:loopback` (CLI, daemon) is local/operator — no child, no config key.
 
-  Four optional entry keys:
+  Five optional entry keys:
   - `trust: :local_operator` — the transport is a same-user local surface the
     human owner is sitting at (CLI, daemon). `Gateway.Authorizer` resolves it to
     an operator authorization before any sender lookup, and the ingress gates
     below exempt it: such a channel has no inbox and therefore no allow-list.
+  - `agent: Module` — the gateway agent the channel's turns are handed to
+    (`agent.handle_message/2`). The Mac app's chat and the phone hand theirs to
+    `Companion.Turns`, which decides what each turn shows on their wire and
+    ends it there, so a turn anything else starts on such a channel (a
+    finished run's report, re-ingested) is handed to it too (`agent/1`).
+    Absent means `Gateway.Queue`.
   - `commands?: false` — the gateway skips the slash-command pipeline for the
     channel entirely; message content is always model input. Absent means `true`.
   - `platform: :macos` — the transport only exists on a Mac (iMessage reads the
@@ -61,6 +67,7 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
             :polling | :gateway | :subprocess | :webhook | :socket | :loopback | :listener,
           :child => module() | nil,
           optional(:trust) => trust(),
+          optional(:agent) => module(),
           optional(:ingress_auth) => ingress_auth(),
           optional(:commands?) => boolean(),
           optional(:platform) => platform(),
@@ -171,6 +178,7 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
       adapter: FermixChannels.Channels.Companion,
       remote?: true,
       trust: :local_operator,
+      agent: FermixChannels.Companion.Turns,
       transport: :loopback,
       child: nil
     },
@@ -180,6 +188,7 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
       adapter: FermixChannels.Channels.Mobile,
       remote?: true,
       ingress_auth: :paired_device,
+      agent: FermixChannels.Companion.Turns,
       transport: :listener,
       child: FermixChannels.Mobile.Supervisor,
       # The child reads `enabled` itself, so the switch is live (M51 §5.5).
@@ -245,6 +254,20 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
     case find(name) do
       nil -> nil
       channel -> trust_of(channel)
+    end
+  end
+
+  @doc """
+  The gateway agent a channel's turns are handed to: the one its entry names,
+  or the turn queue. Whatever starts a turn on a channel from outside its own
+  transport asks here, so the turn reaches what answers for it on that
+  channel's wire.
+  """
+  @spec agent(String.t()) :: module()
+  def agent(name) when is_binary(name) do
+    case find(name) do
+      %{agent: agent} when is_atom(agent) and not is_nil(agent) -> agent
+      _the_queue -> FermixChannels.Gateway.Queue
     end
   end
 

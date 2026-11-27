@@ -186,6 +186,19 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The Fermix app's chat no longer stays on Thinking after a report.** When a
+  phone call or a coding run started from the app's chat finished, Fermix
+  wrote its report there in a turn of its own, told the app a turn had
+  started, and never told it the turn had ended, so the chat showed Thinking
+  with a Cancel that did nothing until the app reconnected. A report is now
+  sent as what it is, a message of Fermix's own: nothing is shown while it is
+  written, it arrives when it is done, and a paired phone that is away is
+  notified of it as of any other message Fermix sends by itself. If the report
+  cannot be written, a message says so instead of nothing arriving. A request
+  that carries on after you approve something had the same fault in another
+  form, its start and its end naming two different turns on the app and on
+  the phone, and now ends as any other reply does.
+
 - **Fermix no longer loses the start of a long conversation.** When a
   conversation outgrows its limit, Fermix summarizes the older turns and keeps
   the summary. Saving the shortened conversation also deleted the stored copy

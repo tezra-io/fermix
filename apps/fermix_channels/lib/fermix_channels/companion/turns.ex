@@ -36,10 +36,31 @@ defmodule FermixChannels.Companion.Turns do
     * the queue it was handed to dying (a restart loses every outcome it held)
       ends the turn the same way, with code `interrupted`.
 
+  A turn need not have a request behind it, and is tracked like any other:
+  it has no cancel mark to read and no request to settle. A request the
+  owner's approval resumed is handed here by the gateway. It streams and ends
+  on the transport that confirmed it, under the one id `turn_id/1` gives it,
+  which both channel adapters name a turn by.
+
+  A report Fermix starts in the chat itself (a finished phone call's or
+  coding run's notice, `own?/1`) is handed here by the continuation
+  dispatcher, through the agent the channel names (`ChannelRegistry.agent/1`).
+  No client started that turn, so none is shown one: the Mac's adapter streams
+  and announces nothing of it, and when it completes each reply is written as
+  a delivery, the row every watcher hears and an away phone is pushed for. One
+  that fails is not lost in silence: one row says the report could not be
+  written and why, so the owner knows to ask for it. One that was stopped
+  writes nothing. The dispatcher re-enters a channel as its owner, and the
+  phone's channel names none to re-enter as, so no such turn runs on the
+  phone's transport.
+
   During a Live call in the chat, a turn of the chat's own conversation is
   told to the call as it is handed off, and its answer as it completes
-  (`Voice.ChatMirror`, M56 §4.3). Such a turn may end with no reply (M56
-  §4.4): when its runner says so (`silent/1`, before the reply arrives, from
+  (`Voice.ChatMirror`, M56 §4.3). A report Fermix starts is told to no call,
+  neither as typed nor by its answer: nobody typed it, and its answer rests
+  on words someone else wrote. A turn the call is told of may end with no
+  reply (M56 §4.4), which a report is never offered (`Agents.MainAgent`):
+  when its runner says so (`silent/1`, before the reply arrives, from
   the turn's own process), its reply, exactly the sentinel, is dropped rather
   than held, it ends with `turn_done`, and the call is told no answer.
 
@@ -102,10 +123,16 @@ defmodule FermixChannels.Companion.Turns do
   alias FermixChannels.Voice.ChatMirror
   alias FermixCore.Agents.ConversationKey
   alias FermixCore.Agents.LiveCallTurn
+  alias FermixCore.Agents.TurnRunner
   alias FermixCore.ReplyBlocks
   alias FermixCore.Telemetry
+  alias FermixCore.Tools.HarnessSupport
 
   @max_ended 64
+  # What the row of a report that could not be written says, around the
+  # sentence a failed run gives for its reason (`TurnRunner.error_reply/2`).
+  @unwritten_report "I had a report for you here and could not write it. "
+  @ask_for_report " Ask me for it and I will write it."
   @channels ["companion", "mobile"]
 
   @typedoc """
@@ -151,6 +178,26 @@ defmodule FermixChannels.Companion.Turns do
   # other channel's turn does.
   def handle_message(%{channel: channel} = message, queue) when is_binary(channel),
     do: Queue.handle_message(message, queue)
+
+  @doc """
+  The id of the turn that answers `message`, the one its stream and its ending
+  carry on either wire: its request's own, or, for a turn with no request
+  behind it, one made of the message's id.
+  """
+  @spec turn_id(Message.t() | map()) :: String.t()
+  def turn_id(%{id: id} = message) when is_binary(id) and id != "" do
+    Map.get(Map.get(message, :metadata) || %{}, :turn_id) || "turn-" <> id
+  end
+
+  @doc """
+  Whether Fermix started `message`'s turn itself: a finished run's notice
+  re-entering its chat, above zero in its chain, which the gateway lets only
+  the continuation dispatcher and a grant's resume hand it. No client asked
+  for such a turn, so it is shown as none on the wire.
+  """
+  @spec own?(Message.t() | map()) :: boolean()
+  def own?(message) when is_map(message),
+    do: HarnessSupport.continuation_depth(Map.get(message, :metadata) || %{}) > 0
 
   @doc """
   Settle, with `settlement`, a request of this attempt that the gateway
@@ -343,7 +390,7 @@ defmodule FermixChannels.Companion.Turns do
       {:ok, false} ->
         state = track(state, turn)
         :ok = Queue.handle_message(message, turn.queue)
-        :ok = ChatMirror.typed(turn.conversation, message.content)
+        :ok = mirror_typed(turn, message)
         state
 
       {:error, reason} ->
@@ -351,7 +398,15 @@ defmodule FermixChannels.Companion.Turns do
     end
   end
 
-  # A turn with no request behind it (a re-ingested resume) has no mark to read.
+  # A call in the chat is told what the owner typed. A report Fermix starts
+  # there was typed by nobody, and its text frames words someone else wrote,
+  # so the call is not told it; its answer is the chat's, and is told as any
+  # other.
+  defp mirror_typed(%{own?: true}, _message), do: :ok
+  defp mirror_typed(turn, message), do: ChatMirror.typed(turn.conversation, message.content)
+
+  # A turn with no request behind it (a resumed request, a report Fermix
+  # starts) has no mark to read.
   defp cancel_recorded(_state, %{attempt: nil}), do: {:ok, false}
 
   defp cancel_recorded(state, turn) do
@@ -415,12 +470,23 @@ defmodule FermixChannels.Companion.Turns do
       profile: Map.fetch!(message, :chat_id),
       client_id: Map.get(metadata, :client_msg_id) || Map.fetch!(message, :id),
       attempt: message_attempt(message),
-      turn_id: Map.get(metadata, :turn_id) || "turn-" <> Map.fetch!(message, :id),
+      turn_id: turn_id(message),
+      own?: own?(message),
+      delivery_opts: delivery_opts(metadata),
       queue: queue,
       replies: [],
       silent?: false
     }
   end
+
+  # What the delivery of a turn Fermix started itself is sent with. A finished
+  # phone call's report previews no link it names (M94 D23): the words that
+  # led to it are the called person's, and a preview is a fetch of an address
+  # they could have dictated.
+  defp delivery_opts(%{phone_call_result: call_id}) when is_binary(call_id),
+    do: [link_previews: false]
+
+  defp delivery_opts(_metadata), do: []
 
   defp track(state, turn) do
     %{
@@ -472,6 +538,12 @@ defmodule FermixChannels.Companion.Turns do
   defp hold(state, key, text),
     do: update_in(state.turns[key].replies, &[text | &1])
 
+  defp finish(state, %{own?: true} = turn, {:completed}) do
+    records = reply_records(state, turn)
+    turn.replies |> Enum.reverse() |> Enum.each(&deliver_own(turn, &1, records))
+    {nil, ended(state, turn)}
+  end
+
   defp finish(state, turn, {:completed}) do
     records = reply_records(state, turn)
     turn.replies |> Enum.reverse() |> Enum.each(&write_reply(state, turn, &1, records))
@@ -502,9 +574,24 @@ defmodule FermixChannels.Companion.Turns do
 
   defp fail(state, turn, reason) do
     settle_failed(state, turn, reason)
-    event = Output.turn_error(turn.turn_id, reason)
-    :ok = Fanout.announce(turn.profile, event, audience: turn.transport)
+    :ok = announce_failed(turn, reason)
     ended(state, turn)
+  end
+
+  # No client was shown a turn Fermix started itself, so none is told it
+  # ended. A report that failed is not lost in silence, though: one row says
+  # it could not be written and why, so the owner knows to ask for it. One
+  # that was stopped says nothing: whoever stopped it was answered.
+  defp announce_failed(%{own?: true}, :cancelled), do: :ok
+
+  defp announce_failed(%{own?: true} = turn, reason) do
+    said = TurnRunner.error_reply(reason, surface: :job)
+    deliver_own(turn, @unwritten_report <> said <> @ask_for_report, [])
+  end
+
+  defp announce_failed(turn, reason) do
+    event = Output.turn_error(turn.turn_id, reason)
+    Fanout.announce(turn.profile, event, audience: turn.transport)
   end
 
   # The place records the conversation's searches returned, taken once for a
@@ -565,8 +652,29 @@ defmodule FermixChannels.Companion.Turns do
     end
   end
 
-  # A turn with no request behind it (a re-ingested resume) has nothing to
-  # settle; every other one settles its request exactly once, here.
+  # One reply of a turn Fermix started itself. It answers no request, so it is
+  # a delivery: written with the blocks its text makes of the turn's place
+  # records and announced as its row to every watcher, the phones included,
+  # and an away phone is pushed for it (`Companion.send_message/3`). A failed
+  # write is the operator's to read, as a held reply's is.
+  defp deliver_own(turn, text, records) do
+    opts =
+      [blocks: ReplyBlocks.build(text, records), turn_id: turn.turn_id] ++ turn.delivery_opts
+
+    write = fn -> Companion.send_message(turn.profile, text, opts) end
+
+    case guarded(turn.client_id, "report", write) do
+      :ok -> :ok
+      {:error, reason} -> log_unwritten(turn, reason)
+    end
+  end
+
+  defp log_unwritten(turn, reason),
+    do: Logger.error("companion report of #{turn.turn_id} was not written: #{inspect(reason)}")
+
+  # A turn with no request behind it (a resumed request, a report Fermix
+  # starts) has nothing to settle; every other one settles its request exactly
+  # once, here.
   defp settle_completed(_state, %{attempt: nil}), do: nil
 
   defp settle_completed(state, turn) do
@@ -633,7 +741,12 @@ defmodule FermixChannels.Companion.Turns do
   # delivery is.
   defp write_untracked(state, message, text) do
     records = take_records(state, message.id, ConversationKey.from(message))
-    opts = [blocks: ReplyBlocks.build(text, records)] ++ Companion.reply_opts(message)
+    metadata = Map.get(message, :metadata) || %{}
+
+    opts =
+      [blocks: ReplyBlocks.build(text, records)] ++
+        Companion.reply_opts(message) ++ delivery_opts(metadata)
+
     write = fn -> Companion.send_message(message.reply_target, text, opts) end
 
     guarded(message.id, "reply", write)

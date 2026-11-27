@@ -18,7 +18,11 @@ defmodule FermixChannels.Channels.Companion do
   asked in the owner's inbox when that is the app goes to the phones too
   (`send_approval/2`). A turn's replies
   and its ending go through `Companion.Turns`, which writes and announces them
-  only once the queue fires the turn's outcome.
+  only once the queue fires the turn's outcome, and every event of a turn
+  names it by the id `Turns.turn_id/1` gives, the one it ends by. A turn
+  Fermix started itself (`Turns.own?/1`, a finished run's report) is shown to
+  no client as a turn: nothing of it is streamed here, and its reply arrives
+  as the row `Turns` writes when it completes.
 
   The stream tier is `:raw`: the gateway hands the turn `build_raw_stream_callback/1`
   verbatim. The loop's stream events are cumulative snapshots, so the callback
@@ -198,7 +202,11 @@ defmodule FermixChannels.Channels.Companion do
   def terminal_error_capability, do: :turn_result
 
   @impl true
-  def build_raw_stream_callback(%Message{chat_id: profile_id} = message) do
+  def build_raw_stream_callback(%Message{} = message) do
+    if Turns.own?(message), do: fn _unshown -> :ok end, else: turn_stream(message)
+  end
+
+  defp turn_stream(%Message{chat_id: profile_id} = message) do
     turn_id = turn_id(message)
     started = Output.turn_started(profile_id, turn_id, client_message_id(message))
 
@@ -249,6 +257,10 @@ defmodule FermixChannels.Channels.Companion do
   # `Capabilities.Activity`), which the client shows instead of the tool's name.
   @impl true
   def build_activity_callback(%Message{} = message) do
+    if Turns.own?(message), do: fn _unshown -> :ok end, else: turn_activity(message)
+  end
+
+  defp turn_activity(%Message{} = message) do
     turn_id = turn_id(message)
 
     fn
@@ -568,7 +580,7 @@ defmodule FermixChannels.Channels.Companion do
       attempt: request_attempt(message)
     ]
 
-  defp turn_id(%Message{metadata: metadata}), do: Map.get(metadata, :turn_id) || new_turn_id()
+  defp turn_id(%Message{} = message), do: Turns.turn_id(message)
 
   defp client_message_id(%Message{} = message),
     do: Map.get(message.metadata, :client_msg_id) || message.id
@@ -615,6 +627,4 @@ defmodule FermixChannels.Channels.Companion do
   @doc "The timeline this channel writes through (a test injects another)."
   @spec store() :: module()
   def store, do: Application.get_env(:fermix_channels, :companion_store, Timeline)
-
-  defp new_turn_id, do: "turn-#{System.unique_integer([:positive, :monotonic])}"
 end

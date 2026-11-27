@@ -857,6 +857,14 @@ was rewritten rather than grown. `tool_event` reports each tool's
 `start` and `stop`. A route that does not stream sends no `turn_started` or
 `text_delta`, only the ending.
 
+A turn need not answer a request a phone sent: a request the owner's approval
+resumed begins one too, on the transport that confirmed it. Its `turn_id` is
+`turn-` followed by an id no client sent, which its `turn_started` gives as
+`in_reply_to`, and every event of it, its ending included, carries that one
+`turn_id`. A `cancel` names a request, so it stops no such turn. A report
+Fermix starts in the Mac's chat when a phone call or a coding run finishes is
+no turn on either wire: a phone hears its reply as a `row`.
+
 A reply is one or more bubbles, each sealed by a `text_done` at its row; a
 `text_done` seals a bubble and never ends the turn. A turn ends on the wire
 exactly once:

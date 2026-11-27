@@ -46,6 +46,7 @@ defmodule FermixCore.Agents.MainAgent do
   alias FermixCore.Realtime.VoiceBridge
   alias FermixCore.Reply
   alias FermixCore.Telemetry
+  alias FermixCore.Tools.HarnessSupport
 
   @max_auto_compaction_failures 512
 
@@ -411,12 +412,16 @@ defmodule FermixCore.Agents.MainAgent do
 
   # Only an owner's turn of the chat is told, and a hand-off never is: it is
   # the call's own turn, and runs in the chat's conversation by its key
-  # override. Channels answers from the call registry and the companion
+  # override. Nor is a report Fermix starts there (a finished run's notice,
+  # above zero in its chain): nobody typed it, so it is no material for the
+  # call, and it must never end with no reply, which only a turn told of the
+  # call is offered. Channels answers from the call registry and the companion
   # clients attached, for the channel the turn came on (the Mac's and the
   # phone's turns share the chat, M56 D9); with no bridge registered no call
   # can be up.
   defp live_call(state, msg, :none) do
     with :operator <- Map.get(msg, :source_trust),
+         0 <- HarnessSupport.continuation_depth(Map.get(msg, :metadata) || %{}),
          {:ok, bridge} <- voice_bridge(state),
          {:ok, call} <- bridge.chat_call(ConversationKey.from(msg), Map.fetch!(msg, :channel)) do
       call

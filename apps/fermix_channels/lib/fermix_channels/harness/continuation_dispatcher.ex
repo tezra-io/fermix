@@ -10,7 +10,11 @@ defmodule FermixChannels.Harness.ContinuationDispatcher do
   mechanism is the sandbox-grant `/confirm` auto-resume, reused rather than
   re-invented: synthesize an inbound message and `Gateway.ingest/2` it, so
   authorization, the reply surface, and per-conversation queueing all happen
-  exactly as for real inbound.
+  exactly as for real inbound. The message is handed to the agent the channel's
+  own transport hands its turns to (`ChannelRegistry.agent/1`): in the Mac
+  app's chat that is `Companion.Turns`, which knows every queue turn of that
+  chat and decides what each one shows on its wire. A report is shown as no
+  turn there, only as the row of its reply (`Turns.own?/1`).
 
   The ingest runs **inline** and its result is the return value — the grant
   resume's async hop exists because it re-enters the same `Gateway.ingest`
@@ -76,8 +80,9 @@ defmodule FermixChannels.Harness.ContinuationDispatcher do
 
   @doc """
   Same as `dispatch/1` with injectable seams: `:ingest` (default
-  `Gateway.ingest/2`), `:agent`, and `:agent_server` (both default to the
-  `Gateway.Queue`, the transports' default).
+  `Gateway.ingest/2`), `:agent` (default the channel's own,
+  `ChannelRegistry.agent/1`) and `:agent_server` (default the
+  `Gateway.Queue`).
   """
   @spec dispatch(map(), keyword()) :: :ok | {:error, term()}
   def dispatch(notice, opts) when is_map(notice) and is_list(opts) do
@@ -247,7 +252,7 @@ defmodule FermixChannels.Harness.ContinuationDispatcher do
     # sender, with the grant resume, the gateway keeps it from.
     ingest_opts = [
       channel: adapter,
-      agent: Keyword.get(opts, :agent, Queue),
+      agent: Keyword.get_lazy(opts, :agent, fn -> ChannelRegistry.agent(message.channel) end),
       agent_server: agent_server(opts),
       keep_chain_metadata: true
     ]

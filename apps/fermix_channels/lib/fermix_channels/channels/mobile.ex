@@ -459,7 +459,8 @@ defmodule FermixChannels.Channels.Mobile do
       attempt: value(message.metadata, :mobile_attempt)
     ]
 
-  defp turn_id(%Message{metadata: metadata}), do: value(metadata, :turn_id) || new_turn_id()
+  # The id `Companion.Turns` ends the turn by, so its stream names the same.
+  defp turn_id(%Message{} = message), do: Turns.turn_id(message)
 
   defp client_message_id(%Message{} = message),
     do: value(message.metadata, :client_msg_id) || message.id
@@ -918,6 +919,4 @@ defmodule FermixChannels.Channels.Mobile do
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
-
-  defp new_turn_id, do: "turn-#{System.unique_integer([:positive, :monotonic])}"
 end

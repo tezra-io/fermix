@@ -1084,6 +1084,19 @@ model's summary of each step of its reasoning as it completes (see *Version
 6*). Both say what the turn is doing; neither is part of its reply, and
 neither is kept once the turn ends.
 
+A turn need not answer a request a client sent: a request the owner's
+approval resumed begins one, on the transport that confirmed it. Its
+`turn_started` names in `in_reply_to` an id no client sent and no row carries.
+It streams and ends as any other turn does, every event of it under the one
+`turn_id` its `turn_started` gave. A `cancel` names a request, so it stops no
+such turn.
+
+A report Fermix starts in the chat itself, when a phone call or a coding run
+started there finishes, is no turn on this wire: no client started it, so
+nothing of it is streamed and nothing ends. Its reply arrives as a `row` once
+it is written, as a job's message does. A report that could not be written
+arrives as a `row` that says so, and one that was stopped sends nothing.
+
 A turn ends on the wire exactly once, and only from its outcome in the
 daemon's turn queue:
 

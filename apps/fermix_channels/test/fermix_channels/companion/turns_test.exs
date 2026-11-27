@@ -18,16 +18,20 @@ defmodule FermixChannels.Companion.TurnsTest do
   alias FermixChannels.Companion.Requests
   alias FermixChannels.Companion.Supervisor, as: CompanionSupervisor
   alias FermixChannels.Companion.Turns
+  alias FermixChannels.Gateway
   alias FermixChannels.Gateway.DraftStream
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.WorkRegistry
+  alias FermixChannels.Harness.ContinuationDispatcher
   alias FermixChannels.Mobile.DeviceRegistry
   alias FermixChannels.Mobile.DeviceStore
   alias FermixChannels.Mobile.EventRouter
   alias FermixChannels.Mobile.Management
   alias FermixChannels.Mobile.Protocol, as: MobileProtocol
   alias FermixChannels.Mobile.RequestCoordinator
+  alias FermixChannels.Mobile.Supervisor, as: MobileSupervisor
   alias FermixCore.Agents.ConversationKey
+  alias FermixCore.Agents.TurnRunner
   alias FermixCore.Companion.Protocol, as: CompanionProtocol
   alias FermixCore.Companion.Timeline
   alias FermixCore.Memory.ConversationStore
@@ -687,6 +691,135 @@ defmodule FermixChannels.Companion.TurnsTest do
     refute_received {:reported_here, _cause}
   end
 
+  # A finished phone call's or coding run's report re-enters the chat as a
+  # turn Fermix starts itself. The continuation dispatcher hands it to this
+  # agent, as the chat's own transport hands its turns, but no client started
+  # it, so none is shown a turn: its reply arrives as a row when it completes.
+  describe "a report Fermix starts in the chat" do
+    test "is shown as no turn, and its reply arrives as a row once it completes", ctx do
+      # The phone tree runs while its supervisor's name is registered.
+      start_supervised!(%{
+        id: :phone_tree,
+        start: {Agent, :start_link, [fn -> :phone_tree end, [name: MobileSupervisor]]}
+      })
+
+      assert :ok = ContinuationDispatcher.dispatch(report_notice(), agent_server: ctx.queue)
+      assert_receive {:enqueued, turn}
+      assert turn.channel == "companion"
+      assert turn.metadata.phone_call_result == "pc_1"
+
+      turn.stream_spec.callback.({:session_started, "session-1"})
+      turn.stream_spec.callback.({:text_delta, "The dentist"})
+      turn.stream_spec.callback.({:reasoning_done, "Reading the call's report."})
+      assert :ok = turn.activity_callback.({:tool_start, "web_search"})
+
+      # The reply is held for the turn's outcome, as a typed message's is.
+      assert :ok = turn.reply_fn.({:text, "The dentist confirmed Tuesday at three."})
+      drain(ctx)
+      refute_received {:companion_event, _nothing_yet}
+      refute_received {:companion_stream, _turn, _update}
+      assert {:ok, %{messages: []}} = RepoTimeline.history_page("main", limit: 10)
+
+      turn.turn_result_fn.({:completed})
+
+      assert_receive {:companion_event,
+                      %{"t" => "row", "role" => "assistant", "server_seq" => seq} = row}
+
+      assert row["text"] == "The dentist confirmed Tuesday at three."
+      assert row["metadata"]["turn_id"] == Turns.turn_id(turn)
+      assert {:ok, _line} = CompanionProtocol.encode_server_event("row", row)
+
+      # It answers no request, so it is a delivery: a phone hears its row, and
+      # one that is away is pushed for it, as for a job's message.
+      assert_receive {:mobile_event, "main", %{"t" => "row", "server_seq" => ^seq} = phone_row}
+      refute Map.has_key?(phone_row, "in_reply_to")
+      assert_receive {:push, "main", ^seq}
+
+      # Nothing ends on the wire: no client was shown a turn.
+      drain(ctx)
+      refute_received {:companion_event, _turn_event}
+      assert {:ok, %{messages: [_only]}} = RepoTimeline.history_page("main", limit: 10)
+    end
+
+    # A report must not be lost in silence: the call it is about may have
+    # agreed something. No client was shown a turn, so none is told it failed,
+    # and one row says the report could not be written, in a failed run's own
+    # sentence for the reason.
+    test "one that fails leaves a row that says it could not be written", ctx do
+      assert :ok = ContinuationDispatcher.dispatch(report_notice(), agent_server: ctx.queue)
+      assert_receive {:enqueued, turn}
+
+      assert :ok = turn.reply_fn.({:text, "A reply the turn never committed."})
+      turn.turn_result_fn.({:failed, :provider_down})
+
+      assert_receive {:companion_event, %{"t" => "row", "role" => "assistant", "text" => said}}
+      assert said =~ "I had a report for you here and could not write it."
+      assert said =~ TurnRunner.error_reply(:provider_down, surface: :job)
+      refute said =~ "never committed"
+
+      drain(ctx)
+      refute_received {:companion_event, _turn_event}
+      assert {:ok, %{messages: [_only]}} = RepoTimeline.history_page("main", limit: 10)
+    end
+
+    test "one that is stopped writes nothing and tells no client", ctx do
+      assert :ok = ContinuationDispatcher.dispatch(report_notice(), agent_server: ctx.queue)
+      assert_receive {:enqueued, turn}
+
+      assert :ok = turn.reply_fn.({:text, "A reply the turn never committed."})
+      turn.turn_result_fn.({:cancelled})
+      drain(ctx)
+
+      refute_received {:companion_event, _any}
+      refute_received {:mobile_event, "main", _any}
+      assert {:ok, %{messages: []}} = RepoTimeline.history_page("main", limit: 10)
+    end
+
+    test "one whose queue dies under it leaves the same row, once", ctx do
+      assert :ok = ContinuationDispatcher.dispatch(report_notice(), agent_server: ctx.queue)
+      assert_receive {:enqueued, turn}
+
+      ref = Process.monitor(ctx.queue)
+      Process.exit(ctx.queue, :kill)
+      assert_receive {:DOWN, ^ref, :process, _pid, :killed}
+
+      assert_receive {:companion_event, %{"t" => "row", "text" => said}}
+      assert said =~ "I had a report for you here and could not write it."
+
+      # Its outcome, behind the queue's death, finds the turn ended.
+      turn.turn_result_fn.({:completed})
+      _turns = :sys.get_state(Turns)
+      refute_received {:companion_event, _second}
+      assert {:ok, %{messages: [_only]}} = RepoTimeline.history_page("main", limit: 10)
+    end
+
+    # A preview is a fetch of an address the called person could have
+    # dictated, so a call's report asks for none (M94 D23); a coding run's does.
+    test "a phone call's report previews no link, a coding run's does", ctx do
+      test_pid = self()
+
+      Application.put_env(:fermix_channels, :link_preview_launcher, fn _task ->
+        send(test_pid, :preview_asked)
+        :ok
+      end)
+
+      assert :ok = ContinuationDispatcher.dispatch(report_notice(), agent_server: ctx.queue)
+      assert_receive {:enqueued, call}
+      assert :ok = call.reply_fn.({:text, "They said to see https://clinic.example/forms."})
+      call.turn_result_fn.({:completed})
+      assert_receive {:companion_event, %{"t" => "row"}}
+      drain(ctx)
+      refute_received :preview_asked
+
+      assert :ok = ContinuationDispatcher.dispatch(run_notice(), agent_server: ctx.queue)
+      assert_receive {:enqueued, run}
+      assert :ok = run.reply_fn.({:text, "Opened https://code.example/pull/7."})
+      run.turn_result_fn.({:completed})
+      assert_receive {:companion_event, %{"t" => "row"}}
+      assert_receive :preview_asked
+    end
+  end
+
   describe "a command that replies after ingest returns (R2-1)" do
     setup do
       Process.register(self(), :companion_turns_test)
@@ -1213,6 +1346,23 @@ defmodule FermixChannels.Companion.TurnsTest do
                       {:chat, {:answered, %{role: "assistant", content: "Saved the lease."}}}}
     end
 
+    # Nobody typed a report, and its answer rests on words someone else wrote:
+    # a call in the chat hears neither.
+    test "a report Fermix starts is told to the call neither as typed nor by its answer", ctx do
+      :ok = CallRegistry.claim(CallRegistry, call_in("chat"))
+
+      assert :ok = ContinuationDispatcher.dispatch(report_notice(), agent_server: ctx.queue)
+      assert_receive {:enqueued, turn}
+
+      :ok = ConversationStore.add_message(ctx.chat_key, "assistant", "They confirmed Tuesday.")
+      assert :ok = turn.reply_fn.({:text, "They confirmed Tuesday."})
+      turn.turn_result_fn.({:completed})
+
+      assert_receive {:companion_event, %{"t" => "row", "text" => "They confirmed Tuesday."}}
+      drain(ctx)
+      refute_received {:"$gen_cast", {:chat, _told}}
+    end
+
     test "a turn that ends without an answer of its own tells the call nothing more", ctx do
       :ok = CallRegistry.claim(CallRegistry, call_in("chat"))
       id = unique()
@@ -1483,6 +1633,54 @@ defmodule FermixChannels.Companion.TurnsTest do
   # The phone's whole wire for a reply whose last streamed edit already holds
   # the final text, the ordinary case: through the draft spec the gateway put
   # on the queued turn, on the real timeline store.
+  # A request the owner's approval resumed has no request row behind it. Its
+  # turn still streams and ends on the phones under the one id it started
+  # with, or a phone is left holding a turn that nothing ends.
+  describe "a resumed request on the phone" do
+    test "streams and ends under one turn id", ctx do
+      resume =
+        Message.new!(%{
+          id: "grant-resume-9",
+          content: "go on",
+          sender: "Mobile owner",
+          channel: "mobile",
+          chat_id: "main",
+          reply_target: "main",
+          metadata: %{resumed_from_grant: "TOK"}
+        })
+
+      assert :ok =
+               Gateway.ingest([resume],
+                 channel: Mobile,
+                 agent: Turns,
+                 agent_server: ctx.queue,
+                 ingress_context: mobile_context(ctx),
+                 keep_chain_metadata: true
+               )
+
+      assert_receive {:enqueued, %{stream_spec: %DraftStream.Spec{} = spec} = turn}
+      turn_id = "turn-grant-resume-9"
+      pid = DraftStream.start_link(spec)
+      DraftStream.push(pid, {:text_delta, "Done."})
+
+      assert_receive {:mobile_event, "main",
+                      %{
+                        "t" => "turn_started",
+                        "turn_id" => ^turn_id,
+                        "in_reply_to" => "grant-resume-9"
+                      }}
+
+      assert_receive {:mobile_event, "main", %{"t" => "text_delta", "turn_id" => ^turn_id}}
+      assert :ok = DraftStream.discard(pid)
+
+      assert :ok = turn.reply_fn.({:text, "Done."})
+      assert_receive {:mobile_event, "main", %{"t" => "text_done", "turn_id" => ^turn_id}}
+
+      turn.turn_result_fn.({:completed})
+      assert_receive {:mobile_event, "main", %{"t" => "turn_done", "turn_id" => ^turn_id}}
+    end
+  end
+
   describe "a phone reply streamed in full" do
     test "its seal stores the row and completes the request; the turn then ends once", ctx do
       id = unique()
@@ -1636,6 +1834,38 @@ defmodule FermixChannels.Companion.TurnsTest do
   end
 
   defp request(id), do: RepoTimeline.get_client_request("main", id, [])
+
+  # A finished phone call's notice for the Mac chat, as core hands it over.
+  defp report_notice do
+    %{
+      platform: "companion",
+      destination: "main",
+      thread: nil,
+      client_origin: nil,
+      content: "[phone call pc_1 finished]\nanswered",
+      metadata: %{
+        harness_continuation: true,
+        harness_continuation_depth: 1,
+        phone_call_result: "pc_1"
+      }
+    }
+  end
+
+  # A finished coding run's notice for the Mac chat.
+  defp run_notice do
+    %{
+      platform: "companion",
+      destination: "main",
+      thread: nil,
+      client_origin: nil,
+      content: "[coding run hr_1 finished]\ncodex · completed · /repo",
+      metadata: %{
+        harness_continuation: true,
+        harness_continuation_depth: 1,
+        harness_run_id: "hr_1"
+      }
+    }
+  end
 
   defp msg_payload(id, text),
     do: %{"client_msg_id" => id, "profile_id" => "main", "text" => text, "attach_ids" => []}
