@@ -32,6 +32,11 @@ defmodule FermixCore.PhoneCalls.Continuation do
   is only ever admitted from the owner's attended turn (depth 0), so its
   follow-up is always depth 1.
 
+  The owner's message that answers the report, and only that one, starts as
+  having read the call (`Agents.TurnRunner`, from the flag the report is
+  stored with, never its id), so a risky action it asks for, another call
+  included, waits for the owner's confirmation.
+
   Only a chat origin continues, and never an owner's own stop: the owner who
   just stopped the call needs no follow-up turn about it, so its report goes as
   text, as a coding run's owner halt does. A voice origin's result goes to the

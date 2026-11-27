@@ -994,6 +994,8 @@ def test_the_shipped_numbered_rubrics_parse():
                       "marlow_the_twelfth": 2, "seven_full_eight_fifteen": 3,
                       "leading_question_corrected": 3, "deposit_options_then_choice": 3,
                       "deposit_then_go_ahead": 2, "deposit_status_check": 3,
+                      "thursday_slot_call_back": 2, "ring_back_for_thursday": 2,
+                      "go_ahead_call_again": 2,
                       "quick_yes_over_the_readback": 3, "talked_over_then_record": 2,
                       "talked_over_so_are_we_set": 2,
                       "bike_shop_no_answer": 2, "bike_shop_no_redial": 2,

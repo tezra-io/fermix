@@ -23,9 +23,10 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   What a turn's first model call carries has a provenance too:
   `message_sources/1` (a forwarded message and its attachments),
   `recent_activity_source/0` and `open_loop_source/0` are what
-  `Agents.TurnRunner` seeds the turn with, a provenance only: the content itself
-  is not framed here (a due open loop's words are framed by `OpenLoops.DueNote`),
-  so an owner's own checklist still reads as theirs.
+  `Agents.TurnRunner` seeds the turn with, and `phone_call_source/0` the
+  owner's message that answers a phone call's report, a provenance only: the
+  content itself is not framed here (a due open loop's words are framed by
+  `OpenLoops.DueNote`), so an owner's own checklist still reads as theirs.
   """
 
   alias FermixCore.Agents.RequestIdentity
@@ -328,7 +329,11 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   owner's conversation, whose message frames the person's words
   (`Agents.TurnRunner`, from the result's own marker). Never a coding run's,
   so a confirmation the backend turn raises names the call; the result's turn
-  has no tools and raises none (M94 D23).
+  has no tools and raises none (M94 D23). The owner's message that answers
+  that report starts with it too, the one replayed text that taints a turn
+  (`Agents.TurnRunner`, from the flag the report is stored with): what it asks
+  for is the owner's own new request, and a risky action in it waits for their
+  confirmation, which names the call.
   """
   @spec phone_call_source() :: outside_source()
   def phone_call_source, do: {:phone_call, "a phone call"}

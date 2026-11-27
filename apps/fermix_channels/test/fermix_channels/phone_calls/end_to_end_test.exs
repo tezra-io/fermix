@@ -28,6 +28,7 @@ defmodule FermixChannels.PhoneCalls.EndToEndTest do
   alias FermixCore.Capabilities.BuiltinSeeder
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
   alias FermixCore.PhoneCalls.CallControls
@@ -64,6 +65,16 @@ defmodule FermixChannels.PhoneCalls.EndToEndTest do
   }
 
   @readback "A table for two on Saturday, March 8 at 7:30 PM, under Rowan Tellis"
+
+  # The owner's answer to a report that only 9:15 is open: the bistro again.
+  @call_back_brief Map.merge(@brief, %{
+                     "goal" => "Reserve a table for two on Saturday, March 8, 2031 at 9:15 PM.",
+                     "completion_criteria" => [
+                       "The bistro confirms a table for two on March 8, 2031 at 9:15 PM.",
+                       "The name the reservation is under."
+                     ],
+                     "times" => [%{"label" => "Requested table", "at" => "2031-03-08T21:15"}]
+                   })
 
   # --- the parts that would leave the machine, and the seams around them -------
 
@@ -234,13 +245,36 @@ defmodule FermixChannels.PhoneCalls.EndToEndTest do
 
   # The real `phone_call` tool, with the test's manager, readiness and clock
   # in the context seams it reads. Its gates, the access gate's included, are
-  # the real ones.
+  # the real ones. The access gate asks a start's effect module what the owner
+  # confirms (`Capabilities.ExternalEffect`) before the tool runs, so this
+  # module is the capability's effect module too, each callback the tool's own
+  # over the same seams.
   defmodule SeamedPhoneCall do
+    @behaviour FermixCore.Capabilities.ExternalEffect
+
     alias FermixCore.Tools.PhoneCall
 
     def execute(args, context), do: PhoneCall.execute(args, seamed(context))
     def advertise?(context), do: PhoneCall.advertise?(seamed(context))
     def dynamic_parameters(context), do: PhoneCall.dynamic_parameters(seamed(context))
+
+    @impl true
+    def confirmation(args, context), do: PhoneCall.confirmation(args, seamed(context))
+
+    @impl true
+    def effect, do: PhoneCall.effect()
+
+    @impl true
+    def effect_name, do: PhoneCall.effect_name()
+
+    @impl true
+    def effect_call?(args), do: PhoneCall.effect_call?(args)
+
+    @impl true
+    def confirmed(result), do: PhoneCall.confirmed(result)
+
+    @impl true
+    def context_keys, do: PhoneCall.context_keys()
 
     defp seamed(context),
       do: Map.merge(context, FermixTestSupport.PhoneCallFakes.scripted(:tool_seams, %{}))
@@ -380,9 +414,12 @@ defmodule FermixChannels.PhoneCalls.EndToEndTest do
   # The owner's cached context: the owner's tools are `phone_call` and one that
   # shows the test the context a turn's tools receive.
   defp runtime_context do
+    real = Builtin.from_tool_module(FermixCore.Tools.PhoneCall)
+
     phone_call = %{
-      Builtin.from_tool_module(FermixCore.Tools.PhoneCall)
-      | executor: {SeamedPhoneCall, :execute, []}
+      real
+      | executor: {SeamedPhoneCall, :execute, []},
+        metadata: Map.put(real.metadata, :tool_module, SeamedPhoneCall)
     }
 
     recorder =
@@ -853,5 +890,64 @@ defmodule FermixChannels.PhoneCalls.EndToEndTest do
 
     assert_received {:telemetry, [:fermix, :phone_call, :run_complete], _m,
                      %{outcome: "needs_owner"}}
+
+    prompt = call_back_waits!(ctx, call)
+    next_message_is_the_owners!(ctx)
+
+    # The owner says no: the parked start is dropped, and nothing was dialed.
+    [_line, token] = Regex.run(~r{/confirm ([^`\s]+)}, prompt)
+    denied = owner_asks!(ctx, "/deny #{token}")
+    assert_receive {:channel_reply, ^denied, "Not sent: the command was not approved."}, @arrival
+    refute_received {:create, _task, _request}
+    assert {:ok, [only]} = Ledger.list_recent("default", server: ctx.repo)
+    assert only.id == call.id
+  end
+
+  # The owner answers the report with a request of their own: call back for the
+  # 9:15 table. That turn starts as having read the call (the person's words
+  # are in the report it answers), so the start waits for the owner's confirm,
+  # which shows the brief, and no call is admitted meanwhile. Answers the
+  # prompt the owner read.
+  defp call_back_waits!(ctx, call) do
+    answered = owner_asks!(ctx, "Yes, call them back and take the 9:15 table.")
+    {model, {:chat, _messages, tools}} = model_asked!()
+    assert "phone_call" in tools
+    start = {"phone_call", %{"action" => "start", "brief" => @call_back_brief}}
+    answer(model, {:tools, [{"record_context", %{}}, start]})
+
+    assert_receive {:tool_context, answering}, @arrival
+    assert answering.outside_sources == MapSet.new([UntrustedContent.phone_call_source()])
+
+    assert_receive {:channel_reply, ^answered, prompt}, @arrival
+    assert prompt =~ ~s(Call "Calloway Bistro" \(a business\) at #{@destination})
+
+    assert prompt =~
+             "Asked because this request came after reading content someone else could " <>
+               "have written (a phone call)."
+
+    {model, {:continue, [_recorded, held]}} = model_asked!()
+    assert held.output =~ "Not done yet: phone_call places a phone call"
+    answer(model, {:reply, "The call back waits for your confirmation."})
+    assert_receive {:channel_reply, ^answered, "The call back waits" <> _rest}, @arrival
+
+    refute_received {:create, _task, _request}
+    assert {:ok, [only]} = Ledger.list_recent("default", server: ctx.repo)
+    assert only.id == call.id
+    prompt
+  end
+
+  # The owner's next message is their own again: the report is only replayed.
+  defp next_message_is_the_owners!(ctx) do
+    asked = owner_asks!(ctx, "Thanks. Whose name would the table be under?")
+    {model, {:chat, messages, _tools}} = model_asked!()
+    assert Enum.any?(messages, &(&1.content =~ "Outcome: needs_owner"))
+    answer(model, {:tools, [{"record_context", %{}}]})
+
+    assert_receive {:tool_context, later}, @arrival
+    assert later.outside_sources == MapSet.new()
+
+    {model, {:continue, [_recorded]}} = model_asked!()
+    answer(model, {:reply, "Rowan Tellis, once you confirm the call."})
+    assert_receive {:channel_reply, ^asked, "Rowan Tellis" <> _rest}, @arrival
   end
 end

@@ -109,7 +109,7 @@ the trunk password and the OpenAI Platform key the phone engine reuses (the
 `evallib.phone_sim.SEEDED`, the one the runners' simulated GPT-Live endpoint
 checks each create against. Turning the section on is the one setup decision a
 call needs; the owner's confirmation of a call that outside content asked for
-(the access gate) is not pre-granted, because one scenario is about it. The
+(the access gate) is not pre-granted, because two scenarios are about it. The
 daemon reaches the simulator, never OpenAI or a carrier: a development build
 decides at boot where its calls go (`FermixCore.Application.phone_call_transport_opts/2`)
 and sends them to `FERMIX_EVAL_FIXTURE_ORIGIN` when this home's

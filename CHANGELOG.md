@@ -50,7 +50,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   message that brings the report is written with no tools, so Fermix looks
   nothing up and sends, changes or starts nothing on what was said, and what
   happens next waits for your own next message. The report then stays in the
-  conversation, so that next request is answered with it in view. While a call
+  conversation, so that next request is answered with it in view, and since
+  it answers what the other person said, another call it asks for (or
+  anything else that needs your yes after outside content) waits for your
+  confirmation; a message after that one is an ordinary request. While a call
   is in progress Fermix refuses `fermix restart`, the setup page's **Apply &
   restart**, and a change of the OpenAI key or the connection's password (the
   Linux app's Restart and an app's Restart of an Always On server are not

@@ -716,11 +716,12 @@ defmodule FermixCore.Agents.TurnRunner do
       # What this turn's first model call carries that someone else could have
       # written: a forwarded message, its attachments (a voice note aside), a
       # coding-run continuation's vendor text, and below a Recent Activity note
-      # that rendered. A provenance
-      # for `Capabilities.AccessGate`, from this turn's message only, so a later
-      # turn replaying the text is not tainted; the loop keeps it (`put_new`) and
-      # folds in what the turn's tools read.
-      outside_sources: initial_outside_sources(msg),
+      # that rendered. A provenance for `Capabilities.AccessGate`, from this
+      # turn's message, so a later turn replaying the text is not tainted, with
+      # one exception: the owner's message that answers a phone call's report
+      # starts as having read the call (`initial_outside_sources/2`). The loop
+      # keeps it (`put_new`) and folds in what the turn's tools read.
+      outside_sources: initial_outside_sources(msg, history),
       # What the owner typed, before the attachment manifest was composed into
       # the content, and nothing for a forwarded message. An open-loop answer
       # given after outside content must quote it (`OpenLoops.Registry`), and it
@@ -808,15 +809,17 @@ defmodule FermixCore.Agents.TurnRunner do
 
   defp tell_history_tainted(_voice_call, _msg, _state, _history, _stream_callback), do: :ok
 
-  # The turn's message-borne outside content, before any tool runs: a
+  # The turn's outside content before any tool runs, from its message: a
   # forwarded message and its attachments, when it re-enters as a finished
   # coding run's notice (the continuation marker, whose content is the vendor
   # CLI's text) that run's provenance, or as a finished phone call's result
   # (the same marker and the call's own, whose content frames the words of the
   # person called) that call's, and when it is a request re-run after the
   # owner's `/confirm` what its parked turn had read (`:resumed_sources`, set
-  # only by that re-ingest).
-  defp initial_outside_sources(msg) do
+  # only by that re-ingest). What `history` replays brings nothing, but for the
+  # one exception the owner set after a call (M94 D26):
+  # `put_call_report_source/3`.
+  defp initial_outside_sources(msg, history) do
     sources = UntrustedContent.message_sources(msg)
 
     sources =
@@ -824,8 +827,44 @@ defmodule FermixCore.Agents.TurnRunner do
         do: MapSet.put(sources, continuation_source(msg)),
         else: sources
 
-    MapSet.union(sources, resumed_sources(msg))
+    sources
+    |> put_call_report_source(msg, history)
+    |> MapSet.union(resumed_sources(msg))
   end
+
+  # The owner's message that answers a phone call's report starts as having
+  # read the call: whatever happens next is their own new request, and any
+  # risky action it asks for waits for their confirmation, since the report it
+  # answers frames what the person called said. Only that message: one that is
+  # itself a continuation notice is not the owner's, and once the owner has
+  # sent any other message the report is only replayed. What reached the
+  # conversation in between and is not the owner's changes nothing.
+  defp put_call_report_source(sources, msg, history) do
+    if harness_continuation_depth(msg) == 0 and answers_call_report?(history),
+      do: MapSet.put(sources, UntrustedContent.phone_call_source()),
+      else: sources
+  end
+
+  # Whether the owner has sent nothing since a phone call's report: walking
+  # `history` back from its newest message, a call's report (the flag the
+  # store keeps on it, `ConversationStore`'s `phone_call_result`) comes before
+  # any message of the owner's own. A checkpoint summary is a system message
+  # and carries no flag, so a report compacted into one is gone.
+  defp answers_call_report?(history) when is_list(history) do
+    case history |> Enum.reverse() |> Enum.find(&owners_or_report?/1) do
+      %{phone_call_result: true} -> true
+      _owner_message_or_none -> false
+    end
+  end
+
+  # A user-role message that is a call's report or the owner's own. Fermix's
+  # replies, a coding run's notice and a guest's message are neither, so one
+  # of them after a report does not stand in for the owner's answer.
+  defp owners_or_report?(%{role: "user", phone_call_result: true}), do: true
+  defp owners_or_report?(%{role: "user", harness_continuation: true}), do: false
+  defp owners_or_report?(%{role: "user", guest: true}), do: false
+  defp owners_or_report?(%{role: "user"}), do: true
+  defp owners_or_report?(_not_a_user_message), do: false
 
   defp continuation_source(msg) do
     if phone_call_result(msg),
@@ -1521,7 +1560,11 @@ defmodule FermixCore.Agents.TurnRunner do
       sender: msg.sender,
       agent_id: state.memory_agent_id,
       owner_id: state.memory_owner_id,
-      metadata: msg |> user_message_metadata(voice_call) |> mark_continuation(msg)
+      metadata:
+        msg
+        |> user_message_metadata(voice_call)
+        |> mark_continuation(msg)
+        |> mark_phone_call_result(msg)
     )
   end
 
@@ -1533,6 +1576,17 @@ defmodule FermixCore.Agents.TurnRunner do
   defp mark_continuation(metadata, msg) do
     if harness_continuation_depth(msg) > 0,
       do: Map.put(metadata || %{}, :harness_continuation, true),
+      else: metadata
+  end
+
+  # A phone call's report is stored with a flag of its own besides
+  # (`phone_call_result: true`, in place of the call's id the notice carried
+  # in), so the owner's message that answers it can tell from history
+  # (`answers_call_report?/1`). Only a continuation is a call's report
+  # (`phone_call_result/1`), so `mark_continuation/2` has made the metadata a map.
+  defp mark_phone_call_result(metadata, msg) do
+    if phone_call_result(msg),
+      do: Map.put(metadata, :phone_call_result, true),
       else: metadata
   end
 

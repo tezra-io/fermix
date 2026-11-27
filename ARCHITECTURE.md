@@ -1645,7 +1645,13 @@ the dispatcher `Delivery.Continuation` resolves for every run kind) as a turn
 that can only report: the turn carrying a finished call's marker runs on
 `RuntimeContext.reply_only_profile/1`, with no capability offered or
 dispatchable, so after a call Fermix does nothing on what was said in it and
-what happens next is the owner's own new request (M94 D23). Anything
+what happens next is the owner's own new request (M94 D23). The owner's
+message that answers the report starts as having read the call
+(`Agents.TurnRunner` seeds `UntrustedContent.phone_call_source/0` while the
+conversation's most recent user-role message carries the stored
+`phone_call_result` flag), so the access gate asks before another call or
+any other call it decides after outside content; once the owner has sent
+another message the report is only replayed (M94 D26). Anything
 else or a failed dispatch is one send (`PhoneCalls.Delivery`, over
 `Delivery.FrozenSend`, to the origin `Delivery.FrozenOrigin.resolve/2` froze
 on the row), and `DeliveryWorker` owns the bounded rest.

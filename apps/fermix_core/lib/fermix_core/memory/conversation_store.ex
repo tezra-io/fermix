@@ -298,6 +298,7 @@ defmodule FermixCore.Memory.ConversationStore do
     |> maybe_mark_tainted(Keyword.get(opts, :metadata))
     |> maybe_mark_guest(Keyword.get(opts, :metadata))
     |> maybe_mark_continuation(Keyword.get(opts, :metadata))
+    |> maybe_mark_phone_call_result(Keyword.get(opts, :metadata))
     |> maybe_mark_forwarded(Keyword.get(opts, :metadata))
     |> maybe_mark_spoken(Keyword.get(opts, :metadata))
   end
@@ -325,6 +326,15 @@ defmodule FermixCore.Memory.ConversationStore do
     do: Map.put(message, :harness_continuation, true)
 
   defp maybe_mark_continuation(message, _metadata), do: message
+
+  # A finished phone call's report, a continuation notice too, keeps a flag of
+  # its own (a boolean, never the call's id): the owner's message that answers
+  # it is told by it that it answers a call's report (`Agents.TurnRunner`), so
+  # a compaction's retained tail and a reload must keep it as well.
+  defp maybe_mark_phone_call_result(message, %{phone_call_result: true}),
+    do: Map.put(message, :phone_call_result, true)
+
+  defp maybe_mark_phone_call_result(message, _metadata), do: message
 
   # A message the owner forwarded keeps its marker for the same reason: someone
   # else wrote it, and a retained one that lost the marker would be read by the
@@ -359,6 +369,7 @@ defmodule FermixCore.Memory.ConversationStore do
     |> carry_taint(message)
     |> carry_guest(message)
     |> carry_continuation(message)
+    |> carry_phone_call_result(message)
     |> carry_forwarded(message)
     |> carry_spoken(message)
   end
@@ -388,6 +399,14 @@ defmodule FermixCore.Memory.ConversationStore do
 
     if marked == true do
       Map.put(normalized, :harness_continuation, true)
+    else
+      normalized
+    end
+  end
+
+  defp carry_phone_call_result(normalized, message) do
+    if Map.get(message, :phone_call_result, Map.get(message, "phone_call_result")) == true do
+      Map.put(normalized, :phone_call_result, true)
     else
       normalized
     end
@@ -547,11 +566,19 @@ defmodule FermixCore.Memory.ConversationStore do
 
   # Per-message metadata on the durable replace: a retained message persists
   # the markers it carries — Computer History taint, guest authorship, a coding
-  # run's notice, a forwarded message, a spoken request and its call — and the
-  # backfill side re-derives them from the row's metadata; an unmarked message
-  # keeps the caller's opts.
+  # run's or a phone call's notice, a forwarded message, a spoken request and
+  # its call — and the backfill side re-derives them from the row's metadata;
+  # an unmarked message keeps the caller's opts.
   defp replace_message_opts(opts, message) do
-    markers = [:history_tainted, :guest, :harness_continuation, :forwarded, :spoken, :call_uuid]
+    markers = [
+      :history_tainted,
+      :guest,
+      :harness_continuation,
+      :phone_call_result,
+      :forwarded,
+      :spoken,
+      :call_uuid
+    ]
 
     case Map.take(message, markers) do
       markers when map_size(markers) == 0 -> opts
@@ -897,6 +924,7 @@ defmodule FermixCore.Memory.ConversationStore do
     |> maybe_mark_tainted_from_row(row)
     |> maybe_mark_guest_from_row(row)
     |> maybe_mark_continuation_from_row(row)
+    |> maybe_mark_phone_call_result_from_row(row)
     |> maybe_mark_forwarded_from_row(row)
     |> maybe_mark_spoken_from_row(row)
   end
@@ -918,6 +946,22 @@ defmodule FermixCore.Memory.ConversationStore do
     do: Map.put(message, :harness_continuation, true)
 
   defp maybe_mark_continuation_from_row(message, _row), do: message
+
+  defp maybe_mark_phone_call_result_from_row(
+         message,
+         %{metadata: %{"phone_call_result" => true}}
+       ),
+       do: Map.put(message, :phone_call_result, true)
+
+  # A report stored before the flag was its own holds the call's id under the
+  # same key, beside the continuation's: it is the same report.
+  defp maybe_mark_phone_call_result_from_row(
+         message,
+         %{metadata: %{"phone_call_result" => "pc_" <> _id, "harness_continuation" => true}}
+       ),
+       do: Map.put(message, :phone_call_result, true)
+
+  defp maybe_mark_phone_call_result_from_row(message, _row), do: message
 
   defp maybe_mark_forwarded_from_row(message, %{metadata: %{"forwarded" => true}}),
     do: Map.put(message, :forwarded, true)
