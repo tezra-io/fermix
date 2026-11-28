@@ -17,7 +17,7 @@ defmodule FermixCore.Capabilities.Advertisement do
   refused it, because `RecallActivity` had never been loaded).
 
   After a tool's own schema refresh, a tool one of the home's computers can
-  run gains the `computer` argument where a computer offers it
+  run gains the `computer` argument, naming every computer of the home
   (`Computers.Argument`, M97 §6.5), so no tool's refresh can drop it. The
   home's computers are read once per call, and each hook is handed them in its
   context (`:computers`), so a tool whose offer follows a computer's

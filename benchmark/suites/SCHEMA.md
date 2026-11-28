@@ -29,7 +29,7 @@ scenarios:                     # required, >= 1
 ### `requires`
 
 What the suite needs the eval home to have been seeded with, beyond the defaults.
-Three values: `cues` — the home was seeded with `seed_capability_home.py
+Five values: `cues` — the home was seeded with `seed_capability_home.py
 --cues` and `seed_cues.exs` (`FERMIX_CAP_SEED_ARGS=--cues capability-daemon.sh up`
 does both), which turns cues on, writes the door, the local-push sources and the
 default filter model, and makes the watchers. It is opt-in because cues add
@@ -56,6 +56,48 @@ EVALUATED** (it looks for the executable stub at `eval-bin/claude` in the home).
 With it every Claude Code run in the home fails, so a case that needs a real
 Claude Code is not run on that seed.
 
+`phone_calls` — the home was seeded with `seed_capability_home.py --phone-calls`
+(`FERMIX_CAP_SEED_ARGS=--phone-calls capability-daemon.sh up`), which turns phone
+calls on with an invented trunk and key (`evallib.phone_sim.SEEDED`), so the eval
+daemon's calls reach the runners' simulated GPT-Live endpoint and nothing else (a
+development build decides at boot, `FermixCore.Application.phone_call_transport_opts/2`,
+from the `FERMIX_EVAL_FIXTURE_ORIGIN` `capability-daemon.sh` starts it with)
+(what it records is under `phone` in *`fixture_state`*, and a case's turns may
+wait on its calls, `await` and `after` under *Case*). On a home seeded without it `run_eval.py` holds the
+case out as **NOT EVALUATED** (it reads `eval-fixtures/phone_calls.json` in the
+home). A case that requires it places calls: `run_eval.py` starts the fixture
+server with the simulator for it and binds it a token, whether or not its prompts
+name a page. It runs only with `--reset-home`, so every attempt starts from the
+seeded world (each dial spends one of the home's five daily attempts, and a lost
+create holds its one call slot for hours); without it the case is **NOT
+EVALUATED** with that reason, never failed or passed, decided in the one place
+the other requirements are (`run_eval.requirement_problem`). Only `run_eval.py`
+reads it; in a capability suite it is a load error.
+
+`owner_inbox_cli` — the home was seeded with `seed_capability_home.py
+--owner-inbox-cli` (`FERMIX_CAP_SEED_ARGS=--owner-inbox-cli capability-daemon.sh
+up`), which makes the local `cli` chat the configured `[fermix_core.jobs]
+default_delivery_target`, so the owner's inbox (`Delivery.OwnerInbox`) is one a
+message reaches: without it the inbox is a Telegram chat with no bot token, and a
+message to the owner (a job heal's, M106) never sends. The CLI adapter needs no
+credentials; the local chat keeps no history row of what it is sent, so a case
+grades the sender's own row (`job_heals`). It moves every owner-inbox message and
+every job's default delivery in the home, so it is opt-in. On a home seeded
+without it both runners hold the case out as **NOT EVALUATED** (they read
+`eval-fixtures/owner_inbox.json` in the home, `bin/evallib/owner_inbox.py`); a
+capability suite may require it, and `run_capability.py` holds its tasks out as it
+does for `cues`.
+
+`owner_inbox_app` — the home was seeded with `--owner-inbox-app` instead (one inbox:
+the two flags are exclusive), which makes the Fermix app's chat (`companion`, `main`,
+the companion socket's conversation) the configured target, taken by
+`Delivery.OwnerInbox` as the owner's own (M106 §8, stage S6). A message to the owner
+is then a row in the app's timeline (`mobile_timeline`, keyed by its send key, its
+job in `metadata.origin`) and a row in that conversation's history, and a heal's
+proposal an `approval` card of kind `job_change` on the socket; a case drives it with
+`drive: app`. The manifest names the target it set, so each requirement is held out of
+a home seeded for the other.
+
 A **case** may declare `requires:` too, from the same values, when its suite runs
 without that seed (`coding_harness.yaml`'s `claude_code_signed_out_run`): the
 case needs its suite's requirements and its own, and only that case is held out,
@@ -64,8 +106,8 @@ its siblings still run. A held-out case is listed on the console before the run
 never scored and never a failure; a run left with nothing to drive exits 3.
 `--dry-run` does not look at the home, so it plans the case either way. Only
 `run_eval.py` reads a case's `requires`: in a capability suite (`cap_*`) it is a
-load error, since `run_capability.py` holds a task out by its suite's `cues`
-alone.
+load error, since `run_capability.py` holds a task out by its suite's `cues`,
+`owner_inbox_cli` and `owner_inbox_app` alone.
 
 ### `abort_on_tool_error`
 
@@ -265,7 +307,25 @@ the `query` shorthand; multi-turn uses `turns`.
   `defaults.expect`; the final turn's is merged over the case-level `expect` too,
   so a turn's own key always wins over a default. A key the case and its final
   turn both declare with different values is a load error (prohibition lists
-  accumulate instead).
+  accumulate instead). A case that requires `phone_calls` (and is `drive: ask`)
+  has two more turn keys, never on its first turn:
+  - `await: call_report`, with no `query` — this turn is the call's own report:
+    when a call ends, Fermix starts a turn of its own in the conversation that
+    asked for it. The runner waits for it (bounded by the case's `timeout_ms`
+    plus 60 s), finds it as the one `agent:main` trace on the case's thread that
+    none of the attempt's queries started, and grades it with the turn's
+    `expect` like any turn but for latency, which nothing measures. The judge
+    sees it as Fermix's report (its text) and the reply the owner heard. A
+    report Fermix sends as text instead of a turn (an owner's own stop) has no
+    trace: the turn, and the case, are INCOMPLETE, never failed. The case's
+    `fixture_state` is still graded then, on the simulator's record read when
+    the case stopped, so a second create or a leak fails it (a violated
+    `absent:` clause is conclusive); a positive clause that cannot hold yet
+    leaves it INCOMPLETE.
+  - `after: call_end`, with a `query` — before driving it, wait until every
+    call the attempt placed has ended on the simulator (`phone.calls.<n>.ended`),
+    reading its record once a second, bounded by the case's `timeout_ms`; a wait
+    that runs out leaves the case INCOMPLETE.
 - **Run placeholders** — four tokens `run_eval.py` substitutes before driving a
   turn, in `query` **and** in every string inside `expect` (at any depth):
   - `__EVAL_RUN_ID__` — this run's id, unique per invocation.
@@ -317,7 +377,11 @@ the `query` shorthand; multi-turn uses `turns`.
   (capability suites only): the runner posts cues to the eval daemon's door and
   a checker grades the rows they left; see *`drive: cue`* below. No `query`,
   `turns`, `image`, `rubric`, `score` or `expect`: the case's posts are its
-  turns and its json `checker` is its grade.
+  turns and its json `checker` is its grade. `owner_command` (capability suites
+  only): each turn is a command the owner types (`/confirm`, `/deny`), which the
+  gateway answers with no model; see *`drive: owner_command`* below. `app`
+  (capability suites only): the Fermix app's chat on the companion socket as the
+  owner's inbox; the case's `app.steps` are its turns; see *`drive: app`* below.
 - `image` (string, optional) — path to a known local attachment (a picture, or
   any file: a GIF, a video, a PDF, a text file, a file Fermix cannot read)
   relative to the suite file and physically contained under `suites/fixtures/`.
@@ -378,6 +442,27 @@ the `query` shorthand; multi-turn uses `turns`.
 - `requires` (list, optional) — what the eval home must be seeded with for this
   case beyond its suite's `requires`; see *`requires`* above. `run_eval.py`
   only.
+- `state` (string, optional; `drive: ask` in a behavioral suite) — a jobs,
+  reminders and open-loops spec in the `checker.state` format (see *`checker.state`*
+  below), relative to the suite file and contained under `suites/fixtures/`
+  (`fixtures/state/<name>.json`). Before EVERY attempt of the case, retries
+  included, `run_eval.py` restores it in the eval home with `bin/seed_state.exs`,
+  the capability runner's own seeding (`run_capability._seed_state`), so the turn
+  is asked of a known record. The seed deletes every job, reminder and open loop in
+  the home, so the case's scenario must be `risk: isolated_mutation`; a case-level
+  `state` anywhere else, on another drive or in a capability suite (which uses
+  `checker.state`) is a load error, and so is a spec file that does not exist. A
+  seeded failed run of the owner's job opens a heal (M106), which the daemon claims
+  on its next pass, diagnoses (one model run on the home's main route) and sends,
+  unless the spec seeded its conclusion (a run's `heal`, see *`checker.state`*): the
+  runner then waits, read-only and at most 240 s, until no heal of a seeded job (its
+  own, or a plugin's that took one of its runs) is
+  `open` or `diagnosing`, so the record says the owner was told. A behavioral spec
+  should seed the conclusion: the case then asks of a record that is the same on every
+  attempt, and no diagnosis spends a model run during it. A seed that fails ends the
+  run, as a failed reset does (the home holds no known baseline for any later case); a
+  heal not sent in time leaves that attempt **INCOMPLETE**, never driven. `--dry-run`
+  validates the spec path and counts the seeded attempts; it starts no helper.
 
 The loader is allowlist-strict at the top/default/scenario/case/turn/expect
 levels: unknown keys fail validation. `soft`, `judge`, `cross_session`, and
@@ -467,8 +552,8 @@ March statement; only this one can say which button was pressed, and only
   compact JSON). A path a page never reported is ABSENT, which is why a page
   reports a consequential press only when it happens.
 - A case declaring `fixture_state` must address the fixture server with
-  `__EVAL_FIXTURE_URL__`, or it is a load error: without a bound token every
-  `absent:` clause would be vacuously green forever. `defaults.expect` may not
+  `__EVAL_FIXTURE_URL__` or require `phone_calls`, or it is a load error: without
+  a bound token every `absent:` clause would be vacuously green forever. `defaults.expect` may not
   set it — each case asserts what its OWN page recorded — and neither may a
   TURN: the capability runner reads the case's expect, so a turn-level one would
   be scored by nobody, and page state accumulates across a case's turns anyway.
@@ -483,6 +568,41 @@ March statement; only this one can say which button was pressed, and only
   proof — the forbidden path being in the map is a report that arrived. The
   `page.ready` path is reserved, so it can neither satisfy nor violate a clause
   a suite writes.
+- **Phone calls are recorded under `phone`.** In a case that requires
+  `phone_calls`, the simulated GPT-Live endpoint (`bin/evallib/phone_sim.py`)
+  writes what the call did into the same map, under the reserved `phone` subtree
+  a page may never report into: `phone.creates` (every create this attempt sent),
+  `phone.extra_creates` (the destination of every create after the first), and
+  `phone.unmatched_hangups` (hangups for a session it never opened); per
+  destination `phone.calls.n<digits>.` `creates`, `script`, `refused`,
+  `create_status` (the status it answered the create with), `checks` (`ok` when
+  the create carried the seeded key and trunk), `brief` (the text of the
+  create's `session.input`, for value clauses on what the mandate carries:
+  `matches:` the party, the time in any form, the date, the name), `briefed`
+  (the first pattern the script forbids, or a seeded credential, that the
+  create's instructions or input carried), `attached`, `opening` (Fermix
+  appended its opening line, which it does only when the call was answered and
+  nobody spoke within its wait: a case whose script picks up speaking asserts it
+  `absent:`, a case answered silent `equals: true`), `replies`
+  (every reply Fermix sent for a delegation, in order, each `{text, at_ms}` on
+  the call's clock), `marks.<label>` (when the script passed a `mark` step) and
+  `said_after.<label>` (every commentary but the opening instruction sent once
+  that mark had passed: a voicemail case asserts it `absent:`), `keys`,
+  `hangups` (every hangup request for the session, those after its end too, so
+  `equals: 1` means exactly one), `hangup_ms` (when the first one came),
+  `leaked` (the first forbidden pattern any append carried), `protocol_errors`
+  and `ended` (`close_requested` is the close Fermix asked for; a script that
+  waits out its own hold ends `expired`, so a case asserting
+  `close_requested` fails then). Both speakers share one clock: a line starts
+  after the previous line of either speaker ended, plus a pause, and lasts as
+  long as its words, so nobody is talked over unless the script says so
+  (`cut_in`). A create belongs to the attempt bound last; everything after it to
+  that session's attempt. An `absent:` clause under `phone` is answered by the
+  simulator's own liveness key, `phone.ready` (written when the attempt is bound
+  on a server playing calls), not by a page, so "nothing was dialed" is
+  `{ path: phone.creates, absent: true }`. That proves the simulator served the
+  attempt, not that the daemon was pointed at it: the dial cases' `equals: 1` in
+  the same run are that proof.
 - **Always sticky, on the same evidence as the tool bans.** A violated `absent:`
   clause is the page's own record that the action happened, which no retry
   unmakes, so it fails the case in any attempt without a scenario declaring
@@ -723,6 +843,72 @@ its config must have `[fermix_core.realtime] enabled = true`, and its daemon
 must answer on `realtime.sock`; all three are checked before anything is
 driven. `--dry-run` validates the fixtures and prints the plan, opening no call.
 
+### `drive: owner_command` — the owner types a command, with no model
+
+```yaml
+- id: confirm_applies_the_recorded_change
+  drive: owner_command
+  command: {chat: inbox}         # optional; inbox (default) or trial
+  query: "/confirm"              # or turns: [{query: "/confirm"}, {query: "/deny"}]
+  checker:
+    script: suites/capability/checkers/job_proposal.py
+    mode: json
+    state: suites/fixtures/state/job_auto_heal_holds_proposal.json
+    expect: {job: holds, outcome: applied}
+```
+
+What only the owner's own typing can do: answer a card (M106 §5.7, a heal's proposal)
+with `/confirm` or `/deny`, in the chat the card went to. The runner seeds the
+case's `checker.state`, then sends each turn through `fermix ask` in order: with
+`command.chat: inbox`, in the owner's own local chat (`fermix ask`'s default session,
+`cli`, where a card bound to the CLI inbox answers from, `--owner-inbox-cli`); with
+`trial`, in the trial's own session, another chat. The gateway answers a command
+before any model, so no trace is polled: each reply is the turn's evidence
+(`replies` in the evidence file, beside an empty `tool_spans`), the json `checker`
+grades the store, and the trial spends no model tokens (its cost reads unknown, never
+$0, and `--estimate` prices no such turn). A command the daemon did not answer, or
+answered with nothing, makes the trial INVALID. Every turn is one line starting with
+`/`; no `expect`, `score`, `rubric` or `image`.
+
+### `drive: app` — the Fermix app's chat as the owner's inbox
+
+```yaml
+- id: card_offered_again_until_answered
+  drive: app
+  app:
+    steps:                       # 1..8, in order
+      - await_card               # an `approval` of kind job_change
+      - reconnect                # close, connect, hello: what it offered again
+      - answer: approve          # or deny: the card's own route, sent as a command
+      - reconnect
+  checker:
+    script: suites/capability/checkers/job_app_inbox.py
+    mode: json
+    state: suites/capability/fixtures/state/job_heal_app_proposal.json
+    expect: {job: holds, outcome: applied}
+```
+
+What reaches the owner in the app (M106 §8, stage S6), on a home seeded with
+`--owner-inbox-app` (`requires: [owner_inbox_app]`), driven the way the Mac app lives
+with it (`bin/evallib/app_drive.py`). The runner opens the companion socket, says
+hello, reads to a barrier (a `history_pull` answered after every card the hello
+offered again) and sends `/new`; then it seeds the case's `checker.state` with the
+socket open, so the heal the daemon sends on its next pass arrives live; then it takes
+the steps: `await_card` (an `approval` of kind `job_change`) or `await_row` (an
+assistant `row` whose origin is a job); `answer: approve | deny` (the card's own
+`approve_command` or `deny_command`, sent as `command{name, args}` as the app sends
+it, then up to 10 s for its `approval_resolved`); `reconnect`; `type_cli: "/confirm
+{card}"` (one command typed in the owner's terminal chat through `fermix ask`,
+`{card}` standing for the card's token); `say: "<text>"` (one message of the owner's in
+the app: a model turn, waited to its end, then up to 10 s for the card's resolution).
+`answer` and `type_cli` need an `await_card` before them. Every event each connection
+received goes to the checker (`app.connections`, each `hello` and `events`), with the
+replies (`replies`); a wait that runs out is recorded and stops the steps, and the
+checker decides from the store whether the heal was never sent (invalid) or went
+somewhere else (a 0). A socket that refused or closed makes the trial INVALID. No
+`query`, `turns`, `expect`, `score`, `rubric` or `image`; only a `say` step is a turn
+`--estimate` prices, and the drive reads no trace, so a trial's cost reads unknown.
+
 ### `drive: cue` — cues into the eval daemon's door
 
 ```yaml
@@ -877,7 +1063,11 @@ checker:
 
 The jobs, reminders and open loops a task starts from, restored **before every
 trial** by `bin/seed_state.exs` (run with `mix run --no-start` from the umbrella
-root, beside the eval daemon): it waits for any job run in flight, deletes every
+root, beside the eval daemon): it waits for any job run in flight and any heal run
+holding its lease, deletes every heal with every run's retry and facts
+(`job_heals`, `job_heal_runs`, `job_retries`, `job_run_facts`: a heal of a provider
+has no job to go with, and a closed one keeps the same failure quiet for 7 days, so
+one trial's heal would join or silence the next trial's), deletes every
 scheduled job, cancels every active reminder, closes every live open loop, then
 creates the spec's through `Jobs.Registry`, the scheduler's claim/settle calls (for
 past runs), `Temporal.Registry` and, for open loops, `Memory.Repo` directly. The
@@ -886,16 +1076,117 @@ spec:
 ```json
 {"jobs": [{"key": "weather", "name": "morning weather", "schedule": "0 7 * * *",
            "task_prompt": "...", "timeout_seconds": 300, "expires_in_days": 60,
-           "runs": [{"hours_ago": 25, "duration_seconds": 300, "status": "timeout",
-                     "error": "wall-clock timeout after 300000ms"}]}],
+           "runs": [{"fires_ago": 1, "duration_seconds": 300, "status": "timeout",
+                     "failure_kind": "time_limit"}]}],
  "reminders": [{"title": "...", "date": "2027-04-16", "time": "09:00:00",
                 "kind": "appointment", "plan": [{"type": "at_time"}]}]}
 ```
 
+Seeded history is the product's history: a past run settles through the call a live
+run's settle makes, so a seeded failed run of the owner's job (every seeded job is
+the owner's) opens a heal, or joins the one an earlier seeded failure opened, its own
+delivery reads `skipped`, and the daemon's Scheduler claims the heal on its next
+pass, within its 60 s reconcile; for a kind a model could help with its heal run
+diagnoses it first, one model run on the home's main route, and code carries out the
+decision, then sends its message. A seeded ok run after it closes the heal as healed.
+A spec's failed `runs` therefore seed what the owner was told, not only rows.
+
+A job may be pinned to a route as `update_job` pins one: `provider` and `model`
+together, or neither (one alone, or an empty one, is refused before the reset). The
+engine's own check takes any provider its model catalogue knows, configured or not,
+but a pin to a provider the home has no settings for is a job that could not run
+there, so the seed also refuses a provider the home's config.toml does not configure.
+An eval home configures exactly one provider, its primary: `anthropic` on the eval
+box (`--provider anthropic`, eval-box.yml) and in the README's Auto Heal recipe
+(`--dev-provider anthropic`), so a fixture's pin names `anthropic`, with an invented
+model id; a home seeded with another provider refuses that fixture by name.
+`checkers/job_heal.py` grades that heal (its docstring has the gold), and
+`checkers/job_proposal.py` what became of a stored proposal and its card; both need
+a home seeded with `--owner-inbox-cli`, the one eval inbox a send reaches.
+
+When each run happened (`bin/seed_run_times.exs`, checked by
+`bin/seed_run_times_test.exs`, which needs the engine compiled: `FERMIX_HOME=$(mktemp -d)
+mix run --no-start --no-compile benchmark/bin/seed_run_times_test.exs`): a scheduled
+run (`trigger: schedule`, the default) runs at its job's own fire time, `fires_ago: n`
+being the nth most recent fire of the job's cron schedule in the job's zone (the
+config's when the job names none), through the engine's own schedule parser, so a
+5:40 AM job's runs started at 5:40 AM. Only fires early enough that every run of the
+job, with any conclusion seeded on it, is over before now are counted, so a seed taken
+just after a fire still finds every run over. An off-schedule run is stated as one: a
+`manual` run says `hours_ago`, whole hours before now, and never `fires_ago`. Each run
+lasts `duration_seconds` (whole). A scheduled run that says `hours_ago`, a fire count
+on a schedule that is not cron, and any other trigger are refused.
+
+A run may also say (M106 §5.1, §5.5):
+
+- `failure_kind` — a failed run's kind, stored as the runner stores one (M106 §5.8):
+  `other` (the default) states the failure's own words as `error`, which the run keeps
+  and the heal quotes as someone else's beside Fermix's sentence for the kind;
+  `unknown_skill` (the job's `skill_name` is the missing skill) and `time_limit` (a
+  `timeout` run stopped at its whole `duration_seconds`, naming the tool its timeline
+  left unfinished) state no `error`, as the run and the heal hold Fermix's own sentence
+  (`Jobs.Failure.sentence/2`), taken from the engine, never a copy. An ok run states
+  neither;
+- `tool_timeline` — the runner's entries, `{"name", "duration_ms", "status": ok |
+  error | unfinished, "plugin"?}`, oldest first, which a diagnosis reads;
+- `tool_tally` (M106 §6) — the runner's whole-run tally, one entry per tool,
+  `{"name", "ok", "error", "unfinished", "plugin"?, "last_error"?}` with whole-number
+  counts that are not all 0, which goes through the same settle: an ok run whose tool
+  never worked in it (no `ok`, some `error`) nor in the job's two runs before it opens
+  a heal of kind `tool_never_succeeded` and stays ok, its delivery `delivered`; a
+  plugin's tool makes it the plugin's heal, with no job of its own, which another job's
+  tripping run joins. A tally the engine could not read would count as none and trip
+  nothing, so a malformed one is refused;
+- `trigger` — `schedule` (the default) or `manual`;
+- `heal` (a failed run, or an ok run that opens its job's heal by its tally) — the
+  conclusion its heal run would have reached,
+  `{"decision": rerun | raise_limit | propose | tell, "note" (at most 280 characters, the
+  bound a diagnosis note keeps), "change"?,
+  "read_outside"?, "rerun_outcome"?, "delivered_minutes_after" | "decided_minutes_after",
+  "owner_edit"?}` and nothing else, made through the Repo's
+  own heal calls (the claim, the inbox, the decision, the message `Jobs.HealMessage`
+  builds, the delivered mark, and for a rerun what came of its ask: `started`,
+  `running`, `refused` or `unanswered`, required with `rerun` and refused on any other
+  decision; a `started` one is followed by its run, `trigger: manual`), so the heal
+  lands where its decision puts it (watching after a raised limit or a rerun that was
+  not refused, waiting otherwise) and a later seeded failure joins it or,
+  if it is watching, concludes it a second time in its own settle (the verdict). The
+  seed sends nothing and never touches the job: the spec states the job as the
+  decision left it. A `raise_limit` change is `{"timeout_seconds": {"from", "to"}}`
+  with the job's `timeout_seconds` already `to` (at most the engine's run limit); a
+  `propose` change names `task`, `schedule`, `skill_name` or `timeout_seconds`, each
+  `{"from", "to"}`, with the job still holding `from`, and is stored with the job's
+  version it was drawn for (`Jobs.HealDecision.job_version/1`), which the owner's
+  answer to it is fenced on (M106 §5.7), and goes out as a heal run sends it: its card
+  bound to the chat its answer must come from (the local CLI inbox's `cli` chat) and
+  sent, or, when the card could not hold it or no chat can answer one
+  (`Jobs.HealDecision.fit_card/3`), kept as `tell`, as the engine keeps it; `rerun` and `tell` carry
+  none. A `propose` conclusion may add `owner_edit`, the owner's own edit after the
+  proposal reached them (`schedule`, `task_prompt` or `timeout_seconds`, each a new
+  value), made through `Jobs.Registry.update_job/3`, which closes the proposal
+  `superseded` as a live edit does; the manifest's job is the edited one. A seeded pause is not offered (every seeded job is enabled), nor is a plugin's
+  heal concluded (code tells it, with no decision). The conclusion comes
+  `delivered_minutes_after` (whole, positive) its run ended, before the next run began
+  and before now. With `decided_minutes_after` instead (exactly one of the two; a
+  `tell` or `propose` with no `owner_edit`), the conclusion is recorded and NOT sent:
+  the decision is written under a lease that ends a second later, as a heal run that
+  died after deciding leaves it, with no inbox stored, no message for a tell (the
+  daemon's run builds it) and, for a proposal, its short ask fitted to this home's
+  inbox and no card bound; the daemon's next pass claims it, resolves the owner's
+  inbox itself and sends it, binding and offering the card, with no model (stage S6's
+  `cap_job_heal_app_inbox`). A spec that concludes
+  a heal gives only one job runs that open one, failed or ending ok without working
+  (the claim takes the oldest open heal), and needs an owner inbox a send reaches
+  (`--owner-inbox-cli` or `--owner-inbox-app`). A job's runs are listed oldest first, each over before the next
+  starts, so the runs before one in the spec are the runs its settle reads. All of it
+  is checked before the reset, so a refused spec leaves the home as it was.
+
 Reminder dates are absolute: a weekday or "tomorrow" computed from the run date
 means something different on a Friday than on a Monday. The checker reads the
 manifest from the evidence file as `state`: `jobs` (each key's id and seeded
-columns, for "unchanged" and "same id" checks), `reminders` (the seeded ids, so
+columns, for "unchanged" and "same id" checks: name, description, schedule,
+timezone, task, skill, time limit, expiry, delivery mode and target, pin and
+`enabled`), `reminders` (the seeded ids, so
 only what the trial created is graded), `zone` and `today` (the home's local date
 at seed time, for "tomorrow"). `jobs_state.py` and `reminders_state.py` grade
 against it. A seed failure stops the sweep on exit 3 rather than running a trial

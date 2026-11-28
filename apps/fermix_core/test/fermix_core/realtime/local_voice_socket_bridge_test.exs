@@ -202,7 +202,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketBridgeTest do
       :ok
     end
 
-    def call_stop(_pid), do: :ok
+    def call_stop(pid), do: Agent.stop(pid)
   end
 
   defp end_socket(socket, :stopped) do

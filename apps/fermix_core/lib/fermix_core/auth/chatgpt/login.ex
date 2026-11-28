@@ -3,24 +3,29 @@ defmodule FermixCore.Auth.ChatGPT.Login do
   The Sign in with ChatGPT browser sign-in (M57 §4.2).
 
   Before the browser opens: the host id exists, and the attempt is built from
-  the stored registration. A home with no issued client registers through
-  `dynamic_agent_client` with the `Fermix` name hint; one with a client (even a
-  pending one) re-authorizes it with no hint, adding `prompt=consent` only when
-  its finished grant left plan usage out.
+  the registration a sign-in resumes (`Registration.resumed/1`). With none, it
+  registers a new client through `dynamic_agent_client` with the `Fermix` name
+  hint, and ChatGPT asks which account and workspace to use; a resumed one (a
+  pending sign-in, or one holding tokens) is re-authorized with no hint,
+  adding `prompt=consent` only when its finished grant left plan usage out.
 
   After the callback, under the `chatgpt` profile lock, in this order:
 
-    1. A newly issued client id is stored as `"pending"` before anything is
-       spent, so a failed exchange (`invalid_grant` included) keeps it and the
-       next attempt registers no second app.
-    2. The code is exchanged with the issued client id, the verifier, the same
+    1. The registration the attempt was built from must still be the one to
+       resume (`:client_mismatch` otherwise, and nothing is replaced).
+    2. A newly issued client id is stored as `"pending"` in place of whatever
+       was stored, before anything is spent, so a failed exchange
+       (`invalid_grant` included) keeps it and the next attempt registers no
+       second app.
+    3. The code is exchanged with the issued client id, the verifier, the same
        redirect uri and the `resource`.
-    3. The ID token is verified, nonce included.
-    4. A re-authorization must name the stored subject (`:account_mismatch`
-       otherwise, and nothing is replaced).
-    5. Plan usage is read from the token response's `scope`, never the
+    4. The ID token is verified, nonce included.
+    5. A resumed registration must name its stored subject
+       (`:account_mismatch` otherwise, and nothing is replaced); a new one may
+       be any account.
+    6. Plan usage is read from the token response's `scope`, never the
        callback's.
-    6. The registration is written.
+    7. The registration is written.
   """
 
   alias FermixCore.Auth.ChatGPT.HostId
@@ -42,27 +47,31 @@ defmodule FermixCore.Auth.ChatGPT.Login do
 
     with {:ok, host_id} <- HostId.fetch_or_create(auth_path),
          {:ok, stored} <- Registration.read(auth_path),
-         attempt = attempt(stored, host_id, Keyword.get(opts, :port) || 0),
+         resumed = Registration.resumed(stored),
+         attempt = attempt(resumed, host_id, Keyword.get(opts, :port) || 0),
          {:ok, authorization} <- OAuthFlow.await_authorization(attempt.provider, flow_opts(opts)) do
       redeem(attempt, authorization, auth_path, req_options)
     end
   end
 
-  defp attempt(stored, host_id, port) do
+  defp attempt(resumed, host_id, port) do
     nonce = 32 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
-    client_id = stored && stored.client_id
+    client_id = client_id(resumed)
 
     provider =
       OAuthProvider.chatgpt(
         client_id: client_id,
         host_id: host_id,
         nonce: nonce,
-        consent?: Registration.consent_needed?(stored),
+        consent?: Registration.consent_needed?(resumed),
         port: port
       )
 
     %{provider: provider, nonce: nonce, client_id: client_id}
   end
+
+  defp client_id(nil), do: nil
+  defp client_id(%{client_id: client_id}), do: client_id
 
   defp flow_opts(opts) do
     opts
@@ -76,12 +85,13 @@ defmodule FermixCore.Auth.ChatGPT.Login do
     client_id = authorization.client_id
 
     Store.with_profile_lock(Registration.profile(), auth_path, fn ->
-      with {:ok, current} <- Registration.read(auth_path),
-           :ok <- same_registration(current, attempt),
-           :ok <- keep_pending(current, client_id, auth_path),
+      with {:ok, stored} <- Registration.read(auth_path),
+           resumed = Registration.resumed(stored),
+           :ok <- same_registration(resumed, attempt),
+           :ok <- keep_pending(resumed, client_id, auth_path),
            {:ok, tokens} <- exchange(attempt.provider, client_id, authorization, req_options),
            {:ok, claims} <- verify(tokens, client_id, attempt.nonce, req_options),
-           :ok <- same_account(current, claims),
+           :ok <- same_account(resumed, claims),
            {:ok, scopes} <- granted_scopes(tokens),
            {:ok, earliest} <- Registration.earliest_refresh_at(tokens.earliest_refresh_at) do
         persist(Registration.signed_in(client_id, claims, tokens, scopes, earliest), auth_path)
@@ -89,18 +99,20 @@ defmodule FermixCore.Auth.ChatGPT.Login do
     end)
   end
 
-  # The attempt was built from the registration stored when it began. Another
-  # sign-in that finished meanwhile is never overwritten by this one.
-  defp same_registration(current, %{client_id: client_id}) do
-    if (current && current.client_id) == client_id,
+  # The attempt was built from the registration to resume when it began.
+  # Another sign-in that finished meanwhile is never overwritten by this one.
+  defp same_registration(resumed, %{client_id: client_id}) do
+    if client_id(resumed) == client_id,
       do: :ok,
       else: {:error, :client_mismatch}
   end
 
   defp keep_pending(%{client_id: client_id}, client_id, _auth_path), do: :ok
 
-  defp keep_pending(_current, client_id, auth_path) do
-    case Store.write(Registration.profile(), Registration.pending(client_id), auth_path) do
+  # A newly issued client starts a new registration, so nothing of the stored
+  # entry (another account's subject, email or scopes) carries over into it.
+  defp keep_pending(_resumed, client_id, auth_path) do
+    case Store.replace(Registration.profile(), Registration.pending(client_id), auth_path) do
       :ok -> :ok
       {:error, reason} -> {:error, {:persist_failed, reason}}
     end
@@ -133,11 +145,12 @@ defmodule FermixCore.Auth.ChatGPT.Login do
     {:error, :invalid_token_response}
   end
 
+  # A resumed registration keeps its account; a new one may be any account.
   defp same_account(%{subject: subject}, %{"sub" => sub}) when is_binary(subject) do
     if subject == sub, do: :ok, else: {:error, :account_mismatch}
   end
 
-  defp same_account(_current, _claims), do: :ok
+  defp same_account(_resumed, _claims), do: :ok
 
   # The token response's `scope` decides plan usage. A grant with
   # `offline_access` must carry the refresh token it promises.

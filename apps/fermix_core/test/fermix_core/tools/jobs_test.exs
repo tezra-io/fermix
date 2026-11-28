@@ -135,6 +135,71 @@ defmodule FermixCore.Tools.JobsTest do
     }
   end
 
+  # M106 §5.4: a job whose failure a heal took says so where the owner's
+  # assistant reads its jobs: the heal's state, kind, since when, how many
+  # runs, and whether the owner was told.
+  test "list_jobs carries each job's heal that is not closed", %{context: context} do
+    failing_id = seed_job(context, "Harbour tide table")
+    quiet_id = seed_job(context, "Morning brief")
+    failed_at = ~U[2026-11-20 07:10:00.000000Z]
+
+    {:ok, {_job, run}} =
+      Repo.claim_job_now(
+        failing_id,
+        %{state: "running", updated_at: failed_at},
+        %{
+          id: "run_heal_listed",
+          job_id: failing_id,
+          session_id: "cron_#{failing_id}_1",
+          trigger: "manual",
+          status: "queued",
+          claimed_at: failed_at,
+          delivery_status: "none",
+          created_at: failed_at,
+          updated_at: failed_at
+        },
+        server: context.memory_repo
+      )
+
+    attrs =
+      Map.merge(run, %{
+        status: "timeout",
+        error: "wall-clock timeout after 600000ms",
+        failure_kind: "time_limit",
+        completed_at: failed_at,
+        updated_at: failed_at,
+        heal_facts: %{failure_text: "wall-clock timeout after 600000ms", provider: nil}
+      })
+
+    {:ok, {_run, _job, %{heal: {:opened, _id}}}} =
+      Repo.settle_job_run(attrs, {:failed, :other}, server: context.memory_repo)
+
+    assert {:ok, listed} = ListJobs.execute(%{}, context)
+    jobs = Map.new(Jason.decode!(listed.output)["jobs"], &{&1["id"], &1})
+
+    assert jobs[failing_id]["heal"] == %{
+             "state" => "open",
+             "subject" => "job",
+             "failure_kind" => "time_limit",
+             "since" => FermixCore.Clock.iso(failed_at),
+             "runs" => 1,
+             "owner_told" => false
+           }
+
+    assert jobs[quiet_id]["heal"] == nil
+  end
+
+  # Found on a live server: a real turn's tool context carries its clock seam
+  # as nil (`Agents.TurnRunner`), and list_jobs called it, so it raised on
+  # every call an owner's turn made.
+  test "list_jobs lists on the real clock in a turn whose clock seam is nil", %{context: context} do
+    turn_context = Map.put(context, :now_fn, nil)
+
+    assert {:ok, %{success: true, output: output}} = ListJobs.execute(%{}, turn_context)
+    assert %{"jobs" => jobs} = Jason.decode!(output)
+    assert is_list(jobs)
+  end
+
   test "main-agent job tools create, list, pause, resume, and remove jobs", %{context: context} do
     assert {:ok, created} =
              ScheduleJob.execute(
@@ -303,7 +368,7 @@ defmodule FermixCore.Tools.JobsTest do
     assert result.success == false
 
     assert result.error =~
-             "at least one of task, schedule, description, skill_name, provider/model, clear_route_pin, or delivery"
+             "at least one of task, schedule, description, skill_name, provider/model, clear_route_pin, timeout_seconds, or delivery"
   end
 
   test "schedule_job exposes and persists runner timeout controls", %{context: context} do

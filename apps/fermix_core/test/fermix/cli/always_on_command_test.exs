@@ -451,6 +451,40 @@ defmodule Fermix.CLI.AlwaysOnCommandTest do
     end
   end
 
+  # M102 J1, D3: on a computer its server removed, `fermix always-on join` is
+  # Join again from a terminal: the code Add a computer opened, asked for
+  # without echo, sent as the step's input and never printed.
+  describe "joining again" do
+    test "on a terminal join asks for the code without echo and sends it", ctx do
+      removed = golden_summary("home_status_removed")
+      %{"id" => "join", "key" => key, "needs" => ["code"]} = removed["action"]
+      code = "fxenroll1.invented-computer-code"
+
+      act = fn params ->
+        assert params == %{"action" => "join", "key" => key, "input" => %{"code" => code}}
+        {:ok, %{"summary" => removed, "result" => nil}}
+      end
+
+      client = script([hello(), {"home.status", {:ok, status(removed)}}, {"home.act", act}])
+      {{0, out, err}, prompts} = run_tty(["join"], ctx, client, code <> "\n")
+
+      assert prompts == "Code from Add a computer: (#{String.length(code)} characters)\n"
+      refute prompts <> out <> err =~ code
+    end
+
+    # Without a terminal nothing is asked: the verb that takes the code piped
+    # in is named, and no step is sent.
+    test "with no terminal join reads no code and names the verb that takes it piped", ctx do
+      removed = golden_summary("home_status_removed")
+      client = script([hello(), {"home.status", {:ok, status(removed)}}])
+
+      {2, "", err} = run(["join"], ctx, client, stdin: "fxenroll1.invented-computer-code\n")
+      assert err =~ "pass the code to fermix computer join"
+      refute err =~ "fxenroll1"
+      refute_act()
+    end
+  end
+
   # M97 D28c (§19.7): on a linked computer, `fermix always-on restart-server`
   # is Restart <server> from a terminal, the step the screen offers.
   describe "restarting the server" do

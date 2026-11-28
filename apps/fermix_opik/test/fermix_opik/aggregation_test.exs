@@ -1121,6 +1121,221 @@ defmodule FermixOpik.AggregationTest do
     refute Map.has_key?(trace.metadata, :cue_count)
   end
 
+  # M106 §5.3: a scheduled run's failure says whether it is run again.
+  test "a failed run's trace carries its retry: the disposition, the attempt and the time" do
+    session_id = "cron_job-9_20261120_070000_d4e5f6"
+    base = %{agent: "scheduled:job-9", job_id: "job-9", run_id: "run-3", session_id: session_id}
+
+    {_state, closed} =
+      run([
+        {[:fermix, :job, :run_start], %{},
+         Map.merge(base, %{name: "tide table", trigger: "retry"})},
+        {[:fermix, :job, :run_error], %{count: 1, duration_ms: 400},
+         Map.merge(base, %{
+           status: "error",
+           error: "rate limited",
+           trigger: "retry",
+           retry_disposition: "retry",
+           retry_attempts: 2,
+           retry_at: "2026-11-20T07:02:50.000000Z"
+         })}
+      ])
+
+    assert [%{trace: trace}] = closed
+    assert trace.metadata.trigger == "retry"
+    assert trace.metadata.retry_disposition == "retry"
+    assert trace.metadata.retry_attempts == 2
+    assert trace.metadata.retry_at == "2026-11-20T07:02:50.000000Z"
+  end
+
+  # M106 §5.4: a failure a heal took says which heal, and each phase of the
+  # heal is a point trace of its own, correlated by its id.
+  test "a failed run's trace names the heal that took it" do
+    session_id = "cron_job-9_20261120_071000_a1b2c3"
+    base = %{agent: "scheduled:job-9", job_id: "job-9", run_id: "run-4", session_id: session_id}
+
+    {_state, closed} =
+      run([
+        {[:fermix, :job, :run_start], %{},
+         Map.merge(base, %{name: "tide table", trigger: "schedule"})},
+        {[:fermix, :job, :run_error], %{count: 1, duration_ms: 400},
+         Map.merge(base, %{
+           status: "timeout",
+           error: "wall-clock timeout",
+           heal: "opened",
+           heal_id: "jhl_0a1b"
+         })}
+      ])
+
+    assert [%{trace: trace}] = closed
+    assert {trace.metadata.heal, trace.metadata.heal_id} == {"opened", "jhl_0a1b"}
+  end
+
+  test "each phase of a heal is its own self-closing trace" do
+    {_state, closed} =
+      run([
+        {[:fermix, :job, :heal], %{count: 1},
+         %{
+           agent: "scheduled:job-9",
+           phase: "delivery_failed",
+           heal_id: "jhl_0a1b",
+           job_id: "job-9",
+           subject_kind: "job",
+           subject_id: "job-9",
+           failure_kind: "time_limit",
+           attempts: 2,
+           dead_letter: false,
+           error: "{:transport, :timeout}"
+         }}
+      ])
+
+    assert [%{trace: trace, spans: []}] = closed
+    assert trace.name == "job_heal:delivery_failed"
+    assert trace.start_time == trace.end_time
+    assert "job_heal" in trace.tags
+
+    assert %{
+             heal_id: "jhl_0a1b",
+             job_id: "job-9",
+             subject_kind: "job",
+             failure_kind: "time_limit",
+             attempts: 2,
+             dead_letter: false,
+             error: "{:transport, :timeout}"
+           } = trace.metadata
+  end
+
+  # M106 §5.5 (stage S3): a heal's decision is a phase of its own, carrying
+  # what the run asked, what code carried out and why it refused.
+  test "a heal's decision is its own point trace, with what was asked and what was done" do
+    {_state, closed} =
+      run([
+        {[:fermix, :job, :heal], %{count: 1},
+         %{
+           agent: "scheduled:job-9",
+           phase: "decided",
+           heal_id: "jhl_0a1b",
+           job_id: "job-9",
+           decision: "propose",
+           requested: "raise_limit",
+           refusal: "over_ceiling",
+           read_outside: true
+         }}
+      ])
+
+    assert [%{trace: trace}] = closed
+    assert trace.name == "job_heal:decided"
+
+    assert %{decision: "propose", requested: "raise_limit", refusal: "over_ceiling"} =
+             trace.metadata
+
+    assert trace.metadata.read_outside == true
+  end
+
+  # M106 §5.7, D5 (stage S4): the owner's answer to a proposal is a phase of
+  # its own, carrying which answer and whether the change was applied.
+  test "a heal's answer is its own point trace, with the answer and whether it applied" do
+    {_state, closed} =
+      run([
+        {[:fermix, :job, :heal], %{count: 1},
+         %{
+           agent: "scheduled:job-9",
+           phase: "answered",
+           heal_id: "jhl_0a1b",
+           job_id: "job-9",
+           decision: "propose",
+           answer: "apply",
+           applied: false
+         }}
+      ])
+
+    assert [%{trace: trace}] = closed
+    assert trace.name == "job_heal:answered"
+    assert %{answer: "apply", applied: false, decision: "propose"} = trace.metadata
+  end
+
+  # M106 §5.5 (stage S3): a heal run is a run kind of its own. Its session is
+  # its own root: the failed run it was spawned for has shipped, so its
+  # session rides as correlation metadata, never as a parent.
+  describe "a job's heal run" do
+    @heal_session "heal_job-9_20310304_073000_a1b2c3"
+
+    defp heal_run_meta(extra) do
+      Map.merge(
+        %{
+          agent: "job_heal:job-9",
+          session_id: @heal_session,
+          parent_session: "cron_job-9_20310304_071000_d4e5f6",
+          heal_id: "jhl_0a1b",
+          job_id: "job-9",
+          run_id: "run-4"
+        },
+        extra
+      )
+    end
+
+    test "the reporter subscribes to its three bookends" do
+      for run <- [:heal_run_start, :heal_run_complete, :heal_run_error] do
+        assert [:fermix, :job, run] in FermixOpik.Reporter.events()
+      end
+    end
+
+    test "is its own root trace nesting its tool spans, the failed run as metadata" do
+      {_state, closed} =
+        run([
+          {[:fermix, :job, :heal_run_start], %{count: 1},
+           heal_run_meta(%{failure_kind: "time_limit", max_duration_ms: 120_000})},
+          {[:fermix, :tool, :exec], %{duration_ms: 9},
+           %{tool: "list_job_runs", success: true, session_id: @heal_session}},
+          {[:fermix, :tool, :exec], %{duration_ms: 4},
+           %{tool: "job_heal_respond", success: true, session_id: @heal_session}},
+          {[:fermix, :job, :heal_run_complete], %{duration_ms: 2_100},
+           heal_run_meta(%{decision: "raise_limit"})}
+        ])
+
+      assert [%{trace: trace, spans: spans}] = closed
+      assert trace.name == "job_heal:job-9"
+      assert trace.tags == ["job_heal_run"]
+      refute Map.has_key?(trace.metadata, :status)
+
+      assert %{
+               heal_id: "jhl_0a1b",
+               job_id: "job-9",
+               run_id: "run-4",
+               parent_session: "cron_job-9_20310304_071000_d4e5f6",
+               failure_kind: "time_limit",
+               decision: "raise_limit"
+             } = trace.metadata
+
+      assert span_named(spans, "list_job_runs")
+      assert span_named(spans, "job_heal_respond")
+    end
+
+    test "a run the watchdog stopped closes with its own status and error" do
+      {_state, closed} =
+        run([
+          {[:fermix, :job, :heal_run_start], %{count: 1}, heal_run_meta(%{})},
+          {[:fermix, :job, :heal_run_error], %{duration_ms: 120_000},
+           heal_run_meta(%{status: "timeout", error: "wall-clock timeout after 120000ms"})}
+        ])
+
+      assert [%{trace: trace}] = closed
+      assert trace.metadata.status == "timeout"
+      assert trace.output == %{text: "wall-clock timeout after 120000ms"}
+    end
+
+    test "a closer whose opener was missed is still a heal run, never a sub-agent" do
+      {_state, closed} =
+        run([
+          {[:fermix, :job, :heal_run_complete], %{duration_ms: 900},
+           heal_run_meta(%{decision: "tell"})}
+        ])
+
+      assert [%{trace: trace}] = closed
+      assert trace.tags == ["job_heal_run"]
+    end
+  end
+
   test "a soul-curation draft is its own trace nesting the bounded provider call" do
     {_state, closed} =
       run([
@@ -2736,6 +2951,169 @@ defmodule FermixOpik.AggregationTest do
       {_agg, closed} = Aggregation.sweep(agg, 61_000_001)
       assert [%{trace: trace}] = closed
       assert trace.name == "meeting:mtg_ab12cd"
+    end
+  end
+
+  # Phone calls ([:fermix, :phone_call, :run_start | :run_complete | :run_error],
+  # M94 §11): the meeting shape, a root of its own that outlives the turn that
+  # asked for it.
+  @phone_start [:fermix, :phone_call, :run_start]
+  @phone_complete [:fermix, :phone_call, :run_complete]
+  @phone_error [:fermix, :phone_call, :run_error]
+  @phone_session "phone_call_pc_0a1b2c3d4e5f"
+
+  # The emitter's own metadata shape (FermixCore.PhoneCalls.Telemetry), mirrored
+  # by hand as `meeting_meta/1` is. Every id is invented.
+  defp phone_meta(extra \\ %{}) do
+    Map.merge(
+      %{
+        agent: "phone_call:pc_0a1b2c3d4e5f",
+        call_id: "pc_0a1b2c3d4e5f",
+        session_id: @phone_session,
+        parent_session: "main-4",
+        origin_kind: "chat",
+        model: "gpt-live-1",
+        carrier_profile: "telnyx_credential_v1",
+        authorization: "direct"
+      },
+      extra
+    )
+  end
+
+  describe "phone call runs" do
+    test "the reporter subscribes to all three events" do
+      for event <- [@phone_start, @phone_complete, @phone_error] do
+        assert event in FermixOpik.Reporter.events(),
+               "#{inspect(event)} is not subscribed, so the call is invisible to Opik"
+      end
+    end
+
+    test "a call is its own root nesting its backend turns' provider spans" do
+      {_state, closed} =
+        run([
+          {[:fermix, :provider, :call], %{duration_ms: 100},
+           %{provider: :openai, model: "gpt-5", status: :ok, session_id: "main-4"}},
+          {@phone_start, %{}, phone_meta(%{status: "admitted", max_duration_ms: 660_000})},
+          {[:fermix, :agent, :message], %{iterations: 1},
+           %{channel: :telegram, chat_id: "c1", session_id: "main-4", agent: "main"}},
+          {[:fermix, :provider, :call], %{duration_ms: 700},
+           %{provider: :openai, model: "gpt-5", status: :ok, session_id: @phone_session}},
+          {@phone_complete, %{duration_ms: 180_000, voice_seconds: 150, core_turns: 1},
+           phone_meta(%{
+             status: "ended",
+             outcome: "confirmed",
+             usage_state: "voice_duration_confirmed"
+           })}
+        ])
+
+      call = Enum.find(closed, &(&1.trace.name == "phone_call:pc_0a1b2c3d4e5f"))
+      assert call, "the call shipped no root of its own"
+      assert call.trace.tags == ["phone_call"]
+      assert call.trace.metadata.parent_session == "main-4"
+      assert call.trace.metadata.call_id == "pc_0a1b2c3d4e5f"
+      assert call.trace.metadata.outcome == "confirmed"
+      assert call.trace.metadata.voice_seconds == 150
+
+      wrapper = span_named(call.spans, "phone_call:pc_0a1b2c3d4e5f")
+      refute Map.has_key?(wrapper, :parent_span_id)
+      assert [llm] = spans_of_type(call.spans, "llm")
+      assert llm.parent_span_id == wrapper.id
+
+      turn = Enum.find(closed, &(&1.trace.name == "agent:main"))
+      refute span_named(turn.spans, "phone_call:pc_0a1b2c3d4e5f")
+    end
+
+    # What a call's backend turns emit (`Agents.PhoneCallTurn`, each turn under
+    # the call's own session with no `parent_session`, `agent: "phone_call"`):
+    # a provider call and one exec event per tool call, the in-call controls'
+    # metadata as the tools write it, then the outcome extraction's one
+    # provider call. Every span nests under the call's wrapper, and the turns
+    # open no root of their own.
+    test "a call's backend turns and its outcome extraction nest whole under the call" do
+      turn_call = fn ms ->
+        {[:fermix, :provider, :call], %{duration_ms: ms},
+         %{
+           provider: :openai,
+           model: "gpt-5",
+           status: :ok,
+           session_id: @phone_session,
+           agent: "phone_call"
+         }}
+      end
+
+      tool = fn name, extra ->
+        {[:fermix, :tool, :exec], %{duration_ms: 3},
+         Map.merge(
+           %{tool: name, success: true, session_id: @phone_session, agent: "phone_call"},
+           extra
+         )}
+      end
+
+      {_state, closed} =
+        run([
+          {@phone_start, %{}, phone_meta(%{status: "admitted", max_duration_ms: 660_000})},
+          turn_call.(400),
+          tool.("phone_call_press_keys", %{key_count: 1}),
+          turn_call.(300),
+          turn_call.(350),
+          tool.("phone_call_end", %{reason: "done"}),
+          turn_call.(200),
+          {[:fermix, :provider, :call], %{duration_ms: 900},
+           %{
+             provider: :openai,
+             model: "gpt-5",
+             status: :ok,
+             session_id: @phone_session,
+             agent: "phone_call_outcome"
+           }},
+          {@phone_complete,
+           %{duration_ms: 95_000, voice_seconds: 95, core_turns: 2, dtmf_keys: 1},
+           phone_meta(%{status: "ended", outcome: "confirmed"})}
+        ])
+
+      assert [%{trace: trace, spans: spans}] = closed
+      assert trace.name == "phone_call:pc_0a1b2c3d4e5f"
+      wrapper = span_named(spans, "phone_call:pc_0a1b2c3d4e5f")
+
+      assert length(spans_of_type(spans, "llm")) == 5
+
+      assert spans |> spans_of_type("tool") |> Enum.map(& &1.name) |> Enum.sort() ==
+               ["phone_call_end", "phone_call_press_keys"]
+
+      for span <- spans, span.id != wrapper.id do
+        assert span.parent_span_id == wrapper.id, "#{span.name} did not nest under the call"
+        assert span.trace_id == trace.id
+      end
+    end
+
+    test "an uncertain end exports as errored with its status word and the vendor's words" do
+      {_state, closed} =
+        run([
+          {@phone_start, %{}, phone_meta()},
+          {@phone_error, %{count: 1, duration_ms: 9_000},
+           phone_meta(%{
+             status: "closure_unconfirmed",
+             error: "worker_lost",
+             vendor_message: "Session not found."
+           })}
+        ])
+
+      assert [%{trace: trace}] = closed
+      assert trace.metadata.status == "closure_unconfirmed"
+      assert trace.output == %{text: "Session not found."}
+      assert trace.error_info == %{exception_type: "PhoneCallError", message: "worker_lost"}
+    end
+
+    test "a closer whose opener was missed still classifies as a phone call" do
+      {_state, closed} =
+        run([
+          {[:fermix, :provider, :call], %{duration_ms: 50},
+           %{provider: :openai, model: "gpt-5", status: :ok, session_id: @phone_session}},
+          {@phone_complete, %{duration_ms: 1_000}, phone_meta(%{status: "ended"})}
+        ])
+
+      assert [%{trace: trace}] = closed
+      assert trace.tags == ["phone_call"], "the call fell through to the :subagent fallback"
     end
   end
 

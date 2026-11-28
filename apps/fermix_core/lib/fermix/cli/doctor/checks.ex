@@ -30,6 +30,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.ComputerHistory.Gate, as: ComputerHistoryGate
   alias FermixCore.ComputerUse.Background
   alias FermixCore.Config, as: CoreConfig
+  alias FermixCore.Delivery.OwnerInbox
   alias FermixCore.Harness.Artifacts, as: HarnessArtifacts
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.Harness.Identity
@@ -2888,8 +2889,16 @@ defmodule Fermix.CLI.Doctor.Checks do
 
       true ->
         {:ok, resolved} = target
-        ok("skill curation", "proposals deliver to #{resolved.platform}:#{resolved.destination}")
+        ok("skill curation", "proposals deliver to #{delivered_to(resolved)}")
     end
+  end
+
+  # The Fermix app's inbox is named as a place (M106 §8); every other target
+  # as its platform and destination.
+  defp delivered_to(target) do
+    if OwnerInbox.app?(target),
+      do: OwnerInbox.place(target),
+      else: "#{target.platform}:#{target.destination}"
   end
 
   # `fermix doctor` is a tree-less CLI verb, so the default probe runs the vendor

@@ -245,6 +245,26 @@ used, titles kept in Unicode NFC, and a day's move before `day_id`'s day. No eve
 field, step or rule the spec reads changed. A later change said in words that a device's add or move after a day's own
 row puts the stop first in that day; nothing the spec reads changed.
 
+The re-read for outbound phone calls (M94, 2026-11-17) found the token's
+window chosen per request in `store_pending_grant`: an access-sensitive
+request may name its own (`ttl_ms`, at most 15 minutes, `grant_ttl_ms`), which
+the access gate's new kind, a phone call the owner confirms, sets to five
+minutes and shows as its card's `ttl_s`; every other token still lives 60
+seconds, as its card says. The token and its card still expire together, the
+first `take` still consumes the token, and the confirm and deny paths are
+unchanged, so nothing the spec models changed. `grant_ttl_ms` and
+`grant_pending_record`, which set the expiry `validate_pending` reads, are now
+pinned beside `store_pending_grant`. A phone call's result turn that parked
+on an approval now carries its call (`phone_call_result`) into the turn its
+confirmation re-ingests, a part of the grant resume the spec leaves out. The
+line references into `sandbox.ex` moved with the code.
+
+`f2a874b8` (M94, 2026-11-17) made the grant resume carry the owner request's
+identity (`request_id`) into the re-ingested turn, in `synthesize_resume_message`,
+a part of the resume the spec leaves out; no pinned function changed. The
+citations of `take_pending` and `validate_pending` moved down by six with the
+code.
+
 **The Queue is one abstract process.** The runner takes one `.tla` per spec,
 and `turn_queue` proves the Queue's rules against `queue.ex`, so this spec takes
 them as given:
@@ -385,7 +405,7 @@ the checks that show a rule needs it):
 - `AnnouncesEveryRow`: every row written outside a turn's completion is
   announced as a `row` as it is written: the user's row (`announce_user_row`,
   `connection.ex:1378-1379`) and a delivery (`announce_written`,
-  `channels/companion.ex:409-410`), both built by `Companion.Output.row` and
+  `channels/companion.ex:455-456`), both built by `Companion.Output.row` and
   sent through `Companion.Fanout.announce`. `FALSE` announces no user row.
 - `SingleAnswer`: `Confirmations.take` is an `:ets.take`, the sole consumer of
   a token (`confirmations.ex:21-31`).
@@ -403,8 +423,8 @@ the checks that show a rule needs it):
 - `CancelMarksRequest`: a cancel is recorded on its request first
   (`Requests.cancel`, `requests.ex:192-208`; `cancel_request`,
   `mobile_sql.ex:821-840`). `Turns` reads the mark and enqueues in one step
-  (`hand_off`, `turns.ex:338-352`), and sends every stop of a turn it handed
-  off itself, after the enqueue (`turns.ex:253-256`, `stop_in_queue`,
+  (`hand_off`, `turns.ex:385-399`), and sends every stop of a turn it handed
+  off itself, after the enqueue (`turns.ex:300-303`, `stop_in_queue`,
   `:449-460`). `FALSE` is the code before 431d5663: the Connection called
   `Queue.stop_turn` directly.
 - `OutcomeEndsTurn`: a turn ends on the wire only from the Queue's outcome, in
@@ -415,12 +435,12 @@ the checks that show a rule needs it):
   answered without a turn stayed `running`, and the next boot ran it again.
 - `SettleUnlessHandedOff`: `Turns` settles that request only if no turn was
   handed off for it (`handle_cast({:settle_unless_handed_off, ...})`,
-  `turns.ex:298-304`). `FALSE` completes it regardless, as the code before did
+  `turns.ex:345-351`). `FALSE` completes it regardless, as the code before did
   for every `command`, so a command that became a turn (`/ultra`) had its reply
   refused.
 - `FailsUnsettled`: a settlement that fails is followed by one failure write
   for the attempt and by `error{request_failed, client_msg_id}` to the client
-  that sent the request (`settle_inline`, `run_settle`, `turns.ex:371-406`;
+  that sent the request (`settle_inline`, `run_settle`, `turns.ex:426-461`;
   `fail_attempt`, `report_failure`, `requests.ex:383-403`), through the
   transport's `report_failure`, which the connection writes as a failed
   worker's error (`connection.ex:1366-1373`, `:331-332`). `FALSE` only logs the
@@ -607,7 +627,7 @@ of an entity its rules are about. All still hold:
 - A phone's revocation. `Turns` runs it in its own mailbox as a cancel of
   every unsettled request the device claimed: one step marks them all and
   stops each turn it handed off (`handle_cast({:revoke_device, ...})`,
-  `turns.ex:306-318`), so the device registry that forgot the phone never
+  `turns.ex:353-365`), so the device registry that forgot the phone never
   waits on the store.
 - A cancel that arrives before its request is claimed. There is no request to
   mark, so `cancel_request` answers `not_found`. `PROTOCOL.md` scopes the
@@ -618,16 +638,16 @@ of an entity its rules are about. All still hold:
 - A daemon restart and boot recovery. Recovery hands a request off through the
   same `Turns` step, so it reads the mark (431d5663); the model has no boot
   step to check that.
-- A Queue crash (`Turns` ends its turns as `interrupted`, `turns.ex:321-327`),
+- A Queue crash (`Turns` ends its turns as `interrupted`, `turns.ex:368-374`),
   and a hand-off `Turns` cannot complete (a mark it cannot read, a Queue
   already gone), which ends like a marked one. A cancel whose stop finds its
-  Queue gone is left to that `:DOWN`: `stop_in_queue` (`turns.ex:459-470`)
+  Queue gone is left to that `:DOWN`: `stop_in_queue` (`turns.ex:525-536`)
   waits with no timeout, so its call exits only when the Queue was already dead
   (`:noproc`) or dies during the stop (its exit reason), and it catches only
   that exit of its own call; until the review's third round (its R3-2) a Queue
   that died during the stop crashed `Turns`. A store call that exits inside
   `Turns` is logged as that request's error and the turn still ends once
-  (`guarded/3`, `turns.ex:606-616`). A raise in `Turns`' own code or store
+  (`guarded/3`, `turns.ex:714-724`). A raise in `Turns`' own code or store
   calls is a defect: it crashes `Turns` to `Companion.Supervisor`
   (`rest_for_one`), which releases the requests it fenced. A request worker's
   crash.
@@ -932,3 +952,71 @@ the same `{:trips_changed, _}` then `:trips_flush` steps any trips change takes,
 and the size guard counts a town on every day. The trip family is outside this
 spec (Not modelled: protocol 8's trips), and the push carries no seq, request or
 turn. No modelled step changed.
+
+## Re-read for the app inbox (M106 S6, 2026-11-26)
+
+M106's stage S6 staled `PROTOCOL.md`, `output.ex#approval`,
+`approvals.ex` (whole) and `channels/companion.ex#send_approval`. Function
+by function:
+- **`Channels.Companion.send_approval/2`.** A card a turn on this socket
+  raised (`:sandbox`, `:soul`, no `owner_inbox` mark) takes the clause it
+  took: `Approvals.announce(..., :companion)`, kept, this socket's clients
+  alone. Two clauses are new.
+  - A heal's proposal (`:job_change`) is offered to both transports and
+    never kept (`Approvals.offer/3`).
+  - An access confirmation asked in the owner's inbox when that is the app
+    (`owner_inbox: true`) is kept for `:all`.
+
+  Neither is a turn's card. The spec's one approval is still raised by a
+  turn of the socket.
+- **`Companion.Approvals`.**
+  - `announce` and `resolve` now take an audience (a transport, or `:all`).
+    For a turn's card it is its transport, as before.
+  - `resolve` announces to the audience the card was kept with.
+  - `pending/3` returns the kept cards for the transport or for `:all`,
+    then the heal proposals its `:durable` source reads in the caller (the
+    Connection's join). That source never raises: a store that does not
+    answer gives none.
+  - The modelled card's announce, its kept deadline, its expiry
+    (`handle_info({:approval_expired, ...})`, `expire/3`), its resend at
+    hello and its resolution are as they were.
+  - `heal_card_ended/3` resolves a heal's card to both transports. It is
+    another card id, which the spec's one approval never is.
+- **`Output.approval/1`** builds the new kind's routes from the heal's id
+  (`approval_routes(:job_change, _)`), takes its `ttl_s` from the spec and
+  its text from its lines. A `:sandbox` or `:soul` card is built as before.
+- **`PROTOCOL.md`** documents `job_change` and a card's audience. The wire's
+  events and their order are as they were.
+
+No step, variable or check changed. A heal's card and an owner-inbox
+confirmation are approval cards the spec leaves out: they are not raised by
+a turn, and no property here is about them. Their answers go through the
+answer rail and the sandbox confirmations, unchanged in what this spec pins.
+The `approvals.ex`, `companion.ex` and `sandbox.ex` citations in the spec and
+above Findings moved with the code and were updated.
+
+The re-read for a report Fermix starts (2026-11-26) found `Turns` tracking
+one more kind of turn, and `PROTOCOL.md`'s *Streaming a turn* saying what it
+shows (`5adb44fd8`). A finished phone call's or coding run's notice re-enters the
+chat through the continuation dispatcher, which now hands it to `Turns`, as
+the chat's own transport hands its turns (`ChannelRegistry.agent/1`), where
+it went straight to the Queue. `Turns` hands it on and tracks it as it
+tracks a resumed request, with no request behind it: no cancel mark is read
+and nothing is settled. No client started that turn, so none is shown one:
+`build_raw_stream_callback` streams nothing of it, and at its outcome `Turns`
+writes each reply through `Channels.Companion.send_message`, the delivery
+write the job's row stands for, in the step that writes a turn's replies,
+and sends no `text_done`, `turn_done` or `turn_error` for it. Before, that
+reply was written through the same call as soon as it arrived, as an
+untracked message's still is. `turn_id/1` is the one id a turn with no
+request behind it is named by, where each adapter minted its own. A
+report whose turn failed leaves one row that says it could not be written,
+through the same delivery write, and one that was stopped writes nothing.
+A call in the chat is told nothing of a report, and `MainAgent.live_call/3`
+tells a report of no call, so it is never offered the ending with no reply
+(`ff0cfdc1b`). The spec's turns are the ones a client's request starts: each is
+handed off, stopped, ended and settled as before, an owner's typed turn is
+told of a call as before, a report's row is one more row of the writer the
+job stands for, which writes at any time, and no client rule changed. So
+nothing the spec models changed. The line references into `turns.ex` and
+`channels/companion.ex` moved with the code.

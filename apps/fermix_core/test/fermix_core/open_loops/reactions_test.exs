@@ -533,6 +533,73 @@ defmodule FermixCore.OpenLoops.ReactionsTest do
       assert [%{source_channel: "telegram"}] = rows(ctx)
     end
 
+    # The owner said it in that conversation, so their answer arrives under its
+    # key whatever the platform: the app's chat has no owner id to key a DM by.
+    test "a send to the conversation the loop came from is recorded on any platform", ctx do
+      loop = loop!(ctx, "Hear back from the Larchmont pottery residency")
+
+      said_in_app = %{
+        loop
+        | source_channel: "companion",
+          source_chat_id: "main",
+          delivery_platform: "companion",
+          delivery_destination: "main"
+      }
+
+      assert {:ok, %{rung: 2, source_channel: "companion", source_chat_id: "main"}} =
+               Reactions.record_sent(
+                 said_in_app,
+                 "How did it go?",
+                 @raised,
+                 sent_opts(ctx, false)
+               )
+
+      # A loop said where no reply is captured (the terminal) is still skipped
+      # when its check-in goes to such an inbox.
+      elsewhere = %{loop | source_channel: "cli", source_chat_id: "session-7"}
+      to_slack = %{elsewhere | delivery_platform: "slack", delivery_destination: "U0RIVERA"}
+
+      assert {:skipped, :reply_uncapturable} =
+               Reactions.record_sent(to_slack, "How did it go?", @raised, sent_opts(ctx, false))
+    end
+
+    # M106 §8 (stage S6): a loop said elsewhere is checked in on in the
+    # owner's inbox, the Fermix app's chat first while a phone is paired. The
+    # Mac's turns run in that conversation and a phone's join it, so the
+    # owner's reply typed on either is captured there.
+    test "a check-in in the Fermix app for a loop said elsewhere takes the reply typed there",
+         ctx do
+      # Noted in the terminal with a phone paired: the registry's ladder puts
+      # the check-in in the app's chat.
+      paired =
+        Keyword.merge(ctx.opts, FermixTestSupport.AppInbox.opts(%{"telegram" => FakeChannel}))
+
+      terminal = turn(ctx, %{conversation_key: {"cli", "session-7", :root}})
+
+      params = %{
+        "intention" => "Hear back from the Larchmont pottery residency",
+        "matters_by" => %{"type" => "date", "date" => "2031-06-10"},
+        "reach" => "message"
+      }
+
+      assert {:ok, %{loop: said_elsewhere}} = Registry.note(params, terminal, paired)
+
+      assert {said_elsewhere.source_channel, said_elsewhere.delivery_platform,
+              said_elsewhere.delivery_destination} == {"cli", "companion", "main"}
+
+      assert {:ok, %{rung: 2, source_channel: "companion", source_chat_id: "main"} = sent} =
+               Reactions.record_sent(
+                 said_elsewhere,
+                 "How did it go?",
+                 @raised,
+                 sent_opts(ctx, false)
+               )
+
+      app = turn(ctx, %{conversation_key: {"companion", "main", :root}, session_id: "sess_app"})
+      assert {:ok, 1} = Reactions.capture(app, "They said yes", later(@raised, @hour))
+      assert %{outcome: "replied", reply_text: "They said yes"} = row(ctx, sent.id)
+    end
+
     # A check-in run that read outside content (a loop noted after it, a
     # stamped follow-up, a tool's result) says so, and every send states it.
     test "a send states whether its run read outside content", ctx do

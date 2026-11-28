@@ -93,6 +93,27 @@ defmodule FermixChannels.Gateway.OwnerInboxApprovalTest do
     assert record.resume == nil
   end
 
+  # An effect outside the machine (a phone call's start): the promise its own
+  # rendering makes ends the prompt, and its token lives for its own window.
+  test "an effect's prompt ends with its own promise, and its token lives for its window" do
+    request =
+      Map.merge(request(), %{
+        after_confirm: "Once you confirm, Fermix places exactly this call.",
+        ttl_ms: 300_000
+      })
+
+    before = System.monotonic_time(:millisecond)
+    assert {:ok, token, :new} = OwnerInboxApproval.request(request, telegram_owner())
+
+    assert_received {:stub_adapter, {:approval, _message, text, ^token}}
+    assert text =~ "`/confirm #{token}` (expires in 5 minutes)."
+    assert String.ends_with?(text, "Once you confirm, Fermix places exactly this call.")
+    refute text =~ "command"
+
+    assert {:ok, %{expires_at: expires_at}} = Confirmations.peek(token)
+    assert expires_at >= before + 300_000
+  end
+
   test "a repeat for a live prompt sends nothing" do
     request = request()
     assert {:ok, token, :new} = OwnerInboxApproval.request(request, telegram_owner())
@@ -300,6 +321,60 @@ defmodule FermixChannels.Gateway.OwnerInboxApprovalTest do
              )
 
     assert_received {:card_adapter, %{reply_target: "owner-1"}, ^spec}
+  end
+
+  # M106 §5.7, D5: a heal's proposal goes through the same sender, and its
+  # send key rides on the message the channel is handed.
+  test "a heal's card goes as its card, carrying the heal's send key" do
+    spec = %{
+      kind: :job_change,
+      text: "card",
+      token: "cp_H",
+      lines: [~s(Job "Harbour tide table" failed.)],
+      detail: "Details: each change in full",
+      actions: %{confirm: "Approve", deny: "Deny"},
+      proactive_key: "job_heal:jhl_harbour"
+    }
+
+    assert :ok =
+             OwnerInboxApproval.send_cue_proposal(
+               %{platform: "telegram", destination: "owner-1"},
+               spec,
+               adapter: CardAdapter
+             )
+
+    assert_received {:card_adapter, %{reply_target: "owner-1", metadata: metadata}, ^spec}
+    assert metadata.proactive_key == "job_heal:jhl_harbour"
+  end
+
+  # The local cli chat is the owner's own (only the owner types there), so
+  # a heal's card can be held to it and sent there as its text.
+  test "a card goes to the local cli chat as its text" do
+    spec = %{
+      kind: :job_change,
+      text: "the whole card\n\nReply /confirm to make this change.",
+      token: "cp_C",
+      lines: ["x"],
+      detail: "Details",
+      actions: %{confirm: "Approve", deny: "Deny"}
+    }
+
+    assert :ok =
+             OwnerInboxApproval.send_cue_proposal(%{platform: "cli", destination: "cli"}, spec,
+               adapter: StubAdapter
+             )
+
+    assert_received {:stub_adapter,
+                     {:text, %{channel: "cli", reply_target: "cli"},
+                      "the whole card\n\nReply /confirm to make this change."}}
+
+    # Any other inbox no card's answer can come from is refused, as before.
+    assert {:error, :no_owner_inbox} =
+             OwnerInboxApproval.send_cue_proposal(
+               %{platform: "slack", destination: "C0SLACK"},
+               spec,
+               adapter: StubAdapter
+             )
   end
 
   defp follow_up_card do

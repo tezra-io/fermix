@@ -184,6 +184,35 @@ defmodule FermixChannels.Gateway.DeliveryTest do
       assert_received {:text_sent, "the whole card\n\nReply /confirm to run or /deny to skip."}
     end
 
+    # M106 §5.7, D5: a heal's proposal is a card of the same family.
+    test "a heal's proposal is drawn as a card, and is its text where none is drawn" do
+      spec = %{
+        kind: :job_change,
+        text: "the whole card\n\nReply /confirm to make this change, or /deny to leave it.",
+        token: "cp_H",
+        lines: [~s(Job "Harbour tide table" failed.)],
+        detail: "Details: each change in full",
+        actions: %{confirm: "Approve", deny: "Deny"}
+      }
+
+      rich = Delivery.build_deliver(ReplyContext.new(RichApprovalChannel, message()))
+      assert :ok = rich.({:approval_prompt, spec})
+      assert_received {:rich_approval_sent, "42", ^spec}
+
+      plain = Delivery.build_deliver(ReplyContext.new(TextOnlyChannel, message()))
+      assert :ok = plain.({:approval_prompt, spec})
+      assert_received {:text_sent, "the whole card\n\nReply /confirm" <> _rest}
+
+      override =
+        Delivery.build_deliver(
+          ReplyContext.new(TextOnlyChannel, message()),
+          capturing_override(self())
+        )
+
+      assert :ok = override.({:approval_prompt, spec})
+      assert_received {:override_part, {:approval_prompt, "the whole card" <> _rest, "cp_H"}}
+    end
+
     test "the answer to a tap replaces the card where the channel can edit it, else is a reply" do
       editing = Delivery.build_deliver(ReplyContext.new(EditingChannel, message()))
       assert :ok = editing.({:approval_answer, "55", "Skipped; it did not run."})

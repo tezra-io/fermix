@@ -50,6 +50,14 @@ def test_explicit_mode_allows_env_key_anthropic():
     assert pid == "anthropic"
 
 
+def test_explicit_mode_seeds_vercel_from_its_gateway_key():
+    # The eval home's daemon reads the key from Vercel's own variable name,
+    # the one the engine's secret registry overlays.
+    pid, _blk = seed.explicit_spec(_args(provider="vercel", model="anthropic/claude-sonnet-4.6"))
+    assert pid == "vercel"
+    assert seed._ENV_KEY_PROVIDERS["vercel"] == "AI_GATEWAY_API_KEY"
+
+
 def test_explicit_mode_allows_keyless_ollama():
     pid, _blk = seed.explicit_spec(_args(provider="ollama", model="llama3"))
     assert pid == "ollama"
@@ -727,7 +735,7 @@ def _computer_tree(home):
     return tree
 
 
-def test_the_computers_fixture_writes_two_away_computers_the_store_reads(tmp_path):
+def test_the_computers_fixture_writes_three_away_computers_the_store_reads(tmp_path):
     home = tmp_path / "x-eval"
     home.mkdir()
     seed.write_computer_fixtures(str(home))
@@ -738,11 +746,11 @@ def test_the_computers_fixture_writes_two_away_computers_the_store_reads(tmp_pat
     devices = home / "mobile" / "devices.toml"
     assert devices.stat().st_mode & 0o777 == 0o600
     rows = tomllib.loads(devices.read_text())["devices"]
-    assert [row["name"] for row in rows] == ["studio Mac", "loft Linux"]
+    assert [row["name"] for row in rows] == ["studio Mac", "loft Linux", "cellar Linux"]
     for row in rows:
         _assert_desktop_row(row)
-    assert len({row["device_id"] for row in rows}) == 2
-    assert len({row["noise_pk"] for row in rows}) == 2
+    assert len({row["device_id"] for row in rows}) == 3
+    assert len({row["noise_pk"] for row in rows}) == 3
 
     records = {}
     for row in rows:
@@ -772,10 +780,19 @@ def test_the_computers_fixture_writes_two_away_computers_the_store_reads(tmp_pat
                                  "sentence": "Messages runs only on a Mac."}
     assert linux["places"] == {"id": "places", "state": "unavailable",
                                "sentence": "Looking places up in Apple Maps needs the Fermix app on a Mac."}
+    # cellar Linux: every switch off (M102 N10), so it offers nothing, each off
+    # offer with the sentence a Linux computer says for it.
+    cellar = _offers(records["cellar Linux"])
+    assert not [oid for oid, offer in cellar.items() if offer["state"] == "on"]
+    assert {oid for oid, offer in cellar.items() if offer["state"] == "off"} == {
+        "files", "shell", "browser", "computer_use", "history"}
+    assert {offer["sentence"] for offer in cellar.values() if offer["state"] == "off"} == {
+        "Switched off on this computer. Only someone at this computer can switch it on."}
     assert {row["platform"] for row in rows} == {"macos", "linux"}
 
     manifest = json.loads((home / seed.COMPUTERS_MANIFEST).read_text())
-    assert [c["name"] for c in manifest["computers"]] == ["studio Mac", "loft Linux"]
+    assert [c["name"] for c in manifest["computers"]] == [
+        "studio Mac", "loft Linux", "cellar Linux"]
 
 
 def test_a_second_computers_seed_writes_the_same_bytes(tmp_path, monkeypatch):
@@ -796,7 +813,8 @@ def test_computers_come_only_with_the_flag_and_a_seed_without_them_takes_them_aw
     # A Mac dev daemon carries the Apple helper and would search Apple Maps
     # itself; the computers world looks places up on the studio Mac (D13).
     assert on["fermix_core"]["tools"]["place_search"] == {"backend": "computer"}
-    assert "computers: studio Mac and loft Linux linked, both away" in capsys.readouterr().out
+    assert ("computers: studio Mac, loft Linux and cellar Linux linked, all away"
+            in capsys.readouterr().out)
     written = seed.computer_paths(str(home))
     assert all(os.path.isfile(path) for path in written)
 
@@ -886,6 +904,181 @@ def test_computers_refuse_a_devices_file_the_seed_did_not_write(tmp_path, monkey
     assert foreign.read_text() == "devices = []\n"
     seed.clear_computer_fixtures(str(home))
     assert foreign.read_text() == "devices = []\n"
+
+
+def _seed_phone(monkeypatch, home, *flags):
+    monkeypatch.setattr(sys, "argv", ["seed_capability_home.py", str(home), "--provider",
+                                      "ollama", "--model", "brindle-7b", *flags])
+    seed.main()
+    return tomllib.loads((home / "config.toml").read_text())
+
+
+def test_phone_calls_turn_the_section_on_with_invented_values_in_the_homes_file_store(
+        tmp_path, monkeypatch):
+    # M94: the one setup decision a call needs, and the trunk and key it reads, all
+    # invented, the secrets in the home's own file store as `@file` names them.
+    home = tmp_path / "x-eval"
+    cfg = _seed_phone(monkeypatch, home, "--phone-calls")
+    phone = cfg["fermix_core"]["phone_calls"]
+    assert phone == {"enabled": True, "caller_number": "+16465550108",
+                     "sip_username": "fermix-eval-trunk-94", "sip_password": "@file"}
+    assert set(phone) <= {"enabled", "voice", "caller_number", "sip_username", "sip_password"}
+    # The phone engine's key is the openai provider's slot; the scored provider stays primary.
+    assert cfg["fermix_core"]["providers"]["openai"] == {"api_key": "@file"}
+    assert cfg["fermix_core"]["providers"]["ollama"]["primary"] is True
+    secrets_dir = home / "secrets"
+    assert oct(secrets_dir.stat().st_mode & 0o777) == "0o700"
+    for name, value in seed.PHONE_SECRETS.items():
+        path = secrets_dir / name
+        assert path.read_text() == value and oct(path.stat().st_mode & 0o777) == "0o600"
+    manifest = json.loads((home / seed.PHONE_CALLS_MANIFEST).read_text())
+    assert manifest["caller_number"] == phone["caller_number"]
+    assert manifest["secrets"] == sorted(seed.PHONE_SECRETS)
+    assert not any(value in json.dumps(manifest) for value in seed.PHONE_SECRETS.values())
+    # The fixture manifest records that its origin is where the daemon's calls go.
+    fixtures = json.loads((home / seed.FIXTURE_MANIFEST).read_text())
+    assert set(fixtures) == {"port", "phone_calls"} and fixtures["phone_calls"] is True
+
+
+def test_the_seeded_caller_number_is_a_fictional_number_in_a_us_area_code():
+    number = seed.PHONE_SEEDED["caller_number"]
+    assert re.fullmatch(r"\+1(646)5550(1\d\d)", number)
+
+
+def test_a_seed_without_phone_calls_takes_them_away(tmp_path, monkeypatch):
+    home = tmp_path / "x-eval"
+    _seed_phone(monkeypatch, home, "--phone-calls", "--cues")
+    cue_token = next((home / "secrets").glob("cue_source.*.token"))
+    off = _seed_phone(monkeypatch, home, "--cues")
+    assert "phone_calls" not in off["fermix_core"]
+    assert "openai" not in off["fermix_core"]["providers"]
+    assert not (home / seed.PHONE_CALLS_MANIFEST).exists()
+    assert not any((home / "secrets" / name).exists() for name in seed.PHONE_SECRETS)
+    # Only the phone seed's own files go; the cue tokens beside them are rewritten.
+    assert any((home / "secrets").glob("cue_source.*.token")) and cue_token.parent.is_dir()
+
+
+def test_owner_inbox_cli_makes_the_local_chat_the_default_target(tmp_path, monkeypatch, capsys):
+    # M106: `Delivery.OwnerInbox` takes a configured local target as the owner's own
+    # inbox, and the CLI adapter sends with no credentials, so a heal's message lands.
+    home = tmp_path / "x-eval"
+    on = _seed_main(monkeypatch, home, "--owner-inbox-cli")
+    assert on["fermix_core"]["jobs"]["default_delivery_target"] == {"platform": "cli",
+                                                                     "chat_id": "cli"}
+    assert on["fermix_core"]["jobs"]["default_delivery_mode"] == "channel"
+    # The Telegram owner id stays: only the configured rung moves.
+    assert on["fermix_channels"]["telegram"] == {"owner_user_id": "100001"}
+    manifest = json.loads((home / seed.owner_inbox.MANIFEST).read_text())
+    assert manifest["default_delivery_target"] == {"platform": "cli", "chat_id": "cli"}
+    assert seed.owner_inbox.home_problem(str(home)) is None
+    assert "owner inbox: the local cli chat" in capsys.readouterr().out
+
+
+def test_a_seed_without_owner_inbox_cli_puts_the_telegram_target_back(tmp_path, monkeypatch):
+    home = tmp_path / "x-eval"
+    _seed_main(monkeypatch, home, "--owner-inbox-cli")
+    off = _seed_main(monkeypatch, home)
+    assert off["fermix_core"]["jobs"]["default_delivery_target"] == {"platform": "telegram",
+                                                                      "chat_id": "100001"}
+    assert not (home / seed.owner_inbox.MANIFEST).exists()
+    assert "--owner-inbox-cli" in seed.owner_inbox.home_problem(str(home))
+
+
+def test_owner_inbox_app_makes_the_apps_chat_the_default_target(tmp_path, monkeypatch, capsys):
+    # M106 S6: a configured target naming the app's chat is the owner's own inbox, the
+    # companion socket's conversation `main`.
+    home = tmp_path / "x-eval"
+    on = _seed_main(monkeypatch, home, "--owner-inbox-app")
+    assert on["fermix_core"]["jobs"]["default_delivery_target"] == {"platform": "companion",
+                                                                     "chat_id": "main"}
+    manifest = json.loads((home / seed.owner_inbox.MANIFEST).read_text())
+    assert manifest == {"default_delivery_target": {"platform": "companion", "chat_id": "main"},
+                        "adapter": "FermixChannels.Channels.Companion"}
+    assert seed.owner_inbox.home_problem(str(home), "owner_inbox_app") is None
+    # The terminal chat's tasks are held out of this home, by the flag that seeds them.
+    assert "--owner-inbox-cli" in seed.owner_inbox.home_problem(str(home))
+    assert "owner inbox: the Fermix app's chat" in capsys.readouterr().out
+    off = _seed_main(monkeypatch, home)
+    assert off["fermix_core"]["jobs"]["default_delivery_target"]["platform"] == "telegram"
+    assert "--owner-inbox-app" in seed.owner_inbox.home_problem(str(home), "owner_inbox_app")
+
+
+def test_the_owner_has_one_inbox(tmp_path, monkeypatch):
+    with pytest.raises(SystemExit):
+        _seed_main(monkeypatch, tmp_path / "x-eval", "--owner-inbox-cli", "--owner-inbox-app")
+    assert not (tmp_path / "x-eval" / "config.toml").exists()
+
+
+def _throwaway_checkout(root):
+    """A small git checkout with a commit, a _build and a deps dir, standing in for the
+    harness's own checkout. Every git call names this repo."""
+    repo = root / "checkout"
+    (repo / "apps").mkdir(parents=True)
+    (repo / "apps" / "core.ex").write_text("defmodule Core do\nend\n")
+    env = {**os.environ, "GIT_AUTHOR_NAME": "eval", "GIT_AUTHOR_EMAIL": "eval@localhost",
+           "GIT_COMMITTER_NAME": "eval", "GIT_COMMITTER_EMAIL": "eval@localhost"}
+    for args in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "snapshot me"]):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, env=env)
+    for skipped in ("_build", "deps"):
+        (repo / skipped).mkdir()
+        (repo / skipped / "big.bin").write_text("compiled")
+    (repo / "error.log").write_text("an untracked local file")
+    return repo
+
+
+def _head(repo):
+    return subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True,
+                          capture_output=True, text=True).stdout.strip()
+
+
+def test_workspace_snapshot_puts_the_checkout_at_its_head_as_ci_does(tmp_path, monkeypatch):
+    # run_eval.py refuses an isolated behavioral run unless the disposable workspace is
+    # a git snapshot at the harness's own HEAD (workspace_revision_error, tested in
+    # test_eval_safety.py); the CI eval box rsyncs its checkout in.
+    repo = _throwaway_checkout(tmp_path)
+    monkeypatch.setattr(seed, "REPO_DIR", str(repo))
+    home = tmp_path / "x-eval"
+    _seed_main(monkeypatch, home)
+    workspace = home / "workspace"
+    assert subprocess.run(["git", "-C", str(workspace), "rev-parse", "HEAD"],
+                          capture_output=True).returncode != 0    # an empty repo: refused
+    (workspace / "eval").mkdir()
+    (workspace / "eval" / "left_by_a_trial.txt").write_text("old")
+
+    _seed_main(monkeypatch, home, "--workspace-snapshot")
+    assert _head(workspace) == _head(repo)
+    assert (workspace / "apps" / "core.ex").is_file()
+    assert not (workspace / "_build").exists() and not (workspace / "deps").exists()
+    assert not (workspace / "error.log").exists()     # untracked: never copied
+    assert not (workspace / "eval").exists()          # an earlier trial's files are gone
+    status = subprocess.run(["git", "-C", str(workspace), "status", "--porcelain"],
+                            check=True, capture_output=True, text=True).stdout
+    assert status == ""                                # the tree is the commit, nothing more
+
+
+def test_workspace_snapshot_refuses_a_checkout_without_git_or_holding_the_home(
+        tmp_path, monkeypatch):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    monkeypatch.setattr(seed, "REPO_DIR", str(plain))
+    with pytest.raises(SystemExit):
+        _seed_main(monkeypatch, tmp_path / "x-eval", "--workspace-snapshot")
+    repo = _throwaway_checkout(tmp_path)
+    monkeypatch.setattr(seed, "REPO_DIR", str(repo))
+    with pytest.raises(SystemExit):
+        _seed_main(monkeypatch, repo / "inner-eval", "--workspace-snapshot")
+
+
+@pytest.mark.parametrize("flags", [("--provider", "openai", "--model", "gpt-x"),
+                                   ("--provider", "ollama", "--model", "brindle-7b",
+                                    "--voice", "--voice-engine", "openai_live")])
+def test_phone_calls_refuse_a_home_that_needs_the_real_openai_key(tmp_path, monkeypatch, flags):
+    home = tmp_path / "x-eval"
+    monkeypatch.setattr(sys, "argv", ["seed_capability_home.py", str(home), *flags,
+                                      "--phone-calls"])
+    with pytest.raises(SystemExit):
+        seed.main()
+    assert not (home / seed.PHONE_CALLS_MANIFEST).exists()
 
 
 if __name__ == "__main__":

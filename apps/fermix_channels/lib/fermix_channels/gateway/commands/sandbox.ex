@@ -12,6 +12,7 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   alias FermixChannels.Gateway.Message
   alias FermixCore.Capabilities.AccessGate
   alias FermixCore.Cues.Proposals
+  alias FermixCore.Delivery.OwnerInbox
   alias FermixCore.Harness.Ledger
   alias FermixCore.Sandbox.Config
   alias FermixCore.Sandbox.ConfigMutation
@@ -65,7 +66,11 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   @type grant_request ::
           %{path: String.t(), reason: String.t(), diff: String.t(), provenance: map()}
           | %{acknowledge_vendor_config: String.t(), provenance: map()}
-          | %{access_sensitive: String.t()}
+          | %{required(:access_sensitive) => String.t(), optional(:ttl_ms) => pos_integer()}
+
+  # The longest window a request may name for its token (`AccessGate.Pending`'s
+  # own bound): an effect whose owner reads a whole brief waits longer.
+  @max_ttl_ms 15 * 60_000
 
   @impl true
   def name, do: "sandbox"
@@ -150,12 +155,13 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   defp dispatch("revoke", ["path", path], _message, reply_fn, _context),
     do: apply_now({:remove_allowed_root, path}, reply_fn)
 
-  # A watcher's card (a mandate's proposal, M60 §10.9, or a follow-up's card)
-  # is core's, by its `cp_` token or its id: durable in `memory.db`, and core
-  # checks the message's origin against the chat it was sent to. Every other
-  # token is this store's. `/always` answers a follow-up's card alone: Run, and
-  # no card for its later items (the 2026-10-31 revision of
-  # M60_WATCHER_CODING_RUNS.md §3.4); nothing in this store takes it.
+  # A card of core's answer rail (a mandate's proposal, M60 §10.9, a
+  # follow-up's card, or a heal's proposal, M106 §5.7) is core's, by its `cp_`
+  # token or its id: durable in `memory.db`, and core checks the message's
+  # origin against the chat it was sent to. Every other token is this store's.
+  # `/always` answers a follow-up's card alone: Run, and no card for its later
+  # items (the 2026-10-31 revision of M60_WATCHER_CODING_RUNS.md §3.4);
+  # nothing in this store takes it.
   defp dispatch("confirm", [token], message, reply_fn, context) do
     if Proposals.answerable?(token),
       do: confirm_proposal(token, message, reply_fn, context),
@@ -233,7 +239,9 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   (the `request_directory_access` tool, and a coding-harness launch waiting on a
   vendor-config acknowledgment). Returns `{:ok, token, :existing}` when a live
   pending record for the same mutation + origin already exists (no second owner
-  prompt), otherwise stores a new record and returns `{:ok, token, :new}`.
+  prompt), otherwise stores a new record and returns `{:ok, token, :new}`. An
+  access-sensitive request may name its token's window (`ttl_ms`, at most 15
+  minutes); every other lives for 60 seconds.
   """
   @spec store_pending_grant(grant_request(), grant_origin()) ::
           {:ok, String.t(), :new | :existing}
@@ -246,10 +254,20 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
 
       :error ->
         token = token()
-        :ok = Confirmations.store(token, grant_pending_record(mutation, origin))
+        record = grant_pending_record(mutation, origin, grant_ttl_ms(request))
+        :ok = Confirmations.store(token, record)
         {:ok, token, :new}
     end
   end
+
+  defp grant_ttl_ms(%{access_sensitive: _intent, ttl_ms: ttl_ms})
+       when is_integer(ttl_ms) and ttl_ms > 0 and ttl_ms <= @max_ttl_ms,
+       do: ttl_ms
+
+  defp grant_ttl_ms(%{ttl_ms: ttl_ms}),
+    do: raise(ArgumentError, "a grant's window must be 1..#{@max_ttl_ms} ms: #{inspect(ttl_ms)}")
+
+  defp grant_ttl_ms(_request), do: @ttl_ms
 
   defp grant_mutation(%{path: path}) when is_binary(path), do: {:add_allowed_root, path}
 
@@ -277,7 +295,7 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
       Map.get(record, :ingress_context) == Map.get(origin, :ingress_context)
   end
 
-  defp grant_pending_record(mutation, origin) do
+  defp grant_pending_record(mutation, origin, ttl_ms) do
     %{
       mutation: mutation,
       channel: origin.channel,
@@ -285,7 +303,7 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
       thread_ts: origin.thread_ts,
       user_id: origin.user_id,
       resume: Map.get(origin, :resume),
-      expires_at: now_ms() + @ttl_ms
+      expires_at: now_ms() + ttl_ms
     }
     |> maybe_put(:ingress_context, Map.get(origin, :ingress_context))
   end
@@ -565,10 +583,11 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   end
 
   # A bare `/confirm` or `/deny` answers the one thing waiting in this chat: a
-  # watcher's card held in core, or a parked command or sandbox change held
-  # here. A bare `/always` answers the one follow-up's card waiting, the only
-  # thing that takes it. With more than one it answers none, and lists each
-  # with the command that answers it (M60_WATCHER_CODING_RUNS.md §6.2).
+  # card held in core (a watcher's, or a heal's proposal), or a parked command
+  # or sandbox change held here. A bare `/always` answers the one follow-up's
+  # card waiting, the only thing that takes it. With more than one it answers
+  # none, and lists each with the command that answers it
+  # (M60_WATCHER_CODING_RUNS.md §6.2).
   defp answer_bare(command, message, reply_fn, context) do
     case Proposals.waiting_in_chat(proposal_origin(message), proposal_opts(context)) do
       {:ok, cards} ->
@@ -635,15 +654,23 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   defp held_title(%{mutation: {:add_allowed_root, path}}), do: "Access to #{path}"
   defp held_title(_record), do: "A sandbox change"
 
-  # Who answered, and where: core accepts the answer only from the owner's DM
-  # the proposal was sent to (platform, chat and user), so a group chat or
-  # another platform is refused there.
+  # Who answered, and where: core accepts the answer only from the chat the
+  # card was sent to (platform, chat and user), so a group chat or another
+  # platform is refused there. An answer typed in the Fermix app, on the Mac
+  # chat or a paired phone, is the app's one origin (M106 §8), by core's one
+  # rule for it (`OwnerInbox.answered_in_app/2`).
   defp proposal_origin(message) do
-    %{
-      platform: message.channel,
-      chat_id: message.chat_id,
-      user_id: stable_user_id(message.metadata || %{})
-    }
+    case OwnerInbox.answered_in_app(message.channel, message.chat_id) do
+      {:ok, app} ->
+        app
+
+      :error ->
+        %{
+          platform: message.channel,
+          chat_id: message.chat_id,
+          user_id: stable_user_id(message.metadata || %{})
+        }
+    end
   end
 
   # Core's seams for a test that runs the command against its own repo; the
@@ -667,7 +694,10 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   # The re-run is the request that parked: it carries what that turn had read
   # (`resumed_sources`, which the turn seeds) and, in the metadata the turn and
   # the store read them from, a forwarded message's mark and, on a coding run's
-  # follow-up, its chain depth and finished run.
+  # follow-up, its chain depth and finished run, and the owner request's
+  # identity (`request_id`), so the re-run finds what the request started. A
+  # phone call's result turn has no tools (M94 D23), so it parks nothing and
+  # no re-run carries a call.
   defp synthesize_resume_message(record, resume, token) do
     provenance = Map.fetch!(resume, :provenance)
 
@@ -681,7 +711,11 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
       thread_ts: record.thread_ts,
       metadata:
         provenance
-        |> Map.take([:harness_continuation_depth, :harness_run_id])
+        |> Map.take([
+          :harness_continuation_depth,
+          :harness_run_id,
+          :request_id
+        ])
         |> Map.merge(Map.take(resume, [:forwarded]))
         |> Map.merge(%{user_id: record.user_id, resumed_from_grant: token}),
       resumed_sources: Map.get(provenance, :outside_sources)
@@ -757,10 +791,24 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
     }
   end
 
+  # A record a turn raised is answered from that turn's own chat and person.
+  # One bound to the Fermix app's inbox (an access confirmation that had no
+  # chat of its own, `Gateway.OwnerInboxApproval`) is answered from the app's
+  # one origin, which a message typed on the Mac chat or on a paired phone
+  # carries (`OwnerInbox.answered_in_app/2`); a turn's record never holds it.
   defp same_origin?(record, message) do
-    record.channel == message.channel and record.chat_id == message.chat_id and
-      record.thread_ts == message.thread_ts and
-      record.user_id == stable_user_id(message.metadata || %{})
+    {record.channel, record.chat_id, record.thread_ts, record.user_id} in answer_origins(message)
+  end
+
+  defp answer_origins(message) do
+    own =
+      {message.channel, message.chat_id, message.thread_ts,
+       stable_user_id(message.metadata || %{})}
+
+    case OwnerInbox.answered_in_app(message.channel, message.chat_id) do
+      {:ok, app} -> [own, {app.platform, app.chat_id, nil, app.user_id}]
+      :error -> [own]
+    end
   end
 
   defp token do

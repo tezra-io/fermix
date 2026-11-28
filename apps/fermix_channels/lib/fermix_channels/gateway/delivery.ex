@@ -21,9 +21,10 @@ defmodule FermixChannels.Gateway.Delivery do
   alias FermixCore.Telemetry
 
   # The approval kinds a structured spec may carry: a sandbox change, a SOUL.md
-  # change, and a watcher's card (a follow-up, its approval prompt, or a
-  # mandate's proposal; M60_WATCHER_CODING_RUNS.md §6).
-  @approval_kinds [:sandbox, :soul, :follow_up, :mandate]
+  # change, a watcher's card (a follow-up, its approval prompt, or a mandate's
+  # proposal; M60_WATCHER_CODING_RUNS.md §6), and a heal's proposal for a job
+  # (M106 §5.7).
+  @approval_kinds [:sandbox, :soul, :follow_up, :mandate, :job_change]
 
   @doc "Build the delivery closure for a destination."
   @spec build_deliver(ReplyContext.t()) :: Reply.reply_fn()
@@ -90,11 +91,23 @@ defmodule FermixChannels.Gateway.Delivery do
     end
   end
 
+  # A channel that draws only the one-tap `/confirm` button (`send_approval/3`)
+  # still draws it for a sandbox-kind card, whose window it does not show.
   defp deliver_structured_approval(channel, message, text_reply, spec) do
-    if function_exported?(channel, :send_approval, 2) do
-      observe_reply(fn -> channel.send_approval(message, spec) end, :text, nil, message)
-    else
-      observe_reply(fn -> text_reply.(spec.text) end, :text, nil, message)
+    cond do
+      function_exported?(channel, :send_approval, 2) ->
+        observe_reply(fn -> channel.send_approval(message, spec) end, :text, nil, message)
+
+      spec.kind == :sandbox and function_exported?(channel, :send_approval, 3) ->
+        observe_reply(
+          fn -> channel.send_approval(message, spec.text, spec.token) end,
+          :text,
+          nil,
+          message
+        )
+
+      true ->
+        observe_reply(fn -> text_reply.(spec.text) end, :text, nil, message)
     end
   end
 

@@ -5,11 +5,12 @@ defmodule FermixCore.Capabilities.MeetingsSeederInvariantTest do
 
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.BuiltinSeeder
+  alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Meetings
 
   # MILESTONE_21 C2 §14.1, written as the whole-surface invariant the AGENTS.md
-  # gate-on-the-whole-feature pitfall mandates: when `Meetings.ready?()` is
+  # gate-on-the-whole-feature pitfall mandates: when `Meetings.offered?/1` is
   # false, NO meetings tool is advertised. The assertion loops over the SEEDER's
   # family list and over everything the seeder actually registered, never over a
   # hand-written list of today's three tools, so a fourth meetings tool added
@@ -54,14 +55,18 @@ defmodule FermixCore.Capabilities.MeetingsSeederInvariantTest do
 
   defp meetings(config), do: Application.put_env(:fermix_core, :meetings, config)
 
-  defp seed(registry), do: BuiltinSeeder.start_link(capability_registry: registry)
+  # Whether this engine is an Always On server is the host's fact
+  # (`Home.AlwaysOn.here?/0`), so every seed here states it.
+  defp seed(registry, always_on_server),
+    do:
+      BuiltinSeeder.start_link(capability_registry: registry, always_on_server: always_on_server)
 
   defp registered_names(registry) do
     registry |> CapabilityRegistry.list() |> Enum.map(& &1.name)
   end
 
-  defp assert_no_meetings_surface(registry) do
-    :ignore = seed(registry)
+  defp assert_no_meetings_surface(registry, always_on_server \\ false) do
+    :ignore = seed(registry, always_on_server)
     names = registered_names(registry)
 
     for tool <- BuiltinSeeder.meetings_tool_modules() do
@@ -77,7 +82,7 @@ defmodule FermixCore.Capabilities.MeetingsSeederInvariantTest do
     assert {:ok, _shell} = CapabilityRegistry.find(registry, "shell")
   end
 
-  describe "no meetings tool is advertised when meetings are not ready" do
+  describe "no meetings tool is advertised when meetings are not offered" do
     test "meetings disabled (the default posture)", %{registry: registry} do
       meetings(enabled: false)
 
@@ -123,7 +128,7 @@ defmodule FermixCore.Capabilities.MeetingsSeederInvariantTest do
     setup %{registry: registry} do
       meetings([enabled: true] ++ @rtms_credentials)
       assert Meetings.ready?()
-      :ignore = seed(registry)
+      :ignore = seed(registry, false)
       :ok
     end
 
@@ -148,6 +153,59 @@ defmodule FermixCore.Capabilities.MeetingsSeederInvariantTest do
       expected = BuiltinSeeder.meetings_tool_modules() |> Enum.map(& &1.name()) |> Enum.sort()
 
       assert seeded == expected
+    end
+  end
+
+  # M102 N6, D5: on an Always On server the family is registered once meetings
+  # are on, with no lane usable there, so a Meet link reaches the server's own
+  # sentence (`Meetings.meet_here/1`) instead of finding no meeting tool and
+  # going to a browser. `ready?/1` is unchanged: it is what Doctor and setup
+  # report.
+  describe "on an Always On server" do
+    test "meetings on and no Zoom seeds the family, and a Meet link hears why", %{
+      registry: registry
+    } do
+      meetings(enabled: true)
+
+      :ignore = seed(registry, true)
+
+      for tool <- BuiltinSeeder.meetings_tool_modules() do
+        assert {:ok, _capability} = CapabilityRegistry.find(registry, tool.name()),
+               "#{tool.name()} was not seeded on a server with meetings on"
+      end
+
+      {:ok, join} = CapabilityRegistry.find(registry, "join_meeting")
+
+      context = %{
+        source_trust: :operator,
+        computer_use_origin: :interactive,
+        meetings_opts: [always_on_server: true]
+      }
+
+      assert {:ok, result} =
+               Capability.execute(
+                 join,
+                 %{"url" => "https://meet.google.com/abc-defg-hij"},
+                 context
+               )
+
+      refute result.success
+      assert result.error == Meetings.meet_unavailable_sentence(false)
+    end
+
+    test "meetings off seeds nothing there either", %{registry: registry} do
+      meetings(enabled: false)
+
+      refute Meetings.offered?(always_on_server: true)
+      assert_no_meetings_surface(registry, true)
+    end
+
+    test "offered there is not ready there: Doctor and setup still say no lane is usable" do
+      meetings(enabled: true)
+
+      assert Meetings.offered?(always_on_server: true)
+      refute Meetings.ready?(always_on_server: true)
+      refute Meetings.offered?(always_on_server: false)
     end
   end
 

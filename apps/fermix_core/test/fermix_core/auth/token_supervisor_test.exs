@@ -4,6 +4,7 @@ defmodule FermixCore.Auth.TokenSupervisorTest do
 
   import ExUnit.CaptureLog, only: [with_log: 1]
 
+  alias FermixCore.Auth.ChatGPT
   alias FermixCore.Auth.Store
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Plugins.Dist.Store, as: DistStore
@@ -182,22 +183,28 @@ defmodule FermixCore.Auth.TokenSupervisorTest do
     end
 
     # `openai_codex` signs in with ChatGPT, and its profile has no manager of
-    # its own outside this supervisor: a sign-out lets go of its child as it
-    # does every other profile's.
+    # its own outside this supervisor: its sign-out forgets the registration
+    # and lets go of its child as every other profile's does, so the next use
+    # serves the sign-in made after it.
     test "lets go of the ChatGPT profile's child like any other" do
       profile = Store.profile(:openai_codex)
       # A manager another case left would serve that case's home.
       :ok = TokenSupervisor.stop_profile(profile)
       on_exit(fn -> TokenSupervisor.stop_profile(profile) end)
-      :ok = Store.write(profile, chatgpt_entry())
+      :ok = Store.write(profile, chatgpt_entry("chatgpt_at"))
 
       assert {:ok, "chatgpt_at"} = TokenSupervisor.get_token(profile)
       [{manager, _value}] = Registry.lookup(FermixCore.Auth.TokenRegistry, profile)
       down = Process.monitor(manager)
 
-      :ok = Store.delete_provider(profile)
-      assert :ok = TokenSupervisor.forget_signed_out(profile)
+      revoked = fn conn -> Plug.Conn.send_resp(conn, 200, "") end
+      assert {:ok, %{revoked: true}} = ChatGPT.logout(req_options: [plug: revoked])
+
       assert_receive {:DOWN, ^down, :process, ^manager, _reason}
+      assert {:error, {:provider_missing, ^profile}} = Store.read(profile)
+
+      :ok = Store.write(profile, %{chatgpt_entry("other_at") | subject: "user-other"})
+      assert {:ok, "other_at"} = TokenSupervisor.get_token(profile)
     end
 
     test "starts no manager for a profile nothing holds" do
@@ -242,14 +249,14 @@ defmodule FermixCore.Auth.TokenSupervisorTest do
     stand_in
   end
 
-  defp chatgpt_entry do
+  defp chatgpt_entry(access_token) do
     %{
       auth_mode: "oauth_siwc",
       provider: "chatgpt",
       client_id: "oaiapp_test",
       subject: "user-test",
       granted_scopes: ["openid", "offline_access", "chatgpt.tokens.use.direct"],
-      tokens: %{access_token: "chatgpt_at", refresh_token: "chatgpt_rt"},
+      tokens: %{access_token: access_token, refresh_token: "chatgpt_rt"},
       expires_at: DateTime.add(DateTime.utc_now(), 3600, :second),
       last_refresh: nil,
       status: "ready"

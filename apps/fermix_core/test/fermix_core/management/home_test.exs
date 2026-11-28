@@ -998,6 +998,24 @@ defmodule FermixCore.Management.HomeTest do
 
       assert log =~ "df_unavailable"
     end
+
+    # M102 N2: a Mac that took the home back can still list a computer's row.
+    # It is no Always On server (`ServerPrimary` refuses macOS), so its own
+    # disk is never told as a server's and Always On can be set up again.
+    test "a Mac primary that holds a computer's row is no server: off, own_server", %{
+      home: home
+    } do
+      seams = [
+        host_os: :macos,
+        link_status: link(desktops: [desktop_row()]),
+        disk_usage: disk(0.89)
+      ]
+
+      assert {:ok, %{"summary" => summary}} = route("home.status", %{}, opts(home, seams))
+
+      assert summary["state"] == "off"
+      assert summary["action"]["id"] == "own_server"
+    end
   end
 
   # M97 D28 (§19.5, §19.6): every engine says its own restart and keychain
@@ -1079,7 +1097,7 @@ defmodule FermixCore.Management.HomeTest do
                route(
                  "home.status",
                  %{},
-                 opts(home, link_status: link(desktops: [desktop_row()]))
+                 opts(home, host_os: :linux, link_status: link(desktops: [desktop_row()]))
                )
 
       assert status["computer_changes"] == [

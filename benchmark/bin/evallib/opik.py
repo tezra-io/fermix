@@ -354,6 +354,48 @@ class OpikClient:
                 return None
             time.sleep(min(interval_s, remaining))
 
+    def find_unprompted_turn_trace(self, session: str, after: datetime | None,
+                                   seen_ids: set[str], asked: list[str]) -> dict | None:
+        """The unique unseen main turn on `session`'s thread that no runner query
+        started: the turn Fermix itself starts in the conversation, a finished
+        phone call's report (`await: call_report`). Its input is Fermix's notice,
+        so it is told apart from the case's own turns by not being one of `asked`
+        (each query this attempt drove), never by Fermix's wording."""
+        if not session:
+            raise ValueError("session must be non-empty")
+        asked_norm = {" ".join(query.split()).strip().lower() for query in asked}
+        candidates = []
+        filters = [{"field": "thread_id", "operator": "ends_with", "value": session},
+                   {"field": "name", "operator": "=", "value": "agent:main"}]
+        for t in self._filtered_traces(filters, after):
+            if t.get("id") in seen_ids or t.get("name") != "agent:main":
+                continue
+            if _chat_id(t.get("thread_id")) != session:
+                continue
+            ts = parse_ts(t.get("start_time"))
+            if after is not None and (ts is None or ts < after):
+                continue
+            words = " ".join(_user_words(text_of(t.get("input"))).split()).strip().lower()
+            if words and words not in asked_norm:
+                candidates.append(t)
+        return candidates[0] if len(candidates) == 1 else None
+
+    def poll_for_unprompted_turn(self, session: str, after: datetime | None,
+                                 seen_ids: set[str], asked: list[str], timeout_s: float,
+                                 interval_s: float) -> dict | None:
+        """Block until that turn's trace appears in Opik or timeout elapses."""
+        if timeout_s < 0 or interval_s <= 0:
+            raise ValueError("timeout_s must be non-negative and interval_s must be positive")
+        deadline = time.monotonic() + timeout_s
+        while True:
+            hit = self.find_unprompted_turn_trace(session, after, seen_ids, asked)
+            if hit is not None:
+                return hit
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            time.sleep(min(interval_s, remaining))
+
     def find_job_run_trace(self, job_id: str, run_id: str,
                            after: datetime | None) -> dict | None:
         """The trace of one scheduled run: a job run exports under thread_id = its job

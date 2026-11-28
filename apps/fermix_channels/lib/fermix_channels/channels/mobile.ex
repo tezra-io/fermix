@@ -217,15 +217,48 @@ defmodule FermixChannels.Channels.Mobile do
   Deliver a kind-aware mobile approval with exact approve and deny routes, to
   the phones alone: its token resolves only from the phone (M19 §9.5). The
   card is kept until it resolves or expires, for a phone that connects later,
-  and a phone that is away is told, with no content, that an approval waits.
+  and a phone that is away is told, with no content, that an approval waits,
+  in a push that lives as long as the card does (`push_approval/3`).
   """
   @impl true
   @spec send_approval(Message.t(), map()) :: :ok | {:error, term()}
   def send_approval(%Message{} = message, %{kind: kind, text: text, token: token} = spec)
       when kind in [:sandbox, :soul] and is_binary(text) and is_binary(token) do
-    :ok = Approvals.announce(Approvals.server(), message.chat_id, Output.approval(spec), :mobile)
-    launch_push(fn -> notify_approval(message.chat_id) end, [])
+    %{"ttl_s" => ttl_s} = card = Output.approval(spec)
+    :ok = Approvals.announce(Approvals.server(), message.chat_id, card, :mobile)
+    push_approval(message.chat_id, ttl_s)
   end
+
+  @doc """
+  Tell each paired phone that is away, with no content, that an approval
+  waits for the owner in `profile_id`'s chat: a push that lives `ttl_s`
+  seconds, the card's own lifetime (at most a day, `Mobile.Push`), since an
+  alert after the card ended is noise. Launched off the caller; a launch that
+  fails is logged. `opts`: `:push_launcher`.
+  """
+  @spec push_approval(String.t(), pos_integer(), keyword()) :: :ok
+  def push_approval(profile_id, ttl_s, opts \\ [])
+      when is_binary(profile_id) and is_integer(ttl_s) and ttl_s > 0 and is_list(opts),
+      do: launch_push(fn -> notify_approval(profile_id, ttl_s) end, opts)
+
+  @doc """
+  Whether a phone whose pairing completed is paired here, the question
+  `FermixCore.Delivery.OwnerInbox` asks this channel to put the Fermix app
+  first (M106 §8, D3): `Mobile.Management.phone_paired?/1`'s answer.
+  """
+  @impl true
+  @spec phone_paired?() :: boolean()
+  def phone_paired?, do: Management.phone_paired?([])
+
+  @doc """
+  Whether a computer of this home is linked here, connected now or not, the
+  question `FermixCore.Delivery.OwnerInbox` asks this channel to make the
+  Mac chat the inbox, last, on an engine that is no app's (M106 §8, D9):
+  `Mobile.Management.computer_linked?/1`'s answer.
+  """
+  @impl true
+  @spec computer_linked?() :: boolean()
+  def computer_linked?, do: Management.computer_linked?([])
 
   @impl true
   def start_typing(profile_id) when is_binary(profile_id), do: :ok
@@ -426,7 +459,8 @@ defmodule FermixChannels.Channels.Mobile do
       attempt: value(message.metadata, :mobile_attempt)
     ]
 
-  defp turn_id(%Message{metadata: metadata}), do: value(metadata, :turn_id) || new_turn_id()
+  # The id `Companion.Turns` ends the turn by, so its stream names the same.
+  defp turn_id(%Message{} = message), do: Turns.turn_id(message)
 
   defp client_message_id(%Message{} = message),
     do: value(message.metadata, :client_msg_id) || message.id
@@ -635,13 +669,13 @@ defmodule FermixChannels.Channels.Mobile do
 
   # Push decides itself whether a phone is connected and whether it is
   # configured at all.
-  defp notify_approval(profile_id) do
+  defp notify_approval(profile_id, ttl_s) do
     override = Application.get_env(:fermix_channels, :mobile_approval_push)
 
     result =
-      case injected(override, 1, :mobile_approval_push) do
-        nil -> Push.notify_approval(profile_id)
-        notify -> notify.(profile_id)
+      case injected(override, 2, :mobile_approval_push) do
+        nil -> Push.notify_approval(profile_id, ttl_s: ttl_s)
+        notify -> notify.(profile_id, ttl_s)
       end
 
     case result do
@@ -885,6 +919,4 @@ defmodule FermixChannels.Channels.Mobile do
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
-
-  defp new_turn_id, do: "turn-#{System.unique_integer([:positive, :monotonic])}"
 end

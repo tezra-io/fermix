@@ -9,6 +9,7 @@ defmodule FermixCore.Cues.NoticesTest do
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesWatchersSql
+  alias FermixTestSupport.AppInbox
   alias FermixTestSupport.CueFixtures
 
   @sink :cue_notices_test_sink
@@ -302,6 +303,14 @@ defmodule FermixCore.Cues.NoticesTest do
       assert :sent = Notices.mandate("release-issues", :unpinned, %{}, opts(ctx, 0))
       assert_receive {:sent, "owner-1", "Mandate release-issues is disabled" <> _, send_opts}
       refute Keyword.has_key?(send_opts, :origin)
+    end
+
+    # M106 §8, D3: with a phone paired the owner's inbox is the Fermix app's
+    # chat, which the phone shares: the notice is a row there.
+    test "with a phone paired a source notice goes to the app's chat", ctx do
+      opts = Keyword.merge(opts(ctx, 0), AppInbox.opts())
+      assert :sent = Notices.source("eng-blogs", :auth_failed, %{}, opts)
+      assert_receive {:sent, "main", "Cue source eng-blogs stopped" <> _, _send_opts}
     end
 
     test "with no owner inbox a source notice fails loud and stays unsent", ctx do

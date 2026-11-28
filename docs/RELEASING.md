@@ -40,6 +40,29 @@ goes in this order:
 The Mac app picks the helper up at its next engine pin bump, after its own signing
 change for the helper has landed.
 
+## Released contracts
+
+An app that has not updated keeps working against every later engine that still
+serves it. `test/released_contracts/<tag>/` holds each such release's wire
+contracts (the management, Realtime and mobile schemas and golden fixtures, byte for
+byte as the tag published them under `apps/fermix_core/priv/`), and
+`FermixCore.ReleasedContractsTest` and `FermixChannels.Mobile.ReleasedContractsTest`
+hold the engine to them on every run: a released app's version is inside the
+engine's window, every method it calls is still served at that version, every frame
+it sends still decodes, and every field it reads is still sent, with no type it
+never saw.
+
+- **After the owner tags a release**, snapshot it on `dev` and commit the new
+  directory: `uv run scripts/release/snapshot_released_contracts.py --tag vX.Y.Z`.
+  The script reads only the tag, and refuses a snapshot that already exists.
+- **A release leaves the set** when the engine stops serving its apps in full: one
+  of its protocol versions falls outside the engine's window, or it is more than two
+  minor versions behind (the mobile protocol's *Where it stands*). Delete its
+  directory in the change that stops serving it, and name the apps that stop
+  working in that commit. That is the only way a change that breaks a released app
+  ships: otherwise a failing released-contract test is a break to fix, never a
+  snapshot to retake.
+
 ## Install paths to walk before announcing
 
 The release rail proves the *artifact*: it is signed, its checksum matches, it runs,
@@ -198,9 +221,12 @@ take the engine within five minutes; the Linux app follows whenever it is
 ready. Nothing waits for an owner to install an app. An engine release with no
 `app` row reaches no server, which is the safe side: check
 `curl -fsSL https://fermix.ai/install/releases | awk '$1 == "app"'` after the
-app's site change deploys. After each install the server fetches that
-release's `fermix_always_on.sh`, checks it against the table and lets it
-rewrite the update script, so a change to `fermix-update` reaches existing
+app's site change deploys. The server installs a release's package only
+when the table's digest and the release workflow's cosign signature agree
+(its `.sig` and `.pem` on the GitHub release, checked with the package's own
+cosign), never through the site's installer. After each install it fetches
+that release's `fermix_always_on.sh`, checks it the same two ways and lets
+it rewrite the update script, so a change to `fermix-update` reaches existing
 servers with the release that carries it; keep `--update-script-only` and the
 `update_ceiling` field working for as long as any server may still run an
 older script. On the server, `sudo fermix-update --release X.Y.Z` is the same

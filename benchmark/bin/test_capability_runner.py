@@ -419,6 +419,61 @@ def test_the_default_sweep_is_the_ranking_task_set_and_nothing_else():
         suite.name for suite, _scn, _case in parked}
 
 
+def test_a_home_whose_inbox_is_not_the_local_chat_holds_the_heal_tasks_out(tmp_path, capsys):
+    # M106: on the default eval inbox (Telegram, no bot token) a heal is never sent, so
+    # its tasks are NOT EVALUATED there, never zeros; every other task still runs.
+    cap_dir = os.path.join(os.path.dirname(HERE), "suites", "capability")
+    heal = next(s for s in suites.load_all(cap_dir, include_candidates=True)
+                if s.name == "cap_job_auto_heal")
+    other = SimpleNamespace(name="cap_other", requires=())
+    rows = [(heal, scn, case) for scn in heal.scenarios for case in scn.cases]
+    rows.append((other, None, SimpleNamespace(id="unrelated")))
+    home = tmp_path / "x-eval"
+    cfg = SimpleNamespace(daemon=SimpleNamespace(fermix_home=str(home)))
+
+    kept, unmet = rc._hold_out_unseeded_inbox(cfg, rows)
+    assert [row[0].name for row in kept] == ["cap_other"]
+    assert {case_id for _suite, case_id, _why in unmet} == {
+        "skill_gone_run_now", "second_failure_joins", "planted_instruction_in_failure",
+        "limit_too_short", "mistyped_model_offered_as_a_pair", "watching_heal_fails_again",
+        "tool_never_worked_three_runs",
+        "refused_plugin_tool_two_jobs", "two_runs_or_one_success_open_nothing",
+        "planted_note_read_through_the_run", "edited_proposal_superseded",
+        "confirm_applies_the_recorded_change", "deny_leaves_the_job",
+        "a_second_answer_changes_nothing", "confirm_after_the_owner_edited",
+        "confirm_from_another_chat", "owner_asks_in_words"}
+    assert all("--owner-inbox-cli" in why for _suite, _case, why in unmet)
+    assert "NOT EVALUATED" in capsys.readouterr().out
+
+    manifest = home / rc.owner_inbox.MANIFEST
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"default_delivery_target": rc.owner_inbox.TARGET}))
+    assert rc._hold_out_unseeded_inbox(cfg, rows) == (rows, [])
+
+
+def test_the_app_inbox_tasks_need_a_home_whose_inbox_is_the_app(tmp_path, capsys):
+    # M106 S6: a home seeded for the terminal chat holds the app's tasks out, and the
+    # app's home the terminal chat's, each NOT EVALUATED with the flag that seeds it.
+    cap_dir = os.path.join(os.path.dirname(HERE), "suites", "capability")
+    loaded = {s.name: s for s in suites.load_all(cap_dir, include_candidates=True)}
+    app, cli = loaded["cap_job_heal_app_inbox"], loaded["cap_job_auto_heal"]
+    rows = [(suite, scn, case) for suite in (app, cli) for scn in suite.scenarios
+            for case in scn.cases]
+    home = tmp_path / "x-eval"
+    manifest = home / rc.owner_inbox.MANIFEST
+    manifest.parent.mkdir(parents=True)
+    cfg = SimpleNamespace(daemon=SimpleNamespace(fermix_home=str(home)))
+    for target, kept_suite, flag in ((rc.owner_inbox.TARGET, "cap_job_auto_heal",
+                                      "--owner-inbox-app"),
+                                     (rc.owner_inbox.APP_TARGET, "cap_job_heal_app_inbox",
+                                      "--owner-inbox-cli")):
+        manifest.write_text(json.dumps({"default_delivery_target": target}))
+        kept, unmet = rc._hold_out_unseeded_inbox(cfg, rows)
+        assert {row[0].name for row in kept} == {kept_suite}
+        assert unmet and all(flag in why for _suite, _case, why in unmet)
+    assert "NOT EVALUATED" in capsys.readouterr().out
+
+
 def test_all_shipped_capability_scenarios_declare_a_risk():
     cap_dir = os.path.join(os.path.dirname(HERE), "suites", "capability")
     for suite in suites.load_all(cap_dir, include_candidates=True):
@@ -1069,6 +1124,12 @@ _AUTH_REPLIES = [
     # buy a plan tier. Permanent for the run all the same.
     "SpaceXAI subscription access denied — the Grok plan may not include API "
     "access. Switch to an API key in Fermix's Providers settings, or check the plan tier.",
+    # Worded as a refusal for a missing payment method, not an authentication
+    # failure: the key is fine. Permanent for the run all the same.
+    "Vercel AI Gateway refused this request (HTTP 403), which it does when the Vercel "
+    "team has to add a payment method before AI Gateway serves it. Add one in the "
+    "Vercel dashboard under AI Gateway and retry; if one is already on file, check the "
+    "Vercel AI Gateway API key in Fermix's Providers settings.",
 ]
 
 
@@ -1108,8 +1169,8 @@ def test_auth_invalidated_covers_every_reply_clause():
     # carrying `#{...}` interpolations of a provider label.
     clauses = re.findall(r"^  defp auth_reply\(.*?^  end$", source,
                          re.MULTILINE | re.DOTALL)
-    assert len(clauses) == 7, (
-        f"parsed {len(clauses)} auth_reply clauses, expected 7 — the extraction "
+    assert len(clauses) == 8, (
+        f"parsed {len(clauses)} auth_reply clauses, expected 8 — the extraction "
         "below is stale, not the regex"
     )
     for clause in clauses:
@@ -1124,6 +1185,8 @@ def test_is_auth_invalidated_reply_rejects_content_mentions_and_limits():
     # ANSWER that merely discusses auth failures must not abort the sweep.
     assert driver.is_auth_invalidated_reply(
         "The login endpoint returned 401: authentication failed for that user.") is False
+    assert driver.is_auth_invalidated_reply(
+        "The gateway refused this request (HTTP 403) because the token had expired.") is False
     assert driver.is_auth_invalidated_reply(
         "You've hit your Codex usage limit. Try again in ~15 min.") is False
     assert driver.is_auth_invalidated_reply("") is False
@@ -1723,6 +1786,139 @@ def test_a_state_task_seeds_before_its_first_turn_and_hands_the_checker_the_mani
                        str(tmp_path))
     assert order == [("seed", str(home), str(tmp_path), "fixtures/state/w.json"), ("turn",)]
     assert seen["evidence"]["state"] == {"jobs": {"weather": "weather_1"}}
+
+
+def _command_case(chat="inbox", commands=("/confirm",)):
+    return SimpleNamespace(
+        id="confirm_applies_the_recorded_change", drive="owner_command",
+        command={"chat": chat}, timeout_ms=1000,
+        checker_spec={"script": "chk.py", "mode": "json", "reset": [],
+                      "state": "fixtures/state/holds.json", "expect": {"job": "holds"}},
+        turns=[SimpleNamespace(query=text, expect={}) for text in commands])
+
+
+def _command_world(tmp_path, monkeypatch, replies):
+    """A command trial's world: the seed, the typed commands (each answered with the
+    next of `replies`), and the checker, all recorded in order."""
+    home = tmp_path / "fermix-capability-eval"
+    scoped = home / "workspace" / "eval" / "task" / "t0"
+    scoped.mkdir(parents=True)
+    order, seen = [], {}
+    answers = iter(replies)
+    monkeypatch.setattr(rc.checker, "scoped_dir", lambda *_a: str(scoped))
+    monkeypatch.setattr(rc.checker, "seed_workspace", lambda *_a: None)
+    monkeypatch.setattr(rc.checker, "teardown_workspace", lambda *_a: None)
+    monkeypatch.setattr(rc, "_seed_state", lambda *_a: order.append("seed") or {"now": "x"})
+
+    def fake_drive(_cfg, session, query, _timeout=None, attachments=None):
+        order.append((session, query))
+        text = next(answers)
+        status = "ok" if text is not None else "not_running"
+        return driver.DriveResult(ok=status == "ok", status=status, response=text, error=None,
+                                  session_id=session, exit_code=0, sent_at=datetime.now())
+
+    def fake_checker(_skill, _spec, _scoped, reply, _home, evidence=None):
+        seen.update(evidence=evidence, reply=reply)
+        return rc.checker.CheckerResult(1.0, "applied", safety_ok=True)
+
+    monkeypatch.setattr(rc.driver, "drive_query", fake_drive)
+    monkeypatch.setattr(rc.checker, "run_checker", fake_checker)
+    monkeypatch.setattr(rc, "_capture_turn", lambda *_a: pytest.fail("a command has no trace"))
+    cfg = SimpleNamespace(daemon=SimpleNamespace(fermix_home=str(home)))
+    return cfg, str(home / "workspace" / "eval"), order, seen
+
+
+def test_an_owner_command_is_typed_in_the_owners_chat_with_no_trace_to_wait_for(
+        tmp_path, monkeypatch):
+    # M106 S4b: a card bound to the CLI inbox answers only from that chat, and the
+    # gateway answers a typed command with no model, so there is no trace to poll.
+    cfg, root, order, seen = _command_world(tmp_path, monkeypatch, ["Applied.", "Nothing."])
+    case = _command_case(commands=("/confirm", "/deny"))
+    trial, trace_id, models = rc._command_trial(cfg, SimpleNamespace(name="cap_x"), case,
+                                                "run", 0, "task", root, str(tmp_path))
+    assert order == ["seed", (rc.OWNER_CHAT, "/confirm"), (rc.OWNER_CHAT, "/deny")]
+    assert seen["evidence"]["replies"] == [
+        {"command": "/confirm", "session": "cli", "reply": "Applied."},
+        {"command": "/deny", "session": "cli", "reply": "Nothing."}]
+    assert seen["evidence"]["tool_spans"] == [] and seen["reply"] == "Nothing."
+    assert seen["evidence"]["state"] == {"now": "x"}
+    assert trial.status == "ok" and trial.effective_success == 1.0 and trial.safety_ok is True
+    assert trace_id is None and models == [] and trial.cost_known is False
+
+
+def test_an_owner_command_from_another_chat_is_typed_in_the_trials_own_session(
+        tmp_path, monkeypatch):
+    cfg, root, order, _seen = _command_world(tmp_path, monkeypatch, ["Nothing waits here."])
+    rc._command_trial(cfg, SimpleNamespace(name="cap_x"), _command_case(chat="trial"), "run",
+                      0, "task", root, str(tmp_path))
+    session = order[1][0]
+    assert session != rc.OWNER_CHAT and session.startswith("e2e-cmd")
+
+
+@pytest.mark.parametrize("replies", [[None], [""], ["Applied.", "   "]])
+def test_an_owner_command_with_no_reply_is_an_invalid_trial(tmp_path, monkeypatch, replies):
+    cfg, root, _order, seen = _command_world(tmp_path, monkeypatch, replies)
+    case = _command_case(commands=("/confirm", "/deny")[:len(replies)])
+    trial, _trace, _models = rc._command_trial(cfg, SimpleNamespace(name="cap_x"), case, "run",
+                                               0, "task", root, str(tmp_path))
+    assert trial.status == "not_running" and not trial.valid and "evidence" not in seen
+
+
+def _app_case(steps=("await_card", {"answer": "approve"})):
+    return SimpleNamespace(
+        id="approve_on_the_app_card", drive="app", app={"steps": list(steps)},
+        timeout_ms=1000, turns=[SimpleNamespace(query=json.dumps(s), expect={}) for s in steps],
+        checker_spec={"script": "chk.py", "mode": "json", "reset": [],
+                      "state": "fixtures/state/holds.json", "expect": {"job": "holds"}})
+
+
+def test_an_app_trial_seeds_with_the_socket_open_and_hands_the_checker_its_events(
+        tmp_path, monkeypatch):
+    # M106 S6: the drive opens the socket, then asks the runner to seed, so the heal's
+    # live row and card reach it; a terminal command goes through `fermix ask`.
+    cfg, root, order, seen = _command_world(tmp_path, monkeypatch, ["Not from here."])
+    app = {"connections": [{"hello": [], "events": [{"type": "approval"}]}],
+           "card": {"token": "jhl_1"}, "steps": [],
+           "replies": [{"command": "/confirm jhl_1", "session": "cli", "reply": "x"}]}
+
+    def fake_app_drive(home, spec, marker, seed, cli, timeout_s):
+        order.append("connect")
+        seed()
+        order.append(("cli", cli("/confirm jhl_1")))
+        assert home == cfg.daemon.fermix_home and marker.startswith("e2e-app")
+        return app, None
+
+    monkeypatch.setattr(rc.app_drive, "drive", fake_app_drive)
+    trial, trace_id, models = rc._app_trial(cfg, SimpleNamespace(name="cap_x"), _app_case(),
+                                            "run", 0, "task", root, str(tmp_path))
+    assert order == ["connect", "seed", (rc.OWNER_CHAT, "/confirm jhl_1"),
+                     ("cli", "Not from here.")]
+    assert seen["evidence"]["app"] == app and seen["evidence"]["state"] == {"now": "x"}
+    assert seen["evidence"]["replies"] == app["replies"] and seen["reply"] == "x"
+    assert trial.status == "ok" and trial.effective_success == 1.0 and trial.safety_ok is True
+    assert trace_id is None and models == [] and trial.cost_known is False
+
+
+def test_an_app_trial_whose_socket_refused_is_invalid(tmp_path, monkeypatch):
+    cfg, root, _order, seen = _command_world(tmp_path, monkeypatch, [])
+    monkeypatch.setattr(rc.app_drive, "drive",
+                        lambda *_a, **_k: ({"connections": []}, "cannot connect to x"))
+    trial, _trace, _models = rc._app_trial(cfg, SimpleNamespace(name="cap_x"), _app_case(),
+                                           "run", 0, "task", root, str(tmp_path))
+    assert trial.status == "not_running" and not trial.valid and "evidence" not in seen
+
+
+def test_planned_turns_prices_an_app_case_by_what_the_owner_says():
+    cases = [(SimpleNamespace(name="s"), None, _app_case()),
+             (SimpleNamespace(name="s"), None,
+              _app_case(steps=("await_card", {"say": "move it to 6:45"})))]
+    assert rc._planned_turns(cases) == 1
+
+
+def test_planned_turns_prices_no_typed_owner_command():
+    cases = [(SimpleNamespace(name="s"), None, _plan_case(1)),
+             (SimpleNamespace(name="s"), None, _command_case(commands=("/confirm", "/deny")))]
+    assert rc._planned_turns(cases) == 1
 
 
 def test_a_state_seed_failure_stops_the_sweep_on_the_preconditions_exit(capsys):

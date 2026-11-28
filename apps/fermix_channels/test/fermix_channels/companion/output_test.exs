@@ -4,6 +4,45 @@ defmodule FermixChannels.Companion.OutputTest do
   alias FermixChannels.Companion.Output
   alias FermixCore.Companion.Protocol
 
+  # M106 §8, D12: a heal's proposal is the approval card every app draws: its
+  # lines are its text, its detail apart, its routes the heal's id, its
+  # lifetime its own. The shape is the one both wires already carry.
+  test "a heal's proposal is an approval card routed by its heal's id" do
+    spec = %{
+      kind: :job_change,
+      text: "the whole card\n\nReply /confirm to make this change, or /deny.",
+      lines: [~s(Change job "Harbour tide table"?), ~s(- Schedule: "every 2 hours")],
+      detail: "Details: each change in full\nSchedule now: every 1 hour",
+      token: "jhl_0a1b2c3d4e5f6a7b",
+      ttl_s: 604_800
+    }
+
+    card = Output.approval(spec)
+
+    assert card == %{
+             "t" => "approval",
+             "approval_id" => Output.approval_id(:job_change, "jhl_0a1b2c3d4e5f6a7b"),
+             "kind" => "job_change",
+             "text" => ~s(Change job "Harbour tide table"?\n- Schedule: "every 2 hours"),
+             "detail" => "Details: each change in full\nSchedule now: every 1 hour",
+             "token" => "jhl_0a1b2c3d4e5f6a7b",
+             "ttl_s" => 604_800,
+             "approve_command" => "/confirm jhl_0a1b2c3d4e5f6a7b",
+             "deny_command" => "/deny jhl_0a1b2c3d4e5f6a7b"
+           }
+
+    assert :ok = Protocol.validate_server_payload("approval", Map.delete(card, "t"))
+
+    assert Output.approval_resolved(:job_change, "jhl_0a1b2c3d4e5f6a7b", :expired) == %{
+             "t" => "approval_resolved",
+             "approval_id" => card["approval_id"],
+             "outcome" => "expired"
+           }
+
+    # It lives as long as it says: one with no lifetime is no card.
+    assert_raise CaseClauseError, fn -> Output.approval(Map.delete(spec, :ttl_s)) end
+  end
+
   # An event header is capped, so the text a failure or a tool's result
   # becomes is cut to a bound, and never inside a code point.
   test "a turn's error message is bounded in bytes on a UTF-8 boundary" do

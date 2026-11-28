@@ -13,10 +13,10 @@ defmodule FermixCore.Tools.HarnessRun do
   # (GAP3-1), becomes a `/confirm` prompt instead of an error.
 
   alias FermixCore.Capabilities.UntrustedContent
+  alias FermixCore.Delivery.FrozenOrigin
   alias FermixCore.Harness.Authorization
   alias FermixCore.Harness.Config
   alias FermixCore.Harness.Consent
-  alias FermixCore.Harness.Delivery
   alias FermixCore.Harness.Manager
   alias FermixCore.Harness.VendorConfig
   alias FermixCore.Sandbox
@@ -50,7 +50,7 @@ defmodule FermixCore.Tools.HarnessRun do
          {:ok, params} <- Support.vendor_params(args, spec.key_table, @reserved),
          {:ok, opts} <- parse_opts(args),
          {:ok, session_id} <- fetch_session_id(context),
-         {:ok, snapshot} <- Delivery.resolve_snapshot(context),
+         {:ok, snapshot} <- FrozenOrigin.resolve(context),
          {:ok, run_id} <-
            start_run(spec, prompt, cwd, params, opts, snapshot, session_id, context) do
       Support.success_json(launched_map(run_id, Map.get(snapshot, :origin_kind)))
@@ -148,7 +148,7 @@ defmodule FermixCore.Tools.HarnessRun do
   end
 
   defp maybe_block_scheduled(spec, raw_cwd, reason, context) do
-    with {:ok, snapshot} <- Delivery.resolve_snapshot(context),
+    with {:ok, snapshot} <- FrozenOrigin.resolve(context),
          "scheduled" <- Map.get(snapshot, :origin_kind),
          {:ok, session_id} <- fetch_session_id(context) do
       block = %{

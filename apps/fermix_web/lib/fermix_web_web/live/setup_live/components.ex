@@ -9,6 +9,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   alias FermixWebWeb.SetupLive.AlwaysOnPane
   alias FermixWebWeb.SetupLive.CuesPane
   alias FermixWebWeb.SetupLive.Phone
+  alias FermixWebWeb.SetupLive.PhoneCalls
 
   @local_process_consent "Runs a local process with direct access to the folders you configure."
 
@@ -30,6 +31,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :channels_form, :map, required: true
   attr :phone, :map, required: true
   attr :accessories, :map, default: nil
+  attr :phone_calls, :map, default: nil
   attr :xai_auth, :map, required: true
   attr :xai_auth_running?, :boolean, required: true
   attr :xai_auth_url, :string, default: nil
@@ -44,6 +46,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :provider_form, :map, required: true
   attr :provider_models, :list, required: true
   attr :live_models, :any, default: nil
+  attr :model_refresh?, :boolean, default: false
   attr :plugin_auth_url, :map, default: nil
   attr :plugin_summary, :map, required: true
   attr :oauth_modal, :map, default: nil
@@ -160,6 +163,7 @@ defmodule FermixWebWeb.SetupLive.Components do
               channels_form={@channels_form}
               phone={@phone}
               accessories={@accessories}
+              phone_calls={@phone_calls}
               xai_auth={@xai_auth}
               xai_auth_running?={@xai_auth_running?}
               xai_auth_url={@xai_auth_url}
@@ -174,6 +178,7 @@ defmodule FermixWebWeb.SetupLive.Components do
               provider_form={@provider_form}
               provider_models={@provider_models}
               live_models={@live_models}
+              model_refresh?={@model_refresh?}
               provider_statuses={@provider_statuses}
               plugin_auth_url={@plugin_auth_url}
               plugin_summary={@plugin_summary}
@@ -320,6 +325,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :channels_form, :map, required: true
   attr :phone, :map, required: true
   attr :accessories, :map, default: nil
+  attr :phone_calls, :map, default: nil
   attr :xai_auth, :map, required: true
   attr :xai_auth_running?, :boolean, required: true
   attr :xai_auth_url, :string, default: nil
@@ -334,6 +340,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :provider_form, :map, required: true
   attr :provider_models, :list, required: true
   attr :live_models, :any, default: nil
+  attr :model_refresh?, :boolean, default: false
   attr :plugin_auth_url, :map, default: nil
   attr :plugin_summary, :map, required: true
   attr :oauth_modal, :map, default: nil
@@ -389,6 +396,7 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   defp render_active_pane("provider", assigns), do: provider_pane(assigns)
   defp render_active_pane("realtime", assigns), do: realtime_pane(assigns)
+  defp render_active_pane("phone_calls", assigns), do: phone_calls_pane(assigns)
   defp render_active_pane("channels", assigns), do: channels_pane(assigns)
   defp render_active_pane("plugins", assigns), do: plugins_pane(assigns)
   defp render_active_pane("search", assigns), do: search_pane(assigns)
@@ -426,23 +434,30 @@ defmodule FermixWebWeb.SetupLive.Components do
         <div class={provider_grid_class(@provider_form.provider)}>
           <section class="min-w-0 space-y-5">
             <div class="grid gap-4 lg:grid-cols-2">
-              <label class="form-control w-full">
-                <span class="label pb-1 text-sm font-medium">
-                  Default model <.model_info provider={@provider_form.provider} />
-                </span>
-                <.default_model_input
+              <div class="min-w-0 space-y-1">
+                <label class="form-control w-full">
+                  <span class="label pb-1 text-sm font-medium">
+                    Default model <.model_info provider={@provider_form.provider} />
+                  </span>
+                  <.default_model_input
+                    :if={model_picker_open?(@provider_form.provider, @chatgpt_auth)}
+                    provider_form={@provider_form}
+                    provider_models={@provider_models}
+                    live_models={@live_models}
+                  />
+                  <p
+                    :if={!model_picker_open?(@provider_form.provider, @chatgpt_auth)}
+                    class="text-xs text-base-content/60"
+                  >
+                    Connect ChatGPT with plan usage on to choose a model from your plan.
+                  </p>
+                </label>
+                <.refresh_models
                   :if={model_picker_open?(@provider_form.provider, @chatgpt_auth)}
-                  provider_form={@provider_form}
-                  provider_models={@provider_models}
                   live_models={@live_models}
+                  refresh?={@model_refresh?}
                 />
-                <p
-                  :if={!model_picker_open?(@provider_form.provider, @chatgpt_auth)}
-                  class="text-xs text-base-content/60"
-                >
-                  Connect ChatGPT with plan usage on to choose a model from your plan.
-                </p>
-              </label>
+              </div>
               <%!-- Sub-agent model is a single GLOBAL setting (sub-agents run on the
                     primary provider), so it is shown only on the primary's pane to avoid
                     looking per-provider. Cross-provider sub-agents are a runtime/on-the-fly
@@ -653,7 +668,8 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   # Which options the default-model picker shows: the static catalog for
   # most providers; the LIVE source for providers that have one (installed
-  # Ollama models, the upstream OpenRouter catalog). A failed live fetch
+  # Ollama models, the upstream OpenRouter catalog), read by
+  # `SetupLive.ModelSource` off the page's process. A failed live fetch
   # renders a free-form input plus a loud warning — never a silent
   # fall-back to catalog guesses the server may not serve.
   defp default_model_input(%{live_models: nil} = assigns) do
@@ -702,6 +718,35 @@ defmodule FermixWebWeb.SetupLive.Components do
     """
   end
 
+  # The list is asked and not yet answered. The field is the same element the
+  # answer's picker patches, holding the form's model, so a model typed while
+  # it loads stays as typed.
+  defp default_model_input(%{live_models: :loading} = assigns) do
+    ~H"""
+    <div class="space-y-1">
+      <input
+        type="text"
+        name="provider_form[default_model]"
+        value={@provider_form.default_model}
+        phx-debounce="blur"
+        placeholder="Search or type a model id…"
+        class="input input-bordered w-full bg-base-100 font-mono"
+      />
+      <p id="live-models-loading" class="flex items-center gap-1.5 text-xs text-base-content/55">
+        <span class="loading loading-spinner loading-xs" />
+        Asking {provider_label(@provider_form.provider)} for its models…
+      </p>
+    </div>
+    """
+  end
+
+  # An empty list from Ollama means nothing is pulled on that server, and that
+  # has a fix to name. From any other provider with a live listing it means
+  # the provider listed none Fermix can use; the typed field takes any model id
+  # either way.
+  # The typed field reports on blur too (here, while loading and when the
+  # listing failed), as the picker's does: a model id typed letter by letter is
+  # one change, not one per letter, and no list is asked again for it.
   defp default_model_input(%{live_models: {:ok, []}} = assigns) do
     ~H"""
     <div class="space-y-1">
@@ -709,10 +754,14 @@ defmodule FermixWebWeb.SetupLive.Components do
         type="text"
         name="provider_form[default_model]"
         value={@provider_form.default_model}
+        phx-debounce="blur"
         class="input input-bordered w-full bg-base-100 font-mono"
       />
-      <p class="text-xs text-warning">
+      <p :if={@provider_form.provider == :ollama} class="text-xs text-warning">
         No models installed on this server; run <code>ollama pull &lt;model&gt;</code>.
+      </p>
+      <p :if={@provider_form.provider != :ollama} class="text-xs text-warning">
+        {provider_label(@provider_form.provider)} listed no models Fermix can use; enter a model id manually.
       </p>
     </div>
     """
@@ -727,6 +776,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         type="text"
         name="provider_form[default_model]"
         value={@provider_form.default_model}
+        phx-debounce="blur"
         class="input input-bordered w-full bg-base-100 font-mono"
       />
       <p class="text-xs text-warning">
@@ -735,6 +785,30 @@ defmodule FermixWebWeb.SetupLive.Components do
     </div>
     """
   end
+
+  attr :live_models, :any, default: nil
+  attr :refresh?, :boolean, default: false
+
+  # The page asks for a provider's list only when what the list is read from
+  # changes, so a model pulled into Ollama since, or one the provider added,
+  # appears once this asks again. Drawn beside an answered list the page can
+  # ask again by itself: not while it loads, nor while it is the answer for a
+  # key typed in the pane, which the page does not keep.
+  defp refresh_models(%{live_models: {answered, _list}, refresh?: true} = assigns)
+       when answered in [:ok, :error] do
+    ~H"""
+    <button
+      type="button"
+      phx-click="refresh_models"
+      class="btn btn-ghost btn-xs gap-1"
+      aria-label="Refresh the model list"
+    >
+      <.icon name="hero-arrow-path" class="size-3.5" /> Refresh
+    </button>
+    """
+  end
+
+  defp refresh_models(assigns), do: ~H""
 
   defp live_model_option(%{label: label, id: id, context_window: nil}) when label == id, do: id
 
@@ -774,12 +848,15 @@ defmodule FermixWebWeb.SetupLive.Components do
     """
   end
 
+  # Nothing while the list is loading: the picker says it is being asked.
   defp ollama_status_banner(assigns), do: ~H""
 
   attr :provider_form, :map, required: true
 
   # Non-secret descriptor setup fields (e.g. Ollama's base_url) render as
   # plain text inputs prefilled with the saved value or descriptor default.
+  # They report on blur, as the key field does: the model list is read from
+  # Ollama's base URL, so it is asked once the URL is entered, not per letter.
   defp provider_plain_fields(assigns) do
     assigns = assign(assigns, :plain_fields, plain_field_specs(assigns.provider_form.provider))
 
@@ -790,6 +867,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         type="text"
         name={"provider_form[#{field.key}]"}
         value={Map.get(@provider_form.field_values || %{}, field.key)}
+        phx-debounce="blur"
         class="input input-bordered w-full bg-base-100 font-mono"
       />
     </label>
@@ -800,6 +878,13 @@ defmodule FermixWebWeb.SetupLive.Components do
     Enum.reject(Descriptor.fetch!(provider).setup_fields, & &1.secret?)
   end
 
+  # The key field reports on blur: a provider whose listing depends on the key
+  # (Vercel AI Gateway) is asked once the key is entered, not per keystroke.
+  # The field is the browser's (`phx-update="ignore"`): the reply to the event
+  # its blur sends would otherwise reset it to the blank it is rendered with,
+  # and a save would keep the old key. Its id changes with the provider and
+  # each time the form is built again from the saved settings (a save, another
+  # provider's pane), so the page then gets a new, empty field.
   attr :provider_form, :map, required: true
   attr :report, :map, required: true
 
@@ -816,8 +901,11 @@ defmodule FermixWebWeb.SetupLive.Components do
     >
       <span class="label pb-1 text-sm font-medium">{@secret_label}</span>
       <input
+        id={"provider-secret-#{@provider_form.provider}-#{@provider_form.generation}"}
         type="password"
         name={@secret_name}
+        phx-debounce="blur"
+        phx-update="ignore"
         placeholder={secret_placeholder(api_key_set?(@report, @provider_form.provider))}
         class="input input-bordered w-full bg-base-100 font-mono"
         value=""
@@ -1229,6 +1317,7 @@ defmodule FermixWebWeb.SetupLive.Components do
           :if={effort_provider?(@provider_form.provider)}
           provider_form={@provider_form}
         />
+        <.fast_field :if={fast_provider?(@provider_form.provider)} provider_form={@provider_form} />
       </div>
     </section>
     """
@@ -1264,26 +1353,80 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   defp effort_provider?(provider), do: Descriptor.fetch!(provider).effort?
 
+  attr :provider_form, :map, required: true
+
+  # The provider's Fast mode, published where its requests can carry it; the
+  # Settings row's note says which models it speeds up.
+  defp fast_field(assigns) do
+    ~H"""
+    <div class="form-control">
+      <input type="hidden" name="provider_form[fast]" value="false" />
+      <label class="label cursor-pointer justify-start gap-3">
+        <input
+          type="checkbox"
+          name="provider_form[fast]"
+          value="true"
+          checked={@provider_form.fast == true}
+          class="toggle toggle-sm toggle-primary"
+        />
+        <span class="text-sm font-medium">Fast mode</span>
+      </label>
+      <p class="text-xs text-base-content/60">
+        Answers sooner on the models that offer it, at about twice the price per token.
+      </p>
+    </div>
+    """
+  end
+
+  defp fast_provider?(provider), do: :fast in Descriptor.fetch!(provider).config_keys
+
   defp effort_levels(provider, model) do
     provider |> ModelCatalog.effort_levels_for(model) |> Enum.map(&Atom.to_string/1)
   end
 
+  # The Voice tab: Talk to Fermix's form, then StackChan. The step's footer
+  # closes the page, below every section, and submits the form by its id.
   defp realtime_pane(assigns) do
     ~H"""
     <div>
-      <.pane_header
-        title="Voice companion"
-        subtitle="Enable the local Realtime voice path when this host should run FermixPet."
-      />
+      <.pane_header title="Voice" subtitle="Talk to Fermix out loud and hear it answer." />
 
-      <form phx-change="change_realtime" phx-submit="save_realtime" class="mt-6 space-y-5">
+      <form
+        id="realtime-form"
+        phx-change="change_realtime"
+        phx-submit="save_realtime"
+        class="mt-6 space-y-5"
+      >
         <.realtime_primary_fields form={@realtime_form} />
         <.realtime_secret_field form={@realtime_form} />
         <.realtime_limit_fields form={@realtime_form} />
-        <.form_actions active_tab={@active_tab} tabs={@tabs} save_label="Save realtime" />
       </form>
 
       <Accessories.panel :if={@accessories} accessories={@accessories} />
+
+      <.form_actions
+        active_tab={@active_tab}
+        tabs={@tabs}
+        save_label="Save voice"
+        form="realtime-form"
+      />
+    </div>
+    """
+  end
+
+  # The Phone calls tab (M94 §12): its page, then the step's footer, whose
+  # Save and Save & next submit the page's settings form.
+  defp phone_calls_pane(assigns) do
+    ~H"""
+    <div>
+      <PhoneCalls.pane :if={@phone_calls} phone_calls={@phone_calls} />
+
+      <.form_actions
+        active_tab={@active_tab}
+        tabs={@tabs}
+        save_label="Save phone calls"
+        form={PhoneCalls.form_id()}
+      />
     </div>
     """
   end
@@ -1294,7 +1437,7 @@ defmodule FermixWebWeb.SetupLive.Components do
     ~H"""
     <div class="grid items-start gap-4 @xl:grid-cols-2">
       <label class="form-control w-full">
-        <span class="label pb-1 text-sm font-medium">Realtime status</span>
+        <span class="label pb-1 text-sm font-medium">Talk to Fermix</span>
         <select name="realtime_form[enabled]" class="select select-bordered w-full bg-base-100">
           <option value="false" selected={!@form.enabled}>Disabled</option>
           <option value="true" selected={@form.enabled}>Enabled</option>
@@ -1369,7 +1512,7 @@ defmodule FermixWebWeb.SetupLive.Components do
     """
   end
 
-  defp realtime_key_label("openai"), do: "OpenAI API key for Realtime"
+  defp realtime_key_label("openai"), do: "OpenAI API key for voice"
   defp realtime_key_label("xai"), do: "SpaceXAI API key for Grok voice"
 
   defp realtime_key_info("openai"),
@@ -2680,8 +2823,8 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :active_tab, :string, required: true
   attr :tabs, :list, required: true
   attr :save_label, :string, required: true
-  # The form its buttons submit, when they sit outside it (the Cues tab's
-  # footer, below the lists).
+  # The form its buttons submit, when they sit outside it: a tab with more
+  # than one section keeps its footer below them all (Voice, Phone calls, Cues).
   attr :form, :string, default: nil
 
   @doc "A step's footer: Back, then its Save and Save & next."
@@ -4423,8 +4566,8 @@ defmodule FermixWebWeb.SetupLive.Components do
   # Panes that persist via a single "Save" button — these get the unsaved-edits
   # hint. Plugins and Doctor act per item/probe, so a pane-level hint doesn't fit.
   defp form_pane?(tab_id),
-    do:
-      tab_id in ~w(provider realtime channels meetings search sandbox coding memory personalization)
+    do: tab_id in ~w(provider realtime phone_calls channels meetings search sandbox coding memory
+                   personalization)
 
   defp install_banner_class(:error), do: "text-error"
   defp install_banner_class(:info), do: "text-base-content/70"

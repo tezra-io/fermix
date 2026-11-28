@@ -6,6 +6,19 @@ defmodule FermixCore.Memory.CompactorTest do
   alias FermixCore.Memory.Repo
   alias FermixCore.Resource.Registry
 
+  # SQLite work behind a loaded runner's file-server queue.
+  @durable_write_wait_ms 10_000
+
+  # The conversation `context/1` names, and what `RecordingAdapter` answers.
+  @recorded_key {"telegram", "chat-1", :root}
+  @recorded_summary "direct adapter summary"
+  @recorded_route_key %{
+    provider: :mock,
+    model: "mock-model",
+    auth_mode: :api_key,
+    base_url: "mock://"
+  }
+
   defmodule FailingRepo do
     use GenServer
 
@@ -213,12 +226,7 @@ defmodule FermixCore.Memory.CompactorTest do
        %{repo: repo} do
     stub_summaries(["summary 1"])
     key = {"telegram", "chat-reload", :root}
-    store = :"compactor_store_#{System.unique_integer([:positive])}"
-
-    start_supervised!(%{
-      id: store,
-      start: {ConversationStore, :start_link, [[name: store, max_messages: 5, repo: repo]]}
-    })
+    {store, tasks} = start_store(repo, max_messages: 5)
 
     history = [
       %{
@@ -245,10 +253,63 @@ defmodule FermixCore.Memory.CompactorTest do
     assert checkpoint.timestamp == ~U[2026-03-02 09:15:41.000000Z]
 
     assert :ok = ConversationStore.replace_history(key, [checkpoint, latest], server: store)
-    wait_for_chat_rows(repo, key, 2)
+    await_durable_writes(tasks)
 
     assert {:ok, rows} = Repo.get_messages(chat_selector(key), server: repo, limit: 10)
     assert Enum.map(rows, & &1.content) == [checkpoint.content, "latest question"]
+  end
+
+  # The compaction path end to end: the first compaction's summary is the
+  # prior of the next one, after the first was committed the way TurnRunner and
+  # `/compact` commit it, through the store's replace.
+  test "a committed compaction's summary is the prior of the next compaction", %{repo: repo} do
+    {store, tasks} = start_store(repo, max_messages: :infinity)
+
+    history = [
+      %{
+        role: "user",
+        content: String.duplicate("which ferry leaves Port Alder ", 30),
+        timestamp: ~U[2026-03-02 09:14:05.000000Z]
+      },
+      %{
+        role: "assistant",
+        content: String.duplicate("the 07:40 from pier two ", 30),
+        timestamp: ~U[2026-03-02 09:15:41.000000Z]
+      },
+      %{role: "user", content: "and on Sunday?", timestamp: ~U[2026-03-04 18:02:17.000000Z]}
+    ]
+
+    assert {:ok, %{compacted?: true, messages: compacted}} =
+             compact_recorded(history, repo)
+
+    assert_received {:recording_adapter_chat, [_system, %{content: first_prompt}], [], _opts}
+    refute first_prompt =~ "Prior checkpoint summary:"
+
+    assert :ok = ConversationStore.replace_history(@recorded_key, compacted, server: store)
+    await_durable_writes(tasks)
+
+    later =
+      ConversationStore.get_history(@recorded_key, server: store) ++
+        [
+          %{role: "assistant", content: String.duplicate("the Sunday boat runs late ", 30)},
+          %{role: "user", content: "book the earlier one"}
+        ]
+
+    assert {:ok, %{compacted?: true}} = compact_recorded(later, repo)
+
+    assert_received {:recording_adapter_chat, [_system, %{content: second_prompt}], [], _opts}
+    assert second_prompt =~ "Prior checkpoint summary:\n#{@recorded_summary}"
+  end
+
+  test "with several checkpoints stored, the prior is the newest one", %{repo: repo} do
+    store_checkpoint(repo, "The owner sails on Friday.", ~U[2026-03-10 08:00:00.000000Z])
+    store_checkpoint(repo, "The owner now sails on Saturday.", ~U[2026-03-12 08:00:00.000000Z])
+
+    assert {:ok, %{compacted?: true}} = compact_recorded(compactable_messages(), repo)
+
+    assert_received {:recording_adapter_chat, [_system, %{content: prompt}], [], _opts}
+    assert prompt =~ "Prior checkpoint summary:\nThe owner now sails on Saturday."
+    refute prompt =~ "Friday"
   end
 
   test "summarizer is role-fenced and asks for tool attribution (M10 P2)", %{repo: repo} do
@@ -756,22 +817,61 @@ defmodule FermixCore.Memory.CompactorTest do
     }
   end
 
-  # The store's sqlite write is async; poll a bounded number of times.
-  defp wait_for_chat_rows(repo, key, expected, attempts \\ 50)
+  # The store's durable writes run under a supervisor the test owns, so the
+  # test waits for them to finish instead of polling the database.
+  defp start_store(repo, opts) do
+    unique = System.unique_integer([:positive])
+    store = :"compactor_store_#{unique}"
+    tasks = :"compactor_tasks_#{unique}"
+    start_supervised!({Task.Supervisor, name: tasks}, id: tasks)
 
-  defp wait_for_chat_rows(repo, key, expected, attempts) when attempts > 0 do
-    case Repo.message_count(chat_selector(key), server: repo) do
-      {:ok, ^expected} ->
-        :ok
+    start_supervised!(
+      {ConversationStore,
+       [
+         name: store,
+         repo: repo,
+         durable_task_supervisor: tasks,
+         agent_id: "main",
+         owner_id: "default"
+       ] ++ opts},
+      id: store
+    )
 
-      _other ->
-        Process.sleep(10)
-        wait_for_chat_rows(repo, key, expected, attempts - 1)
-    end
+    {store, tasks}
   end
 
-  defp wait_for_chat_rows(repo, key, expected, 0) do
-    flunk("timed out waiting for #{expected} persisted rows: #{inspect({repo, key})}")
+  # Every durable write starts as a child of the test's task supervisor inside
+  # the store's own call, so once that call returns, its write is listed there
+  # or has already finished.
+  defp await_durable_writes(tasks) do
+    Enum.each(Task.Supervisor.children(tasks), fn pid ->
+      ref = Process.monitor(pid)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, @durable_write_wait_ms
+    end)
+  end
+
+  defp compact_recorded(messages, repo) do
+    Compactor.compact(messages,
+      enabled: true,
+      token_budget: 60,
+      adapter: RecordingAdapter,
+      route: {@recorded_route_key, [model: "mock-model", test_pid: self()]},
+      context: context(repo)
+    )
+  end
+
+  defp store_checkpoint(repo, summary, created_at) do
+    {:ok, _row} =
+      Repo.insert_message(
+        Map.merge(checkpoint_selector(), %{
+          owner_id: "default",
+          sender: "compactor",
+          role: "system",
+          content: summary,
+          created_at: created_at
+        }),
+        server: repo
+      )
   end
 
   defp checkpoint_selector do

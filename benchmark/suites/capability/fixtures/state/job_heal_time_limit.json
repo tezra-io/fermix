@@ -1,0 +1,161 @@
+{
+  "jobs": [
+    {
+      "key": "levels",
+      "name": "Pellbrook river levels digest",
+      "description": "Which of the six Pellbrook river gauges are rising",
+      "schedule": "30 6 * * *",
+      "task_prompt": "Fetch the latest reading from each of the six Pellbrook river gauges at levels.pellbrook.example/gauges/1 to levels.pellbrook.example/gauges/6 and send me a short digest of which ones are rising.",
+      "timeout_seconds": 60,
+      "runs": [
+        {
+          "fires_ago": 4,
+          "duration_seconds": 51,
+          "status": "ok",
+          "final_response": "Gauges 2 and 5 are rising; the other four are steady.",
+          "tool_timeline": [
+            {
+              "name": "web_fetch",
+              "duration_ms": 7600,
+              "status": "ok"
+            },
+            {
+              "name": "web_fetch",
+              "duration_ms": 7900,
+              "status": "ok"
+            },
+            {
+              "name": "web_fetch",
+              "duration_ms": 8100,
+              "status": "ok"
+            },
+            {
+              "name": "web_fetch",
+              "duration_ms": 7800,
+              "status": "ok"
+            },
+            {
+              "name": "web_fetch",
+              "duration_ms": 8400,
+              "status": "ok"
+            },
+            {
+              "name": "web_fetch",
+              "duration_ms": 8000,
+              "status": "ok"
+            }
+          ]
+        },
+        {
+          "fires_ago": 3,
+          "duration_seconds": 57,
+          "status": "ok",
+          "final_response": "Gauge 5 is rising; the other five are steady.",
+          "tool_timeline": [
+            {
+              "name": "web_fetch",
+              "duration_ms": 8600,
+              "status": "ok"
+            },
+            {
+              "name": "web_fetch",
+              "duration_ms": 9100,
+              "status": "ok"
+            },
+            {
+              "name": "web_fetch",
+              "duration_ms": 8900,
+              "status": "ok"
+            },
+            {
+              "name": "web_fetch",
+              "duration_ms": 9300,
+              "status": "ok"
+            },
+            {
+              "name": "web_fetch",
+              "duration_ms": 8800,
+              "status": "ok"
+            },
+            {
+              "name": "web_fetch",
+              "duration_ms": 9200,
+              "status": "ok"
+            }
+          ]
+        },
+        {
+          "fires_ago": 2,
+          "duration_seconds": 60,
+          "status": "timeout",
+          "failure_kind": "time_limit",
+          "tool_timeline": [
+            {
+              "name": "web_fetch",
+              "duration_ms": 10400,
+              "status": "ok"
+            },
+            {
+              "name": "web_fetch",
+              "duration_ms": 11100,
+              "status": "ok"
+            },
+            {
+              "name": "web_fetch",
+              "duration_ms": 10800,
+              "status": "ok"
+            },
+            {
+              "name": "web_fetch",
+              "duration_ms": 11200,
+              "status": "ok"
+            },
+            {
+              "name": "web_fetch",
+              "duration_ms": 10900,
+              "status": "ok"
+            },
+            {
+              "name": "web_fetch",
+              "duration_ms": 4300,
+              "status": "unfinished"
+            }
+          ]
+        },
+        {
+          "fires_ago": 1,
+          "duration_seconds": 60,
+          "status": "timeout",
+          "failure_kind": "time_limit",
+          "tool_timeline": [
+            {
+              "name": "web_fetch",
+              "duration_ms": 12800,
+              "status": "ok"
+            },
+            {
+              "name": "web_fetch",
+              "duration_ms": 13400,
+              "status": "ok"
+            },
+            {
+              "name": "web_fetch",
+              "duration_ms": 13600,
+              "status": "ok"
+            },
+            {
+              "name": "web_fetch",
+              "duration_ms": 13100,
+              "status": "ok"
+            },
+            {
+              "name": "web_fetch",
+              "duration_ms": 6100,
+              "status": "unfinished"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

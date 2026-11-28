@@ -3,6 +3,7 @@ defmodule FermixCore.Realtime.ToolBridge do
   Converts Realtime capability snapshots to provider tools and executes calls.
   """
 
+  alias FermixCore.Agents.RequestIdentity
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.UntrustedContent
 
@@ -42,7 +43,7 @@ defmodule FermixCore.Realtime.ToolBridge do
 
     with {:ok, capability} <- fetch_capability(bridge, name),
          {:ok, args} <- decode_arguments(call),
-         {:ok, result} <- execute_capability(capability, args, bridge.context) do
+         {:ok, result} <- execute_capability(capability, args, call_context(bridge.context)) do
       {text_result, images} = pop_images(result)
 
       output =
@@ -102,6 +103,12 @@ defmodule FermixCore.Realtime.ToolBridge do
       {:error, _reason} -> {:error, :invalid_arguments_json}
     end
   end
+
+  # A Realtime session keeps one session id for the whole conversation, so
+  # each function call is its own owner request (`Agents.RequestIdentity`):
+  # two requests in one conversation are never one, and a start the model
+  # repeats is a new request the one-call slot refuses, never a second call.
+  defp call_context(context), do: Map.put(context, :request_id, RequestIdentity.mint())
 
   defp execute_capability(%Capability{} = capability, args, context) do
     case Capability.execute(capability, args, context) do

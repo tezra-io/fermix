@@ -567,7 +567,186 @@ def test_a_tampered_jar_is_refused_before_java_runs(tmp_path, monkeypatch):
 
     monkeypatch.setattr(check, "require_java", java_must_not_run)
     with pytest.raises(check.CheckError, match="sha256"):
-        check.run_specs([], timeout_s=1)
+        check.tlc_tools()
+
+
+# --- saved verdicts -----------------------------------------------------------
+
+PASSING = {
+    "01_base": check.Verdict("holds", "", "595"),
+    "02_needs_guard": check.Verdict("invariant", "Safe", "15", 4),
+}
+
+
+class FakeTlc:
+    """Stands in for TLC and records which checks really ran."""
+
+    def __init__(self, monkeypatch, verdicts=None):
+        self.ran = []
+        self.verdicts = dict(PASSING if verdicts is None else verdicts)
+        monkeypatch.setattr(check, "tools_jar", lambda: Path("tla2tools.jar"))
+        monkeypatch.setattr(check, "require_java", lambda: "java")
+        monkeypatch.setattr(check, "run_tlc", self.run)
+
+    def run(self, _java, _jar, _spec, one_check, _timeout_s):
+        self.ran.append(one_check.name)
+        return self.verdicts[one_check.name], 0.1
+
+
+@pytest.fixture
+def saved_spec(tmp_path, monkeypatch):
+    """A pinned spec, with the verdict cache in a temp dir."""
+    monkeypatch.setattr(check, "REPO_ROOT", tmp_path)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    git_repo(tmp_path)
+    (tmp_path / "a.ex").write_text("defmodule A do end\n")
+    spec_dir = write_spec(tmp_path, "s", ["a.ex"])
+    git_commit_all(tmp_path)
+    check.repin([check.load_spec(spec_dir)])
+    return spec_dir
+
+
+def run_loaded(spec_dir, **options):
+    return check.run_specs([check.load_spec(spec_dir)], timeout_s=1, **options)
+
+
+def test_an_unchanged_check_reuses_its_passing_verdict_without_java(saved_spec, monkeypatch):
+    tlc = FakeTlc(monkeypatch)
+    assert run_loaded(saved_spec) == 0
+    assert tlc.ran == ["01_base", "02_needs_guard"]
+
+    def must_not_start():
+        raise AssertionError("TLC's tools were needed for saved verdicts")
+
+    monkeypatch.setattr(check, "tools_jar", must_not_start)
+    monkeypatch.setattr(check, "require_java", must_not_start)
+    tlc.ran.clear()
+    assert run_loaded(saved_spec) == 0
+    assert tlc.ran == []
+
+
+def test_a_saved_run_says_which_results_it_reused(saved_spec, monkeypatch, capsys):
+    FakeTlc(monkeypatch)
+    run_loaded(saved_spec)
+    capsys.readouterr()
+    run_loaded(saved_spec)
+    out = capsys.readouterr().out
+    assert "saved" in out and "2 from saved verdicts" in out
+
+
+def test_a_repin_keeps_the_saved_verdicts(saved_spec, monkeypatch, tmp_path):
+    tlc = FakeTlc(monkeypatch)
+    run_loaded(saved_spec)
+    (tmp_path / "a.ex").write_text("defmodule A do def b, do: 1 end\n")
+    git_commit_all(tmp_path)
+    check.repin([check.load_spec(saved_spec)])
+    tlc.ran.clear()
+    assert run_loaded(saved_spec) == 0
+    assert tlc.ran == []
+
+
+def test_an_edited_spec_runs_every_one_of_its_checks_again(saved_spec, monkeypatch):
+    tlc = FakeTlc(monkeypatch)
+    run_loaded(saved_spec)
+    tla = saved_spec / "M.tla"
+    tla.write_text(tla.read_text().replace("====", "Next == TRUE\n===="))
+    tlc.ran.clear()
+    run_loaded(saved_spec)
+    assert tlc.ran == ["01_base", "02_needs_guard"]
+
+
+def test_an_edited_config_runs_only_that_check_again(saved_spec, monkeypatch):
+    tlc = FakeTlc(monkeypatch)
+    run_loaded(saved_spec)
+    cfg = saved_spec / "checks" / "02_needs_guard.cfg"
+    cfg.write_text(cfg.read_text().replace("{m1, m2}", "{m1, m2, m3}"))
+    tlc.ran.clear()
+    with pytest.raises(check.CheckError):
+        check.load_spec(saved_spec)  # the mechanism check must equal its base
+    base = saved_spec / "checks" / "01_base.cfg"
+    base.write_text(base.read_text().replace("{m1, m2}", "{m1, m2, m3}"))
+    run_loaded(saved_spec)
+    assert tlc.ran == ["01_base", "02_needs_guard"]
+    tlc.ran.clear()
+    cfg.write_text(cfg.read_text() + "\\* a comment TLC ignores, in this check alone\n")
+    run_loaded(saved_spec)
+    assert tlc.ran == ["02_needs_guard"]
+
+
+def test_a_changed_runner_runs_every_check_again(saved_spec, monkeypatch, tmp_path):
+    tlc = FakeTlc(monkeypatch)
+    runner = tmp_path / "runner.py"
+    runner.write_text("first")
+    monkeypatch.setattr(check, "RUNNER", runner)
+    run_loaded(saved_spec)
+    runner.write_text("second")
+    tlc.ran.clear()
+    run_loaded(saved_spec)
+    assert tlc.ran == ["01_base", "02_needs_guard"]
+
+
+@pytest.mark.parametrize(
+    "verdict",
+    [check.Verdict("timeout", "no verdict within 1s"), check.Verdict("error", "boom"), check.Verdict("invariant", "Safe", "9", 3)],
+)
+def test_a_result_that_is_not_ok_is_never_saved(saved_spec, monkeypatch, verdict):
+    tlc = FakeTlc(monkeypatch, {**PASSING, "01_base": verdict})
+    assert run_loaded(saved_spec) == 1
+    tlc.verdicts = dict(PASSING)
+    tlc.ran.clear()
+    assert run_loaded(saved_spec) == 0
+    assert tlc.ran == ["01_base"]
+
+
+def test_a_stale_spec_fails_even_when_every_verdict_is_saved(saved_spec, monkeypatch, tmp_path, capsys):
+    tlc = FakeTlc(monkeypatch)
+    run_loaded(saved_spec)
+    (tmp_path / "a.ex").write_text("defmodule A do def changed, do: 1 end\n")
+    tlc.ran.clear()
+    assert run_loaded(saved_spec) == 1
+    assert tlc.ran == []
+    assert "STALE" in capsys.readouterr().out
+
+
+def test_fresh_runs_every_check_and_records_the_result(saved_spec, monkeypatch):
+    tlc = FakeTlc(monkeypatch)
+    run_loaded(saved_spec)
+    tlc.ran.clear()
+    assert run_loaded(saved_spec, fresh=True) == 0
+    assert tlc.ran == ["01_base", "02_needs_guard"]
+    tlc.ran.clear()
+    assert run_loaded(saved_spec) == 0
+    assert tlc.ran == []
+
+
+def test_a_fresh_failure_replaces_the_saved_pass(saved_spec, monkeypatch):
+    tlc = FakeTlc(monkeypatch)
+    run_loaded(saved_spec)
+    tlc.verdicts["01_base"] = check.Verdict("invariant", "Safe", "9", 3)
+    assert run_loaded(saved_spec, fresh=True) == 1
+    tlc.verdicts = dict(PASSING)
+    tlc.ran.clear()
+    assert run_loaded(saved_spec) == 0
+    assert tlc.ran == ["01_base"]
+
+
+def test_a_report_always_runs_tlc_for_its_traces(saved_spec, monkeypatch):
+    tlc = FakeTlc(monkeypatch)
+    monkeypatch.setattr(check, "SPECS_DIR", saved_spec.parent)
+    monkeypatch.setattr(check, "OUT_DIR", saved_spec.parent.parent / "out")
+    assert check.main(["s"]) == 0
+    tlc.ran.clear()
+    assert check.main(["--report", "s"]) == 0
+    assert tlc.ran == ["01_base", "02_needs_guard"]
+
+
+def test_an_unreadable_saved_verdict_is_refused(saved_spec, monkeypatch):
+    FakeTlc(monkeypatch)
+    run_loaded(saved_spec)
+    saved = check.verdict_path(check.load_spec(saved_spec).checks[0])
+    saved.write_text("{not json")
+    with pytest.raises(check.CheckError, match="delete it"):
+        run_loaded(saved_spec)
 
 
 if __name__ == "__main__":

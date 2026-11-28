@@ -190,6 +190,8 @@ defmodule Fermix.CLI do
       fermix settings secret clear ID [--json]     Forget a stored secret
       fermix settings primary [PROVIDER] [--json]  Show providers or make one the primary
       fermix settings reload [--json]              Read config.toml again after an outside edit
+      fermix settings phone-calls recovery [--json]  Show a phone call whose end is unconfirmed
+      fermix settings phone-calls confirm-ended CALL_ID [--json]  Confirm, from your Telnyx portal, that it ended
       fermix memory review --now [--conversation KEY] [--json]
       fermix memory restore ID [--json]
       fermix home export FILE [--passphrase-file PATH] [--mark-moved --to TEXT]  Archive this home, sealed, while it is stopped

@@ -161,7 +161,11 @@ defmodule FermixCore.Computers.OutcomeTest do
       assert Outcome.sentence(Outcome.refused(:stale_epoch, "x"), name) ==
                "studio Mac refused a request from an older copy of this Fermix."
 
-      assert Outcome.sentence(Outcome.refused(:stopped_here, "x"), name) ==
+      assert Outcome.sentence(stopped("shell", 4_700), name) ==
+               "The command ran for 5 seconds on studio Mac and was stopped partway when " <>
+                 "files and commands was switched off there. What it did stands."
+
+      assert Outcome.sentence(stopped("computer_use", 2_000), name) ==
                "The person at studio Mac stopped it."
 
       assert Outcome.sentence(%Outcome{status: :timed_out, deadline_ms: 20_000}, name) ==
@@ -173,7 +177,47 @@ defmodule FermixCore.Computers.OutcomeTest do
       assert Outcome.sentence(Outcome.refused(:unavailable, "Messages runs only on a Mac."), name) ==
                "Messages runs only on a Mac."
     end
+
+    # M102 N7, D7, D9: work a switch stopped had started, so its sentence
+    # says it ran, for how long, that it was stopped partway and that what it
+    # did stands; never that it was switched off alone, which reads as never
+    # run.
+    test "work a switch stopped says it ran, for how long, and that what it did stands" do
+      name = "studio Mac"
+
+      assert Outcome.sentence(stopped("browser", 61_000), name) ==
+               "It ran for 1 minute on studio Mac and was stopped partway when the browser " <>
+                 "was switched off there. What it did stands."
+
+      assert Outcome.sentence(stopped("system", 300), name) =~
+               "when everything Fermix on your server may use was switched off there"
+
+      capabilities = ~w(shell files browser imessage places history notifications system)
+
+      for capability <- [nil, "computer_use" | capabilities],
+          duration <- [0, 999, 1_000, 4_700, 59_999, 60_000, 3_600_000] do
+        sentence = Outcome.sentence(stopped(capability, duration), name)
+
+        if sentence =~ "switched off",
+          do: assert(sentence =~ " ran for " and sentence =~ "stopped partway", sentence)
+
+        assert Copy.violations(sentence, :prose, [name]) == [], sentence
+      end
+
+      assert Outcome.sentence(stopped("shell", 999), name) =~ " ran for under a second "
+      assert Outcome.sentence(stopped("shell", 1_000), name) =~ " ran for 1 second "
+      assert Outcome.sentence(stopped("shell", 59_999), name) =~ " ran for 60 seconds "
+      assert Outcome.sentence(stopped("shell", 60_000), name) =~ " ran for 1 minute "
+      assert Outcome.sentence(stopped("shell", 3_600_000), name) =~ " ran for 60 minutes "
+    end
   end
+
+  defp stopped(capability, duration_ms),
+    do: %{
+      Outcome.refused(:stopped_here, "The person at this computer stopped it.")
+      | capability: capability,
+        duration_ms: duration_ms
+    }
 
   test "the server's exec row carries ids and closed words, never content" do
     outcome = %Outcome{

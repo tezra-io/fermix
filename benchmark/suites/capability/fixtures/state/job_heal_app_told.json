@@ -1,0 +1,32 @@
+{
+  "jobs": [
+    {
+      "key": "ferry",
+      "name": "Saltmarsh ferry crossings digest",
+      "description": "Today's crossings on the Saltmarsh ferry",
+      "schedule": "15 6 * * *",
+      "task_prompt": "Read the Saltmarsh ferry timetable at saltmarsh-ferries.example/timetable and tell me today's crossings.",
+      "timeout_seconds": 300,
+      "runs": [
+        {
+          "fires_ago": 1,
+          "duration_seconds": 22,
+          "status": "error",
+          "error": "The timetable page at saltmarsh-ferries.example/timetable answered 503 Service Unavailable on all three tries.",
+          "tool_timeline": [
+            {
+              "name": "web_fetch",
+              "duration_ms": 3400,
+              "status": "error"
+            }
+          ],
+          "heal": {
+            "decision": "tell",
+            "note": "The ferry company's timetable page was down on every try. Nothing in the job is wrong, so there is nothing to change: the next run should read it again.",
+            "decided_minutes_after": 2
+          }
+        }
+      ]
+    }
+  ]
+}

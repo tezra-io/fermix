@@ -15,19 +15,24 @@
 # packaging/cloud/first-boot.sh every release publishes as
 # fermix_always_on.sh), checks it as it checks a package, and runs it with
 # --version naming that release, every other argument passed on unread. The
-# server then runs exactly its desktop's release: its first boot and its
-# updates, every five minutes and nightly, ask this installer for it.
+# server then runs exactly its desktop's release. That script installs
+# Fermix itself, and the update it writes never runs this installer.
 #
-# Where the trust comes from. The files are downloaded from the project's
-# GitHub release, but their digests are not: they are read from the table at
-# https://fermix.ai/install/releases, which the site publishes only after it
-# has checked each file's cosign signature against the release workflow's
-# identity for that tag and hashed the file itself. A compromised release
-# channel can replace a file, its signature and GitHub's own manifest
-# together; it cannot change the digest this script compares with. So there
-# is no cosign to find and no check to skip: a file the table does not list,
-# or one that does not match it, the Always On server script included, is
-# refused before anything runs as root.
+# Where the trust comes from, at a run the owner starts and sees: the first
+# install, or a Linux desktop's update by hand. The files are downloaded from
+# the project's GitHub release, but their digests are not: they are read from
+# the table at https://fermix.ai/install/releases, which the site publishes
+# only after it has checked each file's cosign signature against the release
+# workflow's identity for that tag and hashed the file itself. A compromised
+# release channel can replace a file, its signature and GitHub's own manifest
+# together; it cannot change the digest this script compares with. Before a
+# first install no cosign of the package's is on the machine, so this script
+# checks the digest alone and trusts the site for that run: a file the table
+# does not list, or one that does not match it, the Always On server script
+# included, is refused before anything runs as root. What runs unattended is
+# not this script: an Always On server's updates require the site's digest
+# and the release workflow's signature both, checked with the cosign its
+# installed package ships (install_checked, packaging/cloud/first-boot.sh).
 #
 #   curl -fsSL https://fermix.ai/install | sh
 #   curl -fsSL https://fermix.ai/install | sh -s -- --no-setup

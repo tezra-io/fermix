@@ -1,10 +1,15 @@
 defmodule Mix.Tasks.Fermix.Bench.Soak do
   @moduledoc """
   Run the manual Fermix soak benchmark.
+
+  Like `mix fermix.bench`, it runs in a home of its own with what a turn needs
+  from an engine, both made for the soak and removed after it
+  (`FermixChannels.Bench.Boot`).
   """
 
   use Mix.Task
 
+  alias FermixChannels.Bench.Boot
   alias FermixChannels.Bench.Runner
   alias FermixCore.Bench.Reporter
 
@@ -22,15 +27,15 @@ defmodule Mix.Tasks.Fermix.Bench.Soak do
   @impl true
   def run(argv) do
     Mix.Task.run("loadpaths")
-    Mix.Task.run("app.config")
 
     {opts, _args, invalid} = OptionParser.parse(argv, strict: @switches)
     raise_on_invalid_options(invalid)
 
-    opts
-    |> soak_opts()
-    |> run_soak()
-    |> print_result()
+    Boot.with_home(fn ->
+      # `:noop` would mean the configuration was read before this home existed.
+      :ok = Mix.Task.run("app.config")
+      Boot.with_engine(fn -> opts |> soak_opts() |> run_soak() |> print_result() end)
+    end)
   end
 
   defp soak_opts(opts) do

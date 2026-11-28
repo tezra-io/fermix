@@ -40,7 +40,7 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
   # M51 §7: the trust inputs a phone's attestation is verified against are
   # exported, and a changed byte in either is a changed contract.
   @attestation_roots_sha256 "1c8f9da8b5a13da216198541d276e424c6a73c72af9fa3433f43e096100ae5ed"
-  @android_signers_sha256 "27dce7a69692b7b7c2329e2cae0c9b00e7a61e92276e2a05178ebb647713421c"
+  @android_signers_sha256 "c44618046c5f1c4e65638b7fe7717ab8c24107c83d7bf70a3269f6f66b93d57e"
 
   setup_all do
     %{
@@ -184,10 +184,13 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     assert %{package: package, signers: by_digest} = Attestation.signers()
     assert package == signers["package"]
 
-    assert Enum.map(by_digest, fn {digest, role} ->
-             {Base.encode16(digest, case: :lower), Atom.to_string(role)}
-           end) ==
-             Enum.map(signers["signers"], &{&1["sha256"], &1["role"]})
+    # A map has no order, so both sides are compared sorted.
+    assert Enum.sort(
+             Enum.map(by_digest, fn {digest, role} ->
+               {Base.encode16(digest, case: :lower), Atom.to_string(role)}
+             end)
+           ) ==
+             Enum.sort(Enum.map(signers["signers"], &{&1["sha256"], &1["role"]}))
   end
 
   test "documentation tells an operator what cannot pair", %{protocol: protocol} do
@@ -1402,6 +1405,31 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
   } do
     [_before, approvals] = String.split(protocol, "## Approvals", parts: 2)
     assert approvals =~ "When `hello_ack` arrives, a client drops every card it shows"
+  end
+
+  # M106 §8, §11.1 (stage S6): a card Fermix asks in the app with no turn
+  # goes to the phones and the Mac, a heal's (`job_change`) is kept in the
+  # home's record and sent again after every hello_ack, a restart too, and
+  # an approval's push lives as long as its card. No field and no version
+  # moved for it: only what the document says is true now.
+  test "documentation says what an approval asked in the app is, and how long its push lives",
+       %{protocol: protocol} do
+    [_before, approvals] = String.split(protocol, "## Approvals", parts: 2)
+    [approvals | _rest] = String.split(approvals, "\n## ", parts: 2)
+    approvals = String.replace(approvals, ~r/\s+/, " ")
+    squashed = String.replace(protocol, ~r/\s+/, " ")
+
+    assert approvals =~ "Its `kind` is `sandbox`, `soul` or `job_change`"
+    assert approvals =~ "goes to the phones and the Mac alike, is answered from either"
+    assert approvals =~ "is kept in the home's record, not in memory, and lives up to seven days"
+    assert approvals =~ "sent again after every `hello_ack` while it waits, after a restart too"
+    refute approvals =~ "Its `kind` is `sandbox` or `soul`."
+
+    assert squashed =~
+             "for an approval, as long as the card itself lives, at most a day, since an " <>
+               "alert after the approval ended is noise"
+
+    refute squashed =~ "300 (five minutes) for an approval"
   end
 
   test "documentation has a table row for every catalog event", %{protocol: protocol} do

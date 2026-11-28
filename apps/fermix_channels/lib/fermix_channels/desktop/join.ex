@@ -14,7 +14,9 @@ defmodule FermixChannels.Desktop.Join do
   as the server's computer. `join_denied`, and a refusal of the code
   (`enrollment_used`, `enrollment_expired`, `enrollment_purpose`), are
   recorded as `denied` with the sentence that says why, and the worker ends;
-  the owner cancels the join, or opens a new code.
+  the owner cancels the join, or opens a new code. Each sentence names where
+  a new code is opened, Always On on a computer already in the home, never
+  the server, which has no screen (M102 N9, D7).
 
   A server that cannot be reached, or a session that ends with no answer, is
   dialled again, 1 s doubling to 60 s, until the code's half hour is over;
@@ -95,7 +97,7 @@ defmodule FermixChannels.Desktop.Join do
   defp again(ctx, state, reason, pause_ms) do
     if expired?(ctx, state) do
       Logger.warning("join: the code expired before the server answered (#{inspect(reason)})")
-      deny(ctx, expired_sentence(state))
+      deny(ctx, expired_sentence())
     else
       Logger.info("join: #{server(state)} not reached yet (#{inspect(reason)}); trying again")
       :ok = record(ctx, "dialing", %{"sas" => nil})
@@ -195,33 +197,43 @@ defmodule FermixChannels.Desktop.Join do
     end
   end
 
-  defp answered(ctx, state, {:denied, reason}), do: deny(ctx, denied_sentence(reason, state))
-  defp answered(ctx, state, {:refused, code}), do: deny(ctx, refused_sentence(code, state))
+  defp answered(ctx, _state, {:denied, reason}), do: deny(ctx, denied_sentence(reason))
+  defp answered(ctx, _state, {:refused, code}), do: deny(ctx, refused_sentence(code))
 
   defp deny(ctx, sentence) do
     :ok = record(ctx, "denied", %{"sentence" => sentence})
     :ok
   end
 
-  defp denied_sentence("timeout", state),
-    do: "Nobody added this computer on #{server(state)} in time. Open a new code there."
+  defp denied_sentence("timeout"),
+    do:
+      "Nobody added this computer in time. Open a new code in Always On on a computer " <>
+        "already in your Fermix."
 
-  defp denied_sentence("cancelled", state),
-    do: "The code was cancelled on #{server(state)}. Open a new one there to try again."
+  defp denied_sentence("cancelled"),
+    do:
+      "The code was cancelled. Open a new one in Always On on a computer already in your " <>
+        "Fermix."
 
-  defp denied_sentence(_denied, state),
-    do: "#{server(state)} did not add this computer. Open a new code there to try again."
+  defp denied_sentence(_denied),
+    do:
+      "This computer was not added. Open a new code in Always On on a computer already in " <>
+        "your Fermix."
 
-  defp refused_sentence("enrollment_used", state),
-    do: "That code was already used on #{server(state)}. Open a new one there."
+  defp refused_sentence("enrollment_used"),
+    do:
+      "That code was already used. Open a new one in Always On on a computer already in your " <>
+        "Fermix."
 
-  defp refused_sentence("enrollment_expired", state), do: expired_sentence(state)
+  defp refused_sentence("enrollment_expired"), do: expired_sentence()
 
-  defp refused_sentence(_code, state),
-    do: "#{server(state)} did not take that code. Open a new one with Add a computer."
+  defp refused_sentence(_code),
+    do:
+      "That code was not taken. Open a new one in Always On on a computer already in your " <>
+        "Fermix."
 
-  defp expired_sentence(state),
-    do: "The code expired before this computer was added on #{server(state)}. Open a new one."
+  defp expired_sentence,
+    do: "That code expired. Open a new one in Always On on a computer already in your Fermix."
 
   # -- facts ---------------------------------------------------------------------------
 

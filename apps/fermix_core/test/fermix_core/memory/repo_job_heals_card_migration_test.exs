@@ -1,0 +1,186 @@
+defmodule FermixCore.Memory.RepoJobHealsCardMigrationTest do
+  # M106 §5.7 and decision D5 (stage S4b): a proposal's card is held on its
+  # heal as the answer rail holds a watcher card, by the digest of its token
+  # (unique) and the chat it was sent to, with the token itself only while
+  # its send is pending. Columns on `job_heals`, this milestone's own table
+  # read by column name, added under one version (76) after 74's columns. `job_runs` and
+  # `scheduled_jobs`, which an engine at the current home format reads by
+  # position, keep their widths. Membership, never list equality: the
+  # versions before stay reserved.
+  use ExUnit.Case, async: true
+
+  alias Exqlite.Sqlite3
+  alias FermixCore.Memory.Repo
+
+  @version 76
+  @at "2031-03-04T07:10:00.000000Z"
+
+  @heal_columns_74 ~w(id subject_kind subject_id job_id failure_kind failure_text failure_words
+                      state outcome run_count last_run_id last_failed_at opened_at updated_at
+                      waiting_since closed_at lease_token lease_until message inbox_platform
+                      inbox_destination inbox_thread_scope delivery_status delivery_attempts
+                      next_delivery_at last_delivery_error delivered_at conclusion decision note
+                      read_outside change_json change_job_version rerun_at rerun_outcome
+                      tool_json change_job_digest answer answered_at decided_from applied_at
+                      owner_wrote_at)
+  @added ~w(card_token card_token_digest card_platform card_chat_id card_user_id)
+  @scheduled_job_width 36
+  @job_run_width 24
+
+  setup do
+    unique = System.unique_integer([:positive])
+    db_path = Path.join(System.tmp_dir!(), "fermix-job-heals-card-#{unique}.db")
+    repo = :"memory_repo_job_heals_card_#{unique}"
+
+    start_supervised!({Repo, name: repo, enabled: true, database_path: db_path}, id: :first)
+
+    on_exit(fn ->
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
+    end)
+
+    %{repo: repo, db_path: db_path}
+  end
+
+  test "a fresh store's heals have the card's columns, and no table read by position widens",
+       %{repo: repo, db_path: db_path} do
+    assert {:ok, versions} = Repo.migration_versions(server: repo)
+    assert @version in versions
+    assert columns(db_path, "job_heals") == @heal_columns_74 ++ @added
+    assert length(columns(db_path, "scheduled_jobs")) == @scheduled_job_width
+    assert length(columns(db_path, "job_runs")) == @job_run_width
+  end
+
+  test "a card's token digest is held by one heal only", %{db_path: db_path} do
+    seed_job(db_path)
+    insert_heal(db_path, "jhl_one")
+    insert_heal(db_path, "jhl_two")
+    raw(db_path, "UPDATE job_heals SET card_token_digest = 'd1' WHERE id = 'jhl_one'")
+
+    assert {:error, _reason} =
+             try_raw(
+               db_path,
+               "UPDATE job_heals SET card_token_digest = 'd1' WHERE id = 'jhl_two'"
+             )
+  end
+
+  test "no read of a heal selects the card's token", %{repo: repo, db_path: db_path} do
+    seed_job(db_path)
+    insert_heal(db_path, "jhl_read")
+    raw(db_path, "UPDATE job_heals SET card_token = 'cp_unread' WHERE id = 'jhl_read'")
+
+    assert {:ok, heal} = Repo.job_heals_call({:get, "jhl_read"}, server: repo)
+    refute Map.has_key?(heal, :card_token)
+    refute inspect(heal) =~ "cp_unread"
+  end
+
+  test "a store at 74 migrates, keeping its heals, and reapplying changes nothing", %{
+    repo: repo,
+    db_path: db_path
+  } do
+    seed_job(db_path)
+    stop_supervised!(:first)
+
+    raw(db_path, """
+    DROP INDEX job_heals_card_token;
+    #{Enum.map_join(@added, "\n", &"ALTER TABLE job_heals DROP COLUMN #{&1};")}
+    DELETE FROM schema_migrations WHERE version = #{@version};
+    """)
+
+    assert columns(db_path, "job_heals") == @heal_columns_74
+    insert_heal(db_path, "jhl_kept")
+
+    reopen(repo, db_path, :second)
+    assert columns(db_path, "job_heals") == @heal_columns_74 ++ @added
+
+    assert {:ok, %{state: "open", card_token_digest: nil, card_platform: nil}} =
+             Repo.job_heals_call({:get, "jhl_kept"}, server: repo)
+
+    stop_supervised!(:second)
+    raw(db_path, "DELETE FROM schema_migrations WHERE version = #{@version};")
+    reopen(repo, db_path, :third)
+
+    assert :ok = Repo.migrate(server: repo)
+    assert {:ok, versions} = Repo.migration_versions(server: repo)
+    assert Enum.count(versions, &(&1 == @version)) == 1
+    assert columns(db_path, "job_heals") == @heal_columns_74 ++ @added
+  end
+
+  test "a table that holds neither column set is refused, never rewritten", %{
+    repo: repo,
+    db_path: db_path
+  } do
+    stop_supervised!(:first)
+
+    raw(db_path, """
+    ALTER TABLE job_heals DROP COLUMN card_user_id;
+    DELETE FROM schema_migrations WHERE version = #{@version};
+    """)
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      assert {:error, _reason} =
+               start_supervised({Repo, name: repo, enabled: true, database_path: db_path},
+                 id: :refused
+               )
+    end)
+
+    assert "card_user_id" not in columns(db_path, "job_heals")
+    assert "card_platform" in columns(db_path, "job_heals")
+  end
+
+  defp reopen(repo, db_path, id) do
+    start_supervised!({Repo, name: repo, enabled: true, database_path: db_path}, id: id)
+  end
+
+  defp seed_job(db_path) do
+    raw(db_path, """
+    INSERT INTO memory_sources (id, source_type, name, memory_scope)
+      VALUES ('job:job_card', 'scheduled_job', 'Harbour tide table', 'job:job_card');
+    INSERT INTO scheduled_jobs (id, name, schedule_kind, schedule_expr, timezone, task_prompt,
+      memory_source_id, created_by_trust)
+      VALUES ('job_card', 'Harbour tide table', 'interval', 'every 1 hour', 'UTC',
+        'Fetch this morning''s tides.', 'job:job_card', 'operator');
+    """)
+  end
+
+  # Heals of one job, so a second one is closed: one per subject is not.
+  defp insert_heal(db_path, id) do
+    state = if id == "jhl_two", do: "'closed', 'healed'", else: "'open', NULL"
+
+    raw(db_path, """
+    INSERT INTO job_heals (id, subject_kind, subject_id, job_id, failure_kind, failure_text,
+      state, outcome, run_count, opened_at, updated_at, delivery_status)
+    VALUES ('#{id}', 'job', 'job_card', 'job_card', 'time_limit', 'The run timed out.',
+      #{state}, 1, '#{@at}', '#{@at}', 'pending');
+    """)
+  end
+
+  defp columns(db_path, table),
+    do: db_path |> rows("SELECT name FROM pragma_table_info('#{table}')") |> List.flatten()
+
+  defp raw(db_path, sql), do: :ok = try_raw(db_path, sql)
+
+  defp try_raw(db_path, sql) do
+    {:ok, conn} = Sqlite3.open(db_path, mode: :readwrite)
+
+    try do
+      :ok = Sqlite3.execute(conn, "PRAGMA busy_timeout = 2000; PRAGMA foreign_keys = ON;")
+      Sqlite3.execute(conn, sql)
+    after
+      Sqlite3.close(conn)
+    end
+  end
+
+  defp rows(db_path, sql) do
+    {:ok, conn} = Sqlite3.open(db_path, mode: :readwrite)
+
+    try do
+      :ok = Sqlite3.execute(conn, "PRAGMA busy_timeout = 2000;")
+      {:ok, stmt} = Sqlite3.prepare(conn, sql)
+      {:ok, rows} = Sqlite3.fetch_all(conn, stmt)
+      :ok = Sqlite3.release(conn, stmt)
+      rows
+    after
+      Sqlite3.close(conn)
+    end
+  end
+end

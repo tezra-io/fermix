@@ -1,0 +1,43 @@
+{
+  "name": "on_hold",
+  "number": "+15125550193",
+  "party": "The Bramble & Oak Hotel in Austin. The front desk answers and puts the assistant on hold, checking in every 45 seconds, so the call lasts until Fermix ends it.",
+  "steps": [
+    {
+      "ring": true
+    },
+    {
+      "pause_ms": 600
+    },
+    {
+      "pick_up": "Bramble and Oak Hotel, front desk, this is Marisol."
+    },
+    {
+      "voice": "Hi Marisol, I'm an AI assistant calling for a guest. Is a late checkout possible on Sunday, February 21st?"
+    },
+    {
+      "say": "Let me check with my manager. Please hold."
+    },
+    {
+      "pause_ms": 45000
+    },
+    {
+      "say": "Thanks for holding, I'm still checking with my manager."
+    },
+    {
+      "pause_ms": 45000
+    },
+    {
+      "say": "Still with me? Just one more moment."
+    },
+    {
+      "pause_ms": 45000
+    },
+    {
+      "say": "Sorry for the wait, I'm nearly there."
+    },
+    {
+      "hold_ms": 60000
+    }
+  ]
+}

@@ -96,6 +96,12 @@ defmodule FermixCore.Management.AlwaysOn do
       not its own deny it, and the code is spent.
     * `cancel` on a computer joining a home (M97 §3.1): the join ends and
       this computer is its own home again (`Home.Join.cancel/2`).
+    * `join` (M102 J1, D3; Join again), offered once the server removed a
+      computer that joined: the code Add a computer opened
+      (`input.code`), joined through `computer.join.start`'s own step
+      (`Management.ComputerLink.join_start/2`, `Home.Join.start/3`), which
+      lets go of the old link first and restarts the engine; refused as it
+      refuses, `invalid_params` on `code` for a code it cannot join with.
     * `restart_server` (M97 D28c), offered on a linked computer while its
       server's restart is required: sent as the rail-only `home.restart`,
       which the server takes after its restart hold
@@ -142,8 +148,9 @@ defmodule FermixCore.Management.AlwaysOn do
   `:start_return`, `:stop_return` and `:end_for_return` (in place of the
   rail's), and
   `:local_return` (a 2-arity stand-in for `Home.LocalReturn.restore/3`,
-  given the home and the copy); and `:serializer` (the name of this
-  process), `:actor` and `:primary_forward`.
+  given the home and the copy); for Join again, `ComputerLink`'s
+  (`:release`, `:key_opts`); and `:serializer` (the name of this process),
+  `:actor` and `:primary_forward`.
   """
 
   use GenServer
@@ -158,6 +165,7 @@ defmodule FermixCore.Management.AlwaysOn do
   alias FermixCore.Home.Move
   alias FermixCore.Home.Return
   alias FermixCore.Management.AlwaysOn.Input
+  alias FermixCore.Management.ComputerLink
   alias FermixCore.Management.Copy
   alias FermixCore.Management.Home
   alias FermixCore.Management.HomeMove
@@ -171,7 +179,7 @@ defmodule FermixCore.Management.AlwaysOn do
 
   @capability "home"
   @acts ~w(cancel move_now try_again back_up_now check_again own_server move_back restore_here
-           review_offers add_computer approve_computer deny_computer change_passphrase
+           review_offers add_computer approve_computer deny_computer join change_passphrase
            restart_server)
   @opened ~w(update)
   # Every client allows `home.act` this long: a review sent to the server
@@ -354,6 +362,8 @@ defmodule FermixCore.Management.AlwaysOn do
   defp step(%{action: "deny_computer"}, _seen, opts),
     do: on_server("home.enroll.deny", %{}, fn -> HomeMove.enroll_deny(opts) end, opts)
 
+  defp step(%{action: "join", input: input}, _seen, opts), do: join(input.code, opts)
+
   defp step(%{action: "back_up_now"}, _seen, opts),
     do: on_server("home.snapshots.run", %{}, fn -> Home.snapshots_run(opts) end, opts)
 
@@ -527,6 +537,15 @@ defmodule FermixCore.Management.AlwaysOn do
         {:ok, %{"device_id" => id, "name" => name}} -> {:ok, %{"device_id" => id, "name" => name}}
         refused -> refused
       end
+    end
+  end
+
+  # A computer its server removed joins again (M102 J1): the one join path,
+  # `computer.join.start`'s, whose refusals are its own.
+  defp join(code, opts) do
+    case ComputerLink.join_start(code, opts) do
+      {:ok, %{"joining" => true}} -> {:ok, nil}
+      {:error, _reason} = refused -> refused
     end
   end
 

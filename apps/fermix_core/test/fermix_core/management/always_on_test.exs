@@ -12,6 +12,7 @@ defmodule FermixCore.Management.AlwaysOnTest do
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.EnrollmentCode
   alias FermixCore.Home.Epoch
+  alias FermixCore.Home.Join
   alias FermixCore.Home.Move
   alias FermixCore.Home.Moved
   alias FermixCore.Home.Return
@@ -123,6 +124,19 @@ defmodule FermixCore.Management.AlwaysOnTest do
       shown = inspect(input)
       refute shown =~ @passphrase
       assert shown =~ "withheld"
+    end
+
+    # M102 J1: a code from Add a computer carries a one-time secret, so it is
+    # text or absent, and no inspection names it.
+    test "takes a code as text, refuses one that is not, and never shows it" do
+      code = computer_code()
+      assert {:ok, %Input{code: ^code} = input} = Input.decode(%{"code" => code})
+      refute inspect(input) =~ code
+      assert inspect(input) =~ "withheld"
+
+      assert {:error, {:invalid_params, "code", sentence}} = Input.decode(%{"code" => 42})
+      assert sentence == "Paste the code from Add a computer as text."
+      assert "code" in Input.fields()
     end
   end
 
@@ -726,6 +740,62 @@ defmodule FermixCore.Management.AlwaysOnTest do
 
       assert {:ok, %{"result" => nil}} = press(ctx, "deny_computer")
       assert_received {:forwarded, "home.enroll.deny", %{}}
+    end
+  end
+
+  # M102 J1, D3: a computer its server removed (its link revoked, and no
+  # moved marker) offers Join again, which takes a new code from Add a
+  # computer through the same join as `computer.join.start` (`Home.Join`).
+  describe "a computer its server removed" do
+    setup ctx do
+      profile = "always-on-join-#{System.unique_integer([:positive])}"
+      File.write!(Path.join(ctx.home, "config.toml"), ~s([fermix_core]\nprofile = "#{profile}"\n))
+      :ok = DesktopLink.write(ctx.home, desktop_link())
+      {:ok, _link} = DesktopLink.record_revoked(ctx.home, desktop_link_read!(ctx.home), true)
+
+      Agent.update(
+        ctx.link,
+        &%{&1 | primary: %{primary(nil) | connected: false, status: :revoked}}
+      )
+
+      test = self()
+
+      opts =
+        ctx.opts
+        |> Keyword.put(:engine_role, @device)
+        |> Keyword.put(:release, fn which ->
+          send(test, {:released, which})
+          :ok
+        end)
+
+      %{ctx | opts: opts}
+    end
+
+    test "Join again lets go of the old link, joins with the code and restarts", ctx do
+      assert %{"state" => "retired", "action" => %{"id" => "join", "needs" => ["code"]}} =
+               summary(ctx.opts)
+
+      assert {:ok, %{"result" => nil, "summary" => after_join}} =
+               press(ctx, "join", %Input{code: computer_code()})
+
+      assert_received {:released, :revoked}
+      assert_received :restarted
+      refute File.exists?(DesktopLink.path(ctx.home))
+      assert {:ok, %{"phase" => "dialing"}} = Join.read(ctx.home)
+      assert after_join["state"] == "creating"
+    end
+
+    test "a code it cannot join with is refused on code, and the old link stays", ctx do
+      for code <- [nil, "fxenroll1.not-a-code", computer_code(purpose: :candidate)] do
+        assert {:error, :invalid_params, %{"field" => "code", "sentence" => sentence}} =
+                 press(ctx, "join", %Input{code: code})
+
+        refute sentence =~ "fxenroll1"
+      end
+
+      assert {:ok, %{revoked: true}} = DesktopLink.read(ctx.home)
+      refute Join.present?(ctx.home)
+      refute_received :restarted
     end
   end
 
@@ -1683,6 +1753,32 @@ defmodule FermixCore.Management.AlwaysOnTest do
       },
       epoch: 5
     }
+  end
+
+  defp desktop_link_read!(home) do
+    {:ok, link} = DesktopLink.read(home)
+    link
+  end
+
+  # A code Add a computer opened on the server, open past `@at`.
+  defp computer_code(overrides \\ []) do
+    facts =
+      Map.merge(
+        %{
+          purpose: :computer,
+          secret: :binary.copy(<<0x5A>>, 32),
+          gateway_pk: :binary.copy(<<3>>, 32),
+          node_id: String.duplicate("c4", 32),
+          relays: [%{"url" => "https://eu1.relay.invalid/", "quic_port" => 7842}],
+          relays_rev: String.duplicate("a1", 8),
+          name: "fermix-general-a3f9",
+          expires_at: ~U[2031-05-04 12:30:00Z]
+        },
+        Map.new(overrides)
+      )
+
+    {:ok, code} = EnrollmentCode.encode(facts)
+    code
   end
 
   defp desktop_row,

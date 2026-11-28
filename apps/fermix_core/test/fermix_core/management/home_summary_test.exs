@@ -7,6 +7,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
   alias FermixCore.Computers.Consent
   alias FermixCore.Home.Move
+  alias FermixCore.Home.ServerPrimary
   alias FermixCore.Home.Snapshot.S3
   alias FermixCore.Home.Snapshot.Status
   alias FermixCore.Management.Copy
@@ -42,6 +43,15 @@ defmodule FermixCore.Management.HomeSummaryTest do
        "Keep Fermix running when this Mac sleeps. It moves to a server you own.", "own_server"},
       {"a Linux home with nothing", facts(host_os: :linux), "off",
        "Keep Fermix running when this computer sleeps. It moves to a server you own.",
+       "own_server"},
+      # M102 N2: a Mac that took the home back can still hold a computer's
+      # row, and is no server (`ServerPrimary`): its own full disk is not a
+      # server's, and Always On can be set up again.
+      {"a Mac that took the home back, still holding a computer's row",
+       facts(
+         link: link(desktops: [desktop_row()]),
+         disk: %{"used" => 0.89, "nearly_full" => true}
+       ), "off", "Keep Fermix running when this Mac sleeps. It moves to a server you own.",
        "own_server"},
       {"a code for the owner's server", facts(link: link(enrollment: manual(:open))), "connect",
        "Waiting for your server to use its code.", nil},
@@ -83,25 +93,25 @@ defmodule FermixCore.Management.HomeSummaryTest do
       {"a computer that joined, which its server removed",
        desktop(moved: nil, link_primary: primary(:revoked), revoked: true), "retired",
        "Your server no longer knows this Mac. To join your Fermix again, enter a new code " <>
-         "from Add a computer.", nil},
+         "from Add a computer.", "join"},
       {"a Linux computer that joined, which its server removed",
        desktop(moved: nil, link_primary: primary(:revoked), revoked: true, host_os: :linux),
        "retired",
        "Your server no longer knows this computer. To join your Fermix again, enter a new " <>
-         "code from Add a computer.", nil},
+         "code from Add a computer.", "join"},
       # The link is the one record of the server's word (`DesktopLink`'s
       # `revoked`): with Fermix stopped no relay says anything, and the link
-      # still does, as `fermix computer join` reads it then.
+      # still does, as `fermix home status` reads it then.
       {"a computer that joined, which its server removed, with Fermix stopped",
        desktop(moved: nil, link_primary: nil, primary_home: nil, revoked: true), "retired",
        "Your server no longer knows this Mac. To join your Fermix again, enter a new code " <>
-         "from Add a computer.", nil},
+         "from Add a computer.", "join"},
       # Fermix restarted with the server's word in the link: the relay dials
       # again, and the link speaks until a session comes up and clears it.
       {"a computer that joined, which its server removed, redialing it",
        desktop(moved: nil, link_primary: primary(:renewing), revoked: true), "retired",
        "Your server no longer knows this Mac. To join your Fermix again, enter a new code " <>
-         "from Add a computer.", nil},
+         "from Add a computer.", "join"},
       # Its link gone (a disconnect, or a join cancelled) while it restarts as
       # its own Fermix.
       {"a computer with no marker and no link", device(linked: false, moved: nil), "retired",
@@ -1350,6 +1360,39 @@ defmodule FermixCore.Management.HomeSummaryTest do
              }
     end
 
+    # M102 D6: a home off a server holds no computer yet, so a move back
+    # drops every computer's row, and its confirm names each one that leaves
+    # by the name the server lists it under: never this computer, which the
+    # server marks as the one asking (`this_computer`).
+    test "a move back's confirm names each other computer it disconnects, which can join again" do
+      confirm = fn computers ->
+        home = Map.put(server_home([]), "computers", computers)
+        facts = returning(back("enrolled"), stays_here: [], primary_home: home)
+        HomeSummary.summary(facts)["action"]["confirm"]
+      end
+
+      this = %{"name" => "studio-mac", "this_computer" => true}
+      loft = %{"name" => "loft-linux", "this_computer" => false}
+      attic = %{"name" => "attic-pc", "this_computer" => false}
+
+      assert confirm.([this, loft]) ==
+               "Move Fermix back to this Mac now?\nloft-linux is disconnected from Fermix, and " <>
+                 "can join again once Fermix is on a server.\nYour server stays until you " <>
+                 "delete it."
+
+      both = confirm.([attic, this, loft])
+
+      assert both ==
+               "Move Fermix back to this Mac now?\nattic-pc and loft-linux are disconnected " <>
+                 "from Fermix, and each can join again once Fermix is on a server.\nYour " <>
+                 "server stays until you delete it."
+
+      assert Copy.summary_violations(both) == []
+
+      assert confirm.([this]) ==
+               "Move Fermix back to this Mac now?\nYour server stays until you delete it."
+    end
+
     # HR-1: Cancel only where no move of the server's is under way: before
     # the start, once the server undid it, and where the server answers as
     # the primary with no move although the start was recorded; never while
@@ -1511,11 +1554,15 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
       assert %{"label" => "Restore on this Mac", "needs" => ["recovery_passphrase"]} = restore
 
+      # M102 D6: a restore drops every computer's row too. With the server
+      # silent, no list of them is at hand, so none is named.
       assert restore["confirm"] ==
                "Restore Fermix on this Mac from its backup of Sunday, May 4, 2031 at 9:30 AM " <>
                  "UTC?\nConfirm only once you deleted your server, or stopped it for good: if " <>
                  "it runs again, two copies of Fermix answer the same channels.\nMessages, " <>
-                 "memory and jobs since that backup are gone."
+                 "memory and jobs since that backup are gone.\nAny other computer that joined " <>
+                 "your server is disconnected from Fermix, and can join again once Fermix is " <>
+                 "on a server."
 
       # Telegram's 24 hours are named only where this computer's settings have
       # it set up (the EC2 test's F7 rule).
@@ -1526,7 +1573,7 @@ defmodule FermixCore.Management.HomeSummaryTest do
                &(&1["id"] == "restore_here")
              )[
                "confirm"
-             ] =~ ~r/are gone, and Telegram keeps nothing older than 24 hours\.\z/
+             ] =~ ~r/are gone, and Telegram keeps nothing older than 24 hours\.\n/
 
       # The pane's D8: the copy's date is the confirm's, never a Details line;
       # the note says what to check, and that Restore is the answer for good.
@@ -1916,9 +1963,11 @@ defmodule FermixCore.Management.HomeSummaryTest do
                {"creating", "waiting", nil}
 
       # The digits are this computer's to show, and the owner's to type where
-      # the home asks.
+      # the home asks: in Always On on a computer already in it, never on the
+      # server, which has no screen (M102 N9, D7).
       assert waiting["sentence"] ==
-               "Type 482 913 on studio-mac, where it asks you to add this Mac."
+               "Type 482 913 in Always On on a computer already in your Fermix, where it " <>
+                 "asks to add this Mac."
 
       said = "studio-mac did not add this computer. Open a new code there to try again."
 
@@ -1951,6 +2000,74 @@ defmodule FermixCore.Management.HomeSummaryTest do
       end
 
       assert "move_back" in ids(HomeSummary.offered(HomeSummary.summary(desktop([]))))
+    end
+
+    # M102 J1, D3: the removed screen (its link revoked, and no moved marker)
+    # is where the owner enters a new code, so the step is the engine's, as
+    # every other is, and no app works out "joined, then removed" itself.
+    test "a computer its server removed offers Join again, which needs a code" do
+      for facts <- [
+            desktop(moved: nil, link_primary: primary(:revoked), revoked: true),
+            desktop(moved: nil, link_primary: nil, primary_home: nil, revoked: true)
+          ] do
+        summary = HomeSummary.summary(facts)
+
+        assert %{"id" => "join", "label" => "Join again", "needs" => ["code"], "confirm" => nil} =
+                 summary["action"]
+
+        assert summary["outcome"] == "done"
+        assert summary["help"] == "https://fermix.ai/docs/always-on/#add-a-computer"
+        assert HomeSummary.find_action(summary, "join", summary["action"]["key"]) != :error
+      end
+
+      # The computer the home moved from keeps its moved marker, its link and
+      # its own copies of the backups: no code joins it anywhere.
+      for facts <- [
+            desktop(link_primary: primary(:revoked), revoked: true),
+            device(linked: false, moved: nil)
+          ] do
+        refute "join" in ids(HomeSummary.offered(HomeSummary.summary(facts)))
+      end
+
+      assert "code" in HomeSummary.needs()
+    end
+  end
+
+  # M102 J4: a code a linked computer opened with Add a computer is open only
+  # while its server's window is (`primary_home.enrollment`), and no screen
+  # draws that window, so the watch folds it in: the app is told when the
+  # window closes, by the half hour or a newer code, and reads it again.
+  describe "a computer's code" do
+    test "a linked computer is told when its server's window for a computer closes" do
+      open = computer_window("open", "2031-05-04T12:30:00Z")
+
+      watched = fn window ->
+        HomeSummary.watch(desktop(primary_home: Map.put(server_home([]), "enrollment", window)))
+      end
+
+      assert watched.(open).key == watched.(open).key
+      refute watched.(open).key == watched.(%{open | "state" => "expired"}).key
+      refute watched.(open).key == watched.(%{open | "expires_at" => "2031-05-04T12:40:00Z"}).key
+      refute watched.(open).key == watched.(nil).key
+    end
+
+    test "a server with desktops tells them when its window for a computer closes" do
+      open = %{
+        state: :open,
+        expires_at: ~U[2031-05-04 12:30:00Z],
+        candidate_id: nil,
+        purpose: :computer,
+        joiner: nil,
+        joined: nil
+      }
+
+      watched = fn window ->
+        HomeSummary.watch(server(link: link(desktops: [desktop_row()], enrollment: window)))
+      end
+
+      refute watched.(open).key == watched.(%{open | state: :expired}).key
+      refute watched.(open).key == watched.(%{open | expires_at: ~U[2031-05-04 12:40:00Z]}).key
+      refute watched.(open).key == watched.(nil).key
     end
   end
 
@@ -2504,7 +2621,14 @@ defmodule FermixCore.Management.HomeSummaryTest do
       },
       Map.new(overrides)
     )
+    |> served()
   end
+
+  # Whether the primary is an Always On server's, by the rule `gather/5` sets
+  # it by (`ServerPrimary.of/2`), unless a case says so itself.
+  defp served(facts),
+    do:
+      Map.put_new(facts, :server, ServerPrimary.of(facts.host_os, facts.link.desktops) == :server)
 
   defp ready_facts(overrides) do
     facts([candidates: [candidate()], link: link(enrollment: manual(:used, @cand))] ++ overrides)
@@ -2590,11 +2714,13 @@ defmodule FermixCore.Management.HomeSummaryTest do
 
   defp copy(name \\ @copy, at \\ ~U[2031-05-04 09:30:00Z]), do: %{name: name, at: at}
 
+  # An Always On server is Linux (`ServerPrimary` refuses macOS).
   defp server(overrides) do
     desktop_row = %{device_id: "6d2b3c1e", name: "Studio Mac", connected: true}
 
     facts(
       [
+        host_os: :linux,
         link: link(desktops: [desktop_row]),
         snapshots: snapshots([{"desktop", ~U[2031-05-04 10:00:00Z]}]),
         disk: %{"used" => 0.42, "nearly_full" => false}
@@ -2619,6 +2745,20 @@ defmodule FermixCore.Management.HomeSummaryTest do
       down_ms: down_ms
     }
   end
+
+  # The server's window for a computer that joins (M97 §3.1), as its
+  # `home.status` names it.
+  defp computer_window(state, expires_at),
+    do: %{
+      "state" => state,
+      "expires_at" => expires_at,
+      "candidate_id" => nil,
+      "purpose" => "computer",
+      "joiner" => nil,
+      "joined" => nil
+    }
+
+  defp desktop_row, do: %{device_id: "6d2b3c1e", name: "Studio Mac", connected: true}
 
   defp manual(state, candidate_id \\ nil),
     do: %{state: state, expires_at: ~U[2031-05-05 10:00:00Z], candidate_id: candidate_id}

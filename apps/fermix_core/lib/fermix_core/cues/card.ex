@@ -58,9 +58,12 @@ defmodule FermixCore.Cues.Card do
           optional(:always_allow) => String.t()
         }
 
-  @typedoc "A compact card, ready for `spec/2`."
+  @typedoc """
+  A compact card, ready for `spec/2`: a watcher's, or a heal's proposal for a
+  job (`:job_change`, built by `Jobs.HealCard` in this same layout).
+  """
   @type t :: %{
-          kind: :follow_up | :mandate,
+          kind: :follow_up | :mandate | :job_change,
           lines: [String.t()],
           detail: String.t(),
           actions: actions(),

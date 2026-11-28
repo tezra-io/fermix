@@ -18,9 +18,17 @@ defmodule FermixCore.Capabilities.Builtin do
   reach the capability's metadata, where `Capabilities.AccessGate` reads them: a
   host command in a turn that read outside content waits for the owner where
   the call is not confined or the host has no kernel enforcement.
+
+  `metadata.external_effect?` marks a built-in whose call makes an effect
+  outside the machine that the owner confirms when the turn read outside
+  content (`phone_call`, which places a call). It is no host command: no
+  sandbox holds it or is asked about it. It is set here, and only from the
+  tool module: a module that implements `Capabilities.ExternalEffect` builds
+  a capability that carries it, and no table entry does.
   """
 
   alias FermixCore.Capabilities.Capability
+  alias FermixCore.Capabilities.ExternalEffect
 
   @policy_defaults %{
     "shell" => %{
@@ -104,6 +112,14 @@ defmodule FermixCore.Capabilities.Builtin do
     "run_job_now" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: false},
     "list_job_runs" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true},
     "get_job_run" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true},
+    # A job's heal run's one exit (M106 §5.5), as `open_loop_respond` is a
+    # check-in's: owner-only, and its `advertise?/execute` gate (the heal
+    # run's own context key) is the hard barrier.
+    "job_heal_respond" => %{
+      policy_class: :read_write,
+      hidden_from_agent?: false,
+      owner_only?: true
+    },
     "memory_sources_list" => %{
       policy_class: :read_only,
       hidden_from_agent?: false,
@@ -162,6 +178,31 @@ defmodule FermixCore.Capabilities.Builtin do
       coding_run?: true
     },
     "codex_cloud_run" => %{policy_class: :exec, hidden_from_agent?: false, owner_only?: false},
+    # Phone calls (M94 §06). A call is an effect outside the machine the model
+    # steers: a `start` in a turn that read outside content waits for the
+    # owner's confirmation of the brief the tool renders (its module is a
+    # `Capabilities.ExternalEffect`).
+    # Owner-only: every row is the owner's call. The execute-time attended gate
+    # (`Tools.PhoneCall`) is the barrier for every other turn.
+    "phone_call" => %{
+      policy_class: :external_api,
+      hidden_from_agent?: false,
+      owner_only?: true
+    },
+    # A phone call's in-call controls (M94 §07): a key press and the hang-up,
+    # each a side effect on the line, run on the handle its worker minted. No
+    # registry holds them: only that call's backend turn builds them, from
+    # these entries (`Agents.PhoneCallTurn`).
+    "phone_call_press_keys" => %{
+      policy_class: :external_api,
+      hidden_from_agent?: false,
+      owner_only?: false
+    },
+    "phone_call_end" => %{
+      policy_class: :external_api,
+      hidden_from_agent?: false,
+      owner_only?: false
+    },
     "list_coding_runs" => %{
       policy_class: :read_only,
       hidden_from_agent?: false,
@@ -221,8 +262,8 @@ defmodule FermixCore.Capabilities.Builtin do
     # the owner's own meetings out of a guest's surface; the attended-operator
     # advertise?/execute gate these three share with the temporal family — and
     # `Meetings.join/2` repeats — is the hard barrier. Only seeded when
-    # `Meetings.ready?()` (BuiltinSeeder), so a disabled or lane-less daemon
-    # never advertises them.
+    # `Meetings.offered?/1` (BuiltinSeeder), so a disabled daemon, or a
+    # lane-less one off an Always On server, never advertises them.
     "join_meeting" => %{
       policy_class: :external_api,
       hidden_from_agent?: false,
@@ -313,12 +354,18 @@ defmodule FermixCore.Capabilities.Builtin do
       category: callback_or(tool_module, :category, :system)
     }
     |> put_computer(callback_or(tool_module, :computer_capability, nil))
+    |> put_external_effect(ExternalEffect.implemented_by?(tool_module))
   end
 
   defp put_computer(metadata, nil), do: metadata
 
   defp put_computer(metadata, module) when is_atom(module),
     do: Map.put(metadata, :computer, module)
+
+  # An effect outside the machine (`Capabilities.AccessGate`, kind
+  # `:external_effect`): its module says so by implementing the behaviour.
+  defp put_external_effect(metadata, true), do: Map.put(metadata, :external_effect?, true)
+  defp put_external_effect(metadata, false), do: metadata
 
   defp callback_or(module, function, default) do
     if function_exported?(module, function, 0) do

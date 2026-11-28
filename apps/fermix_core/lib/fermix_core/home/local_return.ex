@@ -20,7 +20,7 @@ defmodule FermixCore.Home.LocalReturn do
   `local` beside the moved home (`Candidate.prepare_return/3`, `state.json`
   alone, refused as it refuses), the copy staged as a return's
   (`Candidate.Activation.stage/6`: this computer's device settings, secret
-  store and keychain items, and without its own desktop row), the entries
+  store and keychain items, and without any computer's row), the entries
   recorded, the copy's name kept in the return's record (`Home.Return`'s
   `restored`, which the primary tells the owner once), and the staged home
   put in place of the retired copy (`Activation.activate/2`), then the

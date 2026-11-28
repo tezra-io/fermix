@@ -3,12 +3,14 @@ defmodule FermixCore.Providers.ModelListingTest do
 
   alias FermixCore.Auth.ChatGPT
   alias FermixCore.Providers.ModelListing
+  alias FermixTestSupport.TelemetryCapture
 
   describe "live?/1" do
-    test "only ollama, openrouter, venice and openai_codex have live listings" do
+    test "only ollama, openrouter, venice, vercel and openai_codex have live listings" do
       assert ModelListing.live?(:ollama)
       assert ModelListing.live?(:openrouter)
       assert ModelListing.live?(:venice)
+      assert ModelListing.live?(:vercel)
       assert ModelListing.live?(:openai_codex)
       refute ModelListing.live?(:openai)
       refute ModelListing.live?(:anthropic)
@@ -222,6 +224,171 @@ defmodule FermixCore.Providers.ModelListingTest do
     end
   end
 
+  # M105 §3.3. The fixture is cut from the real public `GET /v1/models` listing
+  # (2026-11-22), each entry kept to the fields the listing reads (`id`, `name`,
+  # `owned_by`, `released`, `type`, `tags`, `context_window`) plus `object`,
+  # `created` and `max_tokens`: three makers, two releases of one maker and two
+  # of another on the same day, a batch-only id, a realtime model that is tagged
+  # `tool-use`, a language model that is not, and two hand-written entries: a
+  # malformed one (`acme/no-name`, no name and no release date) and one with a
+  # name and no release date (`openai/gpt-5-undated`).
+  describe "live_models/2 — :vercel" do
+    # With a key, the gateway judges each model against the team's own settings
+    # (Zero Data Retention, allow lists, plan): the owner's team, with Zero Data
+    # Retention on, was told 62 of the 257 models it would be offered were
+    # `ineligible` for `zero_data_retention`, the Claude Fable models among them
+    # (M105 §11.9). A model it cannot judge is `unknown`, and is kept.
+    test "with a key, asks for the team's availability and leaves out what it may not use" do
+      Req.Test.stub(__MODULE__, fn conn ->
+        assert conn.request_path == "/v1/models"
+        assert conn.query_string == "include_availability=true"
+        assert Plug.Conn.get_req_header(conn, "authorization") == ["Bearer vck-team"]
+        Req.Test.json(conn, vercel_availability_listing())
+      end)
+
+      assert {:ok, models} =
+               ModelListing.live_models(:vercel,
+                 api_key: "vck-team",
+                 req_options: [plug: {Req.Test, __MODULE__}]
+               )
+
+      ids = Enum.map(models, & &1.id)
+      refute "anthropic/claude-fable-5.2" in ids
+      assert "openai/gpt-6-luna" in ids
+      assert "anthropic/claude-sonnet-4.6" in ids
+      assert length(ids) == 6
+    end
+
+    test "a key the gateway refuses is that error, not the public listing" do
+      Req.Test.stub(__MODULE__, fn conn ->
+        Plug.Conn.send_resp(conn, 401, ~s({"error":{"type":"authentication_error"}}))
+      end)
+
+      assert {:error, reason} =
+               ModelListing.live_models(:vercel,
+                 api_key: "vck-revoked",
+                 req_options: [plug: {Req.Test, __MODULE__}]
+               )
+
+      assert reason =~ "HTTP 401"
+    end
+
+    # A listing made with the person's own key is a call on that credential, so
+    # it rides the provider-call stream as the ChatGPT one does (M57 §9).
+    test "a listing with a key is a provider call on the vercel credential, ok or not" do
+      TelemetryCapture.attach([[:fermix, :provider, :call]], :emitter)
+      Req.Test.stub(__MODULE__, fn conn -> Req.Test.json(conn, vercel_availability_listing()) end)
+      opts = [api_key: "vck-team", req_options: [plug: {Req.Test, __MODULE__}]]
+
+      assert {:ok, models} = ModelListing.live_models(:vercel, opts)
+      count = length(models)
+
+      assert_receive {:telemetry, [:fermix, :provider, :call], _measurements,
+                      %{
+                        provider: :vercel,
+                        adapter: :model_listing,
+                        status: :ok,
+                        models_count: ^count
+                      }}
+
+      Req.Test.stub(__MODULE__, fn conn -> Plug.Conn.send_resp(conn, 401, "{}") end)
+      assert {:error, reason} = ModelListing.live_models(:vercel, opts)
+
+      assert_receive {:telemetry, [:fermix, :provider, :call], _measurements,
+                      %{provider: :vercel, status: :error, error: ^reason}}
+    end
+
+    # Mint refuses a header value with a character HTTP does not allow, and its
+    # error carries the whole value: for the authorization header, the key.
+    test "a key HTTP cannot carry fails without the key in the error" do
+      {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}])
+      on_exit(fn -> :gen_tcp.close(listener) end)
+      {:ok, port} = :inet.port(listener)
+
+      assert {:error, reason} =
+               ModelListing.live_models(:vercel,
+                 base_url: "http://127.0.0.1:#{port}/v1",
+                 api_key: "vck-pasted​key"
+               )
+
+      assert reason =~ "authorization header"
+      refute reason =~ "vck-pasted"
+    end
+
+    test "keeps tool-calling language models, by maker then newest, an undated one last" do
+      Req.Test.stub(__MODULE__, fn conn -> Req.Test.json(conn, vercel_listing()) end)
+
+      assert {:ok, models} =
+               ModelListing.live_models(:vercel, req_options: [plug: {Req.Test, __MODULE__}])
+
+      # Makers ascending (anthropic, openai, spacexai); newest first inside each;
+      # GPT-6.2 Astra and Sol share a release date, so the id orders them. The
+      # entry with no release date closes its maker's group although its id
+      # sorts first there.
+      assert Enum.map(models, & &1.id) == [
+               "anthropic/claude-fable-5.2",
+               "anthropic/claude-sonnet-4.6",
+               "openai/gpt-6.2-astra",
+               "openai/gpt-6.2-sol",
+               "openai/gpt-6-luna",
+               "openai/gpt-5-undated",
+               "spacexai/grok-4.7"
+             ]
+    end
+
+    test "the label is the listing's name and the window its context_window" do
+      Req.Test.stub(__MODULE__, fn conn -> Req.Test.json(conn, vercel_listing()) end)
+
+      assert {:ok, models} =
+               ModelListing.live_models(:vercel, req_options: [plug: {Req.Test, __MODULE__}])
+
+      by_id = Map.new(models, &{&1.id, &1})
+
+      assert by_id["anthropic/claude-sonnet-4.6"] == %{
+               id: "anthropic/claude-sonnet-4.6",
+               label: "Claude Sonnet 4.6",
+               context_window: 1_000_000
+             }
+
+      assert by_id["spacexai/grok-4.7"].context_window == 500_000
+    end
+
+    # Fermix sends `tools` on every request and makes synchronous requests only,
+    # which Vercel refuses for a batch id; a model of another type is not a chat
+    # model whatever its tags say.
+    test "drops batch ids, other model types, tool-less models and malformed entries" do
+      Req.Test.stub(__MODULE__, fn conn -> Req.Test.json(conn, vercel_listing()) end)
+
+      assert {:ok, models} =
+               ModelListing.live_models(:vercel, req_options: [plug: {Req.Test, __MODULE__}])
+
+      ids = Enum.map(models, & &1.id)
+
+      refute "anthropic/claude-fable-5.2-batch" in ids
+      refute "spacexai/grok-voice-3.0" in ids
+      refute "google/gemini-3-pro-image" in ids
+      refute "acme/no-name" in ids
+    end
+
+    test "reports non-200 upstream answers as a readable error" do
+      Req.Test.stub(__MODULE__, fn conn -> Plug.Conn.send_resp(conn, 503, "down") end)
+
+      assert {:error, reason} =
+               ModelListing.live_models(:vercel, req_options: [plug: {Req.Test, __MODULE__}])
+
+      assert reason =~ "HTTP 503"
+    end
+
+    test "a body without a data list is an unexpected response" do
+      Req.Test.stub(__MODULE__, fn conn -> Req.Test.json(conn, %{"object" => "list"}) end)
+
+      assert {:error, reason} =
+               ModelListing.live_models(:vercel, req_options: [plug: {Req.Test, __MODULE__}])
+
+      assert reason =~ "unexpected response"
+    end
+  end
+
   # M57 §6.2: the signed-in account's own catalog, read with its bearer, in a
   # shape that is not the standard model list.
   describe "live_models/2 — :openai_codex" do
@@ -363,6 +530,36 @@ defmodule FermixCore.Providers.ModelListingTest do
       ModelListing.live_models(:openai, [])
     end
   end
+
+  defp vercel_listing do
+    "../../fixtures/providers/vercel_models.json"
+    |> Path.expand(__DIR__)
+    |> File.read!()
+    |> Jason.decode!()
+  end
+
+  # The same entries with the `model_eligibility` verdict an authenticated
+  # `?include_availability=true` adds to each, in the live answer's shapes.
+  defp vercel_availability_listing do
+    Map.update!(vercel_listing(), "data", fn models ->
+      Enum.map(models, fn model ->
+        Map.put(model, "model_eligibility", eligibility(model["id"]))
+      end)
+    end)
+  end
+
+  defp eligibility("anthropic/claude-fable-5.2"),
+    do: %{
+      "category" => "policy",
+      "evaluated_runtime" => "http",
+      "reason" => "zero_data_retention",
+      "status" => "ineligible"
+    }
+
+  defp eligibility("openai/gpt-6-luna"),
+    do: %{"evaluated_runtime" => "http", "status" => "unknown"}
+
+  defp eligibility(_id), do: %{"evaluated_runtime" => "http", "status" => "eligible"}
 
   defp venice_models do
     [

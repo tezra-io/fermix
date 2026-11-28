@@ -42,6 +42,7 @@ defmodule FermixCore.Management.SettingsTest do
     :compaction,
     :memory,
     :skill_curation,
+    :open_loops,
     :realtime,
     :transcription,
     :meetings,
@@ -142,9 +143,10 @@ defmodule FermixCore.Management.SettingsTest do
     end
 
     test "every pane a section names is a pane the app routes to" do
-      # `always_on` is the Always On pane the apps add with M75 (§14).
-      panes = ~w(providers personality memory channels cues voice meetings computer coding
-                 search images sandbox browser secrets always_on)
+      # `always_on` is the Always On pane the apps add with M75 (§14), and
+      # `phone_calls` Phone calls' own pane beside Meetings (M94).
+      panes = ~w(providers personality memory channels cues voice phone_calls meetings computer
+                 coding search images sandbox browser secrets always_on)
 
       for section <- Settings.sections() do
         assert section.pane in panes, "#{section.id} names an unroutable pane"
@@ -271,6 +273,34 @@ defmodule FermixCore.Management.SettingsTest do
       refute Enum.any?(rows("transcription"), & &1["restart"])
       assert %{"restart" => false} = row("personalization", "user_name")
       assert %{"restart" => true} = row("personalization", "skill_curation_enabled")
+      assert %{"restart" => true} = row("personalization", "open_loops_enabled")
+    end
+
+    # M106 §8: the footer names where suggestions arrive: the Fermix app as a
+    # place, never its internal word; a DM by its platform's word as before.
+    test "the skill-curation footer names the Fermix app as a place, a DM as it always did" do
+      jobs = Application.fetch_env(:fermix_core, :jobs)
+      telegram = Application.fetch_env(:fermix_channels, :telegram)
+
+      on_exit(fn ->
+        restore_fetched(:fermix_core, :jobs, jobs)
+        restore_fetched(:fermix_channels, :telegram, telegram)
+      end)
+
+      Application.delete_env(:fermix_channels, :telegram)
+
+      Application.put_env(:fermix_core, :jobs,
+        delivery_channels: FermixTestSupport.AppInbox.channels()
+      )
+
+      assert %{"footer" => "Suggestions arrive in the Fermix app."} =
+               row("personalization", "skill_curation_enabled")
+
+      Application.put_env(:fermix_core, :jobs, delivery_channels: %{})
+      Application.put_env(:fermix_channels, :telegram, owner_user_id: "40017")
+
+      assert %{"footer" => "Suggestions arrive in telegram."} =
+               row("personalization", "skill_curation_enabled")
     end
 
     test "every channel section carries its credentials and a real enable toggle" do
@@ -364,8 +394,8 @@ defmodule FermixCore.Management.SettingsTest do
       assert "claude-fable-5-2" in published.("providers.anthropic")
       assert "grok-4.7" in published.("providers.xai")
 
-      assert ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"] -- published.("providers.openai") ==
-               []
+      assert ["gpt-6.2-astra", "gpt-6.2-sol", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"] --
+               published.("providers.openai") == []
 
       refute "gpt-6-sol" in published.("providers.openai")
 
@@ -375,6 +405,8 @@ defmodule FermixCore.Management.SettingsTest do
                "anthropic/claude-fable-5.1",
                "anthropic/claude-opus-5.5",
                "openai/gpt-6-astra",
+               "openai/gpt-6.2-astra",
+               "openai/gpt-6.2-sol",
                "openai/gpt-6.1-sol",
                "openai/gpt-6.1-terra",
                "openai/gpt-6-luna",
@@ -383,6 +415,36 @@ defmodule FermixCore.Management.SettingsTest do
 
       refute "openai/gpt-6-sol" in published.("providers.openrouter")
       assert "grok-4-7" in published.("providers.venice")
+
+      assert [
+               "anthropic/claude-fable-5.2",
+               "openai/gpt-6.2-astra",
+               "openai/gpt-6.2-sol",
+               "spacexai/grok-4.7"
+             ] -- published.("providers.vercel") == []
+    end
+
+    # Fast mode is a per-provider toggle, off until turned on, published only by
+    # the providers whose requests can carry it, with no note under it.
+    test "OpenAI and Anthropic publish a fast mode toggle with no note, off by default, and no other provider does" do
+      Application.put_env(:fermix_core, :providers, [])
+
+      for id <- [:openai, :anthropic] do
+        keys = Enum.map(rows("providers.#{id}"), & &1["key"])
+        assert List.last(keys) == "fast", "providers.#{id}: #{inspect(keys)}"
+
+        fast = row("providers.#{id}", "fast")
+        assert fast["kind"] == "toggle"
+        assert fast["label"] == "Fast mode"
+        assert fast["footer"] == nil
+        assert fast["value"] == false
+        assert fast["restart"] == true
+      end
+
+      for descriptor <- Descriptor.all(), descriptor.id not in [:openai, :anthropic] do
+        keys = Enum.map(rows("providers.#{descriptor.id}"), & &1["key"])
+        refute "fast" in keys, "providers.#{descriptor.id}: #{inspect(keys)}"
+      end
     end
 
     # OpenAI Codex lists the signed-in account's models live: its model row
@@ -557,6 +619,7 @@ defmodule FermixCore.Management.SettingsTest do
                "gpt-realtime-2.1-mini · Realtime, integrated tools",
                "gpt-realtime-2.1 · Realtime, integrated tools",
                "gpt-realtime-2 · Realtime, integrated tools",
+               "gpt-live-1.1 · Live, with your Fermix agent",
                "gpt-live-1 · Live, with your Fermix agent",
                "grok-voice-3.0 · Grok, with your Fermix agent"
              ]
@@ -1157,6 +1220,29 @@ defmodule FermixCore.Management.SettingsTest do
       assert %{"value" => "claude-sonnet-5"} = row("providers.anthropic", "default_model")
     end
 
+    test "fast mode persists to the edited provider and reads back" do
+      Application.put_env(:fermix_core, :providers,
+        openai: [primary: true, default_model: "gpt-6.2-sol"],
+        anthropic: []
+      )
+
+      assert {:ok, _result} = Settings.apply("providers.anthropic", %{"fast" => true})
+
+      providers = Application.get_env(:fermix_core, :providers)
+      assert providers[:anthropic][:fast] == true
+      refute Keyword.has_key?(providers[:openai], :fast)
+      assert %{"value" => true} = row("providers.anthropic", "fast")
+
+      assert {:ok, persisted} = ConfigStore.load_runtime_config()
+      assert persisted[:fermix_core][:providers][:anthropic][:fast] == true
+
+      assert {:ok, _result} = Settings.reload()
+      assert %{"value" => true} = row("providers.anthropic", "fast")
+
+      assert {:ok, _result} = Settings.apply("providers.anthropic", %{"fast" => false})
+      assert %{"value" => false} = row("providers.anthropic", "fast")
+    end
+
     test "auth-mode changes persist and read back while preserving an existing API key" do
       Application.put_env(:fermix_core, :providers, anthropic: [auth_mode: :api_key])
       Application.put_env(:fermix_core, :personalization, [])
@@ -1296,6 +1382,26 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert {:ok, _style} =
                Settings.apply("personalization", %{"communication_style" => "Terse, no preamble."})
+    end
+
+    # Open loops run unless they are switched off, and the switch is a row both
+    # apps show. A home with no `[fermix_core.open_loops]` section publishes it
+    # on; turning it off writes the disable and turning it on removes it again.
+    test "the open-loops switch is published on by default and writes only the disable" do
+      Application.put_env(:fermix_core, :open_loops, [])
+
+      assert %{"kind" => "toggle", "value" => true} =
+               row("personalization", "open_loops_enabled")
+
+      assert {:ok, _result} = Settings.apply("personalization", %{"open_loops_enabled" => false})
+      assert %{"value" => false} = row("personalization", "open_loops_enabled")
+      assert {:ok, off} = ConfigStore.load_runtime_config()
+      assert off[:fermix_core][:open_loops] == [enabled: false]
+
+      assert {:ok, _result} = Settings.apply("personalization", %{"open_loops_enabled" => true})
+      assert %{"value" => true} = row("personalization", "open_loops_enabled")
+      assert {:ok, on} = ConfigStore.load_runtime_config()
+      assert on[:fermix_core][:open_loops] == []
     end
 
     # MGMT-1 shaping. A value that names something is one line: the line break a
@@ -2329,6 +2435,7 @@ defmodule FermixCore.Management.SettingsTest do
       assert core[:computer_history][:summarizer] == :default_provider
       assert core[:providers][:anthropic][:auth_mode] == :oauth
       assert core[:providers][:anthropic][:reasoning_effort] == :high
+      assert core[:providers][:anthropic][:fast] == true
       assert core[:transcription][:backend] == "deepgram"
       assert Map.get(reloaded, :sandbox).mode == :strict
       assert core[:realtime][:voice] == "cedar"
@@ -2448,7 +2555,12 @@ defmodule FermixCore.Management.SettingsTest do
     )
 
     Application.put_env(:fermix_core, :providers,
-      anthropic: [auth_mode: :oauth, reasoning_effort: :high, default_model: "claude-opus-5"]
+      anthropic: [
+        auth_mode: :oauth,
+        reasoning_effort: :high,
+        default_model: "claude-opus-5",
+        fast: true
+      ]
     )
 
     Application.put_env(:fermix_core, :transcription, backend: "deepgram", model: "nova-3")
@@ -2716,4 +2828,7 @@ defmodule FermixCore.Management.SettingsTest do
 
   defp restore(app, key, nil), do: Application.delete_env(app, key)
   defp restore(app, key, value), do: Application.put_env(app, key, value)
+
+  defp restore_fetched(app, key, :error), do: Application.delete_env(app, key)
+  defp restore_fetched(app, key, {:ok, value}), do: Application.put_env(app, key, value)
 end

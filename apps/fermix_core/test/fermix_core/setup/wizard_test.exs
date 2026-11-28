@@ -890,10 +890,10 @@ defmodule FermixCore.Setup.WizardTest do
              false
   end
 
-  # `[fermix_core.open_loops] enabled` defaults OFF, the inverse of skill
-  # curation, so the answers write the inverse. Each case starts from the
-  # production posture (no app-env pin), since config/test.exs pins it off.
-  test "save_answers writes open_loops enabled only on accept" do
+  # `[fermix_core.open_loops] enabled` defaults ON, as skill curation does, so
+  # the answers write as its do. Each case starts from the production posture
+  # (no app-env pin), since config/test.exs pins it off.
+  test "save_answers writes open_loops enabled only on decline" do
     tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-open-loops")
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
 
@@ -903,23 +903,26 @@ defmodule FermixCore.Setup.WizardTest do
     Application.delete_env(:fermix_channels, :telegram)
     start_memory_repo!()
 
-    # Accepting writes the explicit enable.
+    # Declining writes the explicit disable.
     assert {:ok, _} =
              Wizard.report().wizard
              |> Wizard.save_answers(
                provider: "openai",
                openai_api_key: "sk-x",
-               open_loops_enabled: "yes"
+               open_loops_enabled: "no"
              )
 
-    assert {:ok, accepted} = ConfigStore.load_runtime_config()
-    assert Keyword.get(accepted.fermix_core, :open_loops) == [enabled: true]
-
-    # Declining writes NOTHING: the default is already off.
-    assert {:ok, _} = Wizard.report().wizard |> Wizard.save_answers(open_loops_enabled: "no")
-
     assert {:ok, declined} = ConfigStore.load_runtime_config()
-    assert Keyword.get(declined.fermix_core, :open_loops) == []
+    assert Keyword.get(declined.fermix_core, :open_loops) == [enabled: false]
+
+    assert File.read!(Path.join(tmp_home, "config.toml")) =~
+             "[fermix_core.open_loops]\nenabled = false"
+
+    # Accepting writes NOTHING: the default is already on.
+    assert {:ok, _} = Wizard.report().wizard |> Wizard.save_answers(open_loops_enabled: "yes")
+
+    assert {:ok, accepted} = ConfigStore.load_runtime_config()
+    assert Keyword.get(accepted.fermix_core, :open_loops) == []
     refute File.read!(Path.join(tmp_home, "config.toml")) =~ "[fermix_core.open_loops]"
   end
 
@@ -943,26 +946,37 @@ defmodule FermixCore.Setup.WizardTest do
 
     refute File.read!(Path.join(tmp_home, "config.toml")) =~ "[fermix_core.open_loops]"
 
-    assert {:ok, _} = Wizard.report().wizard |> Wizard.save_answers(open_loops_enabled: true)
+    assert {:ok, _} = Wizard.report().wizard |> Wizard.save_answers(open_loops_enabled: false)
     assert {:ok, _} = Wizard.report().wizard |> Wizard.save_answers(open_loops_enabled: "")
     assert {:ok, _} = Wizard.report().wizard |> Wizard.save_answers(anthropic_api_key: "sk-ant")
 
     assert {:ok, persisted} = ConfigStore.load_runtime_config()
-    assert Keyword.get(persisted.fermix_core, :open_loops) == [enabled: true]
+    assert Keyword.get(persisted.fermix_core, :open_loops) == [enabled: false]
   end
 
-  test "the open_loops question names the owner inbox check-ins will arrive in" do
-    label = Wizard.open_loops_label(configured_owners: %{"telegram" => "40417"}, jobs_config: [])
+  # M106 §8: the skill-curation question names where proposals arrive: the
+  # Fermix app as a place, every other inbox by its platform's word as before.
+  test "the skill-curation question names the Fermix app as a place, a DM as it always did" do
+    jobs = Application.fetch_env(:fermix_core, :jobs)
+    on_exit(fn -> restore_env(:fermix_core, :jobs, jobs) end)
 
-    assert label =~ "Check-ins will arrive in telegram."
-    assert label =~ "blank = no"
+    Application.put_env(:fermix_core, :jobs,
+      delivery_channels: FermixTestSupport.AppInbox.channels()
+    )
+
+    assert Wizard.skill_curation_label() =~ "Proposals will arrive in the Fermix app."
+
+    Application.put_env(:fermix_core, :jobs, delivery_channels: %{})
+    Application.put_env(:fermix_channels, :telegram, owner_user_id: "40017")
+
+    assert Wizard.skill_curation_label() =~ "Proposals will arrive in telegram."
   end
 
-  test "the open_loops question says check-ins wait when no channel owner is configured" do
-    label = Wizard.open_loops_label(configured_owners: %{}, jobs_config: [])
+  test "the open_loops question says a check-in arrives where the owner mentioned it" do
+    label = Wizard.open_loops_label()
 
-    assert label =~ "Until a channel has an owner configured, Fermix records no loops."
-    refute label =~ "will arrive in"
+    assert label =~ "A check-in arrives in the chat where you mentioned it."
+    assert label =~ "blank = yes"
   end
 
   test "save_answers clears the harness default_vendor when the answer is blank" do
@@ -1246,6 +1260,44 @@ defmodule FermixCore.Setup.WizardTest do
     assert Keyword.get(providers[:openai], :primary) == true
     refute Keyword.get(providers[:anthropic], :primary) == true
     refute Keyword.has_key?(providers[:openai], :default_model)
+  end
+
+  # Fast mode lands on the provider being edited, and only a provider whose
+  # requests can carry it takes it: OpenAI Codex's plan route ignores the tier.
+  test "fast mode lands on the edited provider and is refused where no route carries it" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-fast-mode")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(provider: "openai", openai_api_key: "sk-x")
+
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(
+               edit_provider: "anthropic",
+               anthropic_api_key: "sk-ant",
+               fast: true
+             )
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    providers = Keyword.get(persisted.fermix_core, :providers, [])
+    assert Keyword.get(providers[:anthropic], :fast) == true
+    refute Keyword.has_key?(providers[:openai], :fast)
+
+    for provider <- ["openai_codex", "xai"] do
+      error =
+        assert_raise ArgumentError, fn ->
+          Wizard.save_answers(Wizard.report().wizard, edit_provider: provider, fast: true)
+        end
+
+      assert error.message =~ "fast mode"
+    end
   end
 
   test "an auto-promoted provider receives the same save's model/effort fields" do

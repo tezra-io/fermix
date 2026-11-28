@@ -6,9 +6,12 @@ defmodule FermixCore.OpenLoops.ActiveHours do
   window is read from the owner's own user chat messages over the last 28 days,
   guest rows excluded as the memory reviewer excludes them: the 15th to 85th
   percentile hour of day in the loop's zone, widened around its middle to at
-  least six hours and never past midnight. With fewer than 40 messages it is
-  09:00 to 21:00 local. One resolver; its result is snapshotted into a check-in's
-  start event (`label/1`) so a mistimed check-in can be read back.
+  least six hours. The owner's day runs from 04:00 to midnight: a message
+  before 04:00 is the end of the evening before, so a late night ends the
+  window at 23:00 and never starts it in the small hours, and no window starts
+  before 04:00 or ends after 23:00. With fewer than 40 messages it is 09:00 to
+  21:00 local. One resolver; its result is snapshotted into a check-in's start
+  event (`label/1`) so a mistimed check-in can be read back.
 
   A window is `start <= time < finish` in local wall-clock time, both whole
   hours of one day.
@@ -49,13 +52,18 @@ defmodule FermixCore.OpenLoops.ActiveHours do
       {start, finish} = Defaults.active_hours_default()
       %{start: start, finish: finish, source: :default, sample: sample}
     else
-      instants |> Enum.map(&local_hour(&1, zone)) |> Enum.sort() |> window(sample)
+      instants |> Enum.map(&day_hour(&1, zone)) |> Enum.sort() |> window(sample)
     end
   end
 
   defp window(hours, sample) do
     {low, high} = Defaults.active_hours_percentiles()
-    {start, finish} = widen(percentile(hours, sample, low), percentile(hours, sample, high))
+
+    {start, finish} =
+      widen(
+        min(percentile(hours, sample, low), @last_hour),
+        min(percentile(hours, sample, high), @last_hour)
+      )
 
     %{
       start: Time.new!(start, 0, 0),
@@ -77,14 +85,23 @@ defmodule FermixCore.OpenLoops.ActiveHours do
     clamp(start - early, finish + deficit - early)
   end
 
-  defp clamp(start, finish) when start < 0, do: clamp(0, finish - start)
+  defp clamp(start, finish) do
+    first = Defaults.active_hours_first_hour()
 
-  defp clamp(start, finish) when finish > @last_hour,
-    do: {start - (finish - @last_hour), @last_hour}
+    cond do
+      start < first -> clamp(first, finish + first - start)
+      finish > @last_hour -> {start - (finish - @last_hour), @last_hour}
+      true -> {start, finish}
+    end
+  end
 
-  defp clamp(start, finish), do: {start, finish}
-
-  defp local_hour(at, zone), do: DateTime.shift_zone!(at, zone).hour
+  # The hour of the owner's day a message fell in: an hour before the day's
+  # first is counted past 23, the end of the evening before. Read as an early
+  # hour it would pull the window's start into the night.
+  defp day_hour(at, zone) do
+    hour = DateTime.shift_zone!(at, zone).hour
+    if hour < Defaults.active_hours_first_hour(), do: hour + 24, else: hour
+  end
 
   @doc "Whether `at` falls inside the window, read in `zone`."
   @spec inside?(hours(), DateTime.t(), String.t()) :: boolean()

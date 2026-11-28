@@ -1,0 +1,13 @@
+{
+  "name": "create_timeout",
+  "number": "+17205550164",
+  "party": "Aspen Hollow Pet Grooming in Denver. The provider answers the create with its initialization timeout (504): whether a call was placed is unknown.",
+  "create": {
+    "refuse": {
+      "status": 504,
+      "message": "The session did not finish initializing in time.",
+      "code": "initialization_timeout",
+      "type": "server_error"
+    }
+  }
+}

@@ -1,6 +1,7 @@
 defmodule FermixCore.Realtime.ToolBridgeTest do
   use ExUnit.Case, async: true
 
+  alias FermixCore.Agents.RequestIdentity
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Realtime.ToolBridge
 
@@ -10,6 +11,11 @@ defmodule FermixCore.Realtime.ToolBridgeTest do
     end
 
     def execute(_args, _context), do: {:error, :bad_args}
+  end
+
+  defmodule RequestTool do
+    def execute(_args, context),
+      do: {:ok, %{success: true, output: Map.get(context, :request_id), error: nil}}
   end
 
   defmodule InvalidUtf8Tool do
@@ -63,6 +69,32 @@ defmodule FermixCore.Realtime.ToolBridgeTest do
              "output" => "realtime:hello",
              "error" => nil
            }
+  end
+
+  # A Realtime session keeps one session id for the whole conversation, so
+  # each function call is its own owner request, never the session.
+  test "each function call carries a request identity of its own" do
+    capability =
+      Capability.new(%{
+        name: "whoami",
+        description: "Says which request asked.",
+        parameters: %{"type" => "object"},
+        kind: :builtin,
+        executor: {RequestTool, :execute, []},
+        policy_class: :read_only
+      })
+
+    bridge = ToolBridge.new([capability], %{agent_name: "realtime", session_id: "session:root"})
+
+    [first, second] =
+      for n <- 1..2 do
+        call = %{"call_id" => "call-#{n}", "name" => "whoami", "arguments" => "{}"}
+        assert {:ok, %{output: output}} = ToolBridge.execute_call(bridge, call)
+        Jason.decode!(output)["output"]
+      end
+
+    assert RequestIdentity.valid?(first) and RequestIdentity.valid?(second)
+    assert first != second
   end
 
   test "returns loud tool errors for unknown tools and invalid JSON" do

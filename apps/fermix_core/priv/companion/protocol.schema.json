@@ -680,7 +680,7 @@
     },
     "approval": {
       "type": "object",
-      "description": "An owner-approval card raised by a turn on this socket. The token is submitted but never rendered; the routes are sent back as commands. Sent again after server_hello, with ttl_s the seconds it has left, while it waits.",
+      "description": "An owner-approval card, raised by a turn on this socket, or asked in the Fermix app with no turn (an access confirmation, or a change a heal proposes for a job, kind job_change). The token is submitted but never rendered; the routes are sent back as commands. Sent again after server_hello, with ttl_s the seconds it has left, while it waits.",
       "required": [
         "type",
         "approval_id",

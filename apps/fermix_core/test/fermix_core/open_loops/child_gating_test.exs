@@ -43,10 +43,10 @@ defmodule FermixCore.OpenLoops.ChildGatingTest do
     assert CoreApplication.maybe_open_loops_children(:prod) == []
   end
 
-  test "an absent section is off: the first release ships default-off" do
+  test "an absent section is on: a home that never set the switch runs open loops" do
     Application.put_env(:fermix_core, :open_loops, [])
     Application.put_env(:fermix_core, :memory, enabled: true)
 
-    assert CoreApplication.maybe_open_loops_children(:prod) == []
+    assert CoreApplication.maybe_open_loops_children(:prod) == @children
   end
 end

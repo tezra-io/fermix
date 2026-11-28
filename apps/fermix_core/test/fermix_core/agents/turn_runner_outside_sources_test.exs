@@ -19,11 +19,35 @@ defmodule FermixCore.Agents.TurnRunnerOutsideSourcesTest do
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
   alias FermixCore.OpenLoops.Registry, as: OpenLoopsRegistry
+  alias FermixCore.PhoneCalls.Config, as: PhoneCallsConfig
+  alias FermixCore.PhoneCalls.Ledger
+  alias FermixCore.Prompt.RuntimeSections
   alias FermixCore.Sandbox.Config, as: SandboxConfig
+  alias FermixCore.Tools.PhoneCall
   alias FermixCore.Tools.Shell
   alias FermixTestSupport.SafeRm
 
   @token "TOKEN123"
+
+  # A finished call's report as the owner's chat replays it, and the reply its
+  # turn wrote. Every name, number and id here is invented; numbers are 555-01XX.
+  @report_line "[phone call pc_0a1b2c3d4e5f] The call ended."
+  @report_reply "The bistro only has 9:15 PM. Should I ask for that?"
+  @t0 ~U[2031-03-04 15:00:00.000000Z]
+
+  # What the owner's answer asks for: the same bistro again, at the time it offered.
+  @call_back %{
+    "action" => "start",
+    "brief" => %{
+      "destination" => "+12125550101",
+      "destination_kind" => "business",
+      "number_source" => "The bistro's own website.",
+      "contact_name" => "Calloway Bistro",
+      "timezone" => "America/New_York",
+      "goal" => "Reserve a table for two on Saturday, March 8, 2031 at 9:15 PM.",
+      "completion_criteria" => ["The bistro confirms a table for two at 9:15 PM."]
+    }
+  }
 
   # Calls `record_context` on its first step and answers on the next, sending
   # the test the messages of its first call.
@@ -31,14 +55,19 @@ defmodule FermixCore.Agents.TurnRunnerOutsideSourcesTest do
     @behaviour FermixCore.Providers.Adapter
 
     @impl true
-    def chat(messages, _capabilities, opts) do
-      send(Keyword.fetch!(opts, :test_pid), {:first_call, messages})
+    def chat(messages, capabilities, opts) do
+      test_pid = Keyword.fetch!(opts, :test_pid)
+      send(test_pid, {:first_call, messages})
+      send(test_pid, {:offered, capabilities})
       call = %{id: "c1", call_id: "c1", name: "record_context", arguments: "{}"}
       {:ok, turn("", [call])}
     end
 
     @impl true
-    def continue(_provider_state, _tool_results, _opts), do: {:ok, turn("done", [])}
+    def continue(_provider_state, tool_results, opts) do
+      send(Keyword.fetch!(opts, :test_pid), {:tool_results, tool_results})
+      {:ok, turn("done", [])}
+    end
 
     @impl true
     def to_provider_tools(capabilities), do: capabilities
@@ -85,6 +114,23 @@ defmodule FermixCore.Agents.TurnRunnerOutsideSourcesTest do
   defmodule OpenLoopInbox do
     @moduledoc false
     def send_message(_destination, _text, _opts), do: :ok
+  end
+
+  # The per-call worker as `PhoneCalls.Manager` starts one: it tells the test
+  # it was started, for which call and brief, and dials nothing.
+  defmodule IdleCall do
+    @moduledoc false
+    use GenServer
+
+    def start_link(args), do: GenServer.start_link(__MODULE__, args)
+    def prompt_version, do: "outside-sources-1"
+    def cancel(_pid, _why), do: :ok
+
+    @impl true
+    def init(args) do
+      send(args.test_pid, {:worker_started, args.call_id, args.brief})
+      {:ok, args}
+    end
   end
 
   setup do
@@ -142,29 +188,33 @@ defmodule FermixCore.Agents.TurnRunnerOutsideSourcesTest do
     )
   end
 
+  defp turn_state(ctx, state_extra \\ []) do
+    test_pid = self()
+
+    Enum.into(state_extra, %{
+      adapter: RecordingAdapter,
+      adapter_opts: [model: "mock-model", test_pid: test_pid],
+      provider: nil,
+      adapter_overrides: [],
+      capability_registry: ctx.registry,
+      conversation_store: ctx.store,
+      runtime_context: runtime_context(recorder(test_pid)),
+      memory_agent_id: "main",
+      memory_owner_id: "default",
+      skill_registry: nil,
+      agent_supervisor: nil,
+      task_supervisor: self(),
+      journal_base_dir: nil,
+      memory_store: nil,
+      memory_repo: nil,
+      sandbox_config: ctx.sandbox
+    })
+  end
+
   defp run_turn(ctx, msg, state_extra \\ []) do
     test_pid = self()
     {stream_callback, state_extra} = Keyword.pop(state_extra, :stream_callback)
-
-    turn_state =
-      Enum.into(state_extra, %{
-        adapter: RecordingAdapter,
-        adapter_opts: [model: "mock-model", test_pid: test_pid],
-        provider: nil,
-        adapter_overrides: [],
-        capability_registry: ctx.registry,
-        conversation_store: ctx.store,
-        runtime_context: runtime_context(recorder(test_pid)),
-        memory_agent_id: "main",
-        memory_owner_id: "default",
-        skill_registry: nil,
-        agent_supervisor: nil,
-        task_supervisor: self(),
-        journal_base_dir: nil,
-        memory_store: nil,
-        memory_repo: nil,
-        sandbox_config: ctx.sandbox
-      })
+    turn_state = turn_state(ctx, state_extra)
 
     deliver = fn part ->
       send(test_pid, {:delivered, part})
@@ -239,6 +289,89 @@ defmodule FermixCore.Agents.TurnRunnerOutsideSourcesTest do
   end
 
   defp chat_id, do: "outside-#{System.unique_integer([:positive])}"
+
+  # A finished call's report re-entering the owner's chat as the continuation
+  # dispatcher hands it in (M94 §04), its turn run (it has no tools, so the
+  # tool its model names is refused), and the reply that turn's commit stores.
+  defp reported!(ctx, id) do
+    report =
+      owner_msg(id, %{
+        content:
+          @report_line <>
+            "\nOutcome: needs_owner\n" <>
+            ~s(<untrusted_tool_result source="phone_call_recipient">\n) <>
+            "We're full at 7:30. The only table that night is at 9:15 PM.\n" <>
+            "</untrusted_tool_result>",
+        metadata: %{
+          chat_type: "private",
+          harness_continuation: true,
+          harness_continuation_depth: 1,
+          phone_call_result: "pc_0a1b2c3d4e5f"
+        }
+      })
+
+    assert {:ok, "done", _tokens} = TurnRunner.run(report, turn_state(ctx), fn _part -> :ok end)
+    assert_receive {:first_call, _messages}, 10_000
+    assert_receive {:offered, []}, 10_000
+    assert_receive {:tool_results, [_refused]}, 10_000
+
+    :ok =
+      ConversationStore.add_message({"telegram", id, :root}, "assistant", @report_reply,
+        server: ctx.store,
+        sender: "main"
+      )
+  end
+
+  defp coding_notice(id) do
+    owner_msg(id, %{
+      content: "[coding run hr_000000000001 finished]\ncodex · completed",
+      metadata: %{
+        chat_type: "private",
+        harness_continuation_depth: 1,
+        harness_run_id: "hr_000000000001"
+      }
+    })
+  end
+
+  # A phone-call subtree of the test's own (manager, ledger), and the context
+  # seams the real `phone_call` tool reads to reach it.
+  defp phone_calls!(repo) do
+    unique = System.unique_integer([:positive])
+
+    names = %{
+      supervisor: :"tr_outside_phone_sup_#{unique}",
+      call_registry: :"tr_outside_phone_calls_registry_#{unique}",
+      handoff_supervisor: :"tr_outside_phone_handoff_#{unique}",
+      manager: :"tr_outside_phone_manager_#{unique}",
+      call_supervisor: :"tr_outside_phone_calls_#{unique}",
+      delivery_worker: :"tr_outside_phone_delivery_#{unique}"
+    }
+
+    start_supervised!(
+      {FermixCore.PhoneCalls.Supervisor,
+       call_module: IdleCall,
+       call_args: %{test_pid: self()},
+       hangup: fn _session -> {:error, :never_hung_up_here} end,
+       names: names,
+       repo: repo,
+       readiness: fn -> :ready end,
+       config: &phone_config/0,
+       now_fn: fn -> @t0 end,
+       reconcile: false,
+       timer_enabled: false}
+    )
+
+    %{
+      memory_repo: repo,
+      phone_call_manager: names.manager,
+      phone_call_readiness: fn -> :ready end,
+      phone_call_config: &phone_config/0,
+      phone_call_now: fn -> @t0 end
+    }
+  end
+
+  defp phone_config,
+    do: %PhoneCallsConfig{enabled: true, voice: "marin", caller_number: "+14155550142"}
 
   describe "an attachment" do
     test "a text file taints the turn from its first call, so a flagged command parks", ctx do
@@ -487,6 +620,74 @@ defmodule FermixCore.Agents.TurnRunnerOutsideSourcesTest do
     refute_received {:unlocked, _}
   end
 
+  # A finished phone call's result re-enters through the same dispatcher with
+  # the continuation marker and its own (M94 §04). Its content frames the
+  # words of the person called, so the turn it starts can only write its reply
+  # (M94 D23): no tool is offered, a tool its model names anyway is answered
+  # as not there and never run, the prompt says so, and its message is stored
+  # as not the owner's words.
+  test "a phone call's result turn is offered no tool and runs none", ctx do
+    chat_id = chat_id()
+
+    msg =
+      owner_msg(chat_id, %{
+        content: "the phone call ended; here is its report",
+        metadata: %{
+          chat_type: "private",
+          harness_continuation: true,
+          harness_continuation_depth: 1,
+          phone_call_result: "pc_0a1b2c3d4e5f"
+        }
+      })
+
+    assert {:ok, "done", _tokens} = TurnRunner.run(msg, turn_state(ctx), fn _part -> :ok end)
+
+    assert_receive {:first_call, messages}, 10_000
+    assert_receive {:offered, []}, 10_000
+    assert_receive {:tool_results, [refused]}, 10_000
+    assert refused.output == "Error: Tool 'record_context' not found"
+    refute_received {:tool_context, _context}
+
+    system = messages |> Enum.filter(&(&1.role == "system")) |> Enum.map_join("\n", & &1.content)
+    assert system =~ RuntimeSections.reply_only()
+    refute system =~ "runtime contract"
+
+    [stored | _] = ConversationStore.get_history({"telegram", chat_id, :root}, server: ctx.store)
+    assert stored.role == "user"
+    assert stored.harness_continuation == true
+    # Stored as a call's report too, by a flag and never by the call's id, so
+    # the owner's message that answers it can tell from history.
+    assert stored.phone_call_result == true
+  end
+
+  # Only a call's report is held to its reply: a coding run's keeps its tools.
+  test "a coding run's continuation keeps its tools", ctx do
+    msg =
+      owner_msg(chat_id(), %{
+        content: "the coding run finished; here is its summary",
+        metadata: %{chat_type: "private", harness_continuation_depth: 1, phone_call_result: nil}
+      })
+
+    {_messages, context} = run_turn(ctx, msg)
+    assert_received {:offered, [%{name: "record_context"}]}
+    assert context.outside_sources == MapSet.new([UntrustedContent.harness_continuation_source()])
+    refute Map.has_key?(UntrustedContent.resume_provenance(context), :phone_call_result)
+  end
+
+  # A call's marker means nothing on a turn the owner typed: only a
+  # continuation carries it, so the turn is an ordinary one, tools and all.
+  test "a call's marker on an owner-typed turn is not a call's result", ctx do
+    msg =
+      owner_msg(chat_id(), %{
+        content: "hi",
+        metadata: %{chat_type: "private", phone_call_result: "pc_0a1b2c3d4e5f"}
+      })
+
+    {_messages, context} = run_turn(ctx, msg)
+    assert_received {:offered, [%{name: "record_context"}]}
+    assert context.outside_sources == MapSet.new()
+  end
+
   # The gate reads the finished run from the ledger by the id the notice
   # carries, to chain the next run only in its folder, with its coding agent.
   test "a coding-run continuation turn carries the finished run's id", ctx do
@@ -546,6 +747,7 @@ defmodule FermixCore.Agents.TurnRunnerOutsideSourcesTest do
       [stored | _rest] = ConversationStore.get_history({"telegram", id, :root}, server: ctx.store)
       assert stored.role == "user"
       assert stored.harness_continuation == true
+      refute Map.has_key?(stored, :phone_call_result)
     end
 
     id = chat_id()
@@ -567,6 +769,159 @@ defmodule FermixCore.Agents.TurnRunnerOutsideSourcesTest do
     {_messages, context} = run_turn(ctx, msg)
     assert context.outside_sources == MapSet.new([{:tool, "web_fetch"}])
     refute AccessGate.owner_consent_turn?(context)
+  end
+
+  # The one exception to a replay being clean (the owner's rule after a call,
+  # M94 D26): the owner's message that answers a call's report starts as having
+  # read the call, whose report frames what the person called said. Only that
+  # message: once the owner has sent another, the report is only replayed.
+  describe "the owner's answer to a call's report" do
+    test "starts as having read the call, so a flagged command parks", ctx do
+      id = chat_id()
+      reported!(ctx, id)
+
+      {messages, context} =
+        run_turn(ctx, owner_msg(id, %{content: "yes, call them back for 9:15"}))
+
+      assert Enum.any?(messages, &(&1.role == "user" and &1.content =~ @report_line))
+      assert context.outside_sources == MapSet.new([UntrustedContent.phone_call_source()])
+      refute AccessGate.owner_consent_turn?(context)
+
+      assert {:ok, %{success: false}} = unlock_from(context, ctx)
+      refute_received {:unlocked, _}
+      assert_received {:delivered, {:approval_prompt, prompt, @token}}
+      assert prompt =~ "(a phone call)"
+    end
+
+    test "is the only one: the owner's next message is their own again", ctx do
+      id = chat_id()
+      reported!(ctx, id)
+      {_messages, answer} = run_turn(ctx, owner_msg(id, %{content: "yes, call them back"}))
+      assert answer.outside_sources == MapSet.new([UntrustedContent.phone_call_source()])
+
+      {messages, later} = run_turn(ctx, owner_msg(id, %{content: "and the first time was?"}))
+
+      assert Enum.any?(messages, &(&1.role == "user" and &1.content =~ @report_line))
+      assert later.outside_sources == MapSet.new()
+      assert AccessGate.owner_consent_turn?(later)
+    end
+
+    # What reached the conversation since the report and is not the owner's
+    # (a coding run's notice with Fermix's reply to it, a guest's message)
+    # does not stand in for the owner's answer.
+    test "a coding run's notice in between does not stand in for the answer", ctx do
+      id = chat_id()
+      reported!(ctx, id)
+      {_messages, _notice} = run_turn(ctx, coding_notice(id))
+
+      {_messages, answer} = run_turn(ctx, owner_msg(id, %{content: "yes, call them back"}))
+      assert answer.outside_sources == MapSet.new([UntrustedContent.phone_call_source()])
+    end
+
+    test "a guest's message in between does not stand in for the answer", ctx do
+      id = chat_id()
+      reported!(ctx, id)
+
+      :ok =
+        ConversationStore.add_message({"telegram", id, :root}, "user", "is it booked?",
+          server: ctx.store,
+          metadata: %{guest: true}
+        )
+
+      {_messages, answer} = run_turn(ctx, owner_msg(id, %{content: "yes, call them back"}))
+      assert answer.outside_sources == MapSet.new([UntrustedContent.phone_call_source()])
+    end
+
+    test "a coding run's notice leaves the message after it clean, as before", ctx do
+      id = chat_id()
+      {_messages, _notice} = run_turn(ctx, coding_notice(id))
+      {_messages, context} = run_turn(ctx, owner_msg(id, %{content: "thanks, merge it"}))
+      assert context.outside_sources == MapSet.new()
+    end
+
+    test "a notice that arrives right after it carries only its own source", ctx do
+      id = chat_id()
+      reported!(ctx, id)
+      {_messages, context} = run_turn(ctx, coding_notice(id))
+
+      assert context.outside_sources ==
+               MapSet.new([UntrustedContent.harness_continuation_source()])
+    end
+
+    # A compaction that folded the report into a checkpoint summary took its
+    # words and its flag with it: the summary is a system message, never the
+    # owner's or the report's.
+    test "a report compacted into a checkpoint summary leaves the message after it clean",
+         ctx do
+      id = chat_id()
+
+      summary = %{
+        role: "system",
+        content:
+          "Conversation checkpoint summary:\nThe call to Calloway Bistro ended: only 9:15 PM."
+      }
+
+      :ok =
+        ConversationStore.replace_history(
+          {"telegram", id, :root},
+          [summary, %{role: "assistant", content: @report_reply}],
+          server: ctx.store
+        )
+
+      {messages, context} = run_turn(ctx, owner_msg(id, %{content: "yes, call them back"}))
+
+      assert Enum.any?(messages, &(&1.content =~ "Conversation checkpoint summary"))
+      assert context.outside_sources == MapSet.new()
+    end
+  end
+
+  # The owner's yes to a call their answer asked for runs exactly that call,
+  # through the real `phone_call` tool and `PhoneCalls.Manager`, on this test's
+  # own ledger; only the per-call worker is the test's, and it dials nothing.
+  describe "a call the owner's answer to a report asks for" do
+    setup ctx do
+      db = Path.join(ctx.base, "memory.db")
+      repo = :"tr_outside_phone_repo_#{System.unique_integer([:positive])}"
+      start_supervised!({Repo, name: repo, enabled: true, database_path: db}, id: repo)
+      :ok = CapabilityRegistry.register(ctx.registry, Builtin.from_tool_module(PhoneCall))
+      %{repo: repo, phone_seams: phone_calls!(repo)}
+    end
+
+    test "is asked about once and, confirmed, places exactly the call it recorded", ctx do
+      id = chat_id()
+      reported!(ctx, id)
+      {_messages, context} = run_turn(ctx, owner_msg(id, %{content: "yes, call them back"}))
+
+      turn = Map.merge(context, Map.put(ctx.phone_seams, :access_pending, ctx.pending))
+      start = Capability.execute(Builtin.from_tool_module(PhoneCall), @call_back, turn)
+
+      assert {:ok, %{success: false, access_waiting: true}} = start
+      assert_received {:approval, %{access_sensitive: intent}}
+      refute_received {:approval, _second}
+      assert_received {:delivered, {:approval_prompt, %{text: prompt}}}
+      refute_received {:delivered, {:approval_prompt, _again}}
+
+      assert prompt =~
+               "Asked because this request came after reading content someone else could " <>
+                 "have written (a phone call)."
+
+      refute_received {:worker_started, _call_id, _brief}
+      assert {:ok, []} = Ledger.list_recent("default", server: ctx.repo)
+
+      assert {:ok, line} = AccessGate.confirm(intent, ctx.pending)
+      assert_receive {:worker_started, call_id, brief}, 10_000
+      assert line =~ call_id
+      assert brief.destination == @call_back["brief"]["destination"]
+      assert brief.goal == @call_back["brief"]["goal"]
+
+      assert {:ok, [row]} = Ledger.list_recent("default", server: ctx.repo)
+      assert {row.id, row.authorization, row.access_intent} == {call_id, "confirmed", intent}
+      assert row.request_id == context.request_id
+
+      # The yes is spent: nothing runs a second time.
+      assert {:error, _expired} = AccessGate.confirm(intent, ctx.pending)
+      refute_received {:worker_started, _second, _brief}
+    end
   end
 
   describe "the Recent Activity note" do

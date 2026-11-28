@@ -20,8 +20,8 @@ defmodule FermixCore.Management.Auth do
   tokens in memory and would keep serving turns as that account until the token
   expired, while every surface reported the operator signed out. Nothing is
   revoked upstream, except for `openai_codex`, which signs in with ChatGPT: its
-  sign-out revokes the session at OpenAI and keeps the registration, so the
-  next sign-in reuses it (M57 §6.3).
+  sign-out revokes the session at OpenAI, then removes the registration, so the
+  next sign-in asks again which account and workspace to use (M57 §6.3).
 
   An MCP server the owner added signs in as `mcp:<name>` (M74 E5): only a
   remote one whose `auth` is `auto`, through `MCP.OAuth.SignIn`, and the
@@ -503,10 +503,10 @@ defmodule FermixCore.Management.Auth do
     end
   end
 
-  # `openai_codex` signs in with ChatGPT, whose own sign-out revokes upstream,
-  # clears the tokens but keeps the registration, and drops the live tokens;
-  # deleting its entry would lose the issued client id and leave the session
-  # live at OpenAI.
+  # `openai_codex` signs in with ChatGPT, whose own sign-out revokes the session
+  # upstream, then removes the registration under the profile lock it held for
+  # the revoke, and drops the live tokens; deleting its entry here would leave
+  # the session live at OpenAI.
   defp sign_out(:openai_codex, _provider, _profile, opts) do
     logout = Keyword.get(opts, :chatgpt_logout, &ChatGPT.logout/1)
 

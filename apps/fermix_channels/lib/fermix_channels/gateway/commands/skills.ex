@@ -17,6 +17,7 @@ defmodule FermixChannels.Gateway.Commands.Skills do
   alias FermixChannels.Gateway.ChannelRegistry
   alias FermixChannels.Gateway.Commands.Authorization
   alias FermixCore.Config, as: CoreConfig
+  alias FermixCore.Delivery.OwnerInbox
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.SkillCuration
   alias FermixCore.SkillCuration.Config, as: SkillCurationConfig
@@ -403,14 +404,23 @@ defmodule FermixChannels.Gateway.Commands.Skills do
   # Origin validation (§6.7): a button-delivered proposal is origin-stamped
   # and must be actioned from the same channel + chat; a proposal listed via
   # `/skills proposals` (no stamp yet) is actionable from any operator
-  # conversation.
+  # conversation. The Fermix app is one place (M106 §8): its Mac chat and a
+  # paired phone share one conversation, so a stamp on either is answered
+  # from either, by core's one rule for an answer typed in the app.
   defp validate_origin(%{origin_channel: nil}, _message), do: :ok
 
   defp validate_origin(row, message) do
-    if row.origin_channel == message.channel and row.origin_chat_id == message.chat_id do
+    if place(row.origin_channel, row.origin_chat_id) == place(message.channel, message.chat_id) do
       :ok
     else
       {:error, :origin_mismatch}
+    end
+  end
+
+  defp place(channel, chat_id) do
+    case OwnerInbox.answered_in_app(channel, chat_id) do
+      {:ok, app} -> {app.platform, app.chat_id}
+      :error -> {channel, chat_id}
     end
   end
 

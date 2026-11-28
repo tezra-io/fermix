@@ -8,6 +8,7 @@ defmodule FermixCore.Bench.MockProvider do
   alias FermixCore.Telemetry
 
   @default_model "bench-mock"
+  @default_final_text "bench final"
 
   @impl true
   def chat(messages, capabilities, opts) when is_list(messages) and is_list(capabilities) do
@@ -41,6 +42,15 @@ defmodule FermixCore.Bench.MockProvider do
     tools
   end
 
+  @doc """
+  The text a turn of the `:text` or `:tool_once` script ends with under
+  `opts`: `bench_response:`, else the default. A benchmark derives the reply
+  it expects from the very options it hands the agent.
+  """
+  @spec final_text(keyword()) :: String.t()
+  def final_text(opts) when is_list(opts),
+    do: Keyword.get(opts, :bench_response, @default_final_text)
+
   @impl true
   def parse_tool_calls(_response), do: []
 
@@ -73,7 +83,7 @@ defmodule FermixCore.Bench.MockProvider do
         tool_turn(messages, capabilities, step)
 
       _other ->
-        text_turn(messages, capabilities, step, Keyword.get(opts, :bench_response, "bench final"))
+        text_turn(messages, capabilities, step, final_text(opts))
     end
   end
 

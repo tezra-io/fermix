@@ -37,6 +37,7 @@ defmodule FermixCore.OpenLoops.Defaults do
   @active_hours_min_messages 40
   @active_hours_percentiles {15, 85}
   @active_hours_min_span_hours 6
+  @active_hours_first_hour 4
 
   @checkin_max_iterations 6
   @checkin_watchdog_ms 120_000
@@ -114,6 +115,13 @@ defmodule FermixCore.OpenLoops.Defaults do
 
   @spec active_hours_min_span_hours() :: pos_integer()
   def active_hours_min_span_hours, do: @active_hours_min_span_hours
+
+  @doc """
+  The first hour of the owner's day. A message before it belongs to the evening
+  before, and no window starts earlier.
+  """
+  @spec active_hours_first_hour() :: pos_integer()
+  def active_hours_first_hour, do: @active_hours_first_hour
 
   @doc "The check-in run's iteration cap (the §22 follow-up's own bound)."
   @spec checkin_max_iterations() :: pos_integer()

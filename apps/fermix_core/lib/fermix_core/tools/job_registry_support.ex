@@ -83,6 +83,21 @@ defmodule FermixCore.Tools.JobRegistrySupport do
     end
   end
 
+  @doc """
+  For `list_job_runs` and `get_job_run` inside a job's heal run (M106 §5.5):
+  the job is the heal's own, read from the run's context and never from the
+  arguments, as `cue_history` reads its watcher from a cue run's. Any other
+  turn is answered as before.
+  """
+  @spec check_heal_job(String.t(), map()) :: :ok | {:error, String.t()}
+  def check_heal_job(job_id, %{job_heal: %{job_id: heal_job_id}}) when is_binary(job_id) do
+    if job_id == heal_job_id,
+      do: :ok,
+      else: {:error, "In a job's heal run, only the runs of the job it heals can be read."}
+  end
+
+  def check_heal_job(job_id, context) when is_binary(job_id) and is_map(context), do: :ok
+
   # The most refused tool names one sentence lists before it counts the rest.
   @named_max 8
   @give_refusal "This run can't give a job tools it doesn't have itself: "
@@ -496,6 +511,92 @@ defmodule FermixCore.Tools.JobRegistrySupport do
   end
 
   @doc """
+  A job's heal that is not closed (M106 §5.4), as `list_jobs` shows it: its
+  state, whose it is (`job`, `provider` with the provider, or `plugin` with
+  the plugin), the failure's kind (with the tool, for a run that ended ok
+  without working, §6), since when, how many runs it took, and whether the
+  owner was told;
+  once diagnosed (§5.5), what Fermix decided and whether the diagnosis left a
+  note (`has_note`, and `note_run_id`, the run whose `get_job_run` shows it:
+  never its text, which a model wrote after reading the failure's words and
+  is read only as outside content), for a
+  proposal each field it would change with the whole value it would take
+  (exactly what applying it would write), and for a rerun what came of it; after
+  the owner's answer to a proposal (§5.7, D5), the `answer` (`apply` or
+  `leave`), when it came, and when the change was applied; for a closed heal
+  its `outcome`. Nil for a job with none.
+  """
+  @spec heal_payload(map() | nil) :: map() | nil
+  def heal_payload(nil), do: nil
+
+  def heal_payload(%{subject_kind: kind} = heal) do
+    %{
+      state: heal.state,
+      subject: kind,
+      failure_kind: heal.failure_kind,
+      since: timestamp(heal.opened_at),
+      runs: heal.run_count,
+      owner_told: heal.delivery_status == "delivered"
+    }
+    |> put_heal_provider(heal)
+    |> put_heal_tool(Map.get(heal, :tool))
+    |> put_heal_decision(heal)
+    |> put_heal_answer(heal)
+  end
+
+  # What became of a proposal: the heal's outcome once closed, and the
+  # owner's answer with when it came and when the change was applied.
+  defp put_heal_answer(payload, heal) do
+    [
+      outcome: Map.get(heal, :outcome),
+      answer: Map.get(heal, :answer),
+      answered_at: heal |> Map.get(:answered_at) |> timestamp(),
+      applied_at: heal |> Map.get(:applied_at) |> timestamp(),
+      closed_at: heal |> Map.get(:closed_at) |> timestamp()
+    ]
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Enum.into(payload)
+  end
+
+  defp put_heal_provider(payload, %{subject_kind: "provider", subject_id: provider}),
+    do: Map.put(payload, :provider, provider)
+
+  defp put_heal_provider(payload, %{subject_kind: "plugin", subject_id: plugin}),
+    do: Map.put(payload, :plugin, plugin)
+
+  defp put_heal_provider(payload, _heal), do: payload
+
+  # The tool's name only: its last words reach a model only framed (§9).
+  defp put_heal_tool(payload, %{"name" => name}), do: Map.put(payload, :tool, name)
+  defp put_heal_tool(payload, nil), do: payload
+
+  defp put_heal_decision(payload, %{decision: decision} = heal) when is_binary(decision) do
+    payload
+    |> Map.put(:decision, decision)
+    |> put_heal_note(heal)
+    |> put_heal_proposal(decision, heal.change)
+    |> put_heal_rerun(Map.get(heal, :rerun_outcome))
+  end
+
+  defp put_heal_decision(payload, _undiagnosed), do: payload
+
+  defp put_heal_note(payload, %{has_note: true} = heal),
+    do: Map.merge(payload, %{has_note: true, note_run_id: heal.last_run_id})
+
+  defp put_heal_note(payload, _heal), do: Map.put(payload, :has_note, false)
+
+  defp put_heal_proposal(payload, "propose", change) when is_map(change),
+    do: Map.put(payload, :proposal, Map.new(change, fn {field, %{"to" => to}} -> {field, to} end))
+
+  defp put_heal_proposal(payload, _decision, _change), do: payload
+
+  # What came of a rerun Fermix asked for: `started`, `running` (a run already
+  # held the job), `refused` (none started, nor will) or `unanswered` (asked,
+  # and no clear answer: a run may still come).
+  defp put_heal_rerun(payload, nil), do: payload
+  defp put_heal_rerun(payload, outcome), do: Map.put(payload, :rerun, outcome)
+
+  @doc """
   The words a job echo (`list_jobs` first) shows for a job a watcher starts,
   in place of a schedule it does not have, or `nil` for any other job: "runs
   on cues from watcher <name>" (M60 build decision 8), or "runs on cues" for
@@ -567,8 +668,27 @@ defmodule FermixCore.Tools.JobRegistrySupport do
       output_ref: run.output_ref,
       token_usage: run.token_usage,
       latency: run.latency,
-      updated_at: timestamp(run.updated_at)
+      updated_at: timestamp(run.updated_at),
+      tools: tally_payload(Map.get(run, :tool_tally))
     })
+  end
+
+  # The run's tool tally (M106 §6) as names and numbers: each tool's calls that
+  # succeeded, failed or never finished, and its plugin. Never the last
+  # error's words, which someone else could have written; nil for a run
+  # settled before tallies were kept.
+  defp tally_payload(nil), do: nil
+
+  defp tally_payload(tally) when is_list(tally) do
+    for entry <- tally do
+      %{
+        name: entry["name"],
+        plugin: entry["plugin"],
+        succeeded: entry["ok"],
+        failed: entry["error"],
+        unfinished: entry["unfinished"]
+      }
+    end
   end
 
   def source_payload(source) do

@@ -3,7 +3,6 @@ defmodule Fermix.CLI.DaemonTest do
 
   alias Fermix.CLI.Daemon
   alias Fermix.CLI.Daemon.Client
-  alias Fermix.CLI.Daemon.Lock
   alias FermixCore.Auth.Store
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Capabilities.MCP.RuntimeStatus
@@ -779,53 +778,6 @@ defmodule Fermix.CLI.DaemonTest do
     # The original daemon must still answer; the second one didn't unlink
     # the socket out from under it.
     assert {:ok, %{"engine" => _engine}} = hello(socket_path)
-  end
-
-  # A daemon too busy to accept turns a connection away as a stale socket
-  # does (on macOS its full backlog refuses the connect at once), so a second
-  # start decides from the lock only a live daemon holds, never from the
-  # connect: the busy daemon keeps its socket.
-  test "a second daemon leaves the socket of one that holds the lock but does not accept" do
-    socket_dir = mkdir!()
-    socket_path = Path.join(socket_dir, "busy.sock")
-    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(socket_dir) end)
-    File.touch!(socket_path)
-    {:ok, busy} = Lock.acquire(socket_path)
-    on_exit(fn -> Lock.release(busy) end)
-    Process.flag(:trap_exit, true)
-
-    assert {:error, {:another_daemon_running, ^socket_path}} =
-             Daemon.start_link(
-               name: unique_name(:busy_second_daemon),
-               socket_path: socket_path,
-               task_supervisor: __MODULE__.TaskSup
-             )
-
-    assert File.exists?(socket_path)
-    assert Lock.held(socket_path) == {:ok, true}
-  end
-
-  test "a daemon holds its lock while it runs and lets go of it when it stops" do
-    socket_dir = mkdir!()
-    socket_path = Path.join(socket_dir, "held.sock")
-    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(socket_dir) end)
-
-    {:ok, daemon} =
-      Daemon.start_link(
-        name: unique_name(:lock_daemon),
-        socket_path: socket_path,
-        task_supervisor: __MODULE__.TaskSup,
-        management_opts: management_opts()
-      )
-
-    assert Lock.held(socket_path) == {:ok, true}
-    assert {:ok, %{"engine" => _engine}} = hello(socket_path)
-
-    :ok = GenServer.stop(daemon, :normal, @reply_ms)
-
-    refute File.exists?(socket_path)
-    assert Lock.held(socket_path) == {:ok, false}
-    assert Client.request_v1("hello", %{}, socket_path: socket_path) == {:error, :not_running}
   end
 
   # While the daemon is at one connection, the ones behind it wait in the

@@ -1,82 +1,90 @@
 defmodule Fermix.CLI.ComputerCommandTest do
-  # M97 §3.1: `fermix computer join`, with no engine tree, against a stopped
-  # Fermix. The code comes on stdin, never in argv: here a StringIO stands
-  # for stdin, with the piped or the terminal stub deciding which world it
-  # is. The stub keychain is one table for the VM, so each home names a
-  # profile of its own. Not async: it reads the verb's refusals and the
-  # masked prompt from stderr, where another async test's output would land
-  # too.
+  # M97 §3.1, M102 J2 (D4): `fermix computer join` hands the code to the
+  # running Fermix's `computer.join.start`, the one join path the apps take.
+  # The code comes on stdin, never in argv: here a StringIO stands for stdin,
+  # with the piped or the terminal stub deciding which world it is. Not
+  # async: it reads the verb's refusals and the masked prompt from stderr,
+  # where another async test's output would land too, and its running Fermix
+  # is a socket under a FERMIX_HOME of its own.
   use ExUnit.Case, async: false
 
   import ExUnit.CaptureIO
 
   alias Fermix.CLI.ComputerCommand
-  alias FermixCore.Home.ComputerKey
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.EnrollmentCode
   alias FermixCore.Home.Join
   alias FermixCore.Home.Role
+  alias FermixCore.Management.ComputerLink
+  alias FermixTestSupport.FakeDaemonSocket
   alias FermixTestSupport.PipedTerminal
   alias FermixTestSupport.SafeRm
   alias FermixTestSupport.TtyTerminal
 
   @now ~U[2031-05-04 10:00:00Z]
-
-  # A machine with no keyring client: the store says so, and takes nothing.
-  defmodule NoKeyring do
-    @moduledoc false
-    @behaviour FermixCore.Setup.SecretWriter
-
-    @impl true
-    def available?(_opts \\ []), do: false
-
-    @impl true
-    def probe(opts \\ []) do
-      %{
-        store: Keyword.fetch!(opts, :store),
-        state: :unavailable,
-        sentence: "this machine has no keyring client"
-      }
-    end
-
-    @impl true
-    def put(_key, _value, _opts \\ []), do: flunk("a store that is not there is written to")
-
-    @impl true
-    def get(_key, _opts \\ []), do: flunk("a store that is not there is read")
-
-    @impl true
-    def delete(_key, _opts \\ []), do: flunk("a store that is not there is deleted from")
-
-    @impl true
-    def command_source(_key, _opts \\ []), do: %{source: :command, command: "", args: []}
-  end
+  @joining "This computer is joining your Fermix. Once Fermix restarts here, fermix home " <>
+             "status shows six digits: type them in Always On on a computer already in your " <>
+             "Fermix.\n"
 
   setup do
     home = SafeRm.make_tmp_dir!("computer_command")
     on_exit(fn -> SafeRm.rm_rf!(home) end)
-    profile = "cc-#{System.unique_integer([:positive])}"
-    File.write!(Path.join(home, "config.toml"), ~s([fermix_core]\nprofile = "#{profile}"\n))
+    profile!(home)
     %{home: home}
   end
 
-  test "joins a stopped Fermix with the code piped in: the key, the join and the device role",
-       ctx do
+  # M102 J2: a computer its server removed while its Fermix was stopped hears
+  # of it only once that Fermix runs and its relay dials, which marks the
+  # link revoked. The terminal then joins as the apps do, through the running
+  # Fermix, over its real control socket.
+  test "joins through the running Fermix, which lets go of a link its server revoked" do
+    home = FakeDaemonSocket.fermix_home!()
+    profile!(home)
+    test = self()
+    :ok = Join.start(home, code(), join_opts(test))
+    :ok = Join.finish(home, approved(), join_opts(test))
+    revoked!(home)
+    assert_received :restarted
+    assert_received :restarted
+
+    daemon =
+      FakeDaemonSocket.serve_v1(home, 2, fn
+        "hello", _params -> {:ok, %{"engine" => %{"distribution_identity" => "standalone"}}}
+        "computer.join.start", %{"code" => code} -> engine_join(home, code, join_opts(test))
+      end)
+
+    {_stdin, deps} = piped(code())
+
+    output =
+      capture_io(fn -> assert ComputerCommand.run(["join"], [home: home] ++ deps) == 0 end)
+
+    Task.await(daemon, 10_000)
+    assert output == @joining
+    assert_received {:fake_daemon_v1, "hello", %{}}
+    assert_received {:fake_daemon_v1, "computer.join.start", %{"code" => "fxenroll1." <> _rest}}
+    assert_received :restarted
+    refute File.exists?(DesktopLink.path(home))
+    assert {:ok, %{"phase" => "dialing"}} = Join.read(home)
+    assert {:ok, %{role: :device}} = Role.configured(home)
+  end
+
+  test "joins with the code piped in, and says where its digits show", ctx do
     {stdin, deps} = piped(code())
+    client = engine(%{"joining" => true})
 
     output =
       capture_io(fn ->
-        assert ComputerCommand.run(["join"], [home: ctx.home] ++ deps ++ stopped()) == 0
+        assert ComputerCommand.run(["join"], [home: ctx.home, client: client] ++ deps) == 0
       end)
 
-    assert output =~ "This computer joins your Fermix on studio-mac when Fermix starts here."
-    # The digits are this computer's to show and the owner's to type (M97 §7.5).
-    assert output =~ "It then shows six digits: type them on studio-mac to add it."
+    # The digits show on this computer, and the owner types them where the
+    # home asks, never on the server, which has no screen (M102 N9, D7).
+    assert output == @joining
+    refute output =~ "studio-mac"
     # The one line it read was the code, and all of stdin it took.
     assert {"", _prompt} = StringIO.contents(stdin)
-    assert Join.present?(ctx.home)
-    assert {:ok, _keypair} = ComputerKey.read(ctx.home, store: :keyring)
-    assert {:ok, %{role: :device}} = Role.configured(ctx.home)
+    assert_received {:sent, "computer.join.start", %{"code" => "fxenroll1." <> _rest}, opts}
+    assert opts[:socket_path] == Path.join(ctx.home, "daemon.sock")
   end
 
   # On a terminal the code is asked for with echo off, and the prompt, on
@@ -84,29 +92,83 @@ defmodule Fermix.CLI.ComputerCommandTest do
   test "on a terminal it asks for the code without echo and never shows it", ctx do
     the_code = code()
     {:ok, stdin} = StringIO.open(the_code <> "\n")
-    deps = [home: ctx.home, terminal: TtyTerminal, device: stdin] ++ stopped()
+    client = engine(%{"joining" => true})
+    deps = [home: ctx.home, client: client, terminal: TtyTerminal, device: stdin]
 
     prompt =
       capture_io(:stderr, fn ->
         capture_io(fn -> assert ComputerCommand.run(["join"], deps) == 0 end)
       end)
 
-    assert prompt ==
-             "Code from Add a computer: (#{String.length(the_code)} characters)\n"
-
+    assert prompt == "Code from Add a computer: (#{String.length(the_code)} characters)\n"
     refute prompt =~ the_code
     assert_received {:secret_input_echo, false}
     assert_received {:secret_input_echo, true}
-    assert Join.present?(ctx.home)
+    assert_received {:sent, "computer.join.start", %{"code" => ^the_code}, _opts}
+  end
+
+  # The apps join through the running Fermix, and so does the terminal: with
+  # Fermix stopped there is nothing to join through, so no code is read.
+  test "with Fermix stopped it refuses before it reads a code", ctx do
+    {stdin, deps} = piped(code())
+    client = fn "hello", %{}, _opts -> {:error, :not_running} end
+
+    error =
+      capture_io(:stderr, fn ->
+        assert ComputerCommand.run(["join"], [home: ctx.home, client: client] ++ deps) == 1
+      end)
+
+    assert error ==
+             "fermix computer join: Fermix is not running here. Start it, then run this " <>
+               "again.\n"
+
+    assert {"fxenroll1." <> _rest, ""} = StringIO.contents(stdin)
+    refute Join.present?(ctx.home)
+  end
+
+  # A connect that timed out cannot tell whether Fermix runs here (a starved
+  # machine's daemon may be there), so the verb says so and reads no code.
+  test "refuses when it cannot tell whether Fermix runs here, and reads no code", ctx do
+    {stdin, deps} = piped(code())
+    client = fn "hello", %{}, _opts -> {:error, :timeout} end
+
+    error =
+      capture_io(:stderr, fn ->
+        assert ComputerCommand.run(["join"], [home: ctx.home, client: client] ++ deps) == 1
+      end)
+
+    assert error ==
+             "fermix computer join: Fermix could not tell whether it is running: its control " <>
+               "socket did not answer in time.\n"
+
+    assert {"fxenroll1." <> _rest, ""} = StringIO.contents(stdin)
+  end
+
+  # The engine's refusal is its own sentence: a code that is not a
+  # computer's, a home of its own, a link its relay has not taken to the
+  # server yet (`Home.Join.error_sentence/1`).
+  test "the running Fermix's refusal is said in its own words", ctx do
+    said = Join.error_sentence(:server_not_reached)
+    details = %{"capability" => "computer", "sentence" => said}
+    client = engine({:error, {:management_error, "unavailable", "unavailable", details}})
+    {_stdin, deps} = piped(code())
+
+    error =
+      capture_io(:stderr, fn ->
+        assert ComputerCommand.run(["join"], [home: ctx.home, client: client] ++ deps) == 1
+      end)
+
+    assert error == "fermix computer join: " <> said <> "\n"
   end
 
   # A code in argv is readable by every process here while the verb runs.
   test "a code on the command line is a usage error naming the stdin form", ctx do
     {_stdin, deps} = piped(code())
+    client = fn method, _params, _opts -> flunk("#{method} was sent") end
 
     error =
       capture_io(:stderr, fn ->
-        assert ComputerCommand.run(["join", code()], [home: ctx.home] ++ deps ++ stopped()) ==
+        assert ComputerCommand.run(["join", code()], [home: ctx.home, client: client] ++ deps) ==
                  2
       end)
 
@@ -115,116 +177,84 @@ defmodule Fermix.CLI.ComputerCommandTest do
                "programs here can read it. Run fermix computer join and paste the code when " <>
                "it asks, or pipe it in."
 
-    assert error =~ "fermix computer join"
     refute error =~ "CODE"
-    refute Join.present?(ctx.home)
-    assert {:error, {:missing, :keyring}} = ComputerKey.read(ctx.home, store: :keyring)
   end
 
-  test "nothing on stdin is refused before any key is made", ctx do
+  test "nothing on stdin is refused before the code is sent", ctx do
     {_stdin, deps} = piped(nil)
+    client = engine(%{"joining" => true})
 
     error =
       capture_io(:stderr, fn ->
-        assert ComputerCommand.run(["join"], [home: ctx.home] ++ deps ++ stopped()) == 1
+        assert ComputerCommand.run(["join"], [home: ctx.home, client: client] ++ deps) == 1
       end)
 
     assert error ==
              "fermix computer join: No code was read. Paste the code from Add a computer " <>
                "when this asks for it, or pipe it in.\n"
 
-    refute Join.present?(ctx.home)
-    assert {:error, {:missing, :keyring}} = ComputerKey.read(ctx.home, store: :keyring)
-    assert {:ok, %{role: :primary}} = Role.configured(ctx.home)
-  end
-
-  # A probe whose connect timed out cannot tell whether Fermix runs here (a
-  # starved machine's daemon may be there), so the join refuses and says so.
-  test "refuses when it cannot tell whether Fermix runs here, and asks no code", ctx do
-    {stdin, deps} = piped(code())
-    unknown = [home: ctx.home, hello: fn -> {:error, :timeout} end, now: @now] ++ deps
-
-    error =
-      capture_io(:stderr, fn -> assert ComputerCommand.run(["join"], unknown) == 1 end)
-
-    assert error =~ "fermix computer join: Fermix could not tell whether it is running here"
-    assert error =~ "Make sure it is stopped, then run this again."
-    assert {"fxenroll1." <> _rest, ""} = StringIO.contents(stdin)
-    refute Join.present?(ctx.home)
-  end
-
-  test "refuses while Fermix runs here, and a code that is not a computer's, by name", ctx do
-    {stdin, deps} = piped(code())
-    running = [home: ctx.home, hello: fn -> {:ok, %{}} end, now: @now] ++ deps
-
-    error =
-      capture_io(:stderr, fn -> assert ComputerCommand.run(["join"], running) == 1 end)
-
-    assert error =~ "fermix computer join: Fermix is running here."
-    # Fermix runs here, so the code was never asked for.
-    assert {"fxenroll1." <> _rest, ""} = StringIO.contents(stdin)
-
-    {_stdin, deps} = piped(code(purpose: :candidate))
-
-    error =
-      capture_io(:stderr, fn ->
-        assert ComputerCommand.run(["join"], [home: ctx.home] ++ deps ++ stopped()) == 1
-      end)
-
-    assert error =~ "sets up a server of your own"
-    refute Join.present?(ctx.home)
-    assert {:ok, %{role: :primary}} = Role.configured(ctx.home)
-  end
-
-  # No engine tree runs, so no command host owns a keychain helper: a store
-  # that cannot be used is refused in its own sentence, and nothing is left.
-  test "a secret store it cannot reach is refused by name, leaving nothing behind", ctx do
-    {_stdin, stdin_deps} = piped(code())
-    deps = [home: ctx.home, key_opts: [impl: NoKeyring]] ++ stdin_deps ++ stopped()
-
-    error =
-      capture_io(:stderr, fn -> assert ComputerCommand.run(["join"], deps) == 1 end)
-
-    assert error ==
-             "fermix computer join: Fermix cannot use this computer's key: this machine " <>
-               "has no keyring client.\n"
-
-    refute error =~ "command host"
-    refute Join.present?(ctx.home)
-    assert {:ok, %{role: :primary}} = Role.configured(ctx.home)
-  end
-
-  # PROTOCOL.md's `mobile.devices.revoke`: a computer its server removed
-  # joins again from a terminal, with Fermix stopped, as it joined at first.
-  # The relay kept the server's word in the link (`revoked`).
-  test "a computer its server removed joins again with a new code", ctx do
-    :ok = Join.start(ctx.home, code(), now: @now, restart: fn -> :ok end)
-    :ok = Join.finish(ctx.home, approved(), restart: fn -> :ok end)
-    link = DesktopLink.path(ctx.home)
-    revoked = link |> File.read!() |> Jason.decode!() |> Map.put("revoked", true)
-    File.write!(link, Jason.encode!(revoked))
-    {stdin, deps} = piped(code())
-
-    output =
-      capture_io(fn ->
-        assert ComputerCommand.run(["join"], [home: ctx.home] ++ deps ++ stopped()) == 0
-      end)
-
-    assert output =~ "This computer joins your Fermix on studio-mac when Fermix starts here."
-    assert {"", _prompt} = StringIO.contents(stdin)
-    refute File.exists?(link)
-    assert Join.present?(ctx.home)
-    assert {:ok, %{role: :device}} = Role.configured(ctx.home)
+    refute_received {:sent, "computer.join.start", _params, _opts}
   end
 
   test "anything else is a usage error" do
     capture_io(:stderr, fn ->
-      assert ComputerCommand.run([], stopped()) == 2
-      assert ComputerCommand.run(["leave", "x"], stopped()) == 2
+      assert ComputerCommand.run([]) == 2
+      assert ComputerCommand.run(["leave", "x"]) == 2
     end)
   end
 
-  defp stopped, do: [hello: fn -> {:error, :not_running} end, now: @now]
+  # A running Fermix: it answers `hello`, and `computer.join.start` with
+  # `answer` (a result, or an error as the client gives it back).
+  defp engine(answer) do
+    test = self()
+
+    fn
+      "hello", %{}, _opts ->
+        {:ok, %{"engine" => %{"distribution_identity" => "standalone"}}}
+
+      "computer.join.start", params, opts ->
+        send(test, {:sent, "computer.join.start", params, opts})
+        if is_map(answer), do: {:ok, answer}, else: answer
+    end
+  end
+
+  # The engine's own answer to `computer.join.start`, as its router puts it
+  # on the wire.
+  defp engine_join(home, code, opts) do
+    case ComputerLink.join_start(code, [home: home] ++ opts) do
+      {:ok, result} ->
+        {:ok, result}
+
+      {:error, {:unavailable, capability, sentence}} ->
+        {:error, "unavailable", "unavailable",
+         %{"capability" => capability, "sentence" => sentence}}
+
+      {:error, {:invalid_params, field, sentence}} ->
+        {:error, "invalid_params", "invalid params", %{"field" => field, "sentence" => sentence}}
+    end
+  end
+
+  defp join_opts(test) do
+    [
+      now: @now,
+      restart: fn -> send(test, :restarted) && :ok end,
+      release: fn _which -> :ok end,
+      link_status: fn -> %{primary: nil, desktops: [], enrollment: nil} end
+    ]
+  end
+
+  defp profile!(home) do
+    profile = "cc-#{System.unique_integer([:positive])}"
+    File.write!(Path.join(home, "config.toml"), ~s([fermix_core]\nprofile = "#{profile}"\n))
+  end
+
+  # The link as the relay leaves it once the server ended a session as no
+  # longer knowing this computer (`DesktopLink`'s `revoked`).
+  defp revoked!(home) do
+    link = DesktopLink.path(home)
+    revoked = link |> File.read!() |> Jason.decode!() |> Map.put("revoked", true)
+    File.write!(link, Jason.encode!(revoked))
+  end
 
   # Stdin as a pipe or a file: one line holding `code`, or nothing at all.
   defp piped(code) do

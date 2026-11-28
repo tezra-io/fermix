@@ -22,6 +22,7 @@ defmodule Fermix.CLI.Setup do
     openrouter_api_key: :string,
     mistral_api_key: :string,
     venice_api_key: :string,
+    vercel_api_key: :string,
     ollama_base_url: :string,
     openai_base_url: :string,
     anthropic_base_url: :string,

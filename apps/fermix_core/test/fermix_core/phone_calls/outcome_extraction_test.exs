@@ -1,0 +1,604 @@
+defmodule FermixCore.PhoneCalls.OutcomeExtractionTest do
+  # `Outcome.extract/4` with the provider injected into the route's opts, so
+  # no real adapter is ever resolved and nothing reaches the network. Every
+  # name, number and place is invented; numbers are in the 555-01XX range.
+  use ExUnit.Case, async: true
+
+  @moduletag :capture_log
+
+  alias FermixCore.PhoneCalls.Brief
+  alias FermixCore.PhoneCalls.Outcome
+  alias FermixCore.PhoneCalls.Outcome.Claim
+  alias FermixCore.PhoneCalls.Outcome.Extraction
+
+  @now ~U[2026-11-18 16:00:00Z]
+  @session "phone_call_pc_0a1b2c3d4e5f"
+  @route %{
+    provider: :openai,
+    model: "gpt-test",
+    auth_mode: :api_key,
+    base_url: "https://api.openai.com/v1"
+  }
+
+  # A provider that answers as the test says and tells the test what it was
+  # sent. `{:queue, agent}` answers each call with the agent's next answer.
+  defmodule ExtractionAdapter do
+    def chat(messages, tools, opts) do
+      send(Keyword.fetch!(opts, :test_pid), {:extraction_call, messages, tools, opts})
+      opts |> Keyword.fetch!(:answer) |> next() |> give()
+    end
+
+    defp next({:queue, agent}),
+      do: Agent.get_and_update(agent, fn [next | rest] -> {next, rest} end)
+
+    defp next(answer), do: answer
+
+    defp give(:hang), do: receive(do: (:never_sent -> {:error, :unreachable}))
+    defp give({:raise, message}), do: raise(message)
+    defp give(answer), do: answer
+  end
+
+  defp brief do
+    {:ok, brief} =
+      Brief.new(
+        %{
+          "destination" => "+13125550123",
+          "destination_kind" => "business",
+          "number_source" => "Listed on the restaurant's own website.",
+          "contact_name" => "Marrow & Sage",
+          "timezone" => "America/Chicago",
+          "goal" => "Reserve a table for four on Saturday, December 5, 2026 at 7:30 PM.",
+          "completion_criteria" => ["The restaurant confirms a table for four."],
+          "times" => [%{"label" => "Requested table", "at" => "2026-12-05T19:30"}]
+        },
+        caller_number: "+14155550142",
+        now: @now
+      )
+
+    brief
+  end
+
+  defp said(speaker, text, start_ms),
+    do: %{speaker: speaker, text: text, start_ms: start_ms, end_ms: start_ms + 2_000}
+
+  defp call do
+    [
+      said(:assistant, "Hi, I'm an AI assistant calling to book a table for four.", 0),
+      said(:remote, "Sure, four on Saturday December 5th at 7:30 works.", 2_500),
+      said(:assistant, "So four on December 5 at 7:30 PM. Is it booked?", 5_000),
+      said(:remote, "Yes, it's booked.", 7_500)
+    ]
+  end
+
+  defp claim_json do
+    Jason.encode!(%{
+      "outcome" => "confirmed",
+      "commitment" => "completed",
+      "confirmation_quote" => "Yes, it's booked",
+      "criteria" => [%{"index" => 1, "quote" => "four on Saturday December 5th"}],
+      "facts" => [
+        %{"field" => "date", "value" => "2026-12-05", "quote" => "Saturday December 5th"},
+        %{"field" => "local_time", "value" => "19:30", "quote" => "at 7:30"}
+      ]
+    })
+  end
+
+  defp turn(content),
+    do: {:ok, %{content: content, tool_calls: [], provider_state: %{}, model: "gpt-test"}}
+
+  defp opts(answer, extra \\ []) do
+    Keyword.merge(
+      [
+        started_at: @now,
+        session_id: @session,
+        routes: [{@route, [adapter: ExtractionAdapter, test_pid: self(), answer: answer]}]
+      ],
+      extra
+    )
+  end
+
+  @answered %{answered: true, end_reason: :hangup}
+
+  @overloaded {:error,
+               {:provider_error,
+                %{kind: :provider_unavailable, message: "servers are currently overloaded"}}}
+  # The retry's pause, injected: no test waits on a clock.
+  @no_wait [retry_delay_fn: &__MODULE__.no_pause/1]
+
+  def no_pause(_ms), do: :ok
+
+  defp queue(answers),
+    do: {:queue, start_supervised!({Agent, fn -> answers end}, id: make_ref())}
+
+  # The `at` of every route asked so far, in order.
+  defp asked_routes(asked \\ []) do
+    receive do
+      {:extraction_call, _messages, _tools, call_opts} ->
+        asked_routes(asked ++ [Keyword.get(call_opts, :at, 1)])
+    after
+      0 -> asked
+    end
+  end
+
+  describe "decided in code, with no model call" do
+    # How the call ended is the row's own failure words; the outcome says
+    # only that nobody answered, as a code, and no sentence.
+    test "a call nobody answered, however it ended" do
+      for ended <- [:no_answer, :failed, :deadline, :cancelled, :connection_lost, :hangup] do
+        assert {:ok, %Outcome{outcome: :unknown, reason: :not_answered} = outcome} =
+                 Outcome.extract(
+                   brief(),
+                   [],
+                   %{answered: false, end_reason: ended},
+                   opts(turn(claim_json()))
+                 )
+
+        assert %{
+                 outcome: "unknown",
+                 outcome_facts: %{"reason" => "not_answered"},
+                 uncertainty: nil
+               } = Outcome.to_report(outcome)
+      end
+
+      refute_received {:extraction_call, _, _, _}
+    end
+
+    test "an end reason the worker never produces is refused" do
+      for ended <- [:busy, :rejected] do
+        assert_raise FunctionClauseError, fn ->
+          Outcome.extract(brief(), [], %{answered: false, end_reason: ended}, opts(nil))
+        end
+      end
+    end
+
+    test "voicemail" do
+      voicemail = [said(:remote, "Leave a message after the tone.", 0)]
+
+      assert {:ok, %Outcome{outcome: :unknown, reason: :voicemail}} =
+               Outcome.extract(
+                 brief(),
+                 voicemail,
+                 %{answered: true, end_reason: :voicemail},
+                 opts(turn(claim_json()))
+               )
+
+      refute_received {:extraction_call, _, _, _}
+    end
+
+    test "an answered call in which the recipient said nothing" do
+      only_us = [said(:assistant, "Hello? Is anyone there?", 0)]
+
+      assert {:ok, %Outcome{outcome: :unknown, reason: :no_recipient_speech}} =
+               Outcome.extract(brief(), only_us, @answered, opts(turn(claim_json())))
+
+      refute_received {:extraction_call, _, _, _}
+    end
+  end
+
+  describe "one extraction" do
+    test "a well-formed answer: one tool-free call on the call's session, then verified" do
+      assert {:ok, %Outcome{outcome: :confirmed, extraction: :ok} = outcome} =
+               Outcome.extract(brief(), call(), @answered, opts(turn(claim_json())))
+
+      assert outcome.facts.date == "2026-12-05"
+
+      assert_received {:extraction_call, [system, user], [], call_opts}
+      refute_received {:extraction_call, _, _, _}
+
+      assert system.role == "system"
+      assert system.content == Extraction.prompt()
+      assert system.content =~ "Only lines marked recipient are evidence"
+
+      assert user.role == "user"
+      assert user.content =~ "Objective: \"Reserve a table for four"
+      assert user.content =~ ~s(<untrusted_tool_result source="phone_call_transcript">)
+
+      assert user.content =~
+               "[2.5s] recipient: Sure, four on Saturday December 5th at 7:30 works."
+
+      refute user.content =~ "5550123"
+
+      assert Keyword.fetch!(call_opts, :session_id) == @session
+      assert Keyword.fetch!(call_opts, :agent) == "phone_call_outcome"
+      assert Keyword.fetch!(call_opts, :temperature) == 0
+    end
+
+    test "a yes to the assistant's read-back, from the answer to the outcome" do
+      call = [
+        said(:remote, "Marrow and Sage, how can I help?", 0),
+        said(
+          :assistant,
+          "A table for four on Saturday, December 5 at 7:30 PM. Is that booked?",
+          2_500
+        ),
+        said(:remote, "Yes.", 5_000)
+      ]
+
+      claim =
+        Jason.encode!(%{
+          "outcome" => "confirmed",
+          "commitment" => "completed",
+          "confirmation_quote" => "Yes",
+          "readback_quote" => "A table for four on Saturday, December 5 at 7:30 PM",
+          "criteria" => [%{"index" => 1, "quote" => "A table for four"}],
+          "facts" => [
+            %{"field" => "date", "value" => "2026-12-05", "quote" => "Saturday, December 5"},
+            %{"field" => "local_time", "value" => "19:30", "quote" => "at 7:30 PM"}
+          ]
+        })
+
+      assert {:ok, %Outcome{outcome: :confirmed, confirmation: :readback}} =
+               Outcome.extract(brief(), call, @answered, opts(turn(claim)))
+    end
+
+    test "an answer inside one code fence is read the same" do
+      fenced = "```json\n" <> claim_json() <> "\n```"
+
+      assert {:ok, %Outcome{outcome: :confirmed}} =
+               Outcome.extract(brief(), call(), @answered, opts(turn(fenced)))
+    end
+
+    test "the verdict is verify's: a claimed booking with no recipient words behind it is no booking" do
+      claim =
+        claim_json()
+        |> Jason.decode!()
+        |> Map.put("confirmation_quote", "Is it booked?")
+        |> Jason.encode!()
+
+      assert {:ok,
+              %Outcome{outcome: :finished, reason: :assistant_only_confirmation, extraction: :ok}} =
+               Outcome.extract(brief(), call(), @answered, opts(turn(claim)))
+    end
+
+    # An error the chain would retry on its route and then fail over from: the
+    # first route is asked again, once, and the next is never asked.
+    test "only the first route is asked, at most twice, with no failover" do
+      routes = [
+        {@route, [adapter: ExtractionAdapter, test_pid: self(), answer: @overloaded, at: 1]},
+        {%{@route | model: "gpt-second"},
+         [adapter: ExtractionAdapter, test_pid: self(), answer: turn(claim_json()), at: 2]}
+      ]
+
+      assert {:ok, %Outcome{outcome: :unknown, reason: :extraction_provider_error}} =
+               Outcome.extract(
+                 brief(),
+                 call(),
+                 @answered,
+                 opts(nil, [routes: routes] ++ @no_wait)
+               )
+
+      assert [1, 1] == asked_routes()
+    end
+
+    test "a transient failure, then an answer: the outcome is read" do
+      opts = opts(queue([@overloaded, turn(claim_json())]), @no_wait)
+
+      assert {:ok, %Outcome{outcome: :confirmed, extraction: :ok}} =
+               Outcome.extract(brief(), call(), @answered, opts)
+
+      assert [1, 1] == asked_routes()
+    end
+
+    test "two transient failures report the provider's error" do
+      opts = opts(queue([@overloaded, @overloaded, turn(claim_json())]), @no_wait)
+
+      assert {:ok, %Outcome{outcome: :unknown, reason: :extraction_provider_error}} =
+               Outcome.extract(brief(), call(), @answered, opts)
+
+      assert [1, 1] == asked_routes()
+    end
+
+    test "a refusal, a malformed answer and an error that is not transient are asked once" do
+      refusal =
+        {:ok,
+         %{content: "", tool_calls: [], provider_state: %{stop_reason: "refusal"}, model: "m"}}
+
+      not_transient = {:error, {:provider_error, %{kind: :auth, message: "bad key"}}}
+
+      for {first, reason} <- [
+            {refusal, :extraction_refused},
+            {turn("not json"), :extraction_malformed},
+            {not_transient, :extraction_provider_error}
+          ] do
+        opts = opts(queue([first, turn(claim_json())]), @no_wait)
+
+        assert {:ok, %Outcome{outcome: :unknown, reason: ^reason}} =
+                 Outcome.extract(brief(), call(), @answered, opts)
+
+        assert [1] == asked_routes()
+      end
+    end
+
+    # One bound over the whole reading: a second attempt that never answers
+    # ends with the bound, not with a bound of its own.
+    test "the one bound covers both attempts" do
+      opts = opts(queue([@overloaded, :hang]), [timeout_ms: 100] ++ @no_wait)
+
+      assert {:ok, %Outcome{reason: :extraction_timeout, extraction: {:failed, :timeout, _}}} =
+               Outcome.extract(brief(), call(), @answered, opts)
+
+      assert [1, 1] == asked_routes()
+    end
+
+    # Why the call ended is the row's failure words, said once, by the view.
+    test "an abrupt end adds nothing to a verified result" do
+      assert {:ok, %Outcome{outcome: :confirmed, uncertainty: nil, notes: []}} =
+               Outcome.extract(
+                 brief(),
+                 call(),
+                 %{answered: true, end_reason: :connection_lost},
+                 opts(turn(claim_json()))
+               )
+    end
+
+    test "a transcript past its bound is cut from the front, and the outcome says so" do
+      early =
+        for n <- 1..900,
+            do:
+              said(
+                Enum.at([:remote, :assistant], rem(n, 2)),
+                "filler #{n} " <> String.duplicate("z", 50),
+                n
+              )
+
+      assert {:ok, %Outcome{notes: [:transcript_cut]} = outcome} =
+               Outcome.extract(brief(), early ++ call(), @answered, opts(turn(claim_json())))
+
+      assert Outcome.to_report(outcome).outcome_facts["notes"] == ["transcript_cut"]
+      assert_received {:extraction_call, [_system, user], [], _opts}
+      assert user.content =~ "(earlier speech cut for length)"
+      assert user.content =~ "Yes, it's booked."
+      refute user.content =~ "filler 1 "
+    end
+  end
+
+  # The reading runs at the extraction's own moderate effort, whatever the
+  # owner's main route carries, clamped for the model it runs on.
+  describe "the reading's effort" do
+    defp route_opts(extra),
+      do: [adapter: ExtractionAdapter, test_pid: self(), answer: turn(claim_json())] ++ extra
+
+    test "is moderate over a route that carries a higher level, the pre-bound adapter kept" do
+      routes = [{@route, route_opts(reasoning_effort: :xhigh)}]
+
+      assert {:ok, %Outcome{outcome: :confirmed}} =
+               Outcome.extract(brief(), call(), @answered, opts(nil, routes: routes))
+
+      assert_received {:extraction_call, _messages, [], call_opts}
+      assert Keyword.fetch!(call_opts, :reasoning_effort) == :medium
+      refute Keyword.has_key?(call_opts, :adapter)
+    end
+
+    test "is the level OpenAI Codex's gpt-6-astra accepts for it" do
+      codex = %{
+        provider: :openai_codex,
+        model: "gpt-6-astra",
+        auth_mode: :oauth,
+        base_url: "https://chatgpt.com/backend-api/codex"
+      }
+
+      routes = [{codex, route_opts(reasoning_effort: :xhigh)}]
+
+      assert {:ok, _outcome} =
+               Outcome.extract(brief(), call(), @answered, opts(nil, routes: routes))
+
+      assert_received {:extraction_call, _messages, [], call_opts}
+      assert Keyword.fetch!(call_opts, :reasoning_effort) == :medium
+    end
+
+    test "is left off a provider with no effort levels" do
+      plain = %{
+        provider: :openrouter,
+        model: "vendor/plain-model",
+        auth_mode: :api_key,
+        base_url: "https://openrouter.ai/api/v1"
+      }
+
+      routes = [{plain, route_opts([])}]
+
+      assert {:ok, _outcome} =
+               Outcome.extract(brief(), call(), @answered, opts(nil, routes: routes))
+
+      assert_received {:extraction_call, _messages, [], call_opts}
+      refute Keyword.has_key?(call_opts, :reasoning_effort)
+    end
+  end
+
+  describe "a failed extraction is an unknown outcome with its class kept" do
+    test "malformed: prose instead of the object" do
+      assert {:ok,
+              %Outcome{
+                outcome: :unknown,
+                reason: :extraction_malformed,
+                extraction: {:failed, :malformed, _}
+              }} =
+               Outcome.extract(
+                 brief(),
+                 call(),
+                 @answered,
+                 opts(turn("The table is booked for Saturday."))
+               )
+    end
+
+    test "malformed: a key outside the object's shape" do
+      extra = claim_json() |> Jason.decode!() |> Map.put("approved", true) |> Jason.encode!()
+
+      assert {:ok, %Outcome{reason: :extraction_malformed}} =
+               Outcome.extract(brief(), call(), @answered, opts(turn(extra)))
+    end
+
+    test "malformed: an outcome word outside the set" do
+      word = claim_json() |> Jason.decode!() |> Map.put("outcome", "booked") |> Jason.encode!()
+
+      assert {:ok, %Outcome{reason: :extraction_malformed}} =
+               Outcome.extract(brief(), call(), @answered, opts(turn(word)))
+    end
+
+    test "a provider refusal" do
+      refusal =
+        {:ok,
+         %{content: "", tool_calls: [], provider_state: %{stop_reason: "refusal"}, model: "m"}}
+
+      assert {:ok,
+              %Outcome{
+                outcome: :unknown,
+                reason: :extraction_refused,
+                extraction: {:failed, :refused, _}
+              }} =
+               Outcome.extract(brief(), call(), @answered, opts(refusal))
+    end
+
+    test "no answer within the bound" do
+      assert {:ok,
+              %Outcome{
+                outcome: :unknown,
+                reason: :extraction_timeout,
+                extraction: {:failed, :timeout, _}
+              }} =
+               Outcome.extract(brief(), call(), @answered, opts(:hang, timeout_ms: 100))
+    end
+
+    test "a provider error and a crash" do
+      assert {:ok, %Outcome{reason: :extraction_provider_error}} =
+               Outcome.extract(brief(), call(), @answered, opts({:error, :overloaded}))
+
+      assert {:ok, %Outcome{reason: :extraction_crashed, extraction: {:failed, :crashed, _}}} =
+               Outcome.extract(brief(), call(), @answered, opts({:raise, "boom"}))
+    end
+
+    test "a failed reading carries its code, and no sentence" do
+      assert {:ok, outcome} = Outcome.extract(brief(), call(), @answered, opts(turn("not json")))
+
+      assert %{outcome: "unknown", outcome_facts: %{"reason" => "extraction_malformed"}} =
+               Outcome.to_report(outcome)
+
+      assert outcome.uncertainty == nil
+    end
+  end
+
+  # A call answered, with the recipient's words, read, establishing none of
+  # the other results and ended by a hang-up finished, and
+  # claims nothing was agreed. Only how it ended tells it from `unknown`.
+  describe "a call that finished" do
+    defp reader_unknown_json,
+      do:
+        Jason.encode!(%{
+          "outcome" => "unknown",
+          "commitment" => "none",
+          "note" => "They said to call back on Monday."
+        })
+
+    defp refused_booking_json,
+      do:
+        claim_json()
+        |> Jason.decode!()
+        |> Map.put("confirmation_quote", "Is it booked?")
+        |> Jason.encode!()
+
+    test "a reader's own unknown on a hang-up is finished, with no reason and its note kept" do
+      assert {:ok, outcome} =
+               Outcome.extract(brief(), call(), @answered, opts(turn(reader_unknown_json())))
+
+      assert %Outcome{outcome: :finished, reason: nil, extraction: :ok, excerpts: []} = outcome
+      assert outcome.uncertainty == "They said to call back on Monday."
+
+      assert %{outcome: "finished", outcome_facts: nil, evidence: []} =
+               Outcome.to_report(outcome)
+    end
+
+    # Everything but the word is what verification left: its reason, the
+    # excerpts it kept and the reading's note.
+    test "a refused booking on a hang-up is finished, keeping its reason and excerpts" do
+      {:ok, claim} = Claim.parse(refused_booking_json())
+      verified = Outcome.verify(brief(), call(), claim)
+
+      assert {:ok, outcome} =
+               Outcome.extract(brief(), call(), @answered, opts(turn(refused_booking_json())))
+
+      assert outcome == %{verified | outcome: :finished, extraction: :ok}
+      assert outcome.reason == :assistant_only_confirmation
+      assert [_ | _] = outcome.excerpts
+
+      assert %{outcome: "finished", outcome_facts: %{"reason" => "assistant_only_confirmation"}} =
+               Outcome.to_report(outcome)
+    end
+
+    test "the same readings on any other end stay unknown" do
+      for ended <- [:deadline, :cancelled, :connection_lost, :failed],
+          {json, reason} <- [
+            {reader_unknown_json(), nil},
+            {refused_booking_json(), :assistant_only_confirmation}
+          ] do
+        transport = %{answered: true, end_reason: ended}
+
+        assert {:ok, %Outcome{outcome: :unknown, reason: ^reason, extraction: :ok}} =
+                 Outcome.extract(brief(), call(), transport, opts(turn(json))),
+               inspect(ended)
+      end
+    end
+
+    test "a reading that failed stays unknown on a hang-up, whatever its class" do
+      refusal =
+        {:ok,
+         %{content: "", tool_calls: [], provider_state: %{stop_reason: "refusal"}, model: "m"}}
+
+      # Only the reading that never answers is given a short bound to run out.
+      for {answer, extra, reason} <- [
+            {turn("not json"), [], :extraction_malformed},
+            {refusal, [], :extraction_refused},
+            {{:error, :overloaded}, [], :extraction_provider_error},
+            {{:raise, "boom"}, [], :extraction_crashed},
+            {:hang, [timeout_ms: 100], :extraction_timeout}
+          ] do
+        assert {:ok, %Outcome{outcome: :unknown, reason: ^reason}} =
+                 Outcome.extract(brief(), call(), @answered, opts(answer, extra))
+      end
+    end
+
+    test "a call decided in code stays unknown on a hang-up" do
+      only_us = [said(:assistant, "Hello? Is anyone there?", 0)]
+
+      for {entries, transport, reason} <- [
+            {[], %{answered: false, end_reason: :hangup}, :not_answered},
+            {only_us, @answered, :no_recipient_speech}
+          ] do
+        assert {:ok, %Outcome{outcome: :unknown, reason: ^reason}} =
+                 Outcome.extract(brief(), entries, transport, opts(turn(reader_unknown_json())))
+      end
+
+      voicemail = %{answered: true, end_reason: :voicemail}
+
+      assert {:ok, %Outcome{outcome: :unknown, reason: :voicemail}} =
+               Outcome.extract(brief(), call(), voicemail, opts(turn(reader_unknown_json())))
+
+      refute_received {:extraction_call, _, _, _}
+    end
+  end
+
+  describe "a result the worker never read" do
+    test "is one coded report, in the same contract" do
+      for reason <- [:not_read, :extraction_timeout, :extraction_crashed] do
+        code = Atom.to_string(reason)
+
+        assert Outcome.unread_report(reason) == %{
+                 outcome: "unknown",
+                 outcome_facts: %{"reason" => code},
+                 evidence: [],
+                 uncertainty: nil
+               }
+      end
+
+      assert_raise FunctionClauseError, fn -> Outcome.unread_report(:awaiting_action) end
+    end
+  end
+
+  test "the session id and the start time are required, on every path" do
+    unanswered = %{answered: false, end_reason: :no_answer}
+
+    for key <- [:session_id, :started_at], transport <- [@answered, unanswered] do
+      assert_raise ArgumentError, fn ->
+        Outcome.extract(brief(), call(), transport, Keyword.delete(opts(turn(claim_json())), key))
+      end
+    end
+  end
+end

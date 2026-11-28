@@ -185,6 +185,28 @@ defmodule FermixCore.Auth.ChatGPT.LoginTest do
       assert {:ok, %{tokens: %{access_token: "AT-1"}}} = Store.read("chatgpt", ctx.auth_path)
     end
 
+    test "that another sign-in finished meanwhile under another client replaces nothing", ctx do
+      callback = fn query ->
+        meanwhile = %{
+          ready_entry()
+          | client_id: "oaiapp_Q",
+            tokens: %{access_token: "AT-Q", refresh_token: "RT-Q"}
+        }
+
+        :ok = Store.write("chatgpt", meanwhile, ctx.auth_path)
+        "code=C&state=#{query["state"]}"
+      end
+
+      {result, _log} = with_log(fn -> login(ctx, callback) end)
+
+      assert result == {:error, :client_mismatch}
+      assert_received {:authorize, %{"client_id" => "oaiapp_A1"}}
+      refute_received {:token_form, _form}
+
+      assert {:ok, %{client_id: "oaiapp_Q", tokens: %{access_token: "AT-Q"}}} =
+               Store.read("chatgpt", ctx.auth_path)
+    end
+
     test "while another process holds the profile refuses with the code unspent", ctx do
       FermixTestSupport.ProfileLockWait.shorten!(ctx)
       test = self()
@@ -207,6 +229,113 @@ defmodule FermixCore.Auth.ChatGPT.LoginTest do
       assert result == {:error, :profile_busy}
       refute_received {:token_form, _form}
       assert ChatGPT.failure_sentence(:profile_busy) == Store.busy_sentence()
+    end
+  end
+
+  # A sign-out forgets the registration, so the next sign-in registers a new
+  # client, and ChatGPT asks again which account and workspace to use.
+  describe "a sign-in after a sign-out" do
+    setup ctx do
+      :ok = Store.write("chatgpt", ready_entry(), ctx.auth_path)
+      :ok
+    end
+
+    test "registers afresh and takes a different account", ctx do
+      revoked = fn conn -> Plug.Conn.send_resp(conn, 200, "") end
+
+      assert {:ok, %{revoked: true}} =
+               ChatGPT.logout(fermix_path: ctx.auth_path, req_options: [plug: revoked])
+
+      callback = fn query -> "code=C&state=#{query["state"]}&client_id=oaiapp_NEW" end
+
+      assert {:ok, %{account: "bea@example.test", plan_usage: :on}} =
+               login(ctx, callback, sub: "user-sub-OTHER", email: "bea@example.test")
+
+      assert_received {:authorize, authorize}
+      assert authorize["client_id"] == "dynamic_agent_client"
+      assert authorize["agent_name_hint"] == "Fermix"
+      refute Map.has_key?(authorize, "prompt")
+      assert_received {:token_form, %{"client_id" => "oaiapp_NEW"}}
+
+      assert {:ok, entry} = Store.read("chatgpt", ctx.auth_path)
+      assert entry.client_id == "oaiapp_NEW"
+      assert entry.subject == "user-sub-OTHER"
+      assert Store.account_label(entry) == "bea@example.test"
+      assert entry.status == "ready"
+    end
+  end
+
+  # What a sign-out left in a home before a sign-out forgot the registration:
+  # no tokens and no sign-in under way, the client and the account kept. Only
+  # a registration in use is resumed, so this one is not.
+  describe "a registration with no sign-in in use" do
+    test "is not resumed: the sign-in registers afresh and replaces it", ctx do
+      :ok = Store.write("chatgpt", leftover_entry(), ctx.auth_path)
+      callback = fn query -> "code=C&state=#{query["state"]}&client_id=oaiapp_NEW" end
+
+      assert {:ok, %{account: "bea@example.test", plan_usage: :on}} =
+               login(ctx, callback, sub: "user-sub-OTHER", email: "bea@example.test")
+
+      assert_received {:authorize, authorize}
+      assert authorize["client_id"] == "dynamic_agent_client"
+      assert authorize["agent_name_hint"] == "Fermix"
+      refute Map.has_key?(authorize, "prompt")
+
+      assert {:ok, entry} = Store.read("chatgpt", ctx.auth_path)
+      assert entry.client_id == "oaiapp_NEW"
+      assert entry.subject == "user-sub-OTHER"
+      assert Store.account_label(entry) == "bea@example.test"
+      assert entry.status == "ready"
+    end
+
+    test "is replaced whole by the issued client, so a retry takes the new account", ctx do
+      no_plan = %{leftover_entry() | granted_scopes: String.split(@no_plan_scope)}
+      :ok = Store.write("chatgpt", no_plan, ctx.auth_path)
+      callback = fn query -> "code=C&state=#{query["state"]}&client_id=oaiapp_NEW" end
+      refused = fn _form -> {400, %{"error" => "invalid_grant"}} end
+
+      {result, _log} = with_log(fn -> login(ctx, callback, exchange: refused) end)
+
+      assert {:error, {:token_exchange_failed, _detail}} = result
+      assert {:ok, pending} = Registration.read(ctx.auth_path)
+      assert pending.client_id == "oaiapp_NEW"
+      assert pending.status == "pending"
+      assert pending.subject == nil
+      assert pending.account == nil
+      assert pending.granted_scopes == []
+
+      assert {:ok, %{account: "bea@example.test", plan_usage: :on}} =
+               login(ctx, fn query -> "code=C2&state=#{query["state"]}" end,
+                 sub: "user-sub-OTHER",
+                 email: "bea@example.test"
+               )
+
+      assert_received {:authorize, _first}
+      assert_received {:authorize, retry}
+      assert retry["client_id"] == "oaiapp_NEW"
+      refute Map.has_key?(retry, "agent_name_hint")
+      refute Map.has_key?(retry, "prompt")
+
+      assert {:ok, %{client_id: "oaiapp_NEW", subject: "user-sub-OTHER", status: "ready"}} =
+               Store.read("chatgpt", ctx.auth_path)
+    end
+
+    test "a fresh attempt refuses when another sign-in finished meanwhile", ctx do
+      :ok = Store.write("chatgpt", leftover_entry(), ctx.auth_path)
+
+      callback = fn query ->
+        :ok = Store.write("chatgpt", ready_entry(), ctx.auth_path)
+        "code=C&state=#{query["state"]}&client_id=oaiapp_NEW"
+      end
+
+      {result, _log} = with_log(fn -> login(ctx, callback) end)
+
+      assert result == {:error, :client_mismatch}
+      assert_received {:authorize, %{"client_id" => "dynamic_agent_client"}}
+      refute_received {:token_form, _form}
+
+      assert {:ok, %{client_id: "oaiapp_A1", tokens: %{access_token: "AT-0"}}} =
+               Store.read("chatgpt", ctx.auth_path)
     end
   end
 
@@ -341,7 +470,7 @@ defmodule FermixCore.Auth.ChatGPT.LoginTest do
       "iss" => "https://auth.openai.com",
       "aud" => form["client_id"],
       "sub" => Keyword.get(fake, :sub, "user-sub-1"),
-      "email" => "ada@example.test",
+      "email" => Keyword.get(fake, :email, "ada@example.test"),
       "iat" => now,
       "exp" => now + 3_600,
       "nonce" => nonce
@@ -370,6 +499,15 @@ defmodule FermixCore.Auth.ChatGPT.LoginTest do
       expires_at: DateTime.add(DateTime.utc_now(), 3_600, :second),
       last_refresh: nil,
       status: "ready"
+    }
+  end
+
+  defp leftover_entry do
+    %{
+      ready_entry()
+      | tokens: %{access_token: nil, refresh_token: nil},
+        expires_at: nil,
+        status: "signed_out"
     }
   end
 

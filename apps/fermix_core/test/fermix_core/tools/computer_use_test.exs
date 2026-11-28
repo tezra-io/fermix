@@ -5,6 +5,7 @@ defmodule FermixCore.Tools.ComputerUseTest do
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.ComputerUse.Background
+  alias FermixCore.ComputerUse.ComputerDriver
   alias FermixCore.ComputerUse.Config
   alias FermixCore.ComputerUse.HelperActions
   alias FermixCore.ComputerUse.Session
@@ -951,6 +952,19 @@ defmodule FermixCore.Tools.ComputerUseTest do
       assert result.success == true
       assert [%{type: :image}] = result.images
       assert_received {:driver_execute, %{"action" => "left_click"}}
+    end
+
+    # The session holds a Stop against the turn that asked (`OperatorStop`), so a
+    # request on this machine names its turn as one to a computer does.
+    test "a request on this machine names the turn that asked", %{
+      session: session,
+      config: config
+    } do
+      context = tool_context(session, config, "turn-asking")
+
+      assert {:ok, %{success: true}} = ComputerUse.execute(%{"action" => "screenshot"}, context)
+      assert_received {:driver_execute, %{"action" => "screenshot"} = request}
+      assert %{session_id: "turn-asking"} = request[ComputerDriver.turn_key()]
     end
 
     test "an invalid action is rejected before any driver call", %{

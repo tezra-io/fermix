@@ -13,8 +13,9 @@ defmodule Fermix.CLI.AuthCommand do
       `CLAUDE_CODE_OAUTH_TOKEN` env var. xai: the browser PKCE flow.
     * `status` — prints what is currently stored.
     * `logout` — removes the stored credentials (codex: revokes the ChatGPT
-      session, clears its tokens and keeps the registration), then tells a
-      running daemon to drop the tokens it still holds for them.
+      session, then removes its sign-in, so the next `login` asks which
+      account and workspace to use), then tells a running daemon to drop the
+      tokens it still holds for them.
 
   After `login`, restart the daemon so its token manager reloads the new token
   state.
@@ -322,9 +323,10 @@ defmodule Fermix.CLI.AuthCommand do
   defp do_logout({:ok, @codex_profile}, seams), do: chatgpt_logout(seams)
   defp do_logout({:ok, profile}, seams), do: delete_logout(profile, seams)
 
-  # ChatGPT's own sign-out revokes the session upstream, clears the tokens and
-  # keeps the registration, so the next sign-in reuses it; a revoke OpenAI did
-  # not confirm still signs this computer out, and says where to finish.
+  # ChatGPT's own sign-out revokes the session upstream, then removes the
+  # sign-in and its registration, so the next sign-in asks which account and
+  # workspace to use; a revoke OpenAI did not confirm still signs this computer
+  # out, and says where to finish. A sign-in that never finished is not one.
   defp chatgpt_logout(seams) do
     path = Store.path()
     logout = Keyword.get(seams, :logout, &ChatGPT.logout/1)
@@ -341,13 +343,13 @@ defmodule Fermix.CLI.AuthCommand do
   end
 
   defp chatgpt_logged_out({:ok, %{revoked: true}}, path, seams) do
-    IO.puts("Logged out of ChatGPT. Cleared its tokens in #{path}.")
-    tell_daemon(0, @codex_profile, "cleared the ChatGPT tokens in #{path}", seams)
+    IO.puts("Logged out of ChatGPT. Removed its sign-in from #{path}.")
+    tell_daemon(0, @codex_profile, "removed the ChatGPT sign-in from #{path}", seams)
   end
 
   defp chatgpt_logged_out({:ok, %{revoked: false}}, path, seams) do
     IO.puts(ChatGPT.failure_sentence(:revoke_not_confirmed))
-    tell_daemon(0, @codex_profile, "cleared the ChatGPT tokens in #{path}", seams)
+    tell_daemon(0, @codex_profile, "removed the ChatGPT sign-in from #{path}", seams)
   end
 
   defp chatgpt_logged_out({:error, reason}, _path, _seams),

@@ -411,6 +411,38 @@ defmodule FermixCore.Jobs.RunnerCueTest do
     assert run.delivery_status == "skipped"
   end
 
+  # A cue run's `tools_started_at` is its mandate gate's marker: only an
+  # allowed or proposed mandate call ends its retries. Its other tool calls
+  # land on its timeline and leave the marker unset (M106 §5.1).
+  test "a failure after a tool that is no mandate call is still retried", ctx do
+    claim = claim_cue(ctx, %{})
+
+    run_cue(ctx, claim,
+      script: [%{tool_calls: [call("c1", "cue_history")]}, {:error, "the loop failed"}]
+    )
+
+    assert [[1, "passed"]] == attempts_and_state(ctx.conn, claim.delivery.id)
+    {:ok, run} = Repo.get_job_run(claim.run.id, server: ctx.repo)
+    assert run.status == "error"
+    assert run.tools_started_at == nil
+    assert run.failure_kind == "other"
+    assert [%{"name" => "cue_history"}] = run.tool_timeline
+  end
+
+  # M106 §6: a cue run's text is an outsider's from the first token (M60), so
+  # its tool tally keeps names and counts and never a failed call's words.
+  test "a cue run's tool tally keeps no error words", ctx do
+    claim = claim_cue(ctx, %{})
+    bad_call = %{call("c1", "cue_history") | arguments: "words-marker-4N {"}
+
+    run_cue(ctx, claim, script: [%{tool_calls: [bad_call]}, %{content: "[SILENT]"}])
+
+    {:ok, run} = Repo.get_job_run(claim.run.id, server: ctx.repo)
+    assert [%{"name" => "cue_history", "ok" => 0, "error" => 1} = entry] = run.tool_tally
+    refute Map.has_key?(entry, "last_error")
+    refute Jason.encode!(run.tool_tally) =~ "JSON"
+  end
+
   test "the delivery's final failure sends the failure text once, prefixed", ctx do
     claim = claim_cue(ctx, %{task_attempts: 2})
 

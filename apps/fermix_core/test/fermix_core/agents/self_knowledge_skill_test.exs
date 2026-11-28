@@ -1,11 +1,15 @@
 defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
   use ExUnit.Case, async: true
 
+  alias Fermix.CLI.SettingsCommand.Args, as: SettingsArgs
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Checklists.Access, as: ChecklistAccess
   alias FermixCore.Checklists.Registry, as: ChecklistRegistry
   alias FermixCore.Delivery.OwnerInbox
+  alias FermixCore.Management.PhoneCalls, as: ManagementPhoneCalls
   alias FermixCore.NativeHost.Server, as: NativeHostServer
+  alias FermixCore.PhoneCalls.Grants, as: PhoneCallGrants
+  alias FermixCore.PhoneCalls.Limits, as: PhoneCallLimits
   alias FermixCore.Plugins.Registry, as: PluginRegistry
   alias FermixCore.Temporal.Registry, as: TemporalRegistry
   alias FermixCore.Trace
@@ -439,6 +443,76 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     refute reference =~ "can only add stops"
     refute reference =~ "waits for the owner"
     refute body =~ "rests on a search waits"
+  end
+
+  # M94: the phone-call reference's bounds and grants are read from the code,
+  # so a changed limit or a newly grantable tool fails here until it follows.
+  test "documents phone calls: who can be called, the bounds, the grants and the outcomes" do
+    body = File.read!(self_knowledge_path())
+
+    reference =
+      "phone_calls" |> reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
+
+    assert body =~ "`phone_call`"
+    assert body =~ ~s{skill_view(name: "self-knowledge", file: "phone_calls")}
+
+    assert {PhoneCallLimits.max_outstanding_calls(), PhoneCallLimits.max_attempts_per_day()} ==
+             {1, 20}
+
+    assert reference =~ "One call at a time, and at most twenty attempts in any 24 hours."
+
+    # The two waits it states, as the bounds the worker reads.
+    assert PhoneCallLimits.opening_wait_ms() == 2_000
+    assert reference =~ "it greets them after a moment (about two seconds)"
+    assert PhoneCallLimits.result_extraction_timeout_ms() == 60_000
+    assert reference =~ "up to about a minute after the call ends"
+    assert reference =~ "#{PhoneCallLimits.outcome_retention_days()} days"
+    assert reference =~ "#{PhoneCallLimits.excerpt_retention_days()} days"
+
+    for tool <- PhoneCallGrants.grantable(), do: assert(reference =~ "`#{tool}`")
+    assert reference =~ "only `web_search` and `place_search` can be granted to a call today"
+
+    for fact <- [
+          "**Phone calls** section in a settings pane of its own",
+          "Never a private individual",
+          "toll-free",
+          "the US territories",
+          "the number takes no incoming calls",
+          "the owner has five minutes to confirm it",
+          "without leaving a message",
+          "The assistant is instructed never to pay",
+          "**needs owner**",
+          "**unknown**",
+          "**verified**",
+          "**read**",
+          "may or may not have been placed",
+          "**termination is unconfirmed**",
+          "the owner's own restart of Fermix",
+          "An app's restart is refused the same way when the app asks for it with `lifecycle.prepare_restart`",
+          "when Fermix looked the number up itself",
+          "changes no outcome",
+          "each side's last words",
+          "for any reason (the model reading it failed",
+          "The person called usually speaks first",
+          "nothing is said after the goodbyes",
+          "the tokens they reported",
+          "Unreadable"
+        ] do
+      assert reference =~ fact
+    end
+
+    # Every word the Status row can read, in the engine's own labels.
+    for state <- ManagementPhoneCalls.summary_states() do
+      label = state |> String.replace("_", " ") |> String.capitalize()
+      assert label in ManagementPhoneCalls.sentences(), state
+      assert reference =~ label, state
+    end
+
+    # The recovery verbs it names are the settings command's own.
+    for verb <- [["phone-calls", "recovery"], ["phone-calls", "confirm-ended", "CALL_ID"]] do
+      assert reference =~ "`fermix settings #{Enum.join(verb, " ")}`"
+      refute match?({:usage, _why}, SettingsArgs.parse(verb)), inspect(verb)
+    end
   end
 
   test "the events_reminders reference names every reminder platform and the derived order" do
@@ -1082,6 +1156,25 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     # The self-reference carries no version numbers (AGENTS.md); an address such
     # as 127.0.0.1 is not one.
     refute reference =~ ~r/(?<![\d.])v?\d+\.\d+\.\d+(?![\d.])/
+  end
+
+  # M106 §8, D3, D9, D12 (stage S6): where Fermix reaches the owner, and the
+  # heal's message and card in the Fermix app, as the agent reads them.
+  test "the owner's inbox puts the app first while a phone is paired, and the app shows a card" do
+    jobs = "jobs" |> reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
+    setup = channel_setup_reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
+    mobile = mobile_reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
+
+    for reference <- [jobs, setup] do
+      assert reference =~ "the Fermix app while a phone is paired"
+      assert reference =~ "or on an Always On server with a computer linked to it"
+    end
+
+    assert jobs =~ "In the Fermix app the message is a row in the chat"
+    assert jobs =~ "sent again whenever the app reconnects, after a restart too"
+    refute jobs =~ "The Fermix apps do not show a proposal's card yet."
+    assert setup =~ "A watcher's proposal never goes to the app's chat"
+    assert mobile =~ "goes to the Mac and the phones alike"
   end
 
   defp cues_paragraph do

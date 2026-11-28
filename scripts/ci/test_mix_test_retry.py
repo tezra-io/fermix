@@ -65,7 +65,7 @@ class ParseRunTest(unittest.TestCase):
         run = retry.parse_run(ONE_CORE_FAILURE)
 
         self.assertEqual(run.seed, "100913")
-        self.assertEqual(run.apps["fermix_core"].ran, 1 + 3 + 6372)
+        self.assertEqual(run.apps["fermix_core"].ran, 1 + 3 + 6372 - 29)
         self.assertEqual(run.apps["fermix_core"].failed, 1)
         self.assertEqual(run.apps["fermix_channels"].failed, 0)
         [failure] = run.failures
@@ -88,6 +88,13 @@ class ParseRunTest(unittest.TestCase):
     def test_counts_invalid_tests_as_failed(self):
         self.assertEqual(retry.parse_summary("4 tests, 0 failures, 4 invalid"), (4, 4))
 
+    def test_a_skipped_test_did_not_run(self):
+        self.assertEqual(retry.parse_summary("1 test, 0 failures, 1 skipped (16 excluded)"), (0, 0))
+        self.assertEqual(retry.parse_summary("3 tests, 0 failures, 1 skipped (19 excluded)"), (2, 0))
+
+    def test_an_excluded_test_is_not_counted(self):
+        self.assertEqual(retry.parse_summary("3 tests, 0 failures (19 excluded)"), (3, 0))
+
     def test_reads_a_doctest_only_summary(self):
         run = retry.parse_run("==> fermix_core\nRunning ExUnit with seed: 1\n1 doctest, 0 failures\n")
 
@@ -101,52 +108,24 @@ class ParseRunTest(unittest.TestCase):
         self.assertEqual(run.failures[0].path, "apps/fermix_web/test/a/b_test.exs")
 
 
-class PlanRetryTest(unittest.TestCase):
-    def test_one_failure_is_retried_in_its_own_app_by_its_location(self):
-        targets, refusal = retry.plan_retry(retry.parse_run(ONE_CORE_FAILURE), max_flaky=5)
-
-        self.assertEqual(
-            (targets, refusal),
-            ({"fermix_core": ["apps/fermix_core/test/fermix_core/setup/doctor_test.exs:1332"]}, ""),
-        )
-
-    def test_a_later_apps_failure_is_retried_in_that_app(self):
-        log = "==> fermix_core\nRunning ExUnit with seed: 5\n9 tests, 0 failures\n" + channels_failures(2)
-
-        targets, refusal = retry.plan_retry(retry.parse_run(log), max_flaky=5)
-
-        self.assertEqual(refusal, "")
-        self.assertEqual(
-            targets,
-            {
-                "fermix_channels": [
-                    "apps/fermix_channels/test/fermix_channels/some_test.exs:10",
-                    "apps/fermix_channels/test/fermix_channels/some_test.exs:20",
-                ]
-            },
-        )
+class RetryRefusalTest(unittest.TestCase):
+    def test_a_named_and_placed_failure_can_be_retried(self):
+        self.assertEqual(retry.retry_refusal(retry.parse_run(ONE_CORE_FAILURE), max_flaky=5), "")
 
     def test_a_failure_with_no_test_location_stays_red(self):
         log = "Running ExUnit with seed: 3\n  1) test x (A.BTest)\n     ** (RuntimeError) boom\n1 test, 1 failure\n"
 
-        targets, refusal = retry.plan_retry(retry.parse_run(log, app="fermix_core"), max_flaky=5)
+        refusal = retry.retry_refusal(retry.parse_run(log, app="fermix_core"), max_flaky=5)
 
-        self.assertEqual(targets, {})
         self.assertIn("no test location for A.BTest x", refusal)
 
     def test_failures_exunit_did_not_name_stay_red(self):
         log = channels_failures(1).replace("1283 tests, 1 failures", "1283 tests, 1 failure, 3 invalid")
 
-        targets, refusal = retry.plan_retry(retry.parse_run(log), max_flaky=5)
-
-        self.assertEqual(targets, {})
-        self.assertIn("named 1 of 4 failures", refusal)
+        self.assertIn("named 1 of 4 failures", retry.retry_refusal(retry.parse_run(log), max_flaky=5))
 
     def test_more_failures_than_the_cap_stay_red(self):
-        failed, refusal = retry.plan_retry(retry.parse_run(channels_failures(6)), max_flaky=5)
-
-        self.assertEqual(failed, {})
-        self.assertIn("6 tests failed", refusal)
+        self.assertIn("6 tests failed", retry.retry_refusal(retry.parse_run(channels_failures(6)), max_flaky=5))
 
     def test_an_aborted_suite_stays_red(self):
         log = ONE_CORE_FAILURE + (
@@ -154,44 +133,61 @@ class PlanRetryTest(unittest.TestCase):
             "while using the --warnings-as-errors option\n"
         )
 
-        failed, refusal = retry.plan_retry(retry.parse_run(log), max_flaky=5)
-
-        self.assertEqual(failed, {})
-        self.assertIn("aborted", refusal)
+        self.assertIn("aborted", retry.retry_refusal(retry.parse_run(log), max_flaky=5))
 
     def test_an_app_that_started_but_printed_no_summary_stays_red(self):
         log = ONE_CORE_FAILURE + "==> fermix_web\nRunning ExUnit with seed: 100913, max_cases: 8\n"
 
-        _failed, refusal = retry.plan_retry(retry.parse_run(log), max_flaky=5)
-
-        self.assertIn("fermix_web", refusal)
+        self.assertIn("fermix_web", retry.retry_refusal(retry.parse_run(log), max_flaky=5))
 
     def test_a_red_exit_with_no_failed_test_stays_red(self):
-        _failed, refusal = retry.plan_retry(retry.parse_run("==> fermix_core\n** (Mix) boom\n"), max_flaky=5)
+        refusal = retry.retry_refusal(retry.parse_run("==> fermix_core\n** (Mix) boom\n"), max_flaky=5)
 
         self.assertIn("no failed tests", refusal)
 
 
+class RerunCommandTest(unittest.TestCase):
+    def test_selects_the_failed_test_by_its_exact_name_in_its_file(self):
+        failure = retry.Failure("fermix_core", "test", "a: b", "A.BTest", "apps/fermix_core/test/b_test.exs", 7)
+
+        self.assertEqual(
+            retry.rerun_command(failure),
+            ["mix", "test", "--warnings-as-errors", "apps/fermix_core/test/b_test.exs", "--only", "test:test a: b"],
+        )
+
+    def test_a_doctest_keeps_its_kind_in_the_name(self):
+        failure = retry.Failure("fermix_core", "doctest", "A.b/0 (1)", "ATest", "apps/fermix_core/test/a_test.exs", 3)
+
+        self.assertEqual(retry.rerun_command(failure)[-1], "test:doctest A.b/0 (1)")
+
+
 class CheckRerunTest(unittest.TestCase):
-    def test_a_passing_rerun_that_ran_the_failed_tests_proves_them_flaky(self):
-        rerun = retry.parse_run(CORE_RERUN_PASSES)
+    failure = retry.Failure("fermix_core", "test", "x", "A.BTest", "apps/fermix_core/test/b_test.exs", 7)
 
-        self.assertEqual(retry.check_rerun("fermix_core", 1, rerun, 0), "")
+    def check(self, log, code=0):
+        return retry.check_rerun(self.failure, retry.parse_run(log), code)
 
-    def test_a_rerun_that_ran_nothing_is_not_proof(self):
-        rerun = retry.parse_run("==> fermix_core\nThere are no tests to run\n")
+    def test_a_passing_rerun_of_the_failed_test_proves_it_flaky(self):
+        self.assertEqual(self.check(CORE_RERUN_PASSES), "")
 
-        self.assertIn("no ExUnit summary", retry.check_rerun("fermix_core", 1, rerun, 0))
+    def test_a_rerun_with_no_summary_is_not_proof(self):
+        self.assertIn("no ExUnit summary", self.check("==> fermix_core\nThere are no tests to run\n"))
 
-    def test_a_rerun_that_ran_fewer_tests_than_failed_is_not_proof(self):
-        rerun = retry.parse_run(CORE_RERUN_PASSES)
+    def test_a_rerun_that_selected_no_test_is_not_proof(self):
+        log = "==> fermix_core\nRunning ExUnit with seed: 1\n0 tests, 0 failures (17 excluded)\n"
 
-        self.assertIn("ran 1 tests for 2 failures", retry.check_rerun("fermix_core", 2, rerun, 0))
+        self.assertIn("did not run", self.check(log))
+
+    def test_a_rerun_that_only_skipped_the_test_is_not_proof(self):
+        log = "==> fermix_core\nRunning ExUnit with seed: 1\n1 test, 0 failures, 1 skipped (16 excluded)\n"
+
+        self.assertIn("did not run", self.check(log))
 
     def test_a_rerun_that_fails_again_is_not_flaky(self):
-        rerun = retry.parse_run(CORE_RERUN_PASSES.replace("0 failures", "1 failure"))
+        self.assertIn("failed again", self.check(CORE_RERUN_PASSES.replace("0 failures", "1 failure"), code=2))
 
-        self.assertIn("failed again", retry.check_rerun("fermix_core", 1, rerun, 2))
+    def test_the_reason_names_the_test(self):
+        self.assertIn('A.BTest test "x"', self.check("==> fermix_core\nThere are no tests to run\n"))
 
 
 class AnnotationTest(unittest.TestCase):
@@ -311,12 +307,41 @@ class MainTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(
             self.calls[1],
-            ["mix", "test", "--warnings-as-errors", "apps/fermix_core/test/fermix_core/setup/doctor_test.exs:1332"],
+            [
+                "mix",
+                "test",
+                "--warnings-as-errors",
+                "apps/fermix_core/test/fermix_core/setup/doctor_test.exs",
+                "--only",
+                "test:test meetings_report/1 enabled with no usable lane names the one thing to do",
+            ],
         )
         self.assertIn("::warning file=apps/fermix_core/test/fermix_core/setup/doctor_test.exs,line=1332", out)
         flaky = json.loads(self.flaky.read_text())
         self.assertEqual(flaky["seed"], "100913")
         self.assertEqual([f["module"] for f in flaky["flaky"]], ["FermixCore.Setup.DoctorTest"])
+
+    def test_each_failure_gets_its_own_rerun_and_its_own_log(self):
+        log = channels_failures(2)
+        rerun = "==> fermix_channels\nRunning ExUnit with seed: 1\n1 test, 0 failures (9 excluded)\n"
+
+        code, _out = self.main([(2, log), (0, rerun), (0, rerun)])
+
+        self.assertEqual(code, 0)
+        self.assertEqual([c[-1] for c in self.calls[1:]], ["test:test case 1", "test:test case 2"])
+        self.assertTrue((self.base / "mix-test-rerun-1.log").exists())
+        self.assertTrue((self.base / "mix-test-rerun-2.log").exists())
+
+    def test_one_failure_that_was_only_skipped_keeps_the_run_red(self):
+        log = channels_failures(2)
+        passed = "==> fermix_channels\nRunning ExUnit with seed: 1\n1 test, 0 failures (9 excluded)\n"
+        skipped = "==> fermix_channels\nRunning ExUnit with seed: 1\n1 test, 0 failures, 1 skipped (9 excluded)\n"
+
+        code, out = self.main([(2, log), (0, passed), (0, skipped)])
+
+        self.assertEqual(code, 1)
+        self.assertIn("did not run", out)
+        self.assertFalse(self.flaky.exists())
 
     def test_a_failure_that_fails_its_rerun_stays_red(self):
         code, out = self.main([(2, ONE_CORE_FAILURE), (2, CORE_RERUN_PASSES.replace("0 failures", "1 failure"))])

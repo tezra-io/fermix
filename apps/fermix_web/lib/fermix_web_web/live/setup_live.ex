@@ -46,7 +46,6 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Plugins.Status, as: PluginStatus
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
-  alias FermixCore.Providers.ModelListing
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Providers.ReasoningEffort
   alias FermixCore.Providers.Selection
@@ -69,7 +68,9 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixWebWeb.SetupLive.AlwaysOn
   alias FermixWebWeb.SetupLive.Components
   alias FermixWebWeb.SetupLive.CuesState
+  alias FermixWebWeb.SetupLive.ModelSource
   alias FermixWebWeb.SetupLive.Phone
+  alias FermixWebWeb.SetupLive.PhoneCalls
 
   require AnthropicLogin
   require Logger
@@ -95,7 +96,8 @@ defmodule FermixWebWeb.SetupLive do
 
   @tabs [
     %{id: "provider", label: "Provider", component: "provider:*", description: "Model and key"},
-    %{id: "realtime", label: "Realtime", component: "realtime:*", description: "Voice companion"},
+    %{id: "realtime", label: "Voice", component: "realtime:*", description: "Talk to Fermix"},
+    %{id: "phone_calls", label: "Phone calls", component: nil, description: "Outbound calls"},
     %{id: "channels", label: "Channels", component: "channel:*", description: "Message ingress"},
     %{id: "transcription", label: "Voice notes", component: nil, description: "Speech-to-text"},
     %{id: "plugins", label: "Plugins", component: nil, description: "Integrations"},
@@ -132,7 +134,7 @@ defmodule FermixWebWeb.SetupLive do
   @oauth_client_providers ~w(google github notion x slack tesla)
   # Derived from the descriptor registry: every provider setup field plus
   # each multi-auth-mode provider's auth_mode answer (M12 §6.2).
-  @provider_restart_keys [:provider, :default_model, :reasoning_effort] ++
+  @provider_restart_keys [:provider, :default_model, :reasoning_effort, :fast] ++
                            Enum.flat_map(
                              FermixCore.Providers.Descriptor.all(),
                              fn descriptor -> Enum.map(descriptor.setup_fields, & &1.key) end
@@ -188,7 +190,8 @@ defmodule FermixWebWeb.SetupLive do
   @open_loops_restart_keys [:open_loops_enabled]
   # `[fermix_core.meetings]` is written as a section rather than through wizard
   # answers, so these never reach `runtime_restart_answers?/1`; they are the keys
-  # `Meetings.ready?/0` reads, and tool registration reads it only at boot.
+  # `Meetings.ready?/0` and `Meetings.offered?/1` read, and tool registration
+  # reads the second only at boot.
   @meetings_restart_keys [
     :enabled,
     :zoom_account_id,
@@ -254,6 +257,9 @@ defmodule FermixWebWeb.SetupLive do
       |> assign(:accessories, Accessories.initial())
       |> Accessories.load()
       |> Accessories.watch()
+      |> assign(:phone_calls, PhoneCalls.initial())
+      |> PhoneCalls.load()
+      |> ModelSource.init()
       |> assign_report(report)
       |> AlwaysOn.watch()
       |> AlwaysOn.on_tab(active_tab)
@@ -288,7 +294,7 @@ defmodule FermixWebWeb.SetupLive do
 
     {:noreply,
      socket
-     |> assign(:active_tab, active_tab)
+     |> assign_tab(active_tab)
      |> assign(:saved_flash, nil)
      |> refresh_cues_on(active_tab)
      |> AlwaysOn.on_tab(active_tab)}
@@ -296,12 +302,12 @@ defmodule FermixWebWeb.SetupLive do
 
   def handle_event("next_step", _params, socket) do
     {:noreply,
-     assign(socket, :active_tab, adjacent_tab(socket.assigns.tabs, socket.assigns.active_tab, 1))}
+     assign_tab(socket, adjacent_tab(socket.assigns.tabs, socket.assigns.active_tab, 1))}
   end
 
   def handle_event("previous_step", _params, socket) do
     {:noreply,
-     assign(socket, :active_tab, adjacent_tab(socket.assigns.tabs, socket.assigns.active_tab, -1))}
+     assign_tab(socket, adjacent_tab(socket.assigns.tabs, socket.assigns.active_tab, -1))}
   end
 
   def handle_event("provider_changed", %{"provider_form" => params}, socket) do
@@ -319,8 +325,12 @@ defmodule FermixWebWeb.SetupLive do
     {:noreply,
      socket
      |> assign(:provider_form, form)
-     |> assign_model_sources(form)}
+     |> ModelSource.sync(params)}
   end
+
+  # The picker's Refresh: the provider's list read again for the same source.
+  def handle_event("refresh_models", _params, socket),
+    do: {:noreply, ModelSource.refresh(socket)}
 
   def handle_event("save_provider", %{"provider_form" => params} = root, socket) do
     case maybe_store_anthropic_setup_token(params) do
@@ -333,6 +343,7 @@ defmodule FermixWebWeb.SetupLive do
           |> maybe_put_string(:edit_provider, params["provider"])
           |> maybe_put_string(:default_model, params["default_model"])
           |> maybe_put_string(:reasoning_effort, params["reasoning_effort"])
+          |> put_fast_answer(params["provider"], params["fast"])
           |> put_provider_field_answers(params)
           |> put_auth_mode_answer(params["provider"], params["auth_mode"])
           |> put_subagent_model_answer(params)
@@ -429,7 +440,7 @@ defmodule FermixWebWeb.SetupLive do
       |> maybe_put_string(:realtime_persist_transcripts, params["persist_transcripts"])
 
     {:noreply,
-     save_answers(socket, answers, "Realtime saved.", Map.get(root, "__nav"),
+     save_answers(socket, answers, "Voice saved.", Map.get(root, "__nav"),
        restart_required?: runtime_restart_answers?(answers)
      )}
   end
@@ -485,6 +496,21 @@ defmodule FermixWebWeb.SetupLive do
     case Accessories.handle_event(event, params, socket) do
       {socket, nil} -> {:noreply, socket}
       {socket, _write} -> {:noreply, assign_report(socket, Wizard.report())}
+    end
+  end
+
+  # The Phone calls tab's events (M94 §12), before the Phone card's, whose
+  # prefix they share: its switch, its settings, a stop, the owner's word that
+  # an unresolved call ended. A settings write refreshes the report, and the
+  # form's save answers as every other step's does (`phone_calls_saved/3`). A
+  # refused write stays on the tab, which says why.
+  def handle_event("phone_calls_" <> _rest = event, params, socket) do
+    case PhoneCalls.handle_event(event, params, assign(socket, :saved_flash, nil)) do
+      {socket, nil} ->
+        {:noreply, socket}
+
+      {socket, _write} ->
+        {:noreply, socket |> assign_report(Wizard.report()) |> phone_calls_saved(event, params)}
     end
   end
 
@@ -977,23 +1003,12 @@ defmodule FermixWebWeb.SetupLive do
   # Only where something brings Fermix back once it stops: the Mac app's
   # engine, Fermix's own systemd unit, a `fermix service` install
   # (`Lifecycle.restarts_itself?/0`, the one predicate a move's review reads).
+  # Never while a phone call is in progress, which the stop would hang up
+  # with no outcome (M94 §12).
   def handle_event("apply_restart", _params, socket) do
-    if restarts_itself?() do
-      Process.send_after(self(), :perform_restart, 600)
-      # Stamp the current tab into the URL so the post-restart reconnect lands
-      # here instead of next_action_tab bouncing the operator to a partial tab.
-      # push_patch keeps this process alive so :perform_restart still fires.
-      {:noreply,
-       socket
-       |> assign(:restarting, true)
-       |> push_patch(to: ~p"/setup?#{restart_patch_params(socket)}")}
-    else
-      {:noreply,
-       flash_error(
-         socket,
-         "Nothing to restart from here; no OS-supervised Fermix service is running this process. " <>
-           "In dev, stop and re-run `mix fermix.dev`; an installed service restarts itself from this button."
-       )}
+    case PhoneCalls.restart_hold() do
+      :ok -> apply_restart(socket)
+      {:error, sentence} -> {:noreply, flash_error(socket, sentence)}
     end
   end
 
@@ -1055,6 +1070,10 @@ defmodule FermixWebWeb.SetupLive do
       when phone_read in [:phone_poll, :phone_reach],
       do: {:noreply, Phone.handle_info(message, socket)}
 
+  # The Phone calls section reads its state again while a call is in progress.
+  def handle_info({:phone_calls_poll, _ref} = message, socket),
+    do: {:noreply, PhoneCalls.handle_info(message, socket)}
+
   # The StackChan section follows the accessory watcher: a change notice, the
   # watcher ending, or the time to look for it again.
   def handle_info({:accessories_changed, _version} = message, socket),
@@ -1086,6 +1105,26 @@ defmodule FermixWebWeb.SetupLive do
     {:noreply, socket}
   end
 
+  defp apply_restart(socket) do
+    if restarts_itself?() do
+      Process.send_after(self(), :perform_restart, 600)
+      # Stamp the current tab into the URL so the post-restart reconnect lands
+      # here instead of next_action_tab bouncing the operator to a partial tab.
+      # push_patch keeps this process alive so :perform_restart still fires.
+      {:noreply,
+       socket
+       |> assign(:restarting, true)
+       |> push_patch(to: ~p"/setup?#{restart_patch_params(socket)}")}
+    else
+      {:noreply,
+       flash_error(
+         socket,
+         "Nothing to restart from here; no OS-supervised Fermix service is running this process. " <>
+           "In dev, stop and re-run `mix fermix.dev`; an installed service restarts itself from this button."
+       )}
+    end
+  end
+
   defp restarts_itself?,
     do: Application.get_env(:fermix_web, :restarts_itself, &Lifecycle.restarts_itself?/0).()
 
@@ -1094,6 +1133,9 @@ defmodule FermixWebWeb.SetupLive do
   @impl true
   def handle_async({:always_on, _what} = key, result, socket),
     do: {:noreply, AlwaysOn.handle_async(key, result, socket)}
+
+  def handle_async({:model_source, _source} = key, result, socket),
+    do: {:noreply, ModelSource.handle_async(key, result, socket)}
 
   def handle_async(:doctor_provider_probe, {:ok, result}, socket) do
     {:noreply, finish_doctor_provider_probe(socket, result)}
@@ -1252,6 +1294,7 @@ defmodule FermixWebWeb.SetupLive do
       channels_form={@channels_form}
       phone={@phone}
       accessories={@accessories}
+      phone_calls={@phone_calls}
       doctor_result={@doctor_result}
       memory_form={@memory_form}
       personalization_form={@personalization_form}
@@ -1274,6 +1317,7 @@ defmodule FermixWebWeb.SetupLive do
       provider_form={@provider_form}
       provider_models={@provider_models}
       live_models={@live_models}
+      model_refresh?={@model_refresh?}
       provider_statuses={@provider_statuses}
       plugin_auth_url={@plugin_auth_url}
       plugin_summary={@plugin_summary}
@@ -1338,16 +1382,20 @@ defmodule FermixWebWeb.SetupLive do
     """
   end
 
-  defp assign_report(socket, report) do
+  defp assign_report(socket, report),
+    do: assign_report(socket, report, build_provider_form(report.wizard.config_snapshot))
+
+  # `provider_form` is the form the page shows afterwards: one built from these
+  # settings, or the one in progress a sign-in finished under.
+  defp assign_report(socket, report, provider_form) do
     snapshot = report.wizard.config_snapshot
-    provider_form = build_provider_form(snapshot)
 
     socket
     |> assign(:report, report)
     |> assign(:tabs, shown_tabs(socket.assigns.embed?))
     |> assign_config_banner()
     |> assign(:provider_form, provider_form)
-    |> assign_model_sources(provider_form)
+    |> ModelSource.sync()
     |> assign(:provider_statuses, build_provider_statuses(snapshot))
     |> assign(:xai_auth, xai_auth_summary())
     |> assign(:chatgpt_auth, ChatGPT.summary())
@@ -1388,6 +1436,13 @@ defmodule FermixWebWeb.SetupLive do
     do: maybe_advance(socket, Map.get(params, "__nav"))
 
   defp cues_advance(socket, _action, _result, _params), do: socket
+
+  # The Phone calls form's save says it saved and, on Save & next, moves on.
+  # The switch is its own setter: the tab says what it did.
+  defp phone_calls_saved(socket, "phone_calls_save", params),
+    do: socket |> flash_info("Phone calls saved.") |> maybe_advance(Map.get(params, "__nav"))
+
+  defp phone_calls_saved(socket, _event, _params), do: socket
 
   defp apply_cues(socket, {:edit, cues}), do: assign(socket, :cues, cues)
   defp apply_cues(socket, :refresh), do: refresh_cues_on(socket, "cues")
@@ -1465,7 +1520,7 @@ defmodule FermixWebWeb.SetupLive do
 
   defp save_answers(socket, answers, message, nav, opts \\ []) do
     socket.assigns.report.wizard
-    |> Wizard.save_answers(answers)
+    |> Wizard.save_answers(answers, PhoneCalls.wizard_opts())
     |> save_result(socket, message, nav, opts)
   end
 
@@ -1544,6 +1599,11 @@ defmodule FermixWebWeb.SetupLive do
   # daemon's; before this the value was dropped with a log line and the save
   # reported success, so the operator saw a stored key and the runtime had none.
   defp format_config_error({:secret_store_failed, _key, sentence}) when is_binary(sentence),
+    do: sentence
+
+  # A credential a phone call in progress reads (M94 §12): nothing was saved,
+  # in the hold's own sentence.
+  defp format_config_error({:credential_held, _key, sentence}) when is_binary(sentence),
     do: sentence
 
   # A cue setting the config refused, with its own sentence (M60 §15).
@@ -1885,10 +1945,17 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   defp maybe_advance(socket, "next") do
-    assign(socket, :active_tab, adjacent_tab(socket.assigns.tabs, socket.assigns.active_tab, 1))
+    assign_tab(socket, adjacent_tab(socket.assigns.tabs, socket.assigns.active_tab, 1))
   end
 
   defp maybe_advance(socket, _nav), do: socket
+
+  # Every move to another tab. The Provider pane shown afresh asks for its
+  # model list when that list's source is one the page has not read.
+  defp assign_tab(socket, tab) do
+    previous = socket.assigns.active_tab
+    socket |> assign(:active_tab, tab) |> ModelSource.shown(previous)
+  end
 
   defp edited_provider_form(current, params) do
     %{
@@ -1898,13 +1965,34 @@ defmodule FermixWebWeb.SetupLive do
       subagent_model: Map.get(params, "subagent_model", current.subagent_model),
       reasoning_effort:
         parse_effort_field(Map.get(params, "reasoning_effort"), current.reasoning_effort),
+      fast: parse_fast_field(Map.get(params, "fast"), current.fast),
       auth_mode: parse_auth_mode_field(Map.get(params, "auth_mode"), current.auth_mode),
+      generation: current.generation,
       # Carry the plain setup fields (e.g. Ollama's base_url) across an in-place
       # edit; without this the re-render drops them and the input blanks out,
       # risking a saved value being wiped on the next submit (M12 §6.2).
       field_values: edited_field_values(current, params)
     }
   end
+
+  # The Fast mode switch posts "true" or "false" (a hidden "false" sits before
+  # the checkbox), and only for a provider that has one; any other provider
+  # never sends the answer, so the wizard never sees fast for it.
+  defp put_fast_answer(answers, provider, value) when value in ["true", "false"] do
+    if fast_provider?(provider), do: Keyword.put(answers, :fast, value), else: answers
+  end
+
+  defp put_fast_answer(answers, _provider, _value), do: answers
+
+  defp fast_provider?(provider) when is_binary(provider) do
+    Enum.any?(Descriptor.all(), &(Atom.to_string(&1.id) == provider and :fast in &1.config_keys))
+  end
+
+  defp fast_provider?(_provider), do: false
+
+  defp parse_fast_field("true", _current), do: true
+  defp parse_fast_field("false", _current), do: false
+  defp parse_fast_field(_value, current), do: current
 
   defp edited_field_values(current, params) do
     Map.new(current.field_values || %{}, fn {key, prior} ->
@@ -1930,8 +2018,12 @@ defmodule FermixWebWeb.SetupLive do
       default_model: ModelCatalog.effective_model(provider, provider_block),
       subagent_model: routing_subagent_model(snapshot),
       reasoning_effort: Keyword.get(provider_block, :reasoning_effort, default_effort(provider)),
+      fast: Keyword.get(provider_block, :fast, false),
       auth_mode: Keyword.get(provider_block, :auth_mode, :api_key),
-      field_values: plain_field_values(provider, provider_block)
+      field_values: plain_field_values(provider, provider_block),
+      # Names this build of the form; the key field's id carries it, so a form
+      # built again from the saved settings gets a new, empty key field.
+      generation: System.unique_integer([:positive, :monotonic])
     }
   end
 
@@ -2415,13 +2507,13 @@ defmodule FermixWebWeb.SetupLive do
   defp meetings_saved_message(true), do: "Meetings saved. Restart to apply."
   defp meetings_saved_message(false), do: "Meetings saved."
 
-  # The meetings tools are registered once, at boot, from `Meetings.ready?/0`
-  # (enabled plus either the notetaker binary or the full Zoom credential set),
-  # so a change to any of those keys only reaches the model after a restart —
-  # the same boot-seeded gate the computer-use save asks a restart for. The
-  # remaining keys (bot name, announcement, backend) are read per meeting. The
-  # comparison runs against the loaded config so an unset key reads as its
-  # default rather than as a change.
+  # The meetings tools are registered once, at boot, from `Meetings.offered?/1`
+  # (enabled plus either the notetaker binary or the full Zoom credential set,
+  # or an Always On server), so a change to any of those keys only reaches the
+  # model after a restart — the same boot-seeded gate the computer-use save asks
+  # a restart for. The remaining keys (bot name, announcement, backend) are read
+  # per meeting. The comparison runs against the loaded config so an unset key
+  # reads as its default rather than as a change.
   defp meetings_restart_required?(%MeetingsConfig{} = previous, changes) do
     Enum.any?(@meetings_restart_keys, fn key ->
       Keyword.has_key?(changes, key) and Keyword.get(changes, key) != Map.fetch!(previous, key)
@@ -2706,19 +2798,14 @@ defmodule FermixWebWeb.SetupLive do
   # delivery pass uses, pure config reads.
   defp skill_curation_destination do
     case SkillCurationDelivery.resolve_target() do
-      {:ok, target} -> "Proposals arrive in #{target.platform}."
+      {:ok, target} -> "Proposals arrive in #{OwnerInbox.place(target)}."
       :no_delivery_target -> "Proposals wait in /skills proposals until a channel owner is set."
     end
   end
 
-  # Names where check-ins will land (MILESTONE_78_OPEN_LOOPS §10): the owner
-  # inbox they are sent to, pure config reads.
-  defp open_loops_destination do
-    case OwnerInbox.resolve() do
-      {:ok, inbox} -> "Check-ins will arrive in #{inbox.platform}."
-      :no_delivery_target -> "Until a channel has an owner configured, Fermix records no loops."
-    end
-  end
+  # Where check-ins land (MILESTONE_78_OPEN_LOOPS §10): the conversation the
+  # loop came from.
+  defp open_loops_destination, do: "A check-in arrives in the chat where you mentioned it."
 
   defp tool_summary do
     if Process.whereis(CapabilityRegistry) do
@@ -4116,12 +4203,9 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   defp refresh_report_preserving_provider_form(socket, message) do
-    provider_form = socket.assigns.provider_form
-
     socket
-    |> refresh_report(message)
-    |> assign(:provider_form, provider_form)
-    |> assign_model_sources(provider_form)
+    |> assign_report(Wizard.report(), socket.assigns.provider_form)
+    |> flash_info(message)
   end
 
   # --- xAI (Grok) loopback OAuth ---------------------------------------------
@@ -4337,7 +4421,7 @@ defmodule FermixWebWeb.SetupLive do
 
   # The web's listing seam feeds the one model check every sign-in door runs.
   defp ensure_codex_model(wizard) do
-    impl = model_listing_impl()
+    impl = ModelSource.listing_impl()
 
     case admit_provider_action() do
       :ok -> LiveModel.ensure(:openai_codex, listing: &impl.live_models/2, wizard: wizard)
@@ -4651,56 +4735,6 @@ defmodule FermixWebWeb.SetupLive do
     |> Keyword.get(provider, [])
   end
 
-  # Static catalog options always; live listing (installed Ollama models /
-  # the upstream OpenRouter catalog) layered on for the providers that
-  # have one. Synchronous with a tight timeout — setup page only.
-  defp assign_model_sources(socket, provider_form) do
-    provider = provider_form.provider
-
-    socket
-    |> assign(:provider_models, models_for_safe(provider))
-    |> assign_live_listing(provider, provider_form)
-  end
-
-  defp assign_live_listing(socket, provider, provider_form) do
-    impl = model_listing_impl()
-
-    if impl.live?(provider) do
-      assign(socket, :live_models, live_listing(impl, provider, provider_form))
-    else
-      assign(socket, :live_models, nil)
-    end
-  end
-
-  # A live listing calls the provider; a device shows why it has none.
-  defp live_listing(impl, provider, provider_form) do
-    case admit_provider_action() do
-      :ok -> impl.live_models(provider, listing_opts(provider, provider_form))
-      {:error, {:device_role, sentence}} -> {:error, sentence}
-    end
-  end
-
-  defp listing_opts(:ollama, provider_form) do
-    case Map.get(provider_form.field_values || %{}, :ollama_base_url) do
-      url when is_binary(url) and url != "" -> [base_url: url]
-      _absent -> []
-    end
-  end
-
-  defp listing_opts(_provider, _provider_form), do: []
-
-  defp model_listing_impl do
-    Application.get_env(:fermix_web, :model_listing_impl, ModelListing)
-  end
-
-  defp models_for_safe(provider) do
-    if provider in Descriptor.ids() do
-      ModelCatalog.models_for(provider)
-    else
-      ModelCatalog.models_for(:openai)
-    end
-  end
-
   defp secret_set?(config, key), do: config |> Keyword.get(key) |> present?()
   defp channel_enabled?(config, default), do: Keyword.get(config, :enabled, default) == true
 
@@ -4756,8 +4790,8 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   # The open-loops toggle (MILESTONE_78_OPEN_LOOPS §10), the same hidden-false
-  # pairing; the wizard reducer writes `enabled = true` on accept and deletes
-  # the key on decline (default already false).
+  # pairing; the wizard reducer writes `enabled = false` on decline and deletes
+  # the key on accept (default already true).
   defp maybe_put_open_loops_enabled(answers, params) do
     case Map.fetch(params, "open_loops_enabled") do
       {:ok, "true"} -> [{:open_loops_enabled, true} | answers]

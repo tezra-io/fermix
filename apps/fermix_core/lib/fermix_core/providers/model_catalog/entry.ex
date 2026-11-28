@@ -28,6 +28,11 @@ defmodule FermixCore.Providers.ModelCatalog.Entry do
   Codex, whose ChatGPT plan has no 272k repricing: set, a Codex conversation
   takes it as `context_window` and compacts at 500,000 tokens; `nil` (the
   default), Codex uses the API's facts. Read only for `:openai_codex`.
+
+  `fast?` is whether the vendor runs this model at a faster tier when the
+  provider's Fast mode is on (OpenAI `service_tier: "fast"`, Anthropic
+  `speed: "fast"`); `false` (the default) means the model runs at standard
+  speed whatever the setting says. Consumed via `ModelCatalog.fast?/2`.
   """
   @enforce_keys [:id, :label, :context_window]
   defstruct [
@@ -39,7 +44,8 @@ defmodule FermixCore.Providers.ModelCatalog.Entry do
     :compaction_ceiling,
     :openai_codex_window,
     reasoning_effort?: true,
-    vision?: true
+    vision?: true,
+    fast?: false
   ]
 
   @type t :: %__MODULE__{
@@ -51,6 +57,7 @@ defmodule FermixCore.Providers.ModelCatalog.Entry do
           compaction_ceiling: pos_integer() | nil,
           openai_codex_window: pos_integer() | nil,
           reasoning_effort?: boolean(),
-          vision?: boolean()
+          vision?: boolean(),
+          fast?: boolean()
         }
 end

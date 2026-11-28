@@ -21,14 +21,16 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   subscribes again when it comes back, trying at most `@watch_tries` times a
   second apart. Every act runs in `start_async` too.
 
-  **Secrets.** A passphrase lives only in the submitted event and the one
-  act it becomes (`AlwaysOn.Input`, whose inspection withholds it): never in
+  **Secrets.** A passphrase or a code from Add a computer lives only in the
+  submitted event and the one act it becomes (`AlwaysOn.Input`, whose
+  inspection withholds both): never in
   an assign, and every field is drawn empty, its form replaced after each
   submit (`form_gen`). The one-time code of the owner's server is held in
   `Code`, whose inspection withholds it, and copied from the page by the
   `CopyText` hook, never through an event.
 
-  **Move now** on the computer that sets Always On up restarts the engine:
+  **Move now** on the computer that sets Always On up, and Join again on a
+  computer its server removed, restart the engine:
   the restart overlay goes up first, with the tab stamped into the url
   (`push_patch`), and the act runs once the overlay had `@overlay_ms` to
   draw; a refusal takes it down and shows its sentence. On success the page
@@ -179,6 +181,7 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   @tab_requests %{
     "provider" => {"settings.apply", "providers.openai"},
     "realtime" => {"settings.apply", "realtime"},
+    "phone_calls" => {"settings.apply", "phone_calls"},
     "channels" => {"settings.apply", "channels.telegram"},
     "transcription" => {"settings.apply", "transcription"},
     "plugins" => {"plugins.list", nil},
@@ -422,6 +425,10 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
   # owner typed them; the engine reads them.
   defp needed("sas", fields), do: {:ok, %{"sas" => fields["sas"]}}
 
+  # The code Add a computer opened, for Join again (M102 J1); the engine
+  # reads it, and the page keeps it nowhere.
+  defp needed("code", fields), do: {:ok, %{"code" => fields["code"]}}
+
   # -- the step ------------------------------------------------------------------
 
   defp act(socket, action, input) do
@@ -443,6 +450,8 @@ defmodule FermixWebWeb.SetupLive.AlwaysOn do
 
   # Only this engine's own move restarts it at once; a linked desktop's move
   # back restarts it only once its home is in place.
+  # A join restarts this engine wherever it runs (M102 J1).
+  defp restarts_here?(%{"id" => "join"}, _state), do: true
   defp restarts_here?(%{"id" => id}, %{forwarding: []}), do: id in @moves
   defp restarts_here?(_action, _state), do: false
 

@@ -33,7 +33,8 @@ The modules it describes:
 Not modelled, each covered elsewhere:
 - the other steps of `home.act` (Move back, Move now, Cancel, the review of
   what a computer keeps on for its server, adding a computer and the
-  owner's answer to one that asks to join, and the rest): one act each
+  owner's answer to one that asks to join, Join again on a computer its
+  server removed, and the rest): one act each
   through the same serializer and key rule, with no job of the family
   (`always_on_test.exs`; `home_return` models the move back's);
 - a computer that joined the home, which has no moved marker and is offered

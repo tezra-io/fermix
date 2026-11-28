@@ -455,7 +455,7 @@ command `own_server` answers; Fermix creates, powers and deletes no server.
             "note": "Check that your server is on and online. If it is gone for good, restore Fermix on this Mac.",
             "alternatives": [{"id": "restore_here", "label": "Restore on this Mac",
                               "needs": ["recovery_passphrase"],
-                              "confirm": "Restore Fermix on this Mac from its backup of Sunday, May 4, 2031 at 12:00 PM CEST?\nConfirm only once you deleted your server, or stopped it for good: if it runs again, two copies of Fermix answer the same channels.\nMessages, memory and jobs since that backup are gone.",
+                              "confirm": "Restore Fermix on this Mac from its backup of Sunday, May 4, 2031 at 12:00 PM CEST?\nConfirm only once you deleted your server, or stopped it for good: if it runs again, two copies of Fermix answer the same channels.\nMessages, memory and jobs since that backup are gone.\nAny other computer that joined your server is disconnected from Fermix, and can join again once Fermix is on a server.",
                               "key": "er-r-ReXG6gOEo4Q7ANhcQ"}]},
  "notice": {"id": "cannot_reach:2031-05-04T11:49:00Z",
             "sentence": "Fermix cannot reach your server. Your messages wait until it is back."},
@@ -509,6 +509,9 @@ it with their "update Fermix" screen, so they raise their own minimum for
   Either passphrase is sent as `input.recovery_passphrase`; `restore_here`
   needs `recovery_passphrase` too, the key the copy it restores was written
   for, and `change_passphrase` needs `new_recovery_passphrase`.
+  `approve_computer` needs `sas`, and `join` needs `code`: the code Add a
+  computer opened, which carries a one-time secret, so the surface asks for
+  it masked and sends it as `input.code`.
 - `confirm` is what the owner accepts before Fermix moves, restores, forgets
   a server or changes the recovery passphrase; null otherwise. Its parts are
   one per line (`\n`): the question, then each thing it says, which an
@@ -661,17 +664,30 @@ a code and a six-digit check, and moves nothing.
   `add_computer` ("Add a computer"; no needs, no confirm) in
   `detail.alternatives`. Its `result` is `{code, expires_at}`, answered once: the
   code works once, for thirty minutes, for a computer and for nothing else.
+  It works only while the server's window for a computer is open, which no
+  screen draws: a surface that shows the code clears it once the window
+  closes. That window is the server's `enrollment` (on a linked computer,
+  `primary_home.enrollment`): the code is open while its `purpose` is
+  `computer`, its `state` is `open` and its `expires_at` is the one the
+  result answered; any other state (a computer took the code, it was added
+  or not, its half hour ran out), another `expires_at` (a newer code took
+  its place) or none means it closed, and that change is told as
+  `home_status_changed` like any other (M102 J4).
   While a code for the owner's own server is open the step is refused
   (`unavailable`, "A code for your own server is open. Use it or cancel it
   before you add a computer."), and that code stays as it is.
-- The new computer takes the code in `computer.join.start` (or `fermix
-  computer join`, with Fermix stopped there, which asks for the code or reads it piped
-  in and never takes it as an argument). Its own `home.status` then
+- The new computer takes the code in `computer.join.start`, which the apps
+  send, and so does `fermix computer join` there (it asks for the code or
+  reads it piped in, never takes it as an argument, and needs Fermix running,
+  as the apps do). Its own `home.status` then
   carries `join` and its summary is `creating` with `cancel` beside it (no
   action: nothing is the owner's to do there while it dials or waits):
   "Connecting this Mac to your Fermix on <server>." (`outcome` `running`),
-  then, once the server answered, "Type 482 913 on <server>, where it asks
-  you to add this Mac." (`outcome` `waiting`; "this computer" on Linux). The
+  then, once the server answered, "Type 482 913 in Always On on a computer
+  already in your Fermix, where it asks to add this Mac." (`outcome`
+  `waiting`; "this computer" on Linux): the server has no screen, so the
+  owner adds it on a computer of the home, and the server's name says only
+  where Fermix runs. The
   digits show only here, on the computer that asks: they prove the computer
   the owner looks at is the one asking, so the owner reads them here and
   types them where the home asks. A
@@ -709,14 +725,23 @@ a code and a six-digit check, and moves nothing.
   comes up clears it, and is used only once it did). The link is the one
   record of it: its summary, with Fermix running or stopped, is
   `retired`: "Your server no longer knows this Mac. To join your Fermix
-  again, enter a new code from Add a computer." That link is no home of its
-  own: `computer.join.start` (or `fermix computer join`, with Fermix
-  stopped) with a new code first lets go of it here as `computer.disconnect`
-  does (its key, what the server may use here, the link), then joins as
-  above. A code it cannot join with leaves the link as it is, and so does a
-  running Fermix whose session came up again meanwhile (the server knows
-  this computer again: "This computer already has a Fermix of its own (it
-  holds a link to a server)…"). A letting go that fails part-way leaves the
+  again, enter a new code from Add a computer.", and its `action` is `join`
+  ("Join again"; `needs` `["code"]`: the surface asks for the code masked
+  and sends it as `input.code`; no confirm), so no app works out "joined,
+  then removed" on its own (M102 J1). That link is no home of its own:
+  `join`, or `computer.join.start` (which `fermix computer join` sends),
+  with a new code first lets go of it here as `computer.disconnect` does
+  (its key, what the server may use here, the link), then joins as above,
+  and the engine restarts. A code it cannot join with leaves the link as it
+  is, and so does a running Fermix whose session came up again meanwhile
+  (the server knows this computer again: "This computer already has a
+  Fermix of its own (it holds a link to a server)…"). The server's word
+  reaches the computer only as the answer to its relay's dial, so a link
+  that does not say revoked while the relay has no session up with the
+  server is refused too, `unavailable` with "Fermix has not reached your
+  server from this computer yet, so it cannot tell whether your server
+  still knows this computer. Try again in a minute." (a computer removed
+  while its Fermix was stopped, before its first dial since). A letting go that fails part-way leaves the
   link, and the next join finishes it; a refusal after the link went
   leaves this computer its own home with no link. The computer the home
   moved from is still refused (its moved marker), so its link and its own
@@ -865,7 +890,7 @@ Always On changes*).
 | `moving` | the computer the move leaves, and a linked desktop during a move back or a restore | The move runs; once that computer waits on the server's confirmation the sentence says Fermix keeps trying. `progress`, and on the move and the move back `steps`, `route` and, while bytes move, `transfer` (*A flow's steps and progress*). |
 | `on` | a linked desktop | Fermix runs on the server. `detail`: `server` (`{name, version}`), `backups` (`{place, at}` for each place's newest verified backup), `copies_bytes` (the space this computer's copies take), `disk_used`, `alternatives` (`back_up_now`, `add_computer`, and, only where the home moved from this computer, `move_back` where this engine starts again by itself; one run from a terminal has a `Move back` line instead, saying why in the move back's own refusal; where this engine cannot read a home the server's engine writes (a newer one), `update` labelled `Update Fermix on this Mac first` stands in place of `move_back`, as it does of `restore_here` wherever that would be offered), `backup` (*Backup settings*), where the server serves any, `webhooks` (*Inbound webhooks*), and, where any applies, `not_yet` (*What Always On does not do yet*); while its server's restart is required, `restart_server` first in `alternatives` (*Restarting the server*); while this computer waits for the owner's review of its switches, `review_offers` is its action and `note` says where they are (*What a computer keeps on for its server*); its `lines` end with `Connection` while the link's session is up and its path is known: `Direct`, or `Through Fermix's network` through Fermix's relay. |
 | `undone` | the computer the move left | The move was undone and its server is still held (`try_again`, and `cancel`, `Forget this server`, with `ready`'s confirm in `detail.alternatives`, once the undoing is over; `note`, why, in the move's own words, where its record has them), or the engine is restarting as it was (no action). |
-| `retired` | a computer the move left, and a computer that joined | It has no link to the server, or the server no longer knows it. On a server's own copy that a move back left serving nothing, the sentence names where Fermix moved back to (the marker's `to`). `restore_here` in `detail.alternatives` where it applies (*Moving back*). A computer that joined (no moved marker) says what is true of it instead: "Your server no longer knows this Mac. To join your Fermix again, enter a new code from Add a computer." once its server forgot it (*Adding a computer*), and "This Mac is not connected to a Fermix." with no link, while it restarts as its own home ("this computer" on Linux); no action. |
+| `retired` | a computer the move left, and a computer that joined | It has no link to the server, or the server no longer knows it. On a server's own copy that a move back left serving nothing, the sentence names where Fermix moved back to (the marker's `to`). `restore_here` in `detail.alternatives` where it applies (*Moving back*). A computer that joined (no moved marker) says what is true of it instead: "Your server no longer knows this Mac. To join your Fermix again, enter a new code from Add a computer." once its server forgot it, with `join` (`Join again`, needs `code`) its action (*Adding a computer*), and "This Mac is not connected to a Fermix." with no link, while it restarts as its own home ("this computer" on Linux), with no action. |
 | `candidate` | the server, before its move | It waits for its move, or receives the home. |
 | `primary` | the server, after its move | Fermix runs there. `detail.alternatives` holds `add_computer`; while a computer asks to join, the sentence names it and the action is `approve_computer` (*Adding a computer*). No `detail.webhooks` and no `detail.backup`: its desktops' `on` draws them. `detail.not_yet` where any of the home's applies (*What Always On does not do yet*), which its desktops read. For a week after its own settings file left out what it had inherited, its `notice` is `server_sandbox:<at>`. |
 | `problem` | anywhere | `detail.kind` names it, `detail.note` adds one sentence where the screen has one (what to check or do, a failure's own words), `detail.seen_at` is when Fermix last saw what it rests on, and `detail.alternatives` lists the other steps. Its action is the one step that fixes it, or none where no step of the owner's does. |
@@ -915,7 +940,11 @@ gone included: `creating` while it connects to the server (no action,
 ("Fermix still runs on your server. It moves back to this Mac when you
 press Move now.", its note until when this computer waits: `move_now` needs
 the server's `recovery_passphrase`, its confirm built on the desktop says
-what runs here again; `cancel` in `detail.alternatives`; `detail` the server
+what runs here again, what the move back costs, and each computer it
+disconnects, by the name its server's `computers` lists (every row but
+`this_computer`; a home off a server holds no computer yet, so a move back
+drops every computer's row, and each can join again once Fermix is on a
+server); `cancel` in `detail.alternatives`; `detail` the server
 and `waits_until`; its notice says the same: "Fermix still runs on your
 server. Open Always On and press Move now to move it back to this Mac."),
 `moving` from the server's start of
@@ -938,8 +967,11 @@ silent) and this computer keeps a copy of its snapshots,
 `detail.alternatives` adds `restore_here` (needs
 `recovery_passphrase`; its confirm asks the owner's word that the server is
 deleted, or stopped for good, since a server that runs again answers the
-same channels as the restored copy, names the date of the copy it restores
-and says what is lost). Fermix deletes no server for it: one job of its own
+same channels as the restored copy, names the date of the copy it restores,
+says what is lost, and that any other computer that joined the server is
+disconnected and can join again once Fermix is on a server: a restore
+drops every computer's row too, and with the server silent no list of them
+is at hand to name). Fermix deletes no server for it: one job of its own
 (`home_restore`) restores the copy, and the screen is `moving` from the
 press until this computer restarts as the primary. A restore that stopped
 before its copy was in place offers `restore_here` again. Back on this
@@ -997,6 +1029,7 @@ own update.
 | `approve_computer` | adds the computer that waits, with the six digits it shows (`input.sas`; spaces are dropped; anything but six digits is `invalid_params` on `sas`, "Type the six digits the new computer shows.", and nothing is sent): `home.enroll.approve` on the server; `result` is `{device_id, name}`, the computer as the home added it |
 | `deny_computer` | does not add the computer that waits (`home.enroll.deny` on the server), and its code is spent; `result` is null |
 | `cancel` (a join) | on the computer that joins: ends the join wherever it stands, deletes the key it made, and restarts the engine as its own home |
+| `join` | Join again, on a computer its server removed: joins the home `input.code` names as `computer.join.start` does, letting go of the old link first, and restarts the engine; `result` is null. A code it cannot join with, or none, is `invalid_params` on `code` with `computer.join.start`'s sentence, and every other refusal is `computer.join.start`'s (`unavailable` {`capability`: `computer`}); the old link stays |
 | `move_back` | on a linked desktop: makes this computer's own checks first, so a refused one asks the server for nothing, then asks the server for a copied code (`home.enroll.open`, which names this desktop), writes this desktop's candidate for the home beside it and the move back's record, and starts receiving beside the link; a step after the code that does not go through withdraws it (`home.enroll.withdraw`), and the refusal's sentence says so when the server could not be asked. Refused, `unavailable` with a sentence, while the server reports a move of its own, and where Fermix would not start again by itself (run from a terminal) |
 | `cancel` (a move back) | stops receiving, closes the server's copied code (`home.enroll.withdraw`; one the server cannot be asked to close lapses by itself) and forgets the move back |
 | `change_passphrase` | Change, in the backup settings: a new recovery passphrase (`input.recovery_passphrase`, collected twice), set on the server as `home.snapshots.passphrase` sets it (sent over the link from a linked desktop); backups made before keep the key they were written for; `result` is null. A shorter one is `invalid_params` on `recovery_passphrase` |
@@ -1075,6 +1108,7 @@ daemon onto anything else.
 | `doctor.cancel` | `session_id` | The terminal session view. Cancelling a finished session is a no-op, not an error. |
 | `logs.query` | `limit`, `level`, `subsystem`, `search`, `direction`, `cursor` | A bounded page of redacted entries plus the opaque cursor for the next page in the same direction. |
 | `lifecycle.prepare` | none | `lease_id` and the relative `ttl_ms` of the single drain window. |
+| `lifecycle.prepare_restart` | none | The owner's own restart (`fermix restart`, the apps' restart to apply): the same window and answer as `lifecycle.prepare`, refused with `unavailable` {`capability`: `phone_calls`, `sentence`} while a phone call is positively in progress (its worker runs), since the restart would hang it up with no outcome read; the sentence says how to go on, and no window opens. A call record left not ended with no worker, or call records that cannot be read, do not refuse it: those are what a restart clears, and the engine's stop hangs up any live call first. An update, a move or a disable takes `lifecycle.prepare`, which no call holds. A daemon that does not publish it runs no phone calls, so a client asks it for `lifecycle.prepare`. Minimum version `2`. |
 | `lifecycle.commit` | `lease_id` | Runs the daemon's shutdown path and answers before the VM stops. |
 | `lifecycle.cancel` | `lease_id` | Releases the window with the daemon untouched. |
 | `diagnostics.build` | none | A bounded, field-allowlisted, scrubbed diagnostic object for user-selected export. |
@@ -1095,7 +1129,7 @@ daemon onto anything else.
 | `job.list` | none | Every job this daemon retains, oldest first, as `{jobs, primary_missing}`. What lets a reopened surface find a run it started rather than starting a second one. On a computer linked to its server it is composed (see *After a move*): the server's jobs, oldest first, then the ones this computer started itself, oldest first, whose ids begin `computer.` (`computer.job:<id>`), so a pane reopened over this computer's own install finds it; at most 40, and `primary_missing` the sentence while the server's are missing; null everywhere else. `primary_missing` came after the method: a client reads a missing one as null. Minimum version `2`. |
 | `auth.start` | `provider` | Starts a browser sign-in and answers with the job plus the authorize url and its lifetime, returned once. `openai_codex` signs in with ChatGPT: a sign-in that leaves ChatGPT plan usage off fails the job with its sentence, and a completed one first makes sure the default model is one the account lists. When that check cannot be made (the account's model list could not be read, or the model could not be saved), the sign-in still completes and its result carries `model_warning`, the daemon's sentence saying the default model was not checked and why, beside `account_label`. The field is optional: absent means the check was made, and a client that does not know it shows the sign-in as completed. `mcp:<name>` signs in one MCP server the owner added, a remote one whose `auth` is `auto`, and is refused with `invalid_params` on `provider` and a sentence for a name no server has, a server on this Mac, one that sends a key and one set to need no sign-in. Minimum version `2`. |
 | `auth.import.start` | `source` | Adopts a sign-in this Mac already has, from Claude Code. A job, because reading the keychain can prompt. `codex_cli` is still accepted as a source and refused with `invalid_params` and a sentence: a Codex CLI sign-in is no longer adopted, and `openai_codex` signs in with ChatGPT through `auth.start`. Minimum version `2`. |
-| `auth.logout` | `provider` | Forgets one provider's local session and reverts the route it fed. Nothing is revoked upstream, except for `openai_codex`: its sign-out revokes the ChatGPT session and keeps the registration, so the next sign-in reuses it. `mcp:<name>` forgets one MCP server's sign-in, revokes nothing upstream, and starts the server again without it; a client its sign-in registered is kept for the next one. Minimum version `2`. |
+| `auth.logout` | `provider` | Forgets one provider's local session and reverts the route it fed. Nothing is revoked upstream, except for `openai_codex`: its sign-out revokes the ChatGPT session and forgets the registration, so the next sign-in asks which account and workspace to use. `mcp:<name>` forgets one MCP server's sign-in, revokes nothing upstream, and starts the server again without it; a client its sign-in registered is kept for the next one. Minimum version `2`. |
 | `plugins.list` | none | Every integration this daemon can show, installed or not, in one row shape, plus one entry per sign-in client a published plugin needs, each carrying the account region it is bound to and the regions this daemon offers for it. Every word on a row is the daemon's. Minimum version `2`. |
 | `plugins.install.start` | `name` | Fetches, verifies and activates one catalog plugin. A job. Minimum version `2`. |
 | `plugins.check.start` | `name` | Runs one plugin's own health check, live probe included. A job. Minimum version `2`. |
@@ -1170,9 +1204,9 @@ daemon onto anything else.
 | `home.restart` | none | On the server only: a linked computer's Restart <server> (`home.act`'s `restart_server`, M97 D28c), taken as `fermix restart` would be there, after the restart hold (`home.status.restart_hold`). Nothing holds it: answers `{when: "now", wait_s: 0, sentence}` ("Fermix on your server restarts now, with the changes that waited for it.") and restarts right after, through the daemon's one stop path, which the service manager brings back (a systemd user unit's start budget reset first, as a move's restart is). Work in progress on a computer: answers at once `{when: "after_work", wait_s, sentence}`, the hold's own sentence, and restarts once nothing holds it, the hold's own wait runs out (the oldest work ran ten minutes), or 600 seconds pass since the request, whichever is first: work that starts while it waits holds it too, within those 600 seconds, and a hold the server cannot read while it waits still holds it; one wait at a time, so a request while one waits looks again, restarting now (`when: "now"`) once nothing holds it any more and otherwise answering the same wait, `wait_s` the hold's own, never past the request's 600 seconds. Refusals, each `unavailable` {`capability`: `home`, `sentence`}: a move under way, in the hold's sentence ("A move is under way, so Fermix on your server restarts once it is done."), and a move that starts while it waits ends the wait, since the move restarts the engine itself; Fermix run from a terminal, which nothing starts again ("Fermix on your server runs from a terminal, so nothing would start it again. Restart it there."); no waiter running ("Fermix on your server cannot be restarted from here right now. Its log says why."). A param is `invalid_params` naming it. Rail-only: answered only to a desktop's forward, which a linked computer's own `home.act` sends; on `daemon.sock` it is `unavailable` {`capability`: `home`, `method`} with "Always On takes this step itself: send home.act with the action the summary offers." (*After a move*). Part of Always On (*The Always On summary*). Minimum version `2`. |
 | `home.enroll.approve` | `sas` (text: the six digits the computer that asks shows; spaces are dropped) | On the primary only: the owner adds the computer waiting on the window (`home.act`'s `approve_computer`). Its row is written, with its system, every offer off and no backup copies, under the name it said unless another device holds it (then suffixed ` 2`, ` 3` and on), it is told where its server is, and the answer is `{device_id, name}`. Refusals: `invalid_params` on `sas` for anything but six digits ("Type the six digits the new computer shows."), and for six that are not the computer's ("Those digits are not the ones the new computer showed, so it was not added. Open a new code to try again."), which denies the computer and spends the code; `unavailable` {`capability`: `home`} with "No computer is waiting to join your Fermix." when none waits, and with the daemon's sentence in any other role. Rail-only, as `home.enroll.open` is. Part of Always On (*The Always On summary*). Minimum version `2`. |
 | `home.enroll.deny` | none | On the primary only: the owner does not add the computer waiting on the window (`home.act`'s `deny_computer`). It is told, nothing of it is written, and its code is spent; with none waiting nothing changes. Answers `{denied: true}`. Rail-only, as `home.enroll.open` is. Part of Always On (*The Always On summary*). Minimum version `2`. |
-| `home.act` | `action` (an action id the summary offers, but `update`, which the surface opens itself), `key` (the `key` it was drawn with), `input` (optional: `recovery_passphrase`, text, as the action's `needs` asked; `keep_offers`, at most 32 offer ids, for `move_now` and `try_again`, the lines of the `keeps_on` block left ticked, and for `review_offers` from an app before this change, the lines it drew left ticked; `sas`, text, for `approve_computer`: the six digits the new computer shows) | Every Always On step (Always On setup §3.4, and *The Always On summary*'s *Acting on it*). The engine runs one act at a time and reads the summary first: one that does not offer `action` under `key` answers `changed` with `details.sentence` alone, and does nothing; the surface reads `home.status` again. Otherwise it runs the step and answers `{summary, result}`: the summary after it (Restore here's job already says it runs) and `result`, `own_server`'s `{code, expires_at, command, sentence, tailscale}` (the code answered once and never again, the command carrying none, `sentence` the line the code is shown with, `tailscale` the optional step that also joins the server to the owner's tailnet, `{label, sentence, command, url}`), `move_now`'s and `try_again`'s `{move_id}`, `add_computer`'s `{code, expires_at}` (answered once), `approve_computer`'s `{device_id, name}`, `restart_server`'s the server's `home.restart` answer `{when, wait_s, sentence}`, null for every other step. Refusals, each with `details.sentence`: `invalid_params` on `action` (one the surface opens itself, or no action), `key`, `input` or the field of a missing or bad input (a passphrase that is not the one set: "That is not the recovery passphrase you set."; `keep_offers` that is not a list of text: "Send the offers to keep on as a list of their ids.", or names an offer a move does not decide: "Name only what this computer may keep on for your server."); `unavailable` {`capability`: `home`} (a backup or a restore already runs, the review blocks the move, nothing to move to, a review of what the server may use that could not be saved); `external_change` and `config_unreadable` when the recovery key could not be kept; and a step sent to the server answered as the server answered it (`primary_unreachable`, `unconfirmed` among them). `input` is never logged, traced or answered. An owner decision. Device-class: a linked desktop answers it itself, sending the server's own steps over the link (*After a move*), and the server refuses one forwarded to it with `device_class_method`. A client gives it 90 s (a review sent to the server takes up to 60 s). Minimum version `2`. |
+| `home.act` | `action` (an action id the summary offers, but `update`, which the surface opens itself), `key` (the `key` it was drawn with), `input` (optional: `recovery_passphrase`, text, as the action's `needs` asked; `keep_offers`, at most 32 offer ids, for `move_now` and `try_again`, the lines of the `keeps_on` block left ticked, and for `review_offers` from an app before this change, the lines it drew left ticked; `sas`, text, for `approve_computer`: the six digits the new computer shows; `code`, text, for `join`: the code Add a computer opened) | Every Always On step (Always On setup §3.4, and *The Always On summary*'s *Acting on it*). The engine runs one act at a time and reads the summary first: one that does not offer `action` under `key` answers `changed` with `details.sentence` alone, and does nothing; the surface reads `home.status` again. Otherwise it runs the step and answers `{summary, result}`: the summary after it (Restore here's job already says it runs) and `result`, `own_server`'s `{code, expires_at, command, sentence, tailscale}` (the code answered once and never again, the command carrying none, `sentence` the line the code is shown with, `tailscale` the optional step that also joins the server to the owner's tailnet, `{label, sentence, command, url}`), `move_now`'s and `try_again`'s `{move_id}`, `add_computer`'s `{code, expires_at}` (answered once), `approve_computer`'s `{device_id, name}`, `restart_server`'s the server's `home.restart` answer `{when, wait_s, sentence}`, null for every other step. Refusals, each with `details.sentence`: `invalid_params` on `action` (one the surface opens itself, or no action), `key`, `input` or the field of a missing or bad input (a passphrase that is not the one set: "That is not the recovery passphrase you set."; `keep_offers` that is not a list of text: "Send the offers to keep on as a list of their ids.", or names an offer a move does not decide: "Name only what this computer may keep on for your server."); `unavailable` {`capability`: `home`} (a backup or a restore already runs, the review blocks the move, nothing to move to, a review of what the server may use that could not be saved); `external_change` and `config_unreadable` when the recovery key could not be kept; and a step sent to the server answered as the server answered it (`primary_unreachable`, `unconfirmed` among them). `input` is never logged, traced or answered. An owner decision. Device-class: a linked desktop answers it itself, sending the server's own steps over the link (*After a move*), and the server refuses one forwarded to it with `device_class_method`. A client gives it 90 s (a review sent to the server takes up to 60 s). Minimum version `2`. |
 | `computers.rename` | `device_id`, `name` (text, each at most 256 bytes) | Names a computer of the home (M97): `name` is trimmed and must be one line of 1 to 64 bytes, held by no other computer of the home and not the server's own name, each compared without case. Answers `{computer}`, the computer under its new name as `home.status` lists it in `computers`. Refusals: `invalid_params` with `field` and `sentence`, on `name` ("Give the computer a name of one line, at most 64 characters.", "Another computer of yours is already called <name>.", "Your server is already called <name>." or, when the name could not be written, "The name could not be saved. See the daemon log.") or on `device_id` ("Your Fermix has no such computer."); a missing or non-text parameter, or one it does not take, is `invalid_params` with `field` alone. Primary-class: a linked computer forwards it to its server (*After a move*). Part of Always On: an engine from before it neither lists it in `hello` nor serves it (*The Always On summary*). Minimum version `2`. |
-| `computer.join.start` | `code` (text, at most 4,096 bytes: the code Add a computer opened) | This computer joins the home the code names (M97, *Adding a computer*): it makes its own key in the secret store, records the join (`device/join.json`, mode `0600`), becomes a device, and the engine restarts, dials the server and waits for the owner there; `home.status` then carries `join`. Answers `{joining: true, sentence}`. Refusals, each with `sentence`: `invalid_params` on `code` for a code Fermix did not open ("That is not a code Fermix opened. Copy the code again from Add a computer."), one for the owner's own server ("That code sets up a server of your own, so a computer cannot join with it. Use Add a computer in Always On.") and one that expired ("That code expired. Open a new one with Add a computer."); `unavailable` {`capability`: `computer`} for a computer that has a home of its own ("This computer already has a Fermix of its own (it holds <what>), so it cannot join another. Two homes cannot be merged.": any message, memory, scheduled job or computer history note, a paired phone or computer, the moved marker, or a link to a server, but not one its server revoked, which the join first lets go of here as `computer.disconnect` does once the code is one it can join with (*Adding a computer*); a memory that only repeats the home's settings, as every settings save and the first start write the owner's name, time zone and communication style and the assistant's name, is not one, so a computer whose Fermix started, or whose owner finished setting it up, may still join; nothing is deleted to make a home empty), one already joining, a secret store that cannot keep the key, and a link it could not let go of. A refusal of the home or the code leaves nothing behind; one after the join let go of a link its server revoked leaves this computer the primary of its own home, with no link (*Adding a computer*). An owner decision. Device-class: answered on the computer that asks. Part of Always On (*The Always On summary*). Minimum version `2`. |
+| `computer.join.start` | `code` (text, at most 4,096 bytes: the code Add a computer opened) | This computer joins the home the code names (M97, *Adding a computer*): it makes its own key in the secret store, records the join (`device/join.json`, mode `0600`), becomes a device, and the engine restarts, dials the server and waits for the owner there; `home.status` then carries `join`. Answers `{joining: true, sentence}`. Refusals, each with `sentence`: `invalid_params` on `code` for a code Fermix did not open ("That is not a code Fermix opened. Copy the code again from Add a computer."), one for the owner's own server ("That code sets up a server of your own, so a computer cannot join with it. Use Add a computer in Always On.") and one that expired ("That code expired. Open a new one with Add a computer."); `unavailable` {`capability`: `computer`} for a computer that has a home of its own ("This computer already has a Fermix of its own (it holds <what>), so it cannot join another. Two homes cannot be merged.": any message, memory, scheduled job or computer history note, a paired phone or computer, the moved marker, or a link to a server, but not one its server revoked, which the join first lets go of here as `computer.disconnect` does once the code is one it can join with (*Adding a computer*); a memory that only repeats the home's settings, as every settings save and the first start write the owner's name, time zone and communication style and the assistant's name, is not one, so a computer whose Fermix started, or whose owner finished setting it up, may still join; nothing is deleted to make a home empty), one already joining, a link that does not say revoked while its relay has no session up with the server ("Fermix has not reached your server from this computer yet, so it cannot tell whether your server still knows this computer. Try again in a minute."), a secret store that cannot keep the key, and a link it could not let go of. `fermix computer join` sends it to the running Fermix, and Always On's `join` joins through it. A refusal of the home or the code leaves nothing behind; one after the join let go of a link its server revoked leaves this computer the primary of its own home, with no link (*Adding a computer*). An owner decision. Device-class: answered on the computer that asks. Part of Always On (*The Always On summary*). Minimum version `2`. |
 | `computer.join.cancel` | none | Ends this computer's join wherever it stands: the key it made and its record go, the engine restarts as its own home, and `{cancelled: true, sentence}` is the answer; `unavailable` {`capability`: `computer`} with "This computer is not joining a Fermix." when none is under way. `home.act`'s `cancel` on the joining screen does the same. An owner decision. Device-class. Part of Always On (*The Always On summary*). Minimum version `2`. |
 | `computer.disconnect` | `confirmed` (optional boolean) | This computer leaves the home it is linked to (M97): it tells the server (`mobile.devices.revoke` for its own id, over the link), which forgets it and closes its session, then deletes its key from the secret store, its link and what the server may use here, and the engine restarts; a computer that joined is its own home again, and the one a home moved from stays retired with its own copies of the server's backups. Answers `{disconnected: true, server_told, sentence}`. A server that cannot be told is `unavailable` {`capability`: `computer`, `sentence`: "Fermix could not tell your server. Disconnect anyway? Your server lists this computer until you remove it there.", `confirm`: true} and nothing changes; with `confirmed: true` the computer leaves anyway and `server_told` is false. A computer with no link is `unavailable` with "This computer is not connected to a Fermix." An owner decision. Device-class. Part of Always On (*The Always On summary*). Minimum version `2`. |
 | `computer.journal.list` | `limit` (integer 1 to 200, default 50), `before` (an invocation's id) | What Fermix on its server did on this computer (M97 §6.3), from this computer's own journal, which the server cannot edit: the app shows it as "What Fermix did on this computer". Answers `{entries, more}`, the newest first, at most `limit`, only those older than the invocation `before` when it is given; `more` is true while older ones remain. Each entry is `{id, at, finished_at, capability, capability_label, op, op_label, target, origin, status, refusal, result_bytes, duration_ms}`: `capability_label` and `op_label` the owner's words for `capability` and `op`, from the capability's own module, lower case as an offer's `label` (`commands` and `run a command`, `files` and `write a file`), each null where this computer's engine has no words for its id (an older journal row), which a client shows as the id, as it does for an engine before them, which sends neither; `at` when it came (an RFC 3339 instant), `finished_at` when it ended, null while it runs; `target` a short description of what it acted on (a path, a host or an action, never content); `origin` the kind of turn that asked (`chat`, `voice`, `scheduled`, `cue`, `worker`, `background`, or `computer` for a computer's own request); `status` `ok`, `failed`, `refused`, `timed_out`, `cancelled` or `unknown` (the engine stopped while it ran), null while it runs; `refusal` (`off`, `unavailable`, `outside_sandbox`, `not_attended`, `stopped_here`, `busy`, `stale_epoch`) only when refused, else null; `result_bytes` and `duration_ms` null while it runs. A request refused before it ran opens and ends at once. The journal keeps the newest 2,000 invocations of the last 7 days. A computer that never moved, and a server, answer no entries. Refusals: a parameter it does not take, a `limit` outside its range or a `before` that is not an id is `invalid_params` with `field`; a journal this computer cannot read is `unavailable` with `sentence` ("This computer's record of what Fermix did here could not be read. See the daemon log."). Device-class: answered on the computer that asks; a server refuses a forwarded one (`device_class_method`). Part of Always On (*The Always On summary*). Minimum version `2`. |
@@ -1197,6 +1231,11 @@ daemon onto anything else.
 | `accessories.check.stop` | `accessory_id` | Ends any running check and answers the status. An owner decision. Device-class. Minimum version `2`. |
 | `accessories.calibrate` | `accessory_id`, `op` (`begin`, `nudge`, `set_zero`, `cancel`), `axis` and `steps` (`nudge` only: `pan` or `tilt`, −64 to 64 and not 0) | Calibrate head, one step at a time, on an attached robot with head motion and no call. Progress shows in the accessory's `state.calibration`. Answers the status. An owner decision. Device-class. Minimum version `2`. |
 | `accessories.set` | `accessory_id`, `volume`, `brightness` (each 0 to 100), `motion` (boolean, robots with head motion only), at least one | Changes the robot's own settings and answers the status; the robot reports the values it took in `state`. An owner decision. Device-class. Minimum version `2`. |
+| `phone_calls.status` | none | Phone calls as they stand (see *Phone calls*): `enabled`, `readiness` (`ready`, and each `missing` requirement with its sentence, read as if phone calls were on), `call` (the owner's call holding the one-call slot, or null), the `summary` (`state`, `label`, `sentence`) and the `engine` that calls. Answered with phone calls off. The home's: a linked computer forwards it, and a device with no link refuses it as retired. Minimum version `2`. |
+| `phone_calls.list` | none | The owner's recent calls, newest first, at most 20, each a call view: state, outcome, uncertainty and the three costs labelled apart. No destination number. With durable memory off, `unavailable` {`capability`: `phone_calls`, `sentence`}. Placed as `phone_calls.status`. Minimum version `2`. |
+| `phone_calls.stop` | `call_id` | The owner's stop of a call in progress, the path the `phone_call` tool's cancel takes: one not yet dialed ends with nothing dialed (`stop`: `cancelled`), one dialed is asked to end and reads `stopping` until its end is known (`stop`: `stopping`). Answers `{stop, sentence, call}`. Another owner's id, or none the ledger holds, is `invalid_params` on `call_id` with the sentence; a call already over is `unavailable` {`capability`: `phone_calls`, `sentence`}, which for an unresolved call says its end is unresolved, that it holds the call slot and the two ways out. A process that is not the home's running engine (a setup page served from another tree, a command that booted one) owns none of the daemon's calls: its stop is `unavailable` with the sentence saying the call is stopped in the Fermix that is running. An owner decision. Placed as `phone_calls.status`. Minimum version `2`. |
+| `phone_calls.recovery.get` | none | Every unresolved call of the owner's (whether it was placed is unknown, or its end is unconfirmed) that still holds the slot, with what is known of it and the steps at Telnyx meanwhile (see *Phone calls*). Placed as `phone_calls.status`. Minimum version `2`. |
+| `phone_calls.recovery.confirm` | `call_id` | The owner's word that an unresolved call has ended, which they checked in their Telnyx portal: its slot is released, recorded on the call with the reason `owner_confirmed` and the time; the outcome already recorded for the call is unchanged. Answers `{sentence, call}`. If the owner is wrong, a second call can be placed while the first is still up, bounded by the connection's one channel if the owner set it as the setup asks. Only a call whose termination is unconfirmed and that still holds the slot: one in progress, one already over or released, and one past OpenAI's own limit are `unavailable` {`capability`: `phone_calls`, `sentence`}, as is the word given to a process that is not the home's running engine (its end is confirmed in the Fermix that is running); another owner's is `invalid_params` on `call_id`. An owner decision, in the apps and `fermix settings phone-calls confirm-ended` alone: no tool reaches it. Placed as `phone_calls.status`. Minimum version `2`. |
 
 Notes that the shapes alone do not carry:
 
@@ -1262,7 +1301,9 @@ Notes that the shapes alone do not carry:
   retained.
 - A **pairing session** is the third, and it is polled rather than a job: its
   view grows while it runs, and the operator decides mid-run. `mobile.pair.start`
-  opens the one pairing window and answers at once, the pane reads
+  opens the one pairing window and answers at once (a window opened while
+  remote reach still starts, as the first one of a boot does, waits up to
+  5000 ms for it, so its link carries the relay route), the pane reads
   `mobile.pair.get` (every 1000 ms is the recommended cadence) until the session
   is terminal, and `mobile.pair.decide` or `mobile.pair.cancel` ends it. One
   session is open at a time (`busy` {`operation`: `mobile.pair`} for a second
@@ -1492,6 +1533,13 @@ Notes that the shapes alone do not carry:
   until one is. A sign-in that has just completed therefore names its model at
   once, and Doctor probes the same one. Engines before this published `null`,
   or an empty value, until a model was chosen, so a client keeps accepting both.
+- **`fast` is a provider's Fast mode, off until it is turned on.** The OpenAI
+  and Anthropic settings sections publish it as a `toggle` row after Reasoning
+  effort, applied at restart, with no footer; no other provider publishes one
+  (OpenAI Codex's plan route has no fast tier).
+  A provider row in `setup.state.get` carries the stored value, or `null` while
+  unset. A model without a fast tier, and the Claude sign-in, run at standard
+  speed while it is on.
 - **`computer_use.permissions.get` never prompts**, and `installed` comes from
   the installer rather than from the probe: the feature being switched off says
   nothing about whether the helper is on disk, and that is exactly what decides
@@ -1576,14 +1624,21 @@ Notes that the shapes alone do not carry:
   advisory because the daemon's first boot seeds it from the machine (the
   system time zone, the account's full name, a default style), so its row
   fires only where the machine could not answer; engines before this gated on
-  it, so a client keeps reading `gating` rather than assuming it. A failure
-  also carries `sentence`, the engine's own words where it publishes them,
-  which a client shows in place of its own for the `detail_key`: the iMessage
-  rows (`channel:imessage:helper`, `:carrier`, `:conflict` and `:away`),
-  which name the Mac of the home that carries Messages where the engine
-  knows it ("studio-mac, the Mac that carries Messages, is asleep or
-  offline."). It is null on every other row, whose words a client keeps by
-  its key, and absent from an engine before it, which a client reads as null.
+  it, so a client keeps reading `gating` rather than assuming it. A
+  `detail_key` is a fixed key, an iMessage carrier key
+  (`channel:imessage:carrier`, `:conflict` and `:away`), or
+  `channel:<channel>` for a channel the engine lists, whose rest a client
+  reads as the channel's name. A failure also carries `sentence`, the
+  engine's own words where it publishes them, set where the row is built,
+  which a client shows in place of its own for the `detail_key`: iMessage's
+  missing helper (`channel:imessage`), the carrier rows, which name the Mac
+  of the home that carries Messages where the engine knows it ("studio-mac,
+  the Mac that carries Messages, is asleep or offline."), and Slack's Socket
+  Mode credentials (`channel:slack`). It is null on every other row, a
+  channel's own included, whose words a client keeps by its key, and absent
+  from an engine before it, which a client reads as null. Engines before
+  M102 sent `channel:imessage:helper` and `channel:slack:socket` for the
+  helper and Socket Mode rows.
 - **Restart truth has one owner.** `restart.required` and `restart.reasons` come
   from the daemon's two baselines: the application environment captured at boot,
   and the parsed settings file as this daemon last saw it. The sentence for each
@@ -2588,6 +2643,124 @@ controls work on the robot, with the app closed.
 400 characters and 8 tasks of 240-character summaries; a status wait of
 25,000 ms. Every method but a status wait answers inside the standard call
 timeout.
+
+## Phone calls
+
+`phone_calls.*` and the `phone_calls` settings section are what Settings,
+Phone calls shows (M94 §12): Fermix placing an outbound call through
+the owner's own Telnyx number, with GPT-Live conducting it. The section is the
+home's, never a computer's, so after a move every app shows and changes the
+server's, and the methods are the home's too: a linked computer forwards them,
+and a device with no link refuses them as retired (*After a move*). The app
+renders every word as the daemon sends it and derives no state of its own.
+
+**The section.** `phone_calls`, pane `phone_calls`, independent of Talk to
+Fermix: it stays visible and usable whatever Talk to Fermix's switch and engine,
+a write of either section never rewrites the other's values or secret
+references, and there is no master Voice switch. Its rows, in order:
+`phone_calls_enabled` (the switch), `phone_calls_status` (read-only: the
+summary's `label` as its value and `sentence` as its footer),
+`phone_calls_engine` (read-only: the engine that calls, a fact of this build
+and not a picker; a surface may leave it undrawn while it has one possible
+value), `phone_calls_voice` (the engine's voices),
+`phone_calls_caller_number` (the owner's Telnyx number, E.164),
+`phone_calls_sip_username` (the Telnyx connection's username),
+`phone_calls_sip_password` (a secret: `secret.set` id
+`phone_calls_sip_password`) and `openai_api_key` (a second row for the OpenAI
+provider's own key, never a second credential, shown whichever engine Talk to
+Fermix uses). The trunk address, the model, the limits and the retention are
+constants of the engine and no rows. No phone row asks for a restart; the
+OpenAI key's row carries the provider section's rule, because its write is the
+provider's. A row's footer is there only where the owner would make a
+mistake without it, and null otherwise (the voice, the connection password,
+whose one line the username's footer gives the pair). A value the section
+refuses is `invalid_params` on the row's key with the owner's sentence, and
+nothing is written.
+
+**The off switch.** `settings.apply` of `phone_calls_enabled` is one operation:
+the section is written first, and only once that write has landed does the
+switch take effect, with no restart. Off closes admission, ends a call not yet
+dialed with nothing dialed and asks a call in progress to end, and
+`side_effects` says each in the owner's words (from a process that is not
+the home's running engine, that the running engine still has its calls and
+applies the switch when it reads the setting); on reopens admission and
+nothing else, so an unresolved call keeps its slot, nothing is redialed, and
+`side_effects` says when an earlier call still holds the slot. A write the
+settings file refuses (`external_change`, `config_unreadable`) changes
+nothing and stops nothing. Turning phone calls off keeps both credentials, and
+leaves Talk to Fermix as it is. `settings.reload` applies the switch the same
+way.
+
+**What a call in progress holds.** While a call is in progress, `secret.set`
+and `secret.clear` of `openai_api_key` or `phone_calls_sip_password` answer
+`unavailable` {`capability`: `phone_calls`, `sentence`} and change nothing:
+the call reads both, and its hang-up reads the key. So does
+`lifecycle.prepare_restart`, the owner's restart, which would hang the call
+up with no outcome read. A trunk password longer
+than 4096 bytes, or with a line break or NUL in it, is `invalid_params` on
+`value`.
+
+**Three facts and a summary.** `phone_calls.status` keeps apart whether the
+owner turned phone calls on (`enabled`), whether the setup is complete
+(`readiness`, read as if they were on, each missing requirement one of
+`not_primary`, `durable_memory_off`, `openai_api_key_missing`,
+`openai_api_key_unsendable` (the stored key holds a character a request
+cannot carry), `caller_number_missing`, `sip_username_missing`,
+`sip_password_missing`, `egress_proxy_unsupported` (the network proxy would
+carry the call's live control connection, which cannot tunnel),
+`call_backend_missing` (this engine runs no backend for a call's own turns; a
+release always configures one), each with its sentence; a SpaceXAI key never
+satisfies the OpenAI one), and the call
+holding the one-call slot (`call`). The summary's `state` reads them as one
+word, the call first: `calling`, `stopping` (it was asked to end),
+`placement_unknown` (OpenAI never said whether it placed the call) or
+`termination_unconfirmed` while an uncertain call holds the slot, whether
+phone calls are on or off; then `disabled`, `needs_setup` and `ready`. The
+section's status row shows the summary's `label`, or `Unreadable` with the
+sentence when the call records cannot be read.
+
+**Who a sentence speaks to.** A call's sentences (its report, its call
+view, a stop and its refusal) are the ones a model relays to the owner and
+the apps show alike, so they never address their reader: they name the
+owner, or say what happened. Only this family's own sentences for the owner
+in a settings surface (what they can do, what their write did) say "you".
+
+**A call view.** `phone_calls.list`, `phone_calls.stop`,
+`phone_calls.recovery.confirm` and the status's `call` carry one shape, in
+the words the call's own report uses (one view of the call renders both):
+`call_id`, `state` (the ledger's, or `stopping` for a call not yet over that
+was asked to end), `placed` (`yes`, `no`: nothing reached OpenAI or it
+refused, or `unknown`: OpenAI never said), `contact_name`,
+`destination_kind` (`owner` or `business`), `outcome` and its sentence
+(null for a call never placed, which the state's sentence already says),
+`uncertain` (the remote call is not proven gone: `dispatch_unknown`,
+`closure_unconfirmed`), `holds_slot`, the state's `sentence`, `label` (how it
+went in a few words, for a list that draws one line a call; optional), `slot` (for a
+call whose termination is unconfirmed, how it holds the slot and how that
+ends, else null), `usage` (the voice time and how sure it is, the carrier's
+charges, which only Telnyx knows, and the backend turns and the tokens they reported (`backend_tokens`, null
+where none reported any; no turn reports a cost), each with its sentence,
+unknown never zero; a call never placed claims none, so its sentences and
+`voice_state` are null), `why_stopped` (one sentence per
+failure the engine wrote, null for an ordinary end), `failure_reason` (the
+engine's code, for support, never prose to show), `vendor_message` (OpenAI's
+own words as one line, outside text), `report` and the two times. It carries
+no destination number and no credential.
+
+**The recovery view.** `phone_calls.recovery.get` answers, for each
+unresolved call: when it was attempted (`attempted_at`), the destination its
+brief permitted, the provider's session id and the carrier's call id where
+they are really known (null otherwise, never derived), `slot_release_at`
+(OpenAI's own limit on a call after the dial: its ringing limit and its
+connected limit), the state's `sentence`, the `release` sentence, and
+`containment`: the owner's steps at Telnyx (end the call or turn the
+connection off in the Telnyx portal; the connection's daily spend limit and
+its one channel, if the owner set them as the setup asks, bound it meanwhile;
+once the portal shows it ended, the owner confirms it). Two things release
+the slot: the owner's word that the call ended
+(`phone_calls.recovery.confirm`), which leaves the outcome already recorded
+unchanged, and OpenAI's limit passing. Nothing else on this wire marks a
+call ended.
 
 ## Error codes
 

@@ -14,6 +14,7 @@ defmodule FermixOpik.TraceFileTest do
       "model" => "gpt-5",
       "status" => "ok",
       "session_id" => "main-1",
+      "speed" => "fast",
       "tokens" => %{"prompt" => 40, "completion" => 8}
     }
 
@@ -22,6 +23,7 @@ defmodule FermixOpik.TraceFileTest do
 
     assert meta.session_id == "main-1"
     assert meta.model == "gpt-5"
+    assert meta.speed == "fast"
     assert meta.tokens == %{prompt: 40, completion: 8}
   end
 
@@ -73,6 +75,150 @@ defmodule FermixOpik.TraceFileTest do
 
     assert {_name, _measurements, %{trigger: "cue"}} =
              TraceFile.normalize("agent_event", Map.put(base, "event", "job_run_start"))
+  end
+
+  # M106 §5.3: a replayed failure still says whether the run is run again.
+  test "a job_run_error row keeps its retry" do
+    row = %{
+      "ts" => "2026-11-20T07:00:50.000Z",
+      "type" => "agent_event",
+      "event" => "job_run_error",
+      "job_id" => "j",
+      "session_id" => "cron_j_20261120_070000_d4e5f6",
+      "status" => "error",
+      "retry_disposition" => "retry",
+      "retry_attempts" => 2,
+      "retry_at" => "2026-11-20T07:02:50.000000Z"
+    }
+
+    assert {[:fermix, :job, :run_error], _measurements, meta} =
+             TraceFile.normalize("agent_event", row)
+
+    assert {meta.retry_disposition, meta.retry_attempts, meta.retry_at} ==
+             {"retry", 2, "2026-11-20T07:02:50.000000Z"}
+  end
+
+  # M106 §5.4: a replayed failure names its heal, and a heal row replays as
+  # the heal's own event.
+  test "a job_run_error row keeps its heal, and a job_heal row is the heal's event" do
+    failed = %{
+      "ts" => "2026-11-20T07:10:00.000Z",
+      "type" => "agent_event",
+      "event" => "job_run_error",
+      "job_id" => "j",
+      "session_id" => "cron_j_20261120_071000_d4e5f6",
+      "status" => "timeout",
+      "heal" => "joined",
+      "heal_id" => "jhl_0a1b"
+    }
+
+    assert {[:fermix, :job, :run_error], _measurements, meta} =
+             TraceFile.normalize("agent_event", failed)
+
+    assert {meta.heal, meta.heal_id} == {"joined", "jhl_0a1b"}
+
+    heal = %{
+      "ts" => "2026-11-20T07:30:00.000Z",
+      "type" => "agent_event",
+      "event" => "job_heal",
+      "agent" => "scheduled:j",
+      "phase" => "delivered",
+      "heal_id" => "jhl_0a1b",
+      "job_id" => "j",
+      "platform" => "telegram"
+    }
+
+    assert {[:fermix, :job, :heal], %{count: 1}, heal_meta} =
+             TraceFile.normalize("agent_event", heal)
+
+    assert {heal_meta.phase, heal_meta.heal_id, heal_meta.platform} ==
+             {"delivered", "jhl_0a1b", "telegram"}
+  end
+
+  # M106 §5.5 (stage S3): a heal's decision and a heal run's bookends replay
+  # as their own events, with what correlates them.
+  test "job_heal_run rows replay as the heal run's bookends, and a decision keeps its words" do
+    base = %{
+      "ts" => "2031-03-04T07:30:00.000Z",
+      "type" => "agent_event",
+      "agent" => "job_heal:j",
+      "session_id" => "heal_j_20310304_073000_a1b2c3",
+      "parent_session" => "cron_j_20310304_071000_d4e5f6",
+      "heal_id" => "jhl_0a1b",
+      "job_id" => "j",
+      "run_id" => "run-4"
+    }
+
+    assert {[:fermix, :job, :heal_run_start], _m, start} =
+             TraceFile.normalize(
+               "agent_event",
+               Map.merge(base, %{"event" => "job_heal_run_start", "max_duration_ms" => 120_000})
+             )
+
+    assert {start.session_id, start.parent_session, start.heal_id, start.max_duration_ms} ==
+             {"heal_j_20310304_073000_a1b2c3", "cron_j_20310304_071000_d4e5f6", "jhl_0a1b",
+              120_000}
+
+    assert {[:fermix, :job, :heal_run_complete], %{duration_ms: 900}, complete} =
+             TraceFile.normalize(
+               "agent_event",
+               Map.merge(base, %{
+                 "event" => "job_heal_run_complete",
+                 "duration_ms" => 900,
+                 "decision" => "tell"
+               })
+             )
+
+    assert complete.decision == "tell"
+
+    assert {[:fermix, :job, :heal_run_error], _m, error} =
+             TraceFile.normalize(
+               "agent_event",
+               Map.merge(base, %{
+                 "event" => "job_heal_run_error",
+                 "duration_ms" => 120_000,
+                 "status" => "timeout",
+                 "error" => "wall-clock timeout"
+               })
+             )
+
+    assert {error.status, error.error} == {"timeout", "wall-clock timeout"}
+
+    decided = %{
+      "ts" => "2031-03-04T07:31:00.000Z",
+      "type" => "agent_event",
+      "event" => "job_heal",
+      "agent" => "scheduled:j",
+      "phase" => "decided",
+      "heal_id" => "jhl_0a1b",
+      "decision" => "tell",
+      "requested" => "raise_limit",
+      "refusal" => "not_upward",
+      "read_outside" => true
+    }
+
+    assert {[:fermix, :job, :heal], _m, heal_meta} = TraceFile.normalize("agent_event", decided)
+
+    assert {heal_meta.decision, heal_meta.requested, heal_meta.refusal, heal_meta.read_outside} ==
+             {"tell", "raise_limit", "not_upward", true}
+
+    answered = %{
+      "ts" => "2031-03-04T09:00:00.000Z",
+      "type" => "agent_event",
+      "event" => "job_heal",
+      "agent" => "scheduled:j",
+      "phase" => "answered",
+      "heal_id" => "jhl_0a1b",
+      "decision" => "propose",
+      "answer" => "leave",
+      "applied" => false
+    }
+
+    assert {[:fermix, :job, :heal], _m, answer_meta} =
+             TraceFile.normalize("agent_event", answered)
+
+    assert {answer_meta.phase, answer_meta.answer, answer_meta.applied} ==
+             {"answered", "leave", false}
   end
 
   test "a job_run_complete row carries its tool failure count" do

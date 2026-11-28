@@ -604,6 +604,39 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   defp restore_providers({:ok, value}), do: Application.put_env(:fermix_core, :providers, value)
   defp restore_providers(:error), do: Application.delete_env(:fermix_core, :providers)
 
+  # Fast mode is a boolean in each block that offers it; the round trip is
+  # seeded with the normalized app-env shapes (the config round-trip pitfall).
+  test "save/load round-trips fast mode on the OpenAI and Anthropic blocks" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    openai = [default_model: "gpt-6.2-sol", fast: true, primary: true]
+    anthropic = [default_model: "claude-opus-5-5", auth_mode: :api_key, fast: false]
+
+    snapshot = %{
+      fermix_core: [providers: [openai: openai, anthropic: anthropic]],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ ~r/\[fermix_core\.providers\.openai\][^\[]*fast = true/
+    assert contents =~ ~r/\[fermix_core\.providers\.anthropic\][^\[]*fast = false/
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    assert Enum.sort(loaded.fermix_core[:providers][:openai]) == Enum.sort(openai)
+    assert Enum.sort(loaded.fermix_core[:providers][:anthropic]) == Enum.sort(anthropic)
+
+    assert :ok = ConfigStore.save_snapshot(loaded)
+    assert {:ok, reloaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    assert reloaded.fermix_core[:providers] == loaded.fermix_core[:providers]
+  end
+
   # M57 §5: `[fermix_core.providers.openai_codex]` carries `primary`,
   # `default_model` and `reasoning_effort` and nothing else (the config
   # round-trip pitfall: seeded with the normalized app-env shapes).
@@ -1119,6 +1152,13 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   reasoning_effort = "medium"
   voice = "marin"
   max_session_minutes = 15
+
+  [fermix_core.phone_calls]
+  enabled = true
+  voice = "cedar"
+  caller_number = "+14155550142"
+  sip_username = "fermixtrunk01"
+  sip_password = "@keyring"
 
   [fermix_core.computer_use]
   enabled = true
@@ -2905,8 +2945,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   end
 
   # `[fermix_core.open_loops]` (MILESTONE_78_OPEN_LOOPS §10) is wired like
-  # skill curation with the inverse default: off until the file says otherwise.
-  test "a fresh home loads an empty open_loops section, which reads as disabled" do
+  # skill curation, default included: on until the file says otherwise.
+  test "a fresh home loads an empty open_loops section, which reads as enabled" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
 
@@ -2916,7 +2956,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert {:ok, loaded} = ConfigStore.load_runtime_config()
     open_loops = Keyword.fetch!(loaded.fermix_core, :open_loops)
     assert open_loops == []
-    refute OpenLoopsConfig.enabled?(open_loops)
+    assert OpenLoopsConfig.enabled?(open_loops)
   end
 
   test "save/load round-trips the open_loops config section" do
@@ -5047,6 +5087,37 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(providers[:venice], :base_url) == "https://api.venice.ai/api/v1"
     assert Keyword.get(providers[:venice], :default_model) == "grok-4-6"
     assert Keyword.get(providers[:venice], :primary) == true
+
+    assert :ok = ConfigStore.save_snapshot(loaded, secure_secrets: false)
+    assert {:ok, reloaded} = ConfigStore.load_runtime_config()
+
+    assert Keyword.get(reloaded.fermix_core, :providers) ==
+             Keyword.get(loaded.fermix_core, :providers)
+  end
+
+  test "a vercel block round-trips through dump -> parse -> normalize" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.providers.vercel]
+    api_key = "vck-disk"
+    base_url = "https://ai-gateway.vercel.sh/v1"
+    default_model = "spacexai/grok-4.7"
+    primary = true
+    """)
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    providers = Keyword.get(loaded.fermix_core, :providers, [])
+
+    assert Keyword.get(providers[:vercel], :api_key) == "vck-disk"
+    assert Keyword.get(providers[:vercel], :base_url) == "https://ai-gateway.vercel.sh/v1"
+    assert Keyword.get(providers[:vercel], :default_model) == "spacexai/grok-4.7"
+    assert Keyword.get(providers[:vercel], :primary) == true
 
     assert :ok = ConfigStore.save_snapshot(loaded, secure_secrets: false)
     assert {:ok, reloaded} = ConfigStore.load_runtime_config()

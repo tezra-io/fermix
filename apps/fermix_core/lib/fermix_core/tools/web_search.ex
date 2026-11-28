@@ -25,7 +25,15 @@ defmodule FermixCore.Tools.WebSearch do
     perplexity: Perplexity,
     tavily: Tavily
   }
-  @backend_names Map.keys(@backend_modules)
+  # The catalog order, stated: the order the settings pane offers them in and
+  # the management golden pins. `Map.keys/1` of a small map follows the order
+  # its atoms were created in, which differs from one compile to the next.
+  @backend_names ~w(parallel brave duckduckgo tavily exa perplexity firecrawl)a
+  if Enum.sort(@backend_names) != Enum.sort(Map.keys(@backend_modules)) do
+    raise CompileError,
+      description: "@backend_names must name every backend in @backend_modules exactly once"
+  end
+
   @max_query_length 1_024
   @max_results 10
 

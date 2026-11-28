@@ -119,6 +119,23 @@ defmodule Fermix.CLI.SetupTest do
     assert Keyword.get(opts, :openai_api_key) == "sk-test"
   end
 
+  test "--vercel-api-key is a recognized answer that routes to the terminal runtime" do
+    parent = self()
+
+    assert 0 =
+             Setup.run(["--provider", "vercel", "--vercel-api-key", "vck-test"],
+               standalone?: fn -> true end,
+               display?: fn -> true end,
+               setup_ready?: fn -> false end,
+               runtime: runtime(parent),
+               web_launcher: unexpected_web_launcher(parent)
+             )
+
+    assert_receive {:runtime, opts}
+    assert Keyword.get(opts, :provider) == "vercel"
+    assert Keyword.get(opts, :vercel_api_key) == "vck-test"
+  end
+
   # A server that reaches the internet only through a proxy has to say so before
   # setup can check anything; the flags land as answers like every other.
   test "--proxy and --proxy-bypass are recognized answers that route to the terminal runtime" do

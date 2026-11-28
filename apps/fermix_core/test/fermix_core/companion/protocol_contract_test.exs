@@ -1337,6 +1337,19 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     assert approvals =~ "When `server_hello` arrives, a client drops every card it shows"
   end
 
+  # M106 §8, D12 (stage S6): an approval card is no longer only a turn's on
+  # this socket: one asked in the app with no turn goes here too. No field
+  # and no version moved; the schema's own words say what is true now.
+  test "the schema's approval says a card may be asked in the app with no turn" do
+    description =
+      (@schema_path |> File.read!() |> Jason.decode!())["$defs"]["approval"]["description"]
+
+    assert description =~
+             "raised by a turn on this socket, or asked in the Fermix app with no turn"
+
+    assert description =~ "Sent again after server_hello, with ttl_s the seconds it has left"
+  end
+
   defp companion_only(type), do: Map.get(@companion_only_fields, type, [])
 
   defp minimal_client_payloads do

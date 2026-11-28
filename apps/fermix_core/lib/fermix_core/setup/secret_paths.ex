@@ -57,6 +57,14 @@ defmodule FermixCore.Setup.SecretPaths do
       path: [:fermix_core, :providers, :venice, :api_key],
       sandbox_env: true
     },
+    # Vercel's own name for an AI Gateway key (M105 §9 D2).
+    %{
+      key: :vercel_api_key,
+      env: "AI_GATEWAY_API_KEY",
+      env_overlay: true,
+      path: [:fermix_core, :providers, :vercel, :api_key],
+      sandbox_env: true
+    },
     %{
       key: :tavily_api_key,
       env: "TAVILY_API_KEY",
@@ -151,6 +159,18 @@ defmodule FermixCore.Setup.SecretPaths do
       optional?: true,
       # BEAM-internal HTTP/WebSocket (no subprocess), so it is not exposed via
       # [sandbox.env] — the meetbot sidecar never sees the Zoom credentials.
+      sandbox_env: false
+    },
+    # The password of the owner's Telnyx trunk connection (M94 §12), which the
+    # phone engine hands OpenAI at the call's I/O boundary so it can dial out
+    # through that one connection. BEAM-internal HTTP (no subprocess), so not in
+    # [sandbox.env].
+    %{
+      key: :phone_calls_sip_password,
+      env: "PHONE_CALLS_SIP_PASSWORD",
+      path: [:fermix_core, :phone_calls, :sip_password],
+      functionality: "Phone calls through the owner's Telnyx connection",
+      optional?: true,
       sandbox_env: false
     },
     # The S3 target of the home's snapshots (M75 §8). BEAM-internal HTTP (no

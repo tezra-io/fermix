@@ -1,0 +1,54 @@
+{
+  "name": "menu_one_key",
+  "number": "+14155550126",
+  "party": "Harrow Street Dental in San Francisco. An automated menu asks for 2 for appointments before a person answers with two openings; nothing is booked. The vendor replays the menu prompt once, with its own event id.",
+  "steps": [
+    {
+      "ring": true
+    },
+    {
+      "pause_ms": 600
+    },
+    {
+      "pick_up": "Thank you for calling Harrow Street Dental. For appointments, press 2. For billing, press 3. To hear our hours, press 4."
+    },
+    {
+      "replay": true
+    },
+    {
+      "delegate": true
+    },
+    {
+      "await": "key",
+      "timeout_ms": 45000
+    },
+    {
+      "pause_ms": 800
+    },
+    {
+      "say": "Appointments desk, this is Priya."
+    },
+    {
+      "voice": "Hi Priya, I'm an AI assistant calling for a patient. Is there an opening for a cleaning with Dr. Lin during the week of February 15th?"
+    },
+    {
+      "pause_ms": 400
+    },
+    {
+      "say": "Dr. Lin has a cleaning on Tuesday February 16th at 10 am, and one on Thursday February 18th at 3 pm. I can't hold either one; the patient needs to call us to book."
+    },
+    {
+      "voice": "Thank you, I'll pass those on. Goodbye."
+    },
+    {
+      "delegate": true
+    },
+    {
+      "await": "hangup",
+      "timeout_ms": 50000
+    },
+    {
+      "hang_up": true
+    }
+  ]
+}

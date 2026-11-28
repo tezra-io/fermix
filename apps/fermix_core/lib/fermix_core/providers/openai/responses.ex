@@ -75,6 +75,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
       |> maybe_put(:tools, tools)
       |> maybe_put(:reasoning, reasoning)
       |> maybe_put(:text, text)
+      |> maybe_put(:service_tier, service_tier(Keyword.get(opts, :speed)))
 
     turn_state = %{
       model: model,
@@ -86,6 +87,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
       session_id: Keyword.get(opts, :session_id),
       parent_session: Keyword.get(opts, :parent_session),
       reasoning_effort: reasoning_effort,
+      speed: Keyword.get(opts, :speed),
       invariant_metrics: invariant_metrics,
       request_metrics:
         Map.merge(ResponsesShared.input_metrics(input, instructions), invariant_metrics)
@@ -143,6 +145,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
       |> maybe_put(:tools, tools)
       |> maybe_put(:reasoning, reasoning)
       |> maybe_put(:text, text)
+      |> maybe_put(:service_tier, service_tier(Keyword.get(opts, :speed)))
 
     turn_state = %{
       model: model,
@@ -154,6 +157,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
       session_id: Keyword.get(opts, :session_id),
       parent_session: Keyword.get(opts, :parent_session),
       reasoning_effort: reasoning_effort,
+      speed: Keyword.get(opts, :speed),
       invariant_metrics: invariant_metrics,
       request_metrics:
         Map.merge(ResponsesShared.input_metrics(next_input, instructions), invariant_metrics)
@@ -216,7 +220,8 @@ defmodule FermixCore.Providers.OpenAI.Responses do
      %{
        turn
        | provider_state: Map.put(turn.provider_state, :instructions, turn_state.instructions)
-     }}
+     }
+     |> Map.put(:service_tier, Map.get(body, "service_tier"))}
   end
 
   defp handle_response({:ok, %Req.Response{status: status, body: body}}, _turn_state) do
@@ -241,6 +246,25 @@ defmodule FermixCore.Providers.OpenAI.Responses do
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, _key, []), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  # Fast mode: the route asks for the fast tier with `speed: :fast`
+  # (`RouteResolver`); `:standard` and no speed send no tier.
+  defp service_tier(:fast), do: "fast"
+  defp service_tier(speed) when speed in [:standard, nil], do: nil
+
+  # The speed a call ran at, for its trace: what OpenAI reports in
+  # `service_tier` when the route asked for the fast tier (GPT-5.6 and older
+  # report `priority` for it; a request OpenAI ran at standard speed reports
+  # `default`), `standard` for a route at standard speed, and nothing for a
+  # route without fast mode or a call that did not complete.
+  defp speed_ran(nil, _result), do: nil
+  defp speed_ran(:standard, {:ok, _turn}), do: "standard"
+
+  defp speed_ran(:fast, {:ok, %{service_tier: tier}}) when tier in ["fast", "priority"],
+    do: "fast"
+
+  defp speed_ran(:fast, {:ok, _turn}), do: "standard"
+  defp speed_ran(_speed, {:error, _reason}), do: nil
 
   # The token map the shared provider emitter carries into the Opik llm span.
   # `:cached` is present only when the vendor reported it, so a span keeps "the
@@ -320,6 +344,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
       |> Map.merge(Map.get(turn_state, :request_metrics, %{}))
       |> Map.merge(error_metadata)
       |> maybe_put(:agent, Map.get(turn_state, :agent))
+      |> maybe_put(:speed, speed_ran(Map.get(turn_state, :speed), result))
 
     ProviderTelemetry.emit_call(metadata, duration_ms,
       session_id: Map.get(turn_state, :session_id),

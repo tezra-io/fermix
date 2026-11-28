@@ -79,7 +79,8 @@ defmodule FermixCore.Management.Settings.Providers do
 
     auth_mode_row(descriptor, block, restart) ++
       Enum.map(descriptor.setup_fields, &field_row(descriptor, &1, block, snapshot, restart)) ++
-      [model_row(descriptor, block, restart)] ++ effort_row(descriptor, block, restart)
+      [model_row(descriptor, block, restart)] ++
+      effort_row(descriptor, block, restart) ++ fast_row(descriptor, block, restart)
   end
 
   defp auth_mode_row(descriptor, block, restart) do
@@ -141,6 +142,22 @@ defmodule FermixCore.Management.Settings.Providers do
         restart: restart
       )
     ]
+  end
+
+  # Fast mode is published by the providers whose requests can carry it, with
+  # no note under it; which models it speeds up stays the catalog's
+  # (`Entry.fast?`).
+  defp fast_row(descriptor, block, restart) do
+    if :fast in descriptor.config_keys do
+      [
+        Row.new("fast", :toggle, "Fast mode",
+          value: Source.boolean(block, :fast, false),
+          restart: restart
+        )
+      ]
+    else
+      []
+    end
   end
 
   # An empty option list is the truthful answer for a provider whose models are

@@ -93,7 +93,7 @@
 (* rule here reads it. A phone's revocation is not modelled either: Turns  *)
 (* runs it in its own mailbox as a cancel of every unsettled request the   *)
 (* device claimed, one step that marks them all and stops each turn it     *)
-(* handed off (handle_cast {:revoke_device}, turns.ex:306-318);            *)
+(* handed off (handle_cast {:revoke_device}, turns.ex:353-365);            *)
 (* - a cancel that arrives before its request is claimed: there is no      *)
 (* request to mark (cancel_request answers not_found), as PROTOCOL.md      *)
 (* scopes the guarantee to a cancel after accepted;                        *)
@@ -207,23 +207,23 @@
 (* One step = one callback of one process, one Memory.Repo call, or one    *)
 (* thing a client or the environment does.                                 *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ 2b50f1188848
+\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ 9ee9f11a2ee8
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/requests.ex#request,cancel,claim_and_run,acquire_and_run,run_started,ingest_span,settle_after_ingest,settle_unless_handed_off,handoff_settlement,fail_attempt,report_failure,settle_failed,append_user,after_user_append,settle_inline,ingest_gateway,approval_resolution_fn,history,fit_page,cut_page,take_within,accepted_event,history_event,emit,best_effort_emit @ 97be58f8e741
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/turns.ex @ 028bd206fc14
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex#text_done,turn_error,row,timeline_message,approval,approval_resolved,persist_text,persist_output,complete_request,fail_request @ 28a393bb68d2
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/turns.ex @ ddcf1de4367b
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex#text_done,turn_error,row,timeline_message,approval,approval_resolved,persist_text,persist_output,complete_request,fail_request @ 694eda049f73
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/connection.ex#handle_info,dispatch,hello,join,send_pending_approvals,write_pending_approval,write_event,send_event,transport,request_failure_reporter,announce_user_row,request_opts,read_opts,sink @ 1f0a48d2c438
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/fanout.ex @ abddae4baafe
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/approvals.ex @ 59c135c36360
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/approvals.ex @ d8fb3342dced
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/endpoint.ex#@max_clients,accept_connection,start_connection,hand_over @ c9885a5286f1
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/companion.ex#broadcast,dispatch,build_text_reply,build_turn_result,send_approval,send_message,write_call_row,announce_written,message,build_raw_stream_callback,every_client_reads? @ 0ca43785e88f
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/companion.ex#broadcast,dispatch,build_text_reply,build_turn_result,send_approval,send_message,write_call_row,announce_written,message,build_raw_stream_callback,every_client_reads? @ 9ab830dacd13
 \* SOURCE: apps/fermix_core/lib/fermix_core/companion/timeline.ex#append_client_message,append_proactive,history_page,claim_client_request,get_client_request,cancel_client_request,start_client_request,append_client_output,complete_client_request,fail_client_request @ bfe43cb17172
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/mobile_sql.ex#history,cancel_request,cancelled_request,append_in_tx,next_server_seq,increment_server_seq,claim_request_in_tx,classify_claim,complete_request,settle_request_in_tx,request_transition,append_client_output_in_tx,ensure_running_attempt @ 1ec47b7ff12f
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/request_coordinator.ex#handle_call @ 176aadf6651d
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/queue.ex#stop_turn,stop_named_turn,stop_named_in,maybe_start_next_request,claim_active_turn,stop_conversation_runtime,stop_active_turn,cancel_pending @ 0dc22aada1ac
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/sandbox.ex#store_pending_grant,confirm,deny,notify_approval,take_pending,validate_pending @ 5bec893c9fe6
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/sandbox.ex#store_pending_grant,grant_ttl_ms,grant_pending_record,confirm,deny,notify_approval,take_pending,validate_pending @ dfb39e66e401
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/sandbox/confirmations.ex @ 7f77c69d0c1a
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/voice/bridge.ex#chat_call @ d1c29597e959
-\* SOURCE: apps/fermix_core/lib/fermix_core/agents/main_agent.ex#turn_state,live_call @ 4c76bdeeb9fd
+\* SOURCE: apps/fermix_core/lib/fermix_core/agents/main_agent.ex#turn_state,live_call @ 55f0302a01d6
 \* SOURCE: apps/fermix_core/lib/fermix_core/agents/turn_runner.ex#run_normal,tell_silent @ e194fcaa3b51
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
@@ -267,8 +267,9 @@ CONSTANTS
                          \* coordinator starts no second attempt of a request running,
                          \* completed or failed (acquire_and_run, requests.ex:268-290)
     SeqCursor,           \* the client keeps the last server_seq it shows, pulls
-                         \* history_pull{after_seq: cursor} after server_hello, while a
-                         \* page says more and on a gap, and applies a live row only at
+                         \* history_pull from its cursor or below it after server_hello,
+                         \* while a page says more (from no lower than that page's last
+                         \* row) and on a gap, and applies a live row only at
                          \* cursor + 1 (PROTOCOL.md "Keeping a client's timeline")
     SubscribeBeforePull, \* the Connection joins the registry before it writes
                          \* server_hello (join, connection.ex:638-656)
@@ -278,15 +279,15 @@ CONSTANTS
     AnnouncesEveryRow,   \* every row written outside a turn's completion is announced as
                          \* a row as it is written: the user's (announce_user_row,
                          \* connection.ex:1378-1379) and a delivery's (announce_written,
-                         \* channels/companion.ex:409-410), both built by Output.row and
+                         \* channels/companion.ex:455-456), both built by Output.row and
                          \* sent through Fanout.announce; FALSE announces no user row
     SingleAnswer,        \* an approval token is consumed once: Confirmations.take is
                          \* an :ets.take (confirmations.ex:21-26, take_pending
-                         \* sandbox.ex:730-739)
+                         \* sandbox.ex:762-771)
     ResendsPendingApprovals, \* the Connection writes every card still waiting right
                          \* after server_hello, in the step that joined the registry
                          \* (join, send_pending_approvals, connection.ex:638-727, from
-                         \* Approvals.pending, approvals.ex:112-115); FALSE: a card goes
+                         \* Approvals.pending, approvals.ex:166-170); FALSE: a card goes
                          \* out once, live
     DropsCardsAtHello,   \* when server_hello arrives the client drops every approval card
                          \* it shows and keeps only those sent after it (PROTOCOL.md
@@ -300,12 +301,12 @@ CONSTANTS
     CancelMarksRequest,  \* a cancel is recorded on its request first (Requests.cancel,
                          \* requests.ex:192-208; cancel_request, mobile_sql.ex:821-840);
                          \* Turns reads the mark and enqueues in one step (hand_off,
-                         \* turns.ex:338-352) and sends every stop itself, after its
-                         \* enqueue (turns.ex:253-256, stop_in_queue :459-470). FALSE is
+                         \* turns.ex:385-399) and sends every stop itself, after its
+                         \* enqueue (turns.ex:300-303, stop_in_queue :525-536). FALSE is
                          \* the old code: the Connection calls Queue.stop_turn directly
     OutcomeEndsTurn,     \* a turn ends on the wire only from the Queue's outcome, in
                          \* Turns; the cancel writes nothing (Requests.cancel,
-                         \* requests.ex:192-208; finish, fail, turns.ex:475-508)
+                         \* requests.ex:192-208; finish, fail, turns.ex:547-595)
     SettleAfterIngest,   \* once ingest returned, the request worker casts the request's
                          \* settlement to Turns (settle_after_ingest,
                          \* requests.ex:346-350); FALSE is the code before: a message the
@@ -313,12 +314,12 @@ CONSTANTS
                          \* boot ran it again
     SettleUnlessHandedOff, \* Turns settles that request only if no turn was handed off
                          \* for it (handle_cast {:settle_unless_handed_off},
-                         \* turns.ex:298-304); FALSE completes it regardless, as the code
+                         \* turns.ex:345-351); FALSE completes it regardless, as the code
                          \* before did for every command, so a command that became a turn
                          \* (/ultra) had its reply refused
     FailsUnsettled,      \* a settlement that fails fails the request once for its attempt
                          \* and tells its client error{request_failed, client_msg_id}
-                         \* (settle_inline, run_settle, turns.ex:371-406; fail_attempt,
+                         \* (settle_inline, run_settle, turns.ex:426-461; fail_attempt,
                          \* report_failure, requests.ex:383-403, through the
                          \* transport's report_failure, which the Connection writes as
                          \* a failed worker's error, connection.ex:1366-1373,
@@ -459,12 +460,26 @@ MaxOf(S) == IF S = {} THEN 0 ELSE CHOOSE x \in S : \A y \in S : y <= x
 \* The client's cursor: the last server_seq it shows.
 Cursor(c) == IF view[c] = <<>> THEN 0 ELSE view[c][Len(view[c])]
 
+\* Where a pull may start (PROTOCOL.md "Keeping a client's timeline"): at the
+\* cursor, or below it, so that one page brings held rows again together with
+\* the rows after the cursor (the Mac reads the rows on screen again this way
+\* after a reconnect). OnPage shows only the rows past the cursor, whatever
+\* the page starts with.
+PullStarts(c) == 0..Cursor(c)
+
+\* Where the pull after a page that says more may start: no lower than that
+\* page's last row (its next_after_seq), so every pull of a catch-up reads past
+\* the one before it, and no higher than the cursor `cur` the page left.
+NextStarts(pg, cur) ==
+    LET last == pg.rows[Len(pg.rows)]
+    IN (IF last < cur THEN last ELSE cur)..cur
+
 \* The per-profile counter, read and bumped inside the insert's transaction
 \* (next_server_seq, increment_server_seq, mobile_sql.ex:1078, :1084-1093).
 NextSeq == MaxOf(Range(tl)) + 1
 
 \* Companion.Fanout.announce (fanout.ex:47-67) -> Channels.Companion.broadcast
-\* (channels/companion.ex:175-178, dispatch :464-468): one send to every
+\* (channels/companion.ex:181-184, dispatch :510-514): one send to every
 \* Connection registered under the profile, each event the companion wire
 \* carries, a row (built once, by Output.row) projected to the fields this
 \* wire's row has (its kind and metadata among them, which no rule reads). A row and a text_done are both a live row here.
@@ -577,13 +592,13 @@ Casts(m) ==
 \*    row it created is announced to every connection (after_user_append ->
 \*    announce_user_row, requests.ex:518-522, connection.ex:1378-1379);
 \*  - Gateway.ingest calls Companion.Turns.handle_message, which casts the
-\*    hand-off into Turns' mailbox and returns (turns.ex:140-145). A slash
+\*    hand-off into Turns' mailbox and returns (turns.ex:167-172). A slash
 \*    command the gateway answers inline hands nothing off;
 \*  - once ingest returned, the worker moves the coordinator's fence onto
 \*    Turns (handoff_settlement, requests.ex:364-381; not modelled) and casts
 \*    the settlement to Turns, with how to complete the request, fail it and
 \*    tell its client (settle_after_ingest, settle_unless_handed_off,
-\*    requests.ex:346-360 -> Turns.settle_unless_handed_off, turns.ex:168-182).
+\*    requests.ex:346-360 -> Turns.settle_unless_handed_off, turns.ex:215-229).
 OnMsg(c, m) ==
     /\ dupWhileRunning' = (dupWhileRunning \/ (m \in accepted /\ turn[m] \in Live))
     /\ IF AcceptedDedupe /\ m \in accepted
@@ -605,7 +620,7 @@ OnMsg(c, m) ==
 \*  - CancelMarksRequest: the mark is recorded on a request that has not
 \*    settled, in one Repo call (cancel_request, mobile_sql.ex:821-840;
 \*    settled for one that has, not_found for one never claimed), then Turns
-\*    is asked (Turns.cancel, a call into its mailbox, turns.ex:190-193).
+\*    is asked (Turns.cancel, a call into its mailbox, turns.ex:237-240).
 \*  - Otherwise the old code: the Connection calls Queue.stop_turn itself,
 \*    which finds nothing for a request not yet handed off.
 \*  - Without OutcomeEndsTurn the Connection also writes turn_error{cancelled}
@@ -628,13 +643,13 @@ OnCancel(m) ==
                       dupWhileRunning, refused, told>>
 
 \* /confirm TOKEN or /deny TOKEN: a command request through the same path,
-\* answered by the Gateway's command (confirm, deny, sandbox.ex:293-313).
+\* answered by the Gateway's command (confirm, deny, sandbox.ex:310-330).
 \* take_pending peeks, checks the expiry and origin, then takes the token
-\* (sandbox.ex:730-747, Confirmations.take, confirmations.ex:21-26). Only a
+\* (sandbox.ex:762-779, Confirmations.take, confirmations.ex:21-26). Only a
 \* take that finds the token applies the answer and announces
-\* approval_resolved (notify_approval, sandbox.ex:384-392 ->
+\* approval_resolved (notify_approval, sandbox.ex:401-409 ->
 \* approval_resolution_fn, requests.ex:619-624 -> Approvals.resolve,
-\* approvals.ex:97-105, :136-143, which forgets the card first). Without
+\* approvals.ex:147-155, :226-234, which forgets the card first). Without
 \* SingleAnswer the token survives its first answer.
 OnAnswer(c) ==
     /\ answeredBy' = answeredBy \cup {c}
@@ -694,7 +709,7 @@ Resend(m) ==
 \* to the socket, and right behind it every card still waiting
 \* (ResendsPendingApprovals; hello, join, send_pending_approvals,
 \* connection.ex:598-727). The store keeps a card before it announces it, in
-\* one step (Approvals.announce, approvals.ex:79-88, :130-134), and the
+\* one step (Approvals.announce, approvals.ex:112-121, :217-221), and the
 \* Connection joins before it reads the kept cards, so however the two
 \* interleave, a connection gets the
 \* card from the one, the other, or both (a client deduplicates by
@@ -747,12 +762,12 @@ Cancel(c, m) ==
 
 \* server_hello: the client drops every approval card it shows, since only
 \* the cards the daemon sends after it still wait (DropsCardsAtHello), and
-\* pulls after its cursor (SeqCursor).
+\* pulls from its cursor, or below it (SeqCursor, PullStarts).
 OnServerHello(c, rest) ==
     /\ link' = [link EXCEPT ![c] = "up"]
     /\ prompt' = IF DropsCardsAtHello THEN [prompt EXCEPT ![c] = FALSE] ELSE prompt
     /\ pulling' = [pulling EXCEPT ![c] = SeqCursor]
-    /\ IF SeqCursor THEN Pull(c, rest, Cursor(c))
+    /\ IF SeqCursor THEN \E a \in PullStarts(c) : Pull(c, rest, a)
        ELSE wire' = [wire EXCEPT ![c] = rest] /\ UNCHANGED <<sub, reading>>
     /\ UNCHANGED <<composed, outbox, sentOn, view, resent>>
 
@@ -768,19 +783,20 @@ OnRow(c, s, rest) ==
        THEN /\ wire' = [wire EXCEPT ![c] = rest]
             /\ UNCHANGED <<view, pulling, sub, reading>>
        ELSE /\ pulling' = [pulling EXCEPT ![c] = TRUE]
-            /\ Pull(c, rest, Cursor(c))
+            /\ \E a \in PullStarts(c) : Pull(c, rest, a)
             /\ UNCHANGED view
     /\ UNCHANGED <<link, composed, outbox, sentOn, prompt, resent>>
 
 \* history_page: show the rows past the cursor (the page starts right after
-\* the after_seq its pull named, and the cursor has not gone back since, so
-\* they follow it with no gap), and pull again while the page says more.
+\* the after_seq its pull named, which was at or below the cursor, and the
+\* cursor has not gone back since, so the rows past it follow it with no gap),
+\* and pull again while the page says more.
 OnPage(c, pg, rest) ==
     LET v == view[c] \o SelectSeq(pg.rows, LAMBDA s : s > Cursor(c))
         cur == IF v = <<>> THEN 0 ELSE v[Len(v)]
     IN /\ view' = [view EXCEPT ![c] = v]
        /\ IF pg.more
-          THEN Pull(c, rest, cur) /\ UNCHANGED pulling
+          THEN (\E a \in NextStarts(pg, cur) : Pull(c, rest, a)) /\ UNCHANGED pulling
           ELSE /\ pulling' = [pulling EXCEPT ![c] = FALSE]
                /\ wire' = [wire EXCEPT ![c] = rest]
                /\ UNCHANGED <<sub, reading>>
@@ -825,7 +841,7 @@ Join(c) ==
 (* Companion.Turns: one process, one mailbox                                *)
 
 \* Turns handles its next message:
-\*  - a hand-off (handle_cast {:hand_off, ...}, turns.ex:283-288 -> hand_off
+\*  - a hand-off (handle_cast {:hand_off, ...}, turns.ex:330-335 -> hand_off
 \*    :330-345): with CancelMarksRequest it reads the request's mark
 \*    (cancel_recorded, get_client_request, :347-355) and, in the same step,
 \*    ends a marked request with one turn_error{cancelled} and settles it
@@ -847,8 +863,8 @@ Join(c) ==
 \*    and no client rule reads it, so it is only observed here (told).
 \*    Without FailsUnsettled the failure is only logged and the request
 \*    stays running;
-\*  - a cancel (handle_call {:cancel, ...}, turns.ex:253-256 -> stop :446-451,
-\*    stop_in_queue :459-470): Queue.stop_turn for a turn it handed off,
+\*  - a cancel (handle_call {:cancel, ...}, turns.ex:300-303 -> stop :512-517,
+\*    stop_in_queue :525-536): Queue.stop_turn for a turn it handed off,
 \*    sent after its own enqueue, so it cannot overtake it. Turns waits for
 \*    the answer with no timeout and the Queue answers however busy it is, so
 \*    the Queue's stop is folded into this step; for any other message the
@@ -928,11 +944,11 @@ TurnsNext ==
 
 \* A tool of m's turn needs the owner's approval (a directory grant, or a
 \* coding run's vendor-config change to acknowledge; one path for both): the
-\* gateway stores a pending token (store_pending_grant, sandbox.ex:240-252)
+\* gateway stores a pending token (store_pending_grant, sandbox.ex:247-260)
 \* and the channel's approval store keeps the card, then announces it to this
 \* transport's connections alone, through the announce it announces the
-\* card's end with (send_approval, channels/companion.ex:288-291 ->
-\* Approvals.announce, approvals.ex:79-88, :130-134). The turn does not wait
+\* card's end with (send_approval, channels/companion.ex:328-331 ->
+\* Approvals.announce, approvals.ex:112-121, :217-221). The turn does not wait
 \* for it.
 Ask(m) ==
     /\ turn[m] = "running" /\ appr = "none" /\ Approvals > 0
@@ -942,11 +958,14 @@ Ask(m) ==
                    applied, reqs, queue, store, env, obs>>
 
 \* The card's ttl_s runs out: the token is refused from then on
-\* (validate_pending, sandbox.ex:741-747), and Approvals drops the card and
+\* (validate_pending, sandbox.ex:773-779), and Approvals drops the card and
 \* announces approval_resolved{expired} to its transport (handle_info
-\* {:approval_expired, ...}, expire, approvals.ex:150-155, :208-217). The two
-\* clocks start a moment apart; either order leaves no card that can be
-\* approved, so they are one step here. Time, so no fairness.
+\* {:approval_expired, ...}, expire, approvals.ex:241-246, :328-337). The two
+\* clocks run the same window, 60 s or the one an access-sensitive request
+\* names (a phone call's 5 minutes, grant_ttl_ms, sandbox.ex:262-269, which
+\* its card carries as ttl_s), and start a moment apart; either order leaves
+\* no card that can be approved, so they are one step here. Time, so no
+\* fairness.
 Expire ==
     /\ appr = "pending"
     /\ appr' = "expired"
@@ -963,7 +982,7 @@ Claim(m) ==
                    obs>>
 
 \* The turn invokes {:completed} (Turns.outcome, a call into Turns' mailbox,
-\* turns.ex:234-236, through build_turn_result, channels/companion.ex:268-272)
+\* turns.ex:281-283, through build_turn_result, channels/companion.ex:282-286)
 \* and exits; the Queue's :DOWN frees the slot and starts the next waiting
 \* turn (folded in: nothing else can act on the dead turn in between). A turn
 \* its snapshot let end with no reply may have answered exactly [SILENT]: its
@@ -980,8 +999,8 @@ Finish(m) ==
 
 -----------------------------------------------------------------------------
 (* A scheduled job reporting back: Channels.Companion.send_message in the   *)
-(* job's own process (channels/companion.ex:308-323). A GPT-Live call's    *)
-(* rows (write_call_row, :340-359, M56 sections 4.2 and 4.5) are written   *)
+(* job's own process (channels/companion.ex:354-369). A GPT-Live call's    *)
+(* rows (write_call_row, :374-393, M56 sections 4.2 and 4.5) are written   *)
 (* and announced the same way: a result shown, from the call's session,    *)
 (* and the call's one row when it ends, from the task that made its gist   *)
 (* or from the boot pass after a restart. So the job stands for them too.  *)
@@ -1004,7 +1023,7 @@ JobWrite ==
     /\ UNCHANGED <<client, conn, turns, reqs, queue, env, obs>>
 
 \* announce_written -> Fanout.announce: the job announces its row
-\* (channels/companion.ex:409-410).
+\* (channels/companion.ex:455-456).
 JobAnnounce ==
     /\ job = "written"
     /\ job' = "done"

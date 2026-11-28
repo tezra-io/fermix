@@ -10,7 +10,7 @@ defmodule FermixChannels.Home.Link do
   (`FermixChannels.Desktop.Peer`), and `open_enrollment/1`,
   `withdraw_enrollment/0`, `open_join/0`, `approve_join/1`, `deny_join/0`,
   `forget_candidate/1` and `status/0`'s
-  `enrollment` by the enrollment window, `drop_desktop_row/2` and
+  `enrollment` by the enrollment window, `drop_desktop_rows/1` and
   `home_desktops/1` by the device store of the home they name, read from its
   file, `announce_computers/1` by each open session's computer family
   (`FermixChannels.Desktop.ComputerFamily`), `snooze_reminder/2` by the
@@ -98,14 +98,8 @@ defmodule FermixChannels.Home.Link do
 
   # A staged home's list, by its root: never the running store's.
   @impl true
-  def drop_desktop_row(root, <<_::256>> = noise_pk) when is_binary(root) and root != "" do
-    case DeviceStore.find_by_noise_pk(noise_pk, root: root) do
-      {:ok, %{kind: :desktop, device_id: id}} -> DeviceStore.delete(id, root: root)
-      {:ok, %{device_id: id}} -> {:error, {:not_a_desktop, id}}
-      {:error, {:noise_identity_not_found, _key}} -> :ok
-      {:error, _reason} = error -> error
-    end
-  end
+  def drop_desktop_rows(root) when is_binary(root) and root != "",
+    do: DeviceStore.delete_desktops(root: root)
 
   @impl true
   def home_desktops(root) when is_binary(root) and root != "" do

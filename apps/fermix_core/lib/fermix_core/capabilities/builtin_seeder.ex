@@ -20,6 +20,7 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.Harness.Vendors
   alias FermixCore.Meetings
+  alias FermixCore.PhoneCalls.Tools, as: PhoneCallTools
 
   require Logger
 
@@ -114,6 +115,9 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.RunJobNow,
     FermixCore.Tools.ListJobRuns,
     FermixCore.Tools.GetJobRun,
+    # Seeded unconditionally; `advertise?/1` offers it only inside a job's
+    # heal run (M106 §5.5), and `execute/2` repeats that gate.
+    FermixCore.Tools.JobHealRespond,
     FermixCore.Tools.MemorySourcesList,
     FermixCore.Tools.Browser,
     FermixCore.Tools.SendAttachment,
@@ -191,11 +195,13 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   @computer_use_tool_modules [FermixCore.Tools.ComputerUse]
 
   # Meetings notetaker (MILESTONE_21 C2 §14.1): seeded only when
-  # `Meetings.ready?()` — the subsystem enabled AND a lane that can actually
+  # `Meetings.offered?/1` — the subsystem enabled AND a lane that can actually
   # place a meeting (the Meet sidecar installed, or the Zoom RTMS credentials
-  # complete). A config-only enable advertises nothing, so the model is never
-  # offered a notetaker that would refuse every URL. Re-evaluated each boot,
-  # which (with the save+restart enable flow) is the readiness transition.
+  # complete), or an Always On server, where Google Meet's refusal must reach
+  # the model (M102 D5). Elsewhere a config-only enable advertises nothing, so
+  # the model is never offered a notetaker that would refuse every URL.
+  # Re-evaluated each boot, which (with the save+restart enable flow) is the
+  # readiness transition.
   # Named as its own list so the whole-surface invariant test loops over the
   # authoritative source rather than a hand-written list of today's three tools.
   @meetings_tool_modules [
@@ -254,7 +260,9 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   @doc """
   Every built-in tool module that can be seeded into the capability registry —
   the unconditional ones plus the conditionally-seeded bridge, computer-use,
-  harness, and meetings tools. Exposed for the classification guard test that
+  harness, and meetings tools — and the phone call's in-call controls, which
+  are never seeded: its backend turn builds them through `Builtin` itself
+  (`Agents.PhoneCallTurn`). Exposed for the classification guard test that
   asserts every built-in has an explicit `policy_class` (see
   `FermixCore.Capabilities.Builtin`); membership here is about classification
   coverage, not whether a tool is seeded on a given boot.
@@ -263,6 +271,7 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   def builtin_tool_modules,
     do:
       @builtin_tool_modules ++
+        phone_call_modules() ++
         @bridge_tool_modules ++
         @computer_use_tool_modules ++
         @harness_tool_modules ++ @meetings_tool_modules ++ @cue_tool_modules
@@ -301,8 +310,8 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
 
   @doc """
   The meetings notetaker tool family (MILESTONE_21 C2 §14.1). Exposed so the
-  not-ready invariant test gates the WHOLE feature surface: the assertion is
-  that NO member is advertised when `Meetings.ready?()` is false, looped over
+  not-offered invariant test gates the WHOLE feature surface: the assertion is
+  that NO member is advertised when `Meetings.offered?/1` is false, looped over
   this list, so a fourth meetings tool either joins the invariant or fails it.
   """
   @spec meetings_tool_modules() :: [module()]
@@ -323,9 +332,10 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
 
       :error ->
         @builtin_tool_modules ++
+          PhoneCallTools.registered() ++
           bridge_modules() ++
           computer_use_modules([]) ++
-          auto_harness_modules() ++ meetings_modules() ++ cue_modules()
+          auto_harness_modules() ++ meetings_modules(opts) ++ cue_modules()
     end
   end
 
@@ -343,6 +353,19 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   defp bridge_modules do
     if Deferral.enabled?(), do: @bridge_tool_modules, else: []
   end
+
+  # Phone calls (M94 §06, §07): the family `PhoneCalls.Tools.modules/0`
+  # names, for classification coverage. Only `phone_call` is seeded
+  # (`PhoneCalls.Tools.registered/0`, `builtin_modules/1`), and always, like
+  # the open-loop family, because the switch is live both ways
+  # (`Management.PhoneCalls.apply_enabled/2`): a boot-time decision would leave
+  # calls turned on with no tool, or turned off with no status or stop. Its `advertise?/1` offers it only on the owner's
+  # attended turn, with `start` only while phone calls are on (and, while they
+  # are off, status and stop only while a call holds the one-call slot); its
+  # `execute/2` repeats that gate, and no catalog names it
+  # (`Prompt.RuntimeSections`). The two in-call controls are never seeded: a
+  # phone call's backend turn builds them itself (`Agents.PhoneCallTurn`).
+  defp phone_call_modules, do: PhoneCallTools.modules()
 
   @doc """
   The computer-use tool, when this boot can reach a screen: its own
@@ -363,8 +386,11 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     if ready? or computers?, do: @computer_use_tool_modules, else: []
   end
 
-  defp meetings_modules do
-    if Meetings.ready?(), do: @meetings_tool_modules, else: []
+  # `opts`' `:always_on_server` stands for that fact in a test (`Meetings.meet_here/1`).
+  defp meetings_modules(opts) do
+    if Meetings.offered?(Keyword.take(opts, [:always_on_server])),
+      do: @meetings_tool_modules,
+      else: []
   end
 
   defp cue_modules do

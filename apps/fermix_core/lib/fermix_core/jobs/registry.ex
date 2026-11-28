@@ -20,9 +20,13 @@ defmodule FermixCore.Jobs.Registry do
 
   alias FermixCore.Agents.IterationLimits
   alias FermixCore.Clock
+  alias FermixCore.Jobs.HealCard
   alias FermixCore.Jobs.Schedule
   alias FermixCore.Jobs.Scheduler
+  alias FermixCore.Jobs.Telemetry, as: JobTelemetry
   alias FermixCore.Memory.Repo
+
+  require Logger
 
   @default_agent_id "main"
 
@@ -145,10 +149,87 @@ defmodule FermixCore.Jobs.Registry do
   def update_job(id, attrs, opts \\ []) when is_binary(id) and is_map(attrs) and is_list(opts) do
     now = Keyword.get(opts, :now, DateTime.utc_now())
 
+    with {:ok, job, job_patch, source_patch} <- prepare_update(id, attrs, now, opts) do
+      apply_job_update(job, job_patch, source_patch, now, opts)
+    end
+  end
+
+  @doc """
+  The checks `update_job/3` applies to an edit, without writing it: the
+  patch it would write to the job, or its refusal. A heal's proposal is
+  checked with it as an owner's edit is (M106 §5.6).
+  """
+  @spec check_update(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def check_update(id, attrs, opts \\ [])
+      when is_binary(id) and is_map(attrs) and is_list(opts) do
+    now = Keyword.get(opts, :now, DateTime.utc_now())
+
+    with {:ok, _job, job_patch, _source_patch} <- prepare_update(id, attrs, now, opts),
+         do: {:ok, job_patch}
+  end
+
+  @doc """
+  A job write that belongs to a heal (M106 §5.6, §5.7, D5), the one path for
+  a heal run's raised limit or pause and for the owner's yes to a proposal.
+  `move` is what is written, prepared as an owner's write of it is:
+  `{:update, attrs}` takes `update_job/3`'s attributes and checks
+  (`check_update/3`), `:pause` writes what `pause_job/2` writes. `claim` is
+  whose write it is (`Memory.Repo.JobHealsSql.claim/0`); its time is the
+  write's. The job and the heal are then written in one transaction, only
+  while the job is the version the write was drawn for
+  (`Memory.Repo.heal_job_write/5`, whose results this returns). After a
+  write the Scheduler learns of it as of any edit, and the job's memory
+  source follows as an edit's or a pause's does; a source that cannot be
+  written is logged and leaves the job's change as it is.
+  """
+  @spec heal_write(String.t(), String.t(), {:update, map()} | :pause, tuple(), keyword()) ::
+          {:ok, {:written, Repo.scheduled_job_row(), map()} | {:moved_on, map()}}
+          | {:error, term()}
+  def heal_write(heal_id, job_id, move, claim, opts \\ [])
+      when is_binary(heal_id) and is_binary(job_id) and is_tuple(claim) and is_list(opts) do
+    now = claim_time(claim)
+
+    with {:ok, fields, source_patch} <- heal_move_fields(job_id, move, now, opts),
+         {:ok, result} <- Repo.heal_job_write(heal_id, job_id, fields, claim, repo_opts(opts)) do
+      after_heal_write(result, source_patch, opts)
+    end
+  end
+
+  defp claim_time({:heal_run, _token, _record, %DateTime{} = now}), do: now
+  defp claim_time({:answer, %{at: %DateTime{} = at}}), do: at
+
+  defp heal_move_fields(job_id, {:update, attrs}, now, opts) when is_map(attrs) do
+    with {:ok, _job, job_patch, source_patch} <- prepare_update(job_id, attrs, now, opts),
+         do: {:ok, Map.put(job_patch, :updated_at, now), source_patch}
+  end
+
+  defp heal_move_fields(_job_id, :pause, now, _opts),
+    do: {:ok, %{enabled?: false, state: "paused", updated_at: now}, %{status: "paused"}}
+
+  defp after_heal_write({:written, job, heal}, source_patch, opts) do
+    notify_scheduler(opts)
+
+    case update_source(job.memory_source_id, source_patch, opts) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "Job #{job.id}: a heal's change to it is written, but its memory source could not " <>
+            "be updated: #{inspect(reason)}"
+        )
+    end
+
+    {:ok, {:written, job, heal}}
+  end
+
+  defp after_heal_write({:moved_on, heal}, _source_patch, _opts), do: {:ok, {:moved_on, heal}}
+
+  defp prepare_update(id, attrs, now, opts) do
     with {:ok, job} <- Repo.get_scheduled_job(id, repo_opts(opts)),
          :ok <- check_cue_update(job, attrs),
          {:ok, job_patch, source_patch} <- normalize_update_attrs(job, attrs, now) do
-      apply_job_update(job, job_patch, source_patch, now, opts)
+      {:ok, job, job_patch, source_patch}
     end
   end
 
@@ -173,11 +254,19 @@ defmodule FermixCore.Jobs.Registry do
     end
   end
 
+  @doc """
+  Removes job `id` while no run holds it. Its heals go with it, so a card the
+  Fermix app shows for one of its proposals is told it expired (M106 §8),
+  read before the removal. `opts`: `:repo`, `:scheduler`,
+  `:app_card_listener`.
+  """
   @spec remove_job(String.t(), keyword()) :: :ok | {:error, term()}
   def remove_job(id, opts \\ []) when is_binary(id) and is_list(opts) do
     with {:ok, job} <- Repo.get_scheduled_job(id, repo_opts(opts)),
+         cards = HealCard.waiting_cards_of_job(id, heal_card_opts(opts)),
          :ok <- Repo.delete_scheduled_job_if_idle(id, repo_opts(opts)),
          :ok <- mark_source(job.memory_source_id, "removed", opts) do
+      HealCard.announce(cards, :expired, heal_card_opts(opts))
       notify_scheduler(opts)
       :ok
     end
@@ -220,6 +309,9 @@ defmodule FermixCore.Jobs.Registry do
       given?(attrs, :delivery_mode) and not reaches_owner?(attrs) ->
         {:error, kind_sentence(kind, @cue_must_report, @follow_up_must_report)}
 
+      over_cue_cap?(fetch_field(attrs, :timeout_seconds)) ->
+        {:error, @cue_timeout_cap}
+
       true ->
         :ok
     end
@@ -229,6 +321,9 @@ defmodule FermixCore.Jobs.Registry do
 
   defp kind_sentence(@cue_kind, cue, _follow_up), do: cue
   defp kind_sentence(@follow_up_kind, _cue, follow_up), do: follow_up
+
+  # An edit's time limit keeps a watcher's job under the cap it was made with.
+  defp over_cue_cap?(seconds), do: is_integer(seconds) and seconds > @cue_max_timeout_seconds
 
   defp given?(attrs, key), do: fetch_field(attrs, key) not in [nil, ""]
 
@@ -241,7 +336,9 @@ defmodule FermixCore.Jobs.Registry do
   defp update_job_fields(id, fields, source_status, opts) do
     fields = Map.put(fields, :updated_at, DateTime.utc_now())
 
-    with {:ok, updated} <- Repo.update_scheduled_job_fields(id, fields, repo_opts(opts)),
+    with {:ok, updated, superseded} <-
+           Repo.update_scheduled_job_fields(id, fields, repo_opts(opts)),
+         :ok <- trace_superseded(updated, superseded, opts),
          :ok <- mark_source(updated.memory_source_id, source_status, opts) do
       notify_scheduler(opts)
       {:ok, updated}
@@ -253,11 +350,29 @@ defmodule FermixCore.Jobs.Registry do
   defp apply_job_update(job, job_patch, source_patch, now, opts) do
     fields = Map.put(job_patch, :updated_at, now)
 
-    with {:ok, updated} <- Repo.update_scheduled_job_fields(job.id, fields, repo_opts(opts)),
+    with {:ok, updated, superseded} <-
+           Repo.update_scheduled_job_fields(job.id, fields, repo_opts(opts)),
+         :ok <- trace_superseded(updated, superseded, opts),
          :ok <- update_source(updated.memory_source_id, source_patch, opts) do
       notify_scheduler(opts)
       {:ok, updated}
     end
+  end
+
+  # A heal proposal the write closed, drawn for the version it replaced (M106
+  # §5.7), traced as the close it is; a card the Fermix app shows for it is
+  # told it expired (§8).
+  defp trace_superseded(job, superseded, opts) do
+    Enum.each(superseded, fn heal_id ->
+      JobTelemetry.heal("closed", %{heal_id: heal_id, job_id: job.id, outcome: "superseded"})
+    end)
+
+    HealCard.announce_ended(superseded, :expired, heal_card_opts(opts))
+  end
+
+  defp heal_card_opts(opts) do
+    [repo: Keyword.get(opts, :repo, Keyword.get(opts, :server, Repo))] ++
+      Keyword.take(opts, [:app_card_listener])
   end
 
   defp normalize_update_attrs(job, attrs, now) do
@@ -275,6 +390,7 @@ defmodule FermixCore.Jobs.Registry do
         |> put_present(:model, optional_update_string(attrs, :model))
         |> Map.merge(route_pin_patch(attrs))
         |> Map.merge(delivery_patch(attrs))
+        |> Map.merge(timeout_patch(attrs))
         |> Map.merge(schedule_job_patch)
 
       source_patch =
@@ -309,6 +425,22 @@ defmodule FermixCore.Jobs.Registry do
   end
 
   defp delivery_patch(_attrs), do: %{}
+
+  # A time limit is a positive whole number of seconds, as on creation; an
+  # absent one leaves the job's as it is.
+  defp timeout_patch(attrs) do
+    case fetch_field(attrs, :timeout_seconds) do
+      nil ->
+        %{}
+
+      seconds when is_integer(seconds) and seconds > 0 ->
+        %{timeout_seconds: seconds}
+
+      other ->
+        raise ArgumentError,
+              "expected :timeout_seconds to be a positive integer, got: #{inspect(other)}"
+    end
+  end
 
   defp schedule_patch(_job, nil, _now), do: {:ok, %{}, %{}}
 

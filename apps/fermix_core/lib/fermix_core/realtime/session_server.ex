@@ -13,6 +13,7 @@ defmodule FermixCore.Realtime.SessionServer do
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Checklists.Note, as: ChecklistNote
+  alias FermixCore.Computers
   alias FermixCore.ComputerUse.Probe, as: ComputerUseProbe
   alias FermixCore.ComputerUse.SessionManager, as: ComputerUseSessionManager
   alias FermixCore.Memory.Config, as: MemoryConfig
@@ -631,13 +632,30 @@ defmodule FermixCore.Realtime.SessionServer do
   defp build_session_update_event(state) do
     with {:ok, instructions} <- session_instructions(state) do
       kept = read_kept(state.tool_context, state.kept_read)
-      instructions = Enum.join([instructions | kept_lines(state.tool_context, kept.read)], "\n\n")
+      lines = computers_lines(state.tool_context) ++ kept_lines(state.tool_context, kept.read)
+      instructions = Enum.join([instructions | lines], "\n\n")
       # `screen_share` is a SESSION verb, not a registry capability: it only means
       # anything while this provider session is live, so the session advertises it
       # (and executes it) itself, leaving `ToolBridge` a pure capability bridge.
       advertised = Advertisement.prepare(state.capabilities, state.tool_context)
       tools = ToolBridge.to_openai_tools(advertised) ++ screen_share_tools(state)
       {:ok, OpenAIClient.session_update_event(state.config, instructions, tools), kept}
+    end
+  end
+
+  # The home's computers as they are when the call starts or its session is
+  # built again (M97 §6.5, M102 N10): `Computers.prompt_section/1` at the trust
+  # the call's `computer` argument is given from the same context
+  # (`Computers.turn_trust/1`), never the runtime context, which nothing
+  # rebuilds when a computer joins. The context's `:computers_opts` is a test's
+  # seams, as for the argument.
+  defp computers_lines(context) do
+    opts =
+      Keyword.put(Map.get(context, :computers_opts, []), :trust, Computers.turn_trust(context))
+
+    case Computers.prompt_section(opts) do
+      nil -> []
+      section -> [section]
     end
   end
 

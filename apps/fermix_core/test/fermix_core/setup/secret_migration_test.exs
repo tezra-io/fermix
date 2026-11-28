@@ -245,6 +245,9 @@ defmodule FermixCore.Setup.SecretMigrationTest do
     [fermix_core.providers.venice]
     api_key = "venice-old"
 
+    [fermix_core.providers.vercel]
+    api_key = "vercel-old"
+
     [fermix_core.tools.web_search]
     tavily_api_key = "tavily-old"
     exa_api_key = "exa-old"
@@ -271,6 +274,10 @@ defmodule FermixCore.Setup.SecretMigrationTest do
     zoom_client_id = "zoom-client"
     zoom_client_secret = "zoom-secret-old"
     zoom_ws_subscription_id = "zoom-sub"
+
+    [fermix_core.phone_calls]
+    sip_username = "fermixtrunk01"
+    sip_password = "phone-sip-old"
 
     [fermix_core.oauth.google]
     client_type = "desktop_public_pkce"
@@ -344,6 +351,7 @@ defmodule FermixCore.Setup.SecretMigrationTest do
       openrouter_api_key: "openrouter-old",
       mistral_api_key: "mistral-old",
       venice_api_key: "venice-old",
+      vercel_api_key: "vercel-old",
       tavily_api_key: "tavily-old",
       exa_api_key: "exa-old",
       parallel_api_key: "parallel-old",
@@ -355,6 +363,7 @@ defmodule FermixCore.Setup.SecretMigrationTest do
       transcription_xai_api_key: "transcription-xai-old",
       deepgram_api_key: "deepgram-old",
       meetings_zoom_client_secret: "zoom-secret-old",
+      phone_calls_sip_password: "phone-sip-old",
       snapshot_s3_access_key_id: "snapshot-key-id-old",
       snapshot_s3_secret_access_key: "snapshot-secret-old",
       google_oauth_client_secret: "google-oauth-old",

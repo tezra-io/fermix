@@ -1,6 +1,14 @@
 defmodule FermixChannels.Bench.Runner do
   @moduledoc """
   Runs deterministic Fermix latency benchmark scenarios.
+
+  A run needs what a booted engine gives a turn: the boot facts and the
+  processes it calls by name. The suite's VM booted the engine and has them;
+  the Mix tasks get them from `FermixChannels.Bench.Boot`.
+
+  Every turn must end with the reply its scenario defines. A turn that replies
+  with anything else, or sends no reply, fails the run: it is never counted as
+  processed.
   """
 
   alias FermixChannels.Bench.AdapterRunner
@@ -8,7 +16,9 @@ defmodule FermixChannels.Bench.Runner do
   alias FermixChannels.Gateway
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.Queue
+  alias FermixCore.Agents.IterationLimits
   alias FermixCore.Agents.MainAgent
+  alias FermixCore.Agents.TurnRunner
   alias FermixCore.Bench.MockProvider
   alias FermixCore.Bench.Recorder
   alias FermixCore.Bench.Reporter
@@ -16,12 +26,15 @@ defmodule FermixChannels.Bench.Runner do
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.ConversationStore
-  alias FermixCore.Memory.Repo
   alias FermixCore.Telemetry
 
   @default_output "bench/current.json"
-  @sample_reply_timeout_ms 2_000
-  @batch_reply_timeout_ms 30_000
+  # How long a run waits for a turn's reply, or for a batch of turns to end,
+  # before it fails: the bound on a turn that hangs, never a measurement. A
+  # turn of the mock provider takes microseconds, but the first turn of a VM
+  # that has loaded nothing yet takes seconds on a machine whose cores are all
+  # busy, and at 2 s the bound failed such a run before it took one sample.
+  @reply_timeout_ms 30_000
   @multi_conversation_count 100
 
   @events [
@@ -72,13 +85,24 @@ defmodule FermixChannels.Bench.Runner do
     Enum.sort(shared ++ adapter)
   end
 
+  @doc "The bound on a turn that never replies, for the channel scenarios too."
+  @spec reply_timeout_ms() :: pos_integer()
+  def reply_timeout_ms, do: @reply_timeout_ms
+
   @spec stage_order() :: [String.t()]
   def stage_order, do: Enum.map(@events, fn {_event, stage} -> stage end)
 
+  @doc """
+  Runs the scenarios `opts` names (`scenarios:`, else every shared one) and
+  returns the report, written to `output:` unless that is `nil`. `provider:`
+  is the provider adapter the agent calls, `FermixCore.Bench.MockProvider`
+  unless a test hands in another. Raises when a turn does not end with its
+  scenario's reply.
+  """
   @spec run(keyword()) :: {:ok, map()} | {:error, term()}
   def run(opts) when is_list(opts) do
     with {:ok, scenario_names} <- scenario_names(opts) do
-      with_prompt_resource_repo(fn -> run_and_report(scenario_names, opts) end)
+      run_and_report(scenario_names, opts)
     end
   end
 
@@ -86,31 +110,6 @@ defmodule FermixChannels.Bench.Runner do
     with {:ok, scenario_reports} <- run_scenarios(scenario_names, opts) do
       report = build_report(scenario_reports, opts)
       maybe_write_report(report, Keyword.get(opts, :output, @default_output))
-    end
-  end
-
-  # The prompt-compose path (PromptComposer -> BootstrapLoader -> Resource.Registry)
-  # records bootstrap-file revisions against the globally-named
-  # FermixCore.Memory.Repo. `mix fermix.bench` runs `app.config` but never
-  # `app.start`, so that process is absent and a turn crashes whenever bootstrap
-  # files exist on disk. Provide a disabled Repo (every call returns
-  # {:error, :disabled}, which capture treats as a no-op) for the run so prompt
-  # composition never touches SQLite. When the OTP app is already running (e.g.
-  # the runner invoked from the test suite) its Repo is used and left untouched.
-  defp with_prompt_resource_repo(fun) do
-    case Process.whereis(Repo) do
-      nil -> with_temporary_repo(fun)
-      _pid -> fun.()
-    end
-  end
-
-  defp with_temporary_repo(fun) do
-    {:ok, repo} = Repo.start_link(enabled: false)
-
-    try do
-      fun.()
-    after
-      if Process.alive?(repo), do: GenServer.stop(repo)
     end
   end
 
@@ -147,14 +146,15 @@ defmodule FermixChannels.Bench.Runner do
   defp run_scenario!(name, spec, opts) do
     samples = sample_count(spec, opts)
     warmup = Keyword.get(opts, :warmup, 20)
+    provider = Keyword.get(opts, :provider, MockProvider)
     before_snapshot = runtime_snapshot()
 
     {result, wall_time_us} =
       Telemetry.timed_us(fn ->
         if Map.get(spec, :cold?, false) do
-          run_cold_samples(name, spec, samples)
+          run_cold_samples(name, spec, provider, samples)
         else
-          run_warm_scenario(name, spec, warmup, samples)
+          run_warm_scenario(name, spec, provider, warmup, samples)
         end
       end)
 
@@ -169,8 +169,8 @@ defmodule FermixChannels.Bench.Runner do
     }
   end
 
-  defp run_warm_scenario(name, spec, warmup, samples) do
-    env = start_env!(name, spec)
+  defp run_warm_scenario(name, spec, provider, warmup, samples) do
+    env = start_env!(name, spec, provider)
 
     try do
       setup =
@@ -222,28 +222,29 @@ defmodule FermixChannels.Bench.Runner do
     |> sample_range(samples)
     |> Enum.chunk_every(@multi_conversation_count)
     |> Enum.reduce(0, fn indexes, count ->
-      Enum.each(indexes, &dispatch_sample!(env, spec, &1, :sample))
-      wait_until_idle_or_deadline(env.queue, @batch_reply_timeout_ms)
-      count + drain_replies(0)
+      refs = Enum.map(indexes, &dispatch_sample!(env, spec, &1, :sample))
+      wait_until_idle_or_deadline(env.queue, @reply_timeout_ms)
+      count + await_replies!(env, refs)
     end)
   end
 
   defp run_contention_samples!(env, spec, first_index, samples) do
-    first_index
-    |> sample_range(samples)
-    |> Enum.each(fn index -> dispatch_sample!(env, spec, index, :sample) end)
+    refs =
+      first_index
+      |> sample_range(samples)
+      |> Enum.map(&dispatch_sample!(env, spec, &1, :sample))
 
     wait_until_idle!(env.queue)
-    drain_replies(0)
+    await_replies!(env, refs)
   end
 
-  defp run_cold_samples(name, spec, samples) do
+  defp run_cold_samples(name, spec, provider, samples) do
     {:ok, recorder} = Recorder.start(events: @events)
 
     try do
       processed =
         Enum.reduce(1..samples//1, 0, fn index, count ->
-          env = start_env!("#{name}_#{index}", spec)
+          env = start_env!("#{name}_#{index}", spec, provider)
 
           try do
             run_sample!(env, spec, index, :sample)
@@ -267,7 +268,7 @@ defmodule FermixChannels.Bench.Runner do
 
   defp run_sample!(env, spec, index, label) do
     ref = dispatch_sample!(env, spec, index, label)
-    await_reply!(ref)
+    await_reply!(env, ref)
   end
 
   defp dispatch_sample!(env, spec, index, label) do
@@ -320,13 +321,37 @@ defmodule FermixChannels.Bench.Runner do
 
   defp chat_id(_spec, index, label), do: "#{label}-#{index}"
 
-  defp await_reply!(ref) do
+  defp await_replies!(env, refs) do
+    Enum.each(refs, &await_reply!(env, &1))
+    length(refs)
+  end
+
+  defp await_reply!(%{reply: reply} = env, ref) do
     receive do
-      {:bench_reply, ^ref, _part} -> :ok
+      {:bench_reply, ^ref, ^reply} ->
+        :ok
+
+      {:bench_reply, ^ref, part} ->
+        raise "#{env.name}: a benchmark turn replied #{inspect(part)}; " <>
+                "its scenario defines #{inspect(reply)}"
     after
-      @sample_reply_timeout_ms -> raise "benchmark reply timed out"
+      @reply_timeout_ms ->
+        raise "#{env.name}: a benchmark turn sent no reply within #{@reply_timeout_ms} ms"
     end
   end
+
+  # What every turn of a scenario ends with, read off its definition: the text
+  # the mock provider's script ends with under the options the agent runs
+  # with. The script that calls its tool on every step never ends with text:
+  # its turn reaches the agent loop's iteration cap (`AgentLoop`'s reason, at
+  # the limit an interactive turn runs under), and ends with the reply a
+  # person is given for that.
+  defp expected_reply(%{script: :repeat_tool}) do
+    reason = "Maximum iterations (#{IterationLimits.interactive()}) reached"
+    {:text, TurnRunner.error_reply(reason)}
+  end
+
+  defp expected_reply(spec), do: {:text, MockProvider.final_text(adapter_opts(spec))}
 
   defp wait_until_idle_or_deadline(agent, timeout_ms) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
@@ -350,7 +375,7 @@ defmodule FermixChannels.Bench.Runner do
   end
 
   defp wait_until_idle!(agent) do
-    deadline = System.monotonic_time(:millisecond) + @batch_reply_timeout_ms
+    deadline = System.monotonic_time(:millisecond) + @reply_timeout_ms
     wait_until_idle!(agent, deadline)
   end
 
@@ -370,18 +395,10 @@ defmodule FermixChannels.Bench.Runner do
     end
   end
 
-  defp drain_replies(count) do
-    receive do
-      {:bench_reply, _ref, _part} -> drain_replies(count + 1)
-    after
-      0 -> count
-    end
-  end
-
   defp sample_range(_first_index, 0), do: []
   defp sample_range(first_index, samples), do: first_index..(first_index + samples - 1)//1
 
-  defp start_env!(name, spec) do
+  defp start_env!(name, spec, provider) do
     unique = System.unique_integer([:positive])
     task_supervisor = :"#{name}_task_supervisor_#{unique}"
     conversation_store = :"#{name}_conversation_store_#{unique}"
@@ -397,7 +414,7 @@ defmodule FermixChannels.Bench.Runner do
     {:ok, agent_pid} =
       MainAgent.start_link(
         name: agent,
-        provider: MockProvider,
+        provider: provider,
         capability_registry: capability_registry,
         conversation_store: conversation_store,
         task_supervisor: task_supervisor,
@@ -410,6 +427,8 @@ defmodule FermixChannels.Bench.Runner do
       Queue.start_link(name: queue, main_agent: agent, task_supervisor: task_supervisor)
 
     %{
+      name: name,
+      reply: expected_reply(spec),
       task_supervisor: task_supervisor,
       task_pid: task_pid,
       conversation_store: conversation_store,

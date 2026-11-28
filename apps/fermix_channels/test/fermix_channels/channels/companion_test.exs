@@ -179,6 +179,7 @@ defmodule FermixChannels.Channels.CompanionTest do
                adapter: Companion,
                remote?: true,
                trust: :local_operator,
+               agent: Turns,
                transport: :loopback,
                child: nil
              }
@@ -356,6 +357,52 @@ defmodule FermixChannels.Channels.CompanionTest do
     assert_receive {:companion_stream, "turn-mac-1", :reset}
     assert_receive {:companion_stream, "turn-mac-1", {:snapshot, "Hello"}}
     refute_receive {:companion_stream, _turn, {:snapshot, "thinking"}}
+  end
+
+  # A request the owner's approval resumed carries no turn id of its own: every
+  # event of its turn names the one id `Companion.Turns` ends it by, or the
+  # client is left holding a live turn.
+  test "a resumed request streams under the id Turns ends it by" do
+    message = requestless_message("grant-resume-7", %{resumed_from_grant: "TOK"})
+    assert Turns.turn_id(message) == "turn-grant-resume-7"
+    refute Turns.own?(message)
+
+    Companion.build_raw_stream_callback(message).({:session_started, "session-1"})
+
+    assert_receive {:companion_event,
+                    %{
+                      "t" => "turn_started",
+                      "turn_id" => "turn-grant-resume-7",
+                      "in_reply_to" => "grant-resume-7"
+                    }}
+
+    assert :ok = Companion.build_activity_callback(message).({:tool_start, "shell"})
+    assert_receive {:companion_event, %{"t" => "tool_event", "turn_id" => "turn-grant-resume-7"}}
+    assert Companion.reply_opts(message)[:turn_id] == "turn-grant-resume-7"
+  end
+
+  # No client started a report's turn (a finished phone call's or coding run's
+  # notice), so none is shown one: a `turn_started` here would open a turn in
+  # the app that nothing ends.
+  test "a report Fermix starts is streamed and announced to no client" do
+    message =
+      requestless_message("harness-continuation-7", %{
+        harness_continuation: true,
+        harness_continuation_depth: 1
+      })
+
+    assert Turns.own?(message)
+    stream = Companion.build_raw_stream_callback(message)
+
+    assert :ok = stream.({:session_started, "session-1"})
+    assert :ok = stream.({:iteration_started, 1})
+    assert :ok = stream.({:text_delta, "Called"})
+    assert :ok = stream.({:reasoning_done, "Reading the report."})
+    assert :ok = stream.({:text_done, "Called them."})
+    assert :ok = Companion.build_activity_callback(message).({:tool_start, "shell"})
+
+    refute_received {:companion_event, _event}
+    refute_received {:companion_stream, _turn, _update}
   end
 
   # Companion protocol 6: a step's reasoning summary goes out as it completes,
@@ -870,6 +917,18 @@ defmodule FermixChannels.Channels.CompanionTest do
     assert :ok = Turns.handle_message(Map.from_struct(message), queue)
     assert_receive {:enqueued, "mac-1"}
     message
+  end
+
+  defp requestless_message(id, metadata) do
+    Message.new!(%{
+      id: id,
+      content: "go on",
+      sender: "fermix",
+      channel: "companion",
+      chat_id: "main",
+      reply_target: "main",
+      metadata: metadata
+    })
   end
 
   defp request_message do

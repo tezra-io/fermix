@@ -31,6 +31,8 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.Agents.IterationLimits
   alias FermixCore.Agents.LiveCallTurn
   alias FermixCore.Agents.MainAgent
+  alias FermixCore.Agents.PhoneCallTurn
+  alias FermixCore.Agents.RequestIdentity
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Agents.VoiceCall
   alias FermixCore.Attachments
@@ -41,6 +43,7 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.ComputerHistory.Gate, as: ComputerHistoryGate
   alias FermixCore.ComputerHistory.RecentActivity
   alias FermixCore.ComputerHistory.Taint
+  alias FermixCore.Computers
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Memory.Compactor
   alias FermixCore.Memory.ConversationStore
@@ -102,7 +105,35 @@ defmodule FermixCore.Agents.TurnRunner do
         ) :: {:ok, String.t(), non_neg_integer()} | {:error, term()}
   def run(msg, turn_state, deliver, stream_callback \\ nil, activity_callback \\ nil)
       when is_function(deliver, 1) do
-    run_message_loop(msg, turn_state, deliver, stream_callback, activity_callback)
+    # A phone call's backend turn (M94 §11) is chosen before anything of the
+    # owner's turn is composed: it derives its whole context itself, and
+    # nothing below runs for it.
+    case PhoneCallTurn.from_message(msg) do
+      {:ok, phone_call} ->
+        PhoneCallTurn.run(phone_call, phone_call_runtime(turn_state, stream_callback))
+
+      :none ->
+        run_message_loop(msg, turn_state, deliver, stream_callback, activity_callback)
+    end
+  end
+
+  # What a phone call's backend turn runs with: the registry, this turn's
+  # provider route, the stream callback it tells its reply through, and the
+  # snapshot's seams.
+  defp phone_call_runtime(state, stream_callback) do
+    loop =
+      case resolve_loop_adapter(state) do
+        {:adapter, mod, opts} -> [adapter: mod, adapter_opts: opts]
+        {:routes, routes} -> [routes: routes]
+      end
+
+    %{
+      capability_registry: state.capability_registry,
+      loop: loop,
+      tell: stream_callback,
+      now_fn: Map.get(state, :now_fn),
+      controls: Map.get(state, :phone_call_controls)
+    }
   end
 
   @doc """
@@ -145,6 +176,10 @@ defmodule FermixCore.Agents.TurnRunner do
   # reason. The dispatcher's test pins the pair.
   def computer_use_origin(%{metadata: %{acp_turn: :detached}}), do: :unattended
 
+  # A phone call's backend turn (M94 §11): nobody who can watch or stop a host
+  # action is there, so it fails closed, whatever else the message says.
+  def computer_use_origin(%{source_trust: :phone_call}), do: :unattended
+
   def computer_use_origin(msg) when is_map(msg), do: chat_origin(VoiceCall.from_message(msg))
 
   defp chat_origin({:ok, _voice_call}), do: :voice
@@ -162,6 +197,15 @@ defmodule FermixCore.Agents.TurnRunner do
   """
   @spec commit(map(), map(), String.t(), non_neg_integer()) :: :ok | :compacted
   def commit(msg, turn_state, response, context_tokens) do
+    # A phone call's backend turn keeps no history and starts no memory review
+    # (M94 §11): nothing of the call is written.
+    case PhoneCallTurn.from_message(msg) do
+      {:ok, _phone_call} -> :ok
+      :none -> commit_turn(msg, turn_state, response, context_tokens)
+    end
+  end
+
+  defp commit_turn(msg, turn_state, response, context_tokens) do
     conversation_key = ConversationKey.from(msg)
 
     # Read the replayed conversation BEFORE persisting the reply: the stamp
@@ -512,20 +556,24 @@ defmodule FermixCore.Agents.TurnRunner do
         source_trust,
         state.capability_registry,
         advertise_context,
-        voice_call
+        voice_call,
+        phone_call_result(msg)
       )
 
     emit_runtime_context_cache_telemetry(state, cache_status, profile)
 
-    {history, history_duration_us} =
+    # A snapshot, so a preflight compaction commits only over this same read.
+    {history_snapshot, history_duration_us} =
       Telemetry.timed_us(fn ->
-        ConversationStore.get_history(conversation_key, server: state.conversation_store)
+        ConversationStore.get_history_snapshot(conversation_key,
+          server: state.conversation_store
+        )
       end)
 
     user_message = build_user_message(msg, parts)
 
     {history, preflight_compaction} =
-      maybe_preflight_auto_compact(conversation_key, state, history)
+      maybe_preflight_auto_compact(conversation_key, state, history_snapshot)
 
     maybe_notify_preflight_compacted(preflight_compaction, deliver, voice_call)
     emit_history_telemetry(msg, conversation_key, history, history_duration_us)
@@ -543,7 +591,7 @@ defmodule FermixCore.Agents.TurnRunner do
         profile,
         masked_history,
         user_message,
-        extra_system_messages(voice_call)
+        extra_system_messages(voice_call) ++ computers_messages(state, profile.trust)
       )
 
     accounting = RuntimeContext.accounting_for(ctx, profile)
@@ -559,6 +607,12 @@ defmodule FermixCore.Agents.TurnRunner do
       # adapter opts are byte-identical to before.
       session_id: session_id,
       parent_session: parent_session(voice_call),
+      # The owner request's own identity (`Agents.RequestIdentity`), one per
+      # turn and shared by every tool call in it: what a tool whose effect
+      # outlives the turn (a phone call) records as the request that asked. A
+      # request re-run after the owner's `/confirm` keeps its own
+      # (`request_id/1`).
+      request_id: request_id(msg),
       capability_registry: state.capability_registry,
       provider: state.provider,
       # Turn-start route-chain snapshot for subagents (§7): static for the
@@ -662,11 +716,12 @@ defmodule FermixCore.Agents.TurnRunner do
       # What this turn's first model call carries that someone else could have
       # written: a forwarded message, its attachments (a voice note aside), a
       # coding-run continuation's vendor text, and below a Recent Activity note
-      # that rendered. A provenance
-      # for `Capabilities.AccessGate`, from this turn's message only, so a later
-      # turn replaying the text is not tainted; the loop keeps it (`put_new`) and
-      # folds in what the turn's tools read.
-      outside_sources: initial_outside_sources(msg),
+      # that rendered. A provenance for `Capabilities.AccessGate`, from this
+      # turn's message, so a later turn replaying the text is not tainted, with
+      # one exception: the owner's message that answers a phone call's report
+      # starts as having read the call (`initial_outside_sources/2`). The loop
+      # keeps it (`put_new`) and folds in what the turn's tools read.
+      outside_sources: initial_outside_sources(msg, history),
       # What the owner typed, before the attachment manifest was composed into
       # the content, and nothing for a forwarded message. An open-loop answer
       # given after outside content must quote it (`OpenLoops.Registry`), and it
@@ -754,21 +809,67 @@ defmodule FermixCore.Agents.TurnRunner do
 
   defp tell_history_tainted(_voice_call, _msg, _state, _history, _stream_callback), do: :ok
 
-  # The turn's message-borne outside content, before any tool runs: a
+  # The turn's outside content before any tool runs, from its message: a
   # forwarded message and its attachments, when it re-enters as a finished
   # coding run's notice (the continuation marker, whose content is the vendor
-  # CLI's text) that run's provenance, and when it is a request re-run after
-  # the owner's `/confirm` what its parked turn had read (`:resumed_sources`,
-  # set only by that re-ingest).
-  defp initial_outside_sources(msg) do
+  # CLI's text) that run's provenance, or as a finished phone call's result
+  # (the same marker and the call's own, whose content frames the words of the
+  # person called) that call's, and when it is a request re-run after the
+  # owner's `/confirm` what its parked turn had read (`:resumed_sources`, set
+  # only by that re-ingest). What `history` replays brings nothing, but for the
+  # one exception the owner set after a call (M94 D26):
+  # `put_call_report_source/3`.
+  defp initial_outside_sources(msg, history) do
     sources = UntrustedContent.message_sources(msg)
 
     sources =
       if harness_continuation_depth(msg) > 0,
-        do: MapSet.put(sources, UntrustedContent.harness_continuation_source()),
+        do: MapSet.put(sources, continuation_source(msg)),
         else: sources
 
-    MapSet.union(sources, resumed_sources(msg))
+    sources
+    |> put_call_report_source(msg, history)
+    |> MapSet.union(resumed_sources(msg))
+  end
+
+  # The owner's message that answers a phone call's report starts as having
+  # read the call: whatever happens next is their own new request, and any
+  # risky action it asks for waits for their confirmation, since the report it
+  # answers frames what the person called said. Only that message: one that is
+  # itself a continuation notice is not the owner's, and once the owner has
+  # sent any other message the report is only replayed. What reached the
+  # conversation in between and is not the owner's changes nothing.
+  defp put_call_report_source(sources, msg, history) do
+    if harness_continuation_depth(msg) == 0 and answers_call_report?(history),
+      do: MapSet.put(sources, UntrustedContent.phone_call_source()),
+      else: sources
+  end
+
+  # Whether the owner has sent nothing since a phone call's report: walking
+  # `history` back from its newest message, a call's report (the flag the
+  # store keeps on it, `ConversationStore`'s `phone_call_result`) comes before
+  # any message of the owner's own. A checkpoint summary is a system message
+  # and carries no flag, so a report compacted into one is gone.
+  defp answers_call_report?(history) when is_list(history) do
+    case history |> Enum.reverse() |> Enum.find(&owners_or_report?/1) do
+      %{phone_call_result: true} -> true
+      _owner_message_or_none -> false
+    end
+  end
+
+  # A user-role message that is a call's report or the owner's own. Fermix's
+  # replies, a coding run's notice and a guest's message are neither, so one
+  # of them after a report does not stand in for the owner's answer.
+  defp owners_or_report?(%{role: "user", phone_call_result: true}), do: true
+  defp owners_or_report?(%{role: "user", harness_continuation: true}), do: false
+  defp owners_or_report?(%{role: "user", guest: true}), do: false
+  defp owners_or_report?(%{role: "user"}), do: true
+  defp owners_or_report?(_not_a_user_message), do: false
+
+  defp continuation_source(msg) do
+    if phone_call_result(msg),
+      do: UntrustedContent.phone_call_source(),
+      else: UntrustedContent.harness_continuation_source()
   end
 
   defp resumed_sources(msg) do
@@ -809,6 +910,28 @@ defmodule FermixCore.Agents.TurnRunner do
       else: nil
   end
 
+  # A phone call's result marker (M94 §04), read like the coding run's: under
+  # its atom key, on a continuation only, which only the continuation
+  # dispatcher hands the gateway. It names the turn's outside source, and it
+  # is what gives the turn its reply-only profile (`profile_for_turn/6`).
+  defp phone_call_result(msg) do
+    metadata = Map.get(msg, :metadata) || %{}
+    call_id = Map.get(metadata, :phone_call_result)
+
+    if harness_continuation_depth(msg) > 0 and is_binary(call_id) and call_id != "",
+      do: call_id,
+      else: nil
+  end
+
+  # The owner request this turn is: the one a grant resume hands back, under
+  # its atom key, which only the grant resume hands the gateway (it drops one
+  # from every other message), or a fresh one.
+  defp request_id(msg) do
+    metadata = Map.get(msg, :metadata) || %{}
+    request_id = Map.get(metadata, :request_id)
+    if RequestIdentity.valid?(request_id), do: request_id, else: RequestIdentity.mint()
+  end
+
   # The Live backend addendum (M41 §6.3), spliced right after the runtime
   # contract for this ONE turn. It rides the turn, never the cached profile, so
   # a text conversation's prompt is untouched.
@@ -816,6 +939,21 @@ defmodule FermixCore.Agents.TurnRunner do
     do: [%{role: "system", content: addendum}]
 
   defp extra_system_messages(:none), do: []
+
+  # The home's computers (M97 §6.5), read for this turn, in its own process
+  # and at its trust, as the turn's `computer` argument is
+  # (`Computers.Argument`), never from the cached runtime context, which
+  # nothing rebuilds when a computer joins or goes away (M102 N10). It follows
+  # the voice addendum, since it changes whenever a computer connects or goes
+  # away. `turn_state.computers_opts` is a test's seams for `Computers`.
+  defp computers_messages(state, trust) do
+    opts = Keyword.put(Map.get(state, :computers_opts, []), :trust, trust)
+
+    case Computers.prompt_section(opts) do
+      nil -> []
+      section -> [%{role: "system", content: section}]
+    end
+  end
 
   defp session_id({:ok, %{turn_session_id: turn_session_id}}), do: turn_session_id
   defp session_id(:none), do: "main-#{System.unique_integer([:positive, :monotonic])}"
@@ -1267,6 +1405,16 @@ defmodule FermixCore.Agents.TurnRunner do
       "settings and retry."
   end
 
+  # Vercel AI Gateway answers 403 to a team with no payment method on file,
+  # free credits included, and 401 to a bad key, so key advice would send the
+  # person to a key that is fine (M105 §11).
+  defp auth_reply({:provider_error, %{provider: :vercel, status: 403}}, _get_env) do
+    "Vercel AI Gateway refused this request (HTTP 403), which it does when the Vercel team " <>
+      "has to add a payment method before AI Gateway serves it. Add one in the Vercel " <>
+      "dashboard under AI Gateway and retry; if one is already on file, check the Vercel " <>
+      "AI Gateway API key in Fermix's Providers settings."
+  end
+
   # config/runtime.exs layers a nonblank `<PROVIDER>_API_KEY` over the stored
   # key at every start, so "check the key in setup" would send the operator to
   # a key the daemon is not using.
@@ -1412,7 +1560,11 @@ defmodule FermixCore.Agents.TurnRunner do
       sender: msg.sender,
       agent_id: state.memory_agent_id,
       owner_id: state.memory_owner_id,
-      metadata: msg |> user_message_metadata(voice_call) |> mark_continuation(msg)
+      metadata:
+        msg
+        |> user_message_metadata(voice_call)
+        |> mark_continuation(msg)
+        |> mark_phone_call_result(msg)
     )
   end
 
@@ -1424,6 +1576,17 @@ defmodule FermixCore.Agents.TurnRunner do
   defp mark_continuation(metadata, msg) do
     if harness_continuation_depth(msg) > 0,
       do: Map.put(metadata || %{}, :harness_continuation, true),
+      else: metadata
+  end
+
+  # A phone call's report is stored with a flag of its own besides
+  # (`phone_call_result: true`, in place of the call's id the notice carried
+  # in), so the owner's message that answers it can tell from history
+  # (`answers_call_report?/1`). Only a continuation is a call's report
+  # (`phone_call_result/1`), so `mark_continuation/2` has made the metadata a map.
+  defp mark_phone_call_result(metadata, msg) do
+    if phone_call_result(msg),
+      do: Map.put(metadata, :phone_call_result, true),
       else: metadata
   end
 
@@ -1546,7 +1709,7 @@ defmodule FermixCore.Agents.TurnRunner do
     Code.ensure_loaded?(mod) and function_exported?(mod, :chat, 3)
   end
 
-  defp maybe_preflight_auto_compact(conversation_key, state, history) do
+  defp maybe_preflight_auto_compact(conversation_key, state, %{messages: history} = snapshot) do
     config = Application.get_env(:fermix_core, :compaction, [])
 
     cond do
@@ -1558,7 +1721,7 @@ defmodule FermixCore.Agents.TurnRunner do
         {history, :ok}
 
       true ->
-        preflight_auto_compact_now(conversation_key, state, history, config)
+        preflight_auto_compact_now(conversation_key, state, snapshot, config)
     end
   end
 
@@ -1568,7 +1731,12 @@ defmodule FermixCore.Agents.TurnRunner do
   # means no prior measurement exists (cold/first turn, or first turn after a
   # daemon restart): skip cleanly — there is NO byte-estimate fallback on the
   # trigger path. Post-delivery still catches an over-budget turn this turn.
-  defp preflight_auto_compact_now(conversation_key, state, history, config) do
+  defp preflight_auto_compact_now(
+         conversation_key,
+         state,
+         %{messages: history} = snapshot,
+         config
+       ) do
     context_tokens = Map.get(state, :last_context_tokens, 0)
 
     if context_tokens <= 0 do
@@ -1578,7 +1746,7 @@ defmodule FermixCore.Agents.TurnRunner do
       preflight_compact_if_over_threshold(
         conversation_key,
         state,
-        history,
+        snapshot,
         config,
         context_tokens
       )
@@ -1588,7 +1756,7 @@ defmodule FermixCore.Agents.TurnRunner do
   defp preflight_compact_if_over_threshold(
          conversation_key,
          state,
-         history,
+         %{messages: history} = snapshot,
          config,
          context_tokens
        ) do
@@ -1597,15 +1765,21 @@ defmodule FermixCore.Agents.TurnRunner do
 
     if context_tokens >=
          ModelCatalog.compact_at_tokens_for(lead_key.provider, lead_key.model, threshold) do
-      compact_preflight_history(conversation_key, history, state, target, config)
+      compact_preflight_history(conversation_key, snapshot, state, target, config)
     else
       emit_auto_compaction_skipped(conversation_key, :under_threshold)
       {history, :ok}
     end
   end
 
-  defp compact_preflight_history(conversation_key, history, state, target, config) do
-    result = run_auto_compaction(conversation_key, history, target, config, state)
+  defp compact_preflight_history(
+         conversation_key,
+         %{messages: history} = snapshot,
+         state,
+         target,
+         config
+       ) do
+    result = run_auto_compaction(conversation_key, snapshot, target, config, state)
 
     case result do
       :compacted -> reload_compacted_history(conversation_key, state, history)
@@ -1615,7 +1789,7 @@ defmodule FermixCore.Agents.TurnRunner do
 
   defp reload_compacted_history(conversation_key, state, fallback_history) do
     case conversation_history(conversation_key, state) do
-      {:ok, history} ->
+      {:ok, %{messages: history}} ->
         {history, :compacted}
 
       {:error, reason} ->
@@ -1682,8 +1856,8 @@ defmodule FermixCore.Agents.TurnRunner do
   end
 
   defp compact_when_over_threshold(conversation_key, state, target, config) do
-    with {:ok, history} <- conversation_history(conversation_key, state) do
-      run_auto_compaction(conversation_key, history, target, config, state)
+    with {:ok, snapshot} <- conversation_history(conversation_key, state) do
+      run_auto_compaction(conversation_key, snapshot, target, config, state)
     else
       {:error, reason} -> emit_auto_compaction_skipped(conversation_key, reason)
     end
@@ -1697,8 +1871,10 @@ defmodule FermixCore.Agents.TurnRunner do
     Keyword.put(adapter_opts, :reasoning_effort, CompactionConfig.reasoning_effort(config))
   end
 
+  # A snapshot: the history and the version a compaction of it commits over.
   defp conversation_history(conversation_key, state) do
-    {:ok, ConversationStore.get_history(conversation_key, server: state.conversation_store)}
+    {:ok,
+     ConversationStore.get_history_snapshot(conversation_key, server: state.conversation_store)}
   catch
     :exit, reason -> {:error, {:conversation_history_unavailable, reason}}
   end
@@ -1715,11 +1891,11 @@ defmodule FermixCore.Agents.TurnRunner do
   # Compaction failover runs through the same shared executor as the agent
   # loop's initial chat — no second retry loop. Compactor itself stays
   # single-route; the chain lives here.
-  defp run_auto_compaction(conversation_key, history, {adapter, routes}, config, state) do
+  defp run_auto_compaction(conversation_key, snapshot, {adapter, routes}, config, state) do
     # Strict taint (MILESTONE_32 §13.6): mask any activity-derived assistant turn
     # before it is summarized on an ungranted-remote compaction chain. Both the
     # preflight and post-delivery compaction paths funnel through here.
-    history = Taint.mask_for_chain(history, routes, history_gate_opts(state))
+    history = Taint.mask_for_chain(snapshot.messages, routes, history_gate_opts(state))
     before_tokens = Compactor.estimate_tokens(history)
     attempt = compaction_attempt(history, adapter, config, conversation_key, state)
 
@@ -1735,7 +1911,7 @@ defmodule FermixCore.Agents.TurnRunner do
         commit_compacted_history(
           conversation_key,
           state,
-          compacted,
+          %{messages: compacted, version: snapshot.version},
           route_key,
           {before_tokens, duration_us}
         )
@@ -1788,16 +1964,40 @@ defmodule FermixCore.Agents.TurnRunner do
     ]
   end
 
+  # A compaction replaces exactly the history it read, as `/compact` does: a
+  # message written meanwhile (outside the turn, M106 §5.8) makes its read
+  # stale, and a stale compaction is never committed. It is dropped and said,
+  # with no retry and no failure backoff; the next reply's check reads afresh
+  # and compacts again.
   defp commit_compacted_history(conversation_key, state, compacted, route_key, timing) do
+    case ConversationStore.replace_history(conversation_key, compacted.messages,
+           server: state.conversation_store,
+           agent_id: state.memory_agent_id,
+           owner_id: state.memory_owner_id,
+           expected_version: compacted.version
+         ) do
+      :ok ->
+        compacted_history_committed(
+          conversation_key,
+          state,
+          compacted.messages,
+          route_key,
+          timing
+        )
+
+      {:error, :stale_history} ->
+        Logger.warning(
+          "auto-compaction was not committed for #{inspect(conversation_key)}: the " <>
+            "conversation changed while it ran; the next reply's check compacts it again"
+        )
+
+        emit_auto_compaction_skipped(conversation_key, :stale_history)
+    end
+  end
+
+  defp compacted_history_committed(conversation_key, state, compacted, route_key, timing) do
     {before_tokens, duration_us} = timing
     after_tokens = Compactor.estimate_tokens(compacted)
-
-    :ok =
-      ConversationStore.replace_history(conversation_key, compacted,
-        server: state.conversation_store,
-        agent_id: state.memory_agent_id,
-        owner_id: state.memory_owner_id
-      )
 
     :telemetry.execute(
       [:fermix, :compaction, :auto],
@@ -1909,6 +2109,17 @@ defmodule FermixCore.Agents.TurnRunner do
     )
   end
 
+  # The turn that reports a finished phone call can only write its reply (M94
+  # D23, the owner's rule): what its message frames is what the person called
+  # said, and whatever Fermix did next would be done on their word. So it runs
+  # on the reply-only profile, whatever its trust: no capability is offered or
+  # can be dispatched, and the prompt says so. What should happen next is the
+  # owner's own new request, in their next message, which is their turn.
+  defp profile_for_turn(_ctx, trust, _registry, _advertise_context, _voice_call, call_id)
+       when is_binary(call_id) do
+    RuntimeContext.reply_only_profile(profile_trust(trust))
+  end
+
   # The voice capability boundary (M41 §5.1): a Live delegation runs on the
   # operator surface minus `VoiceCall.excluded_categories/1` for its call's
   # mode — the SAME list `LivePrompt` advertises to the voice model, so prose
@@ -1920,13 +2131,13 @@ defmodule FermixCore.Agents.TurnRunner do
   # this one is a registry read plus string assembly (the expensive half — the
   # file-backed prompt base — stays cached and is reused from `ctx`), against a
   # delegation that is seconds of speech away from the next one.
-  defp profile_for_turn(ctx, trust, registry, _advertise_context, {:ok, voice_call}) do
+  defp profile_for_turn(ctx, trust, registry, _advertise_context, {:ok, voice_call}, nil) do
     RuntimeContext.build_profile(profile_trust(trust), ctx.available_skills, registry,
       excluded_categories: VoiceCall.excluded_categories(voice_call.conversation)
     )
   end
 
-  defp profile_for_turn(ctx, trust, registry, advertise_context, :none) do
+  defp profile_for_turn(ctx, trust, registry, advertise_context, :none, nil) do
     profile_for_trust(ctx, trust, registry, advertise_context)
   end
 

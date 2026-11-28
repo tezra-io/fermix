@@ -86,7 +86,11 @@ companion protocols, and traces.
 `FermixCore.Application.start/2` first picks a `BootProfile` (`:app_engine`,
 `:standalone_cli`, `:linux_package_cli`, or `:source`) from the compiled-in
 `BuildInfo`. A CLI verb that needs no daemon runs and halts before the sibling
-applications start. Otherwise it checks `auth.json` permissions, installs the
+applications start. A daemon's boot first takes the home's lock, the file
+beside its control socket (`Fermix.CLI.Daemon.Lock`), and holds it until the
+application stops: a boot that finds it held starts nothing and writes
+nothing, so one engine at a time serves a home and settles what the one
+before it left. Then it checks `auth.json` permissions, installs the
 redacting logger, attaches telemetry, and starts the core tree under
 `:rest_for_one`, in this order:
 
@@ -103,11 +107,19 @@ redacting logger, attaches telemetry, and starts the core tree under
    `RestartState`, `Sandbox.EnvHealth`)
 8. `AgentSupervisor` and `MainAgent`
 9. the job, meeting, and temporal schedulers with their delivery supervisors,
-   and `Harness.Supervisor`
-10. children gated by config or platform: the daemon socket
-    (`Fermix.CLI.Daemon` and the management workers), `Realtime`,
-    `ComputerUse`, `ComputerHistory` (macOS only), and `SkillCuration.Scheduler`
-11. `Cues.Supervisor`, last, only with cues enabled (see `FermixCore.Cues`
+   `OpenLoops.Scheduler` and `OpenLoops.CheckInSupervisor` (outside
+   `mix test`, on a primary with open loops and memory on),
+   `Harness.Supervisor`, and `PhoneCalls.Supervisor` (always, primary-only)
+10. children gated by config, platform or role: the daemon socket
+    (`Fermix.CLI.Daemon` and the management workers), the native host,
+    `Realtime`, `ComputerUse` and its screen seat, `ComputerHistory` (on the
+    primary and on a machine with a recorder), and `SkillCuration.Scheduler`
+11. late children, the primary's except the move's progress
+    (`Home.MoveProgress`, which a linked computer runs too): the companion
+    origin backfill, the move's progress, `Computers.Registry` and
+    `Computers.Calls`, the trip placer and day turn, `Home.ReleaseTable`, and
+    `Home.Snapshot.Scheduler`
+12. `Cues.Supervisor`, last, only with cues enabled (see `FermixCore.Cues`
     below)
 
 Architecture Invariant: core is the only place where agent runtime state, memory
@@ -136,6 +148,17 @@ review all agree. A trusted Live hand-off names it in its `voice_call` map
 (`Agents.VoiceCall`, believed only on an operator message on the `voice`
 channel); a phone message carries the Mac's chat in `conversation_key`, which
 only `Gateway.ingest/2` sets, from the adapter (M56 D9).
+A phone call's backend turn (`Agents.PhoneCallTurn`) is chosen before anything
+of the owner's turn is composed: it derives its whole context itself, keeps
+no history, starts no memory review, and runs at a low reasoning effort of its
+own whatever the owner's routes carry (`Providers.RoutingOverrides.apply_effort/2`,
+clamped per provider and model), since someone waits on the line for its
+answer. `Agents.RequestIdentity` mints one
+owner request's identity once per turn (and once per function call on a
+Realtime session), which a tool whose effect outlives the turn records, so a
+repeated call inside that request finds what it already started; a call the
+access gate parked, and the request the grant resume re-runs after the owner's
+`/confirm`, keep theirs.
 
 Architecture Invariant: `MainAgent` and `TurnRunner` do not know how Telegram,
 Slack, WhatsApp, Discord, Signal, ACP, mobile, voice, or CLI replies are
@@ -173,18 +196,22 @@ snapshot built when the loop starts, never hard-coded in the loop.
 single source of truth for the supported providers: `openai_codex` (OpenAI
 Codex, Sign in with ChatGPT on the person's plan), OpenAI (API key), Anthropic
 (API key or subscription OAuth), xAI (API key or Grok OAuth, shown as
-SpaceXAI), OpenRouter, Mistral, Venice, and a keyless local Ollama. Each entry names the adapter module, auth modes, secrets,
-config keys, and whether the provider supports reasoning effort. Adapters
-include `OpenAI.ChatCompletions`, `OpenAI.Responses`, `OpenAI.ChatGPTPlan`
-(OpenAI Codex on the public Responses API), `Anthropic.Messages`, and
-`XAI.Responses`; OpenAI is `:routed` (model + base_url pick Responses vs
-ChatCompletions). OpenAI Codex ships no model catalog: `ModelListing` reads the
-signed-in account's list, and after a sign-in `Setup.LiveModel` sets the
-configured model to the first listed one when the list does not have it.
+SpaceXAI), OpenRouter, Mistral, Venice, Vercel AI Gateway, and a keyless local
+Ollama. Each entry names the adapter module, auth modes, secrets, config keys,
+and whether the provider supports reasoning effort. Adapters include
+`OpenAI.ChatCompletions`, `OpenAI.Responses`, `OpenAI.ChatGPTPlan` (OpenAI Codex
+on the public Responses API), `Anthropic.Messages`, and `XAI.Responses`; OpenAI
+is `:routed` (model + base_url pick Responses vs ChatCompletions). OpenAI Codex
+ships no model catalog: `ModelListing` reads the signed-in account's list, and
+after a sign-in `Setup.LiveModel` sets the configured model to the first listed
+one when the list does not have it.
 
 `Selection` builds the primary-plus-fallback chain (at most one provider may be
 marked `primary`), `RouteResolver` resolves a route to `{route_key,
-adapter_opts}`, `Adapter.for_route/1` picks the module, and `RoutingOverrides`
+adapter_opts}` (with Fast mode, the `fast` key of the `openai` and `anthropic`
+blocks, it asks for the vendor's fast tier only where the model has one,
+`ModelCatalog.fast?/2`, and the route takes it, and every call on such a route
+reports the `speed` it ran at), `Adapter.for_route/1` picks the module, and `RoutingOverrides`
 applies the `[fermix_core.routing]` model and reasoning-effort overrides for
 sub-agents, cron, and meetings. `Failover` and `Transient` classify retryable
 errors. Every provider call emits through `Providers.Telemetry.emit_call/3`.
@@ -227,6 +254,10 @@ pins a public URL to the address the guard checked and builds the request to
 it (`Host` and the TLS name keep the original host), for `web_fetch`, link
 previews and Cue feeds.
 `FermixCore.Timeouts` names the non-HTTP deadlines.
+`Net.HttpClient.request_once/3` is the one request retried by neither the
+wrapper nor Req, and it says whether a failure provably never left
+(`:not_sent`) or may have been acted on (`:unknown`); a phone call's create
+uses it.
 
 Architecture Invariant: core boot aborts if `auth.json` exists with a mode other
 than 0600. `Net.TimeoutPolicy` has no default, so an unknown request kind raises.
@@ -287,13 +318,29 @@ Built-in tool families: file read/write/edit, glob and content search, shell,
 and `view_image`; git read/write; web (`web_search`, `web_fetch`,
 `place_search`, `browser`); skills and delegation (`skill_*`, `subagents`,
 `model_routing_config`); memory (`memory_store`, `memory_forget`,
-`memory_recall`, `memory_sources_list`, `recall_activity`); scheduled jobs;
-dated events and
-reminders (`event_*`, `reminder_snooze`); messaging (`send_attachment`,
+`memory_recall`, `memory_sources_list`, `recall_activity`); scheduled jobs,
+with `job_heal_respond` offered only inside a heal run; dated events and
+reminders (`event_*`, `reminder_snooze`); open loops (`open_loop_*`,
+`open_loop_respond` only inside a check-in run); the owner's lists and trips
+(`checklist_*`, `trip_*`); messaging (`send_attachment`,
 `react`, and `send_to_channel` to the owner's own inbox on a channel they name);
-`generate_image`, `request_directory_access`, and `tool_help`.
-`computer_use`, the coding-harness tools, and the meeting tools are registered
-only when their feature is ready.
+`voice_call_context` while a Live call in the chat is up; `generate_image`,
+`request_directory_access`, `tool_help`, and `tool_result_recall`.
+`computer_use`, the coding-harness tools, the meeting tools, and the cue tools
+are registered only when their feature is ready.
+`phone_call` is registered always, because its switch is live both ways, and
+offered by `advertise?/1` on the owner's attended turn only; the text agent's
+capability catalog never names it, and a Live call's prompt names it only while
+phone calls are on. Its in-call controls (`phone_call_press_keys`,
+`phone_call_end`) are in no registry: a phone call's backend turn builds them
+from their modules (`Agents.PhoneCallTurn`), so no other turn can see or run
+one. `phone_call` meets the access gate as an effect outside the machine: its
+module implements the `Capabilities.ExternalEffect` behaviour, so its
+capability carries `metadata.external_effect?`, and the gate asks the module
+which calls make the effect (only `start`), what the owner reads, and which
+context keys a confirmed call runs with. A call asked for after outside content
+waits for the owner's confirmation of its exact brief; one that would be
+refused anyway is refused before the owner is asked.
 
 Architecture Invariant: tools receive explicit context from the agent runtime
 (at least `agent_name` and `conversation_key`). They should not infer
@@ -325,8 +372,11 @@ Memory has two layers:
   `FERMIX_HOME/memory.db`
 
 The same database also holds full-text search, versioned resources, scheduled
-jobs and their runs, temporal events and reminders, harness runs, meetings,
-skill usage and curation, the companion timeline, computer-history rows, and
+jobs and their runs (with the facts, retries and heals behind them,
+`job_run_facts`, `job_retries`, `job_heals`), temporal events and reminders,
+open loops, the owner's lists and trips, harness runs, meetings, phone calls
+(`phone_calls`, migrations 67 and 68), skill usage and curation, the companion
+timeline, computer-history rows, and
 the inbound channel event ids `Gateway.Idempotency` keeps for 24 hours
 (`channel_event_ids`, migration 53, M75), so a provider's retry, or a
 Telegram update sent again, that arrives after a restart, or on the new host
@@ -473,8 +523,10 @@ seals a stopped home (manifest, PBKDF2 key, AES-256-GCM) minus
 `Home.DeviceLocal`, the single list both export exclusion and restore refusal
 read; `Archive.RestoredConfig` rebases the old home path, leaves the old
 machine's own settings out (coding-agent consent among them, M98 D5) and moves a keyring-mode home to the file store on a keyring-less host
-in the restored `config.toml` through `Archive.ConfigText`, `Archive.ScreenHistory`
-clears computer-history rows from the restored database, and a restore writes
+in the restored `config.toml` through `Archive.ConfigText`, a restore with a
+fresh history renews the computer-history home token in the restored database
+(`ComputerHistorySql.renew_home_token/1`; a move's or a move back's continued
+stream keeps its own), and a restore writes
 the archived epoch plus one. `Home.Snapshot` is the streaming twin of the
 archive: `write/4` captures a running home (`Snapshot.Capture`: the archive's
 `collect/2` set, each file copied once while hashed, `memory.db` by
@@ -762,6 +814,12 @@ before yesterday (`Retention.prune_bodies/3`), so a server keeps bodies about a
 day (through the previous UTC day) and the records 14. Readers of trace rows (`Setup.ProviderHealth`, the Doctor's
 sandbox check, `FermixOpik.TraceFile`) read `<type>.jsonl` and need no body.
 
+A phone call is a run kind (`PhoneCalls.Telemetry`, `session_id =
+"phone_call_<call id>"`, its bookends emitted only by `PhoneCalls.Manager`):
+its root outlives the turn that asked for it, whose session it carries as
+`parent_session`, correlation only, and its backend turns and its outcome
+extraction carry the call's own session, so their spans nest under it.
+
 Architecture Invariant: trace writes are best-effort. `Trace` is an early child of
 core's `:rest_for_one` supervisor, so it never raises on its I/O: an entry it
 cannot encode, open or write (a full disk's `:enospc`) is dropped, a failure to
@@ -786,7 +844,23 @@ reminder text without a model.
 through the adapter named in `[:fermix_core, :jobs, :delivery_channels]`, so core
 never compile-depends on channels, and `OwnerInbox` is the one resolver for the
 owner's inbox, the first one or the one on a named platform (a transport only
-the owner reaches names its own through its adapter's `owner_inbox/0`).
+the owner reaches names its own through its adapter's `owner_inbox/0`). Its
+order (M106 §8): a configured target that is the owner's own (a DM of theirs,
+the local chat, or the Fermix app), then the Fermix app while a phone is paired
+(the `mobile` adapter's `phone_paired?/0`, asked through the delivery-channels
+map), then the DM on the first of Telegram, Signal, WhatsApp and iMessage, then
+the app alone on an engine with an app (`Cues.Mandates.app_surface?/1`) or with
+a computer of the home linked to it, connected or not (the `mobile` adapter's
+`computer_linked?/0`): an Always On server, whose owner reads the chat through
+a linked Mac; a watcher card's reach keeps the narrower question. The
+app's inbox is the Mac chat's conversation, which a paired phone shares, and
+an answer typed on either transport is the app's one origin
+(`OwnerInbox.answered_in_app/2`). An ask names what it waits on
+(`for_approval/2`): an approval card, which every app draws, takes that order;
+a watcher's proposal card never goes to the app, whose phone wire carries none.
+Reminders take the DM rung alone (`derived_candidates/1`).
+`FrozenOrigin.resolve/2` freezes where a run that outlives its turn (a coding
+run, a phone call) reports, onto its row, and `FrozenSend` makes the send to it.
 
 Architecture Invariant: a delivery destination is resolved once, at acceptance,
 and stored on the row; send time resolves only the adapter. A send watched by
@@ -795,7 +869,282 @@ and stored on the row; send time resolves only the adapter. A send watched by
 Architecture Invariant: a job is `running` only while one of its runs is queued
 or running. The claim takes the job and inserts the run in one transaction, and
 `Repo.settle_job_run` writes the run's final row and releases the job in
-another; owner edits write only the columns they own.
+another; owner edits write only the columns they own, and so do the
+Scheduler's own writes of a job (a stale skip, an expiry, the disable of a
+schedule that no longer parses: `Repo.advance_stale_scheduled_job/4`,
+`expire_scheduled_job/3`, `disable_scheduled_job/4`), each one guarded UPDATE
+with no read before it and no insert, so an owner's pause, edit or removal
+beside it stands.
+
+A run's row carries three facts beside its result (M106 §5.1): when its first
+tool started (`job_runs.tools_started_at`, stored by the run's loop before that
+tool runs, through AgentLoop's `before_tool` gate, so a crash the Scheduler
+settles still has it, and a start the store cannot record runs no tool and
+ends the run as `tool_start_unrecorded`; a cue run's is its mandate gate's
+marker instead, written before the mandate call acts), and, in
+`job_run_facts`, its failure's kind
+(`Jobs.Failure`, read from the reason term, never its text) and its tool
+timeline (each call's name, plugin, duration and outcome, never what a tool
+returned or was given). A failed run of an interval or cron job that failed
+before its first tool, on its provider or with no runner left
+(`Jobs.Failure.provider_failure?/1`, or the Scheduler's crash and reap settle),
+is retried quietly (M106 §5.3): the settle decides it with `Jobs.Retry` (30 s,
+then 2 min, then 10 min; the fourth such failure in a row ends it) and stores
+it in `job_retries`, the due scan claims a passed retry through the same claim
+with `trigger: "retry"` and without moving `next_run_at`, the Scheduler re-arms
+its timer at every run's end, and the owner's pause, resume, edit or run now
+clears it. Neither table is a column on `job_runs` or `scheduled_jobs`, which
+every engine at the current home format reads whole and by position.
+
+Architecture Invariant: a failed run is retried only before its first tool. No
+tool of a run that can be retried starts before its first start is on the run's
+row, and the retry is decided in the run's settle from that row's
+`tools_started_at`, read in that transaction, so a second run never repeats
+what a tool did, and a retried failure sends and writes nothing the owner
+reads.
+
+A failure that is not retried goes to a heal (M106 §5.4), written in the same
+settle after the retry (`Memory.Repo.JobHealsSql`). Any non-cue run of a job
+created at operator trust opens a heal in `job_heals` for its subject: the
+provider, when the kind is one no model run can help with
+(`Jobs.Failure.model_cannot_help?/1`) and the reason or the run's route names
+one, otherwise the job. It joins the subject's heal that is not closed, or opens
+none when one for the same subject and kind closed still failing, skipped or
+expired within 7 days; `job_heal_runs` links every run a heal took. An ok run
+closes its job's heal and the heal of the provider that answered it (the loop
+result's `provider`), unless it ended without working (below). A guest's job
+and a cue run keep their failure line; for every other failure the runner
+sends nothing and marks the delivery `skipped`.
+`Jobs.HealRun` tells the owner: the Scheduler claims the oldest due heal under a
+lease after its due scan on every due and reconcile tick and when a run or a
+heal run ends, and starts its run under `Jobs.RunnerSupervisor`, one at a time,
+monitored and never waited on. The run resolves the owner's inbox once
+(`Delivery.OwnerInbox.for_approval/2`, for an approval card), builds the message once with the pure
+`Jobs.HealMessage` from the store's facts, sends it once under its message's
+key (`HealMessage.send_key/1`: `job_heal:<id>` for the first message, its card
+and their retries, `job_heal:<id>:verdict` for the verdict and its retries, so
+a channel that answers a repeated key as already sent, the app timeline or
+iMessage's ledger, never takes the verdict for the first), and on a failed
+send backs off by the harness ladder, a dead
+letter after 20 attempts, a day, or an error no wait clears. The reconcile pass
+closes a heal waiting 7 days as `expired`, and removing a job takes its heal.
+A failure's sentence is Fermix's own, one per kind on `Jobs.Failure`'s closed
+list (`Jobs.Failure.sentence/2`, built from the tagged reason: a limit in
+minutes naming the tool still running, a missing skill by name, a provider by
+name), never a generic line; the run's `error`, its job's `last_error`, the
+heal's `failure_text` and a guest's failure line carry it, and the message
+states it after the job's name. Only words someone else wrote are quoted, and
+introduced as theirs: a provider's, a tool's, and the text of a failure Fermix
+has no sentence for (`:other`, whose row keeps that text). A plugin's message
+names the jobs it affects and states no count or "since". The heal run's
+note, model text written after reading outside content, reaches the main
+agent only as outside text: the owner is sent it in the message, the copy
+written to the conversation's history leaves it out
+(`HealMessage.history_copy/2`; history is no outside source, and compaction
+would carry a frame's words on without the frame), `list_jobs` says only that
+a note exists and which run holds it, and `get_job_run`, whose every call
+counts as an outside source for its turn, hands it on framed (`heal_note`,
+source `job_heal_note`).
+
+A run that ends ok without working is taken the same way (M106 §6). The
+runner's watchdog keeps a tool tally for the whole run, stored with the run's
+facts (`job_run_facts.tool_tally_json`): each tool the run was offered and
+called (at most 64), its calls that succeeded, failed or never finished, its
+plugin, and its last error's own words, which AgentLoop puts on a failed
+call's `:tool_finish`, unframed and cut to 500 characters, only because the
+runner sets `activity_error_chars`, which it never does for a cue run. A call
+to a name the run was not offered is the model's words: the timeline records
+it as `(no such tool)` and the tally never counts it. A stored tally this
+engine cannot read (`Jobs.Degraded.readable_tally/1`) reads as none and is
+logged by its run's id, so the store never raises on one. At the settle of an
+ok run of an operator's job, the pure `Jobs.Degraded.decide/1` reads the
+tallies of that run and of the job's two runs settled before it, whatever
+their trigger or status and never a cue run: a tool called in each that never
+succeeded and failed at least once in each trips it, a plugin's tool chosen
+first, then the most failed calls, then the name. The run's own row stays ok
+with no kind. Its heal gets the kind `tool_never_succeeded`, the tool's last
+error as its words and the tool in `job_heals.tool_json`, with the tool's
+plugin as its subject when it has one and the job otherwise, and opens, joins,
+concludes a watching heal or stays quiet as a failure would. Such a run closes
+its provider's heal and never its job's. A heal of this kind is about one
+tool, so only that tool succeeding in an ok run, of any operator's or guest's
+job and tripping or not, closes it; a run that does not call it proves
+nothing, and the heal ends by the seven-day expiry. A plugin's heal runs no
+model and sends one message naming the plugin, the tool and its jobs; a job's
+is diagnosed with the tool's name and failed calls per run among Fermix's
+facts and its last error inside the frame.
+
+Architecture Invariant: one heal per subject is not closed (a partial unique
+index), and a heal is opened, joined or closed by a run only in that run's
+settle transaction, so a run's final row and what became of its failure land
+together. A heal run marks the delivery delivered before it writes the message
+to history, so a run that dies between the two never sends it again.
+
+A job's heal of a kind a model could help with gets one diagnosis inside its
+heal run (M106 §5.5, D1), before its message: `Jobs.HealDiagnosis` runs one
+isolated agent loop on the main route (never the job's pin), linked to the heal
+run and monitored as a job run's loop is (JOB-8), under six steps and a
+watchdog inside the heal's lease, with IDENTITY.md and SOUL.md, the heal
+guidance, the date, the job's definition and its recent runs as Fermix's facts
+(names and numbers), and the failure's own words framed as outside content,
+which the heal records it read. It may call exactly `skill_view`,
+`list_job_runs`, `get_job_run` (both answering for the heal's job only) and
+`job_heal_respond`, whose only effect is to hand one decision and a short note
+to the heal run; the first is kept. A provider's heal, a plugin's, a kind no
+model can help with and a verdict run no model. `Jobs.HealDecision` checks the
+decision and the heal run carries it out after the loop has ended (D4), each
+job write and the decision's record in ONE transaction
+(`Jobs.Registry.heal_write/5`, `Memory.Repo.heal_job_write/5`) fenced on the
+heal's lease and on the job still being the version the decision was
+resolved against (`Jobs.HealDecision.job_version/1`, a digest of the job's
+definition: what an owner's edit, pause or resume can write, never what a
+run writes) and on no owner's write having marked the heal since its claim
+(`job_heals.owner_wrote_at`: every edit, pause or resume marks the job's
+`diagnosing` heal whatever value it leaves, and the claim clears it, so a
+write undone, which no compare by value can see, still counts, JOB-12; the
+digest sees what no mark can, a write outside the owner-write path and a
+proposal answered after its heal run), so an owner's change made while the
+diagnosis ran stands and the decision is recorded as `tell`, refused as
+`job_changed`: `rerun` asks for one
+run through the Scheduler's run now, by the name the Scheduler is registered
+under (a heal run outlives a Scheduler that restarts alone), after the
+concluding write that stamps `rerun_at`, and records what came of it in
+`rerun_outcome` (`started`, `running`, `refused`, which only what proves no
+run will come can be, a reply that the job cannot run now, a call that reached
+no Scheduler or a check before the call that stopped the ask, and which leaves
+the heal `waiting`, or `unanswered`, anything that leaves a run possible, a
+call out of time, a Scheduler stopped while holding it or a reply that cannot
+tell, such as a store timeout under the claim, which keeps it `watching`);
+`raise_limit` raises the time limit through `Jobs.Registry`, only
+upward and at most to the engine's default run limit
+(`Jobs.Runner.default_timeout_ms/0`), and anything past it becomes a proposal;
+`pause` pauses it through `Jobs.Registry`; `propose` is checked as an owner's
+edit is (`Tools.UpdateJob.change_attrs/2`, `Jobs.Registry.check_update/3`) and
+stored on the heal with the job's version, never applied by the heal run; a job a watcher
+wakes or a mandate names gets no edit, only a rerun, a pause or `tell`; a
+decision a check refuses is traced, logged and goes on as `tell`. The decision,
+the note and the change are recorded on `job_heals`; `Jobs.HealMessage` adds
+the note and one line on what Fermix did or would change under the facts. The
+concluding write leaves a rerun or a raised limit `watching` and anything else
+`waiting`. A failure that joins a `watching` heal concludes it a second time
+(§5.9, D8): open again with its outbox reset, it is claimed, sent with no model
+and closed `still_failing`, whose quiet days keep a third failure silent; an ok
+run closes it `healed` and sends nothing; a heal watching 7 days expires as a
+waiting one does.
+
+A proposal is stored and answered on its card (M106 §5.7, D5, stage S4b),
+never by a model or a chat reply. `Jobs.HealCard` makes it the approval card a
+watcher's proposal is (`Cues.Card`, kind `:job_change`): its lines the short
+ask `Jobs.HealMessage.card_lines/2` builds (what failed, the note, one line
+per changed field with its new value, a task as its changed part, every value
+whole, and that Fermix has not made the change), its detail every changed
+field exactly as it is and as it would become (`HealMessage.change_detail/1`),
+its answers Approve and Deny, and its text, for a chat with no buttons, ending
+with how to reply. The heal run offers it only when the inbox has a chat an
+answer can come from (`Delivery.OwnerInbox.answer_origin/1`: a DM, the local
+`cli` chat, owner-private by construction, or the Fermix app's inbox, the
+app's one origin) and the whole card fits
+`Cues.Card.max_chars/0`; otherwise `Jobs.HealDecision.fit_card/3` keeps it as
+`tell`, refused as `no_card_chat` or `card_too_large`, never cut. The short
+ask is stored with the decision, so what was held to the bound is what is
+sent. Before the first send the heal run binds the card to that chat under a
+`cp_` token (`job_heals.card_token_digest`, unique, and `card_platform`,
+`card_chat_id`, `card_user_id`, migration 76); the token itself
+(`card_token`) is kept only until the send's concluding write, so every retry
+of the send carries the first token, and no read of a heal but the bind
+selects it. The card goes through the answer rail's one sender
+(`Cues.Proposals.send_card/3`, the registered `:cue_proposal_sender`) with
+the heal's send key. On the rail (`Cues.Proposals`, whose holders implement
+`Cues.CardHolder`: a mandate's proposal, a follow-up's card, a heal's card,
+in that order) `/confirm` and `/deny` with the token, a Telegram tap, or a
+bare command (the heal's id from the chat's list) reach it only from the
+chat and user it went to, with the cues feature off as well as on; `/always`
+is refused by the rail. The apps' proposal family (`waiting_cards/1`,
+`decide/4`, the companion's and the management socket's lists) stays the
+watcher cards' alone. In the Fermix app (M106 §8, D12) a card is no message
+that stays: the heal's message is written as a row in the app's timeline,
+saying it waits on its card (`HealCard.app_row/1`), and the card beside it is
+an `approval` of kind `job_change` (`HealCard.app_card/2`: the job and each
+changed field, the whole change in its detail), routed by the heal's id
+(`/confirm jhl_…`), which the rail answers only from the chat the card is
+bound to, the app's one origin, while it waits there. It is offered again
+from the record after every hello and restart (`HealCard.app_cards/2`,
+`{:app_cards, origin}`), and every end of it (an answer, an edit, pause or
+resume, the expiry, a clean run, the job's removal) is told to the app
+(`HealCard.announce_ended/3`, `announce/3`) through the listener the channels
+application registers (`:app_approval_listener`,
+`Companion.Approvals.heal_card_ended/3`). `Jobs.HealAnswer` is the apply and the leave the card
+calls, with no turn in it:
+given the heal, the surface the answer came from (`decided_from`, the rail's
+own `<platform>:<chat>:<user>` for a chat) and, as
+data, the checks a heal run's decision takes, `apply_change/4` re-runs an
+owner's edit's checks (`Jobs.HealDecision.check_change/3`), holds the result
+to the recorded values field by field, and writes exactly the recorded change
+with the heal's move to `watching` through the same one transaction, only for
+the version the change was drawn for: a job that moved on gets nothing and the
+heal closes `superseded`; the Scheduler hears of a written change as of any
+edit, and the heal is then watched as after any move (a clean run closes it
+`healed`; a failure is the verdict, saying the change the owner approved did
+not fix it). `leave/3` closes it `skipped`, quiet for 7 days. Each returns
+Fermix's own sentence for the owner, of what it did or why it did nothing. An
+owner's edit, pause or resume that moves the job's definition closes its
+waiting proposal `superseded` in the edit's own transaction, an edit the owner
+asks for in chat among them. The proposal's digest, the answer, when, the
+surface it came from and when the change was applied are columns on
+`job_heals` (migration 74, with JOB-12's mark); `list_jobs` shows a proposal
+whole while it waits (the job's open heal), and as `last_proposal` what became
+of it for its 7 quiet days, whatever heal is open beside it and whether or not
+its runs are kept.
+
+Architecture Invariant: a heal run's model can cause only the decisions in
+`job_heal_respond`'s list, and only code carries one out. The run is offered
+no tool that changes, sends, runs a command or reaches the network; its one
+decision is checked by code, every job write it leads to is made by the heal
+run through the paths an owner's edit takes, in one transaction with its
+record, fenced on the heal's lease and on the job's definition being the one
+the decision was resolved against, and a change to what the job does or where
+it reports is only ever stored. Only the owner's own answer on the
+proposal's card, from the chat it went to (`Jobs.HealCard`, `Jobs.HealAnswer`),
+applies a stored change, and exactly as stored; no model can.
+
+### `FermixCore.OpenLoops`: open loops
+
+An open loop (M78, M83) is something in the owner's own life, in their words,
+that they mean to do or decide by a date, or are waiting on or going through,
+kept so Fermix can follow it up. Open loops are on by default:
+`[fermix_core.open_loops] enabled` (`OpenLoops.Config`, default true) is the way
+to turn them off, and every tuning value is a constant in `OpenLoops.Defaults`.
+`OpenLoops.Registry` is the one layer that turns the model's `open_loop_note`
+and `open_loop_update` arguments into a stored or settled loop, and
+`OpenLoops.Access` admits them only on the owner's attended turn in a private
+chat or the owner's own voice call, so guests, group chats, shared Buzz
+sessions, and scheduled, background and delegated runs never see, record or
+settle one. A loop noted on a turn that read outside content is stamped, and
+its words come back framed, unless they and the loop's date are found in what
+the owner typed on that turn. Its delivery is resolved once, at capture: the
+conversation it came from when that is the owner's own inbox on its platform
+(`Delivery.OwnerInbox.on_platform/2`), otherwise the owner-inbox ladder.
+`OpenLoops.Lifecycle` is the pure state machine, whose column changes
+`Memory.Repo` applies under a live-state guard.
+
+A due loop is raised two ways. `OpenLoops.DueNote` is a system note the
+owner's next private turn carries. `OpenLoops.Scheduler`, in the
+`Temporal.Scheduler` shape and the one claimer, arms one timer for the nearest
+change, keeps check-ins inside the owner's active hours (`OpenLoops.ActiveHours`,
+read from the owner's own messages; there is no quiet-hours setting), and
+starts each `OpenLoops.CheckIn` under `OpenLoops.CheckInSupervisor` (at most
+two at once; a full supervisor is a traced skip, never a queue): one isolated
+model run that may call exactly `memory_recall`, `open_loop_list` and
+`open_loop_respond`, whose one decision (speak, silent, later, close) only code
+carries out, sending at most one message. `OpenLoops.Reactions` records what
+the owner said next, read back as their own words. The two processes start
+in every boot of the tree outside `mix test`, on a primary with open loops and
+memory on, read once at boot.
+
+Architecture Invariant: a check-in's model causes only the decisions in
+`open_loop_respond`'s list, and it can never note or settle a loop; the
+`:open_loop_checkin` key of its context is the whole gate between the
+check-in's surface and the main agent's.
 
 ### `FermixCore.Cues`: Cues and Watchers
 
@@ -1008,7 +1357,7 @@ in the caller and `Trips.Ops`, pure, applies in the Repo's one transaction. A
 stop's `place` is a place's own name or a link a search in the conversation
 returned: before the transaction opens, `Trips.Placing` runs the call over the
 trip as read to learn each stop's day, and `Trips.Lookup` resolves the words
-with the configured place search around that day (`PlaceSearch.lookup/3`, at
+with the configured place search around that day (`PlaceSearch.searcher/2`, at
 most 40 a call, four at a time, 45 s; on Brave they queue for the home's one
 pacer, `PlaceSearch.Brave.Pacer`) and the links from the conversation's
 30-minute place index (`ReplyBlocks.place_by_url/3`); every lookup's record
@@ -1173,17 +1522,26 @@ cosign-verified install.
 ### `FermixCore.ComputerUse`, `ComputerHistory`, and `Browser`
 
 `ComputerUse` controls the desktop through the `compux` sidecar (macOS arm64
-and Linux x86_64). `ready?/0` (enabled and sidecar installed) is the one gate for
-both the `computer_use` tool and `ComputerUse.Supervisor`. `SidecarInstaller`
+and Linux x86_64). `ready?/0` (enabled and sidecar installed; OS permissions
+are a diagnostic, `ComputerUse.Probe`, never part of the gate) is the gate for
+both the `computer_use` tool and `ComputerUse.Supervisor` for this machine's
+own screen; a primary, which may drive a linked computer's screen
+(`drives_computers?/1`), registers the tool and starts the supervisor either
+way and offers the tool only while a screen is in reach
+(`ComputerUse.Reach.reachable?/1`), and a linked computer that is driven starts
+the supervisor and its screen seat (`ComputerUse.Seat`). `SidecarInstaller`
 fetches a sha256-pinned binary into `FERMIX_HOME/plugins/compux/`, and `Safety`
 refuses state-changing actions under strict access and host sessions outside an
 attended chat or voice turn. `SessionManager.ensure/3`, the one door a session
 opens through, also refuses a turn from a shared Buzz channel
 (`Acp.Identity.multi_principal?/1`) before the Stop hold and the registry lookup.
 
-`ComputerHistory` is an opt-in, macOS-only recorder. It captures interaction
-events through the same sidecar and summarizes them on the device into memories
-that `recall_activity` reads. `ComputerHistory.Gate` decides where history may
+`ComputerHistory` is an opt-in recorder on each machine that has one (macOS's
+Accessibility observer, Linux's accessibility bus, through the same sidecar).
+A machine keeps its raw record for 48 hours and sends each finished sitting to
+the home, which summarizes it into a note marked with the machine it came from,
+for `recall_activity`; an Always On server records nothing and keeps the
+notes. `ComputerHistory.Gate` decides where history may
 flow, and `MainAgent` snapshots it per turn.
 
 `Browser` runs the `browser` tool: managed Chrome over the DevTools protocol,
@@ -1201,7 +1559,8 @@ launches only through the `disclaim` shim from `fermix_nif`; on Linux, through
 of memory the kernel stops a Chrome process before the engine.
 
 Architecture Invariant: the computer-use tool is registered only when `ready?/0`
-holds, as a GUI-control capability that guests never get. Computer history
+holds or the primary may drive a linked computer's screen, as a GUI-control
+capability that guests never get. Computer history
 reaches a model only when every hop in the provider chain is local or granted.
 
 ### `FermixCore.Transcription` and `Meetings`
@@ -1221,6 +1580,129 @@ untrusted, and delivers notes to the originating chat or the owner's inbox.
 
 Architecture Invariant: an unknown or unconfigured transcription backend fails
 loudly, and at most one meeting runs at a time.
+
+### `FermixCore.PhoneCalls`
+
+Outbound phone calls (M94) are the coding run's shape with a different worker.
+`PhoneCalls.Supervisor` is always started, a `:rest_for_one` subtree that is
+one of `Home.Role`'s primary-only children and independent of
+`Realtime.Supervisor`: `CallRegistry`, `HandoffSupervisor`, `Manager`,
+`CallSupervisor`, `DeliveryWorker`. `Manager` is the one owner of admission,
+terminal writes and reconciliation, and publishes whether a call holds the
+one-call slot for a turn to read without asking it (`slot_held?/2`), always the
+ledger's own answer, never a row in hand.
+`start_call/2` re-reads readiness (`Readiness`: phone calls on, this engine
+the primary, durable memory on, a sendable OpenAI Platform key, the owner's
+Telnyx caller number and trunk credentials in `[fermix_core.phone_calls]`
+(`PhoneCalls.Config`, whose `credentials/1` resolves them for the call's I/O),
+an egress route the call's control connection can take, and a backend for its
+turns), checks the server-owned authorization evidence
+(the owner request's identity, `Agents.RequestIdentity`, and the brief's hash:
+the same request and mandate find their existing call) and the brief's grants
+(`Grants`), and writes the row (`Ledger`, the `phone_calls` table behind
+`Memory.Repo`, laid down by migration 67, which 68 rebuilds once on a store
+that had its first shape: the request's own call, the one-call slot and the
+day's attempts, which count only calls that may have dialed, in one
+transaction) before it starts a `:temporary` `PhoneCalls.Call`.
+
+The worker is that one process over parts of its own (`Call.Delegations`,
+`Call.Keypad`, `Call.Ending`, `Call.Timers`, `Call.Tasks`, `Call.EndReport`,
+`Call.LastWords`, `Call.Printable`), and other modules reach it only through
+`PhoneCalls.CallControls`. It claims the dispatch, sends the one create through
+`CallTransport` (`OpenAILive`, `OpenAILive.Sideband`), records the session id
+before anything else, attaches the sideband, and once the call is answered
+waits `Limits.opening_wait_ms/0` for the recipient to speak first: their words
+mean the voice answers them from its instructions, and only silence sends the
+opening line, once. It runs each delegation as one scoped backend turn
+through the `PhoneCalls.Delegate` it was handed, fenced by a handle it mints per
+turn; it never waits on the delegate, and a turn's keys stop with the turn. A
+turn that ends the call (`phone_call_end`) begins the ending at once, for every
+reason: its reply is never said and nothing waits for it. At the end it hangs
+up once, after the voice's own speech goes quiet (bounded, and not on
+voicemail; sent again only when the first provably never left), writes a
+confirmed closure the moment it arrives (`Ledger.record_closure/3`), drains,
+reads the outcome once (`Outcome`: one tool-free extraction at a moderate
+effort of its own, tried once more on the same route after a transient
+provider failure, all inside `Limits.result_extraction_timeout_ms/0`, then
+`verify/3`, which keeps `confirmed` under code's own rules: each item the
+brief says must be confirmed rests on the recipient's own words or on their
+yes as the very next turn after the one assistant line it answers, each fact
+is marked `verified` or `read`, and a brief's time the words do not state in
+full is reported as not checked instead of sinking the result; a reading that
+establishes none of the results on a call that ended by a hang-up somebody
+chose (`Call.Ending`'s `:hangup`) is `finished`, a word only `extract/4`
+names, since it alone knows how the call ended, kept by `Call.EndReport` only
+where the provider confirmed that end, and a reading that established nothing
+on a call cut short, or whose end was never confirmed, stays `unknown`, as do
+a call that reached nobody and a result never read; one place decides a result
+was not read, its reader's own failure included, and such a result keeps each
+speaker's last words as its evidence, `Call.LastWords`) and sends the Manager
+one end report.
+An engine stop shortens that ending: the first application to stop runs
+`Manager.drain_for_stop/0` from its `prep_stop/1`, while every tree, the
+call's backend among them, still runs: it asks each live call to hang up, and
+no outcome is read. The Manager writes the terminal row once and hands it off:
+a chat origin whose call the owner did not stop re-enters its conversation
+(`PhoneCalls.Continuation`, through the dispatcher `Delivery.Continuation`
+resolves for every run kind) as a turn
+that can only report: the turn carrying a finished call's marker runs on
+`RuntimeContext.reply_only_profile/1`, with no capability offered or
+dispatchable, so after a call Fermix does nothing on what was said in it and
+what happens next is the owner's own new request (M94 D23). The owner's
+message that answers the report starts as having read the call
+(`Agents.TurnRunner` seeds `UntrustedContent.phone_call_source/0` while the
+conversation's most recent user-role message carries the stored
+`phone_call_result` flag), so the access gate asks before another call or
+any other call it decides after outside content; once the owner has sent
+another message the report is only replayed (M94 D26). Anything
+else or a failed dispatch is one send (`PhoneCalls.Delivery`, over
+`Delivery.FrozenSend`, to the destination frozen on the row: the asking chat
+by `Delivery.FrozenOrigin`, or for a call asked by voice the owner's inbox by
+`Delivery.OwnerInbox.resolve/1`), and `DeliveryWorker` owns the bounded rest.
+`Report.view/2` is the one view of a call, rendered for a person (`text/1`) and
+for a model (`notice/1`, the recipient's and OpenAI's words framed as
+untrusted). While a call is in progress (a ledger row not yet ended, failing
+closed) `PhoneCalls.CallHold` holds the two credentials it reads, and while a
+call's worker runs it refuses the owner's restart (`lifecycle.prepare_restart`,
+which `fermix restart` asks, and the setup page's Restart; the apps' restart
+does not ask yet).
+`phone_call` (start, status, cancel) is the owner's tool and
+`Management.PhoneCalls` the apps'.
+
+Where a build's calls go is decided once, at the composition root
+(`FermixCore.Application.phone_call_transport_opts/2`, handed to every worker and
+to the Manager's cleanup): the vendor in a release, a development build's eval
+fixture origin when it is set and honoured, and a refusal of every call in a
+test build. The transport reads no environment. Boot reconciliation, pruning
+and the delivery ticks run only in the home's daemon process, and a Manager in
+any other process (a command that booted the tree) stops only the calls it
+tracks itself and releases no slot, answering `:owned_by_running_engine` for
+the daemon's.
+
+Architecture Invariant: a mandate dials at most once. The row is written before
+any network I/O, the create is `Net.HttpClient.request_once/3` and is never
+sent again, a lost answer (or a 5xx without the vendor's own error envelope) is
+`dispatch_unknown`, and a known session whose end was not confirmed is
+`closure_unconfirmed`, whose cleanup hang-up the Manager sends again only while
+it provably never left (`Limits.max_cleanup_retries/0`). Either holds the
+one-call slot until the owner confirms the call ended
+(`phone_calls.recovery.confirm`) or `Limits.slot_hold_ms/0` passes (the latest
+its session could start, then OpenAI's own bound on a call). The owner's word
+frees the slot and changes no outcome: `dispatch_unknown` is always `unknown`,
+and `closure_unconfirmed` keeps what was read. Supervision never restarts a
+worker, boot reconciliation settles a row by what it proves, and no switch,
+restart or report retry redials.
+
+Architecture Invariant: a phone call's backend turn is a principal of its own.
+`Agents.PhoneCallTurn` believes only a message on the `phone_call` channel at
+`phone_call` trust, which only `FermixChannels.PhoneCalls.Bridge` enqueues and
+the gateway never assigns. It runs on the call's own conversation and queue
+lane, unattended and tainted from its first token, with nothing of the owner's
+(no memory, persona, history, reply or approval surface), exactly the call's two
+controls, which it builds itself and no registry holds, and its granted
+read-only lookups (`web_search`, `place_search`), and a reply that passes
+`PhoneCalls.Disclosure` before the voice hears it. What the person called says
+is data, never authority.
 
 ### `FermixCore.SkillCuration` and `SoulCuration`
 
@@ -1246,6 +1728,12 @@ publishes the same setting descriptors the setup LiveView renders and saves them
 through `Setup.Wizard`. The canonical export is
 `apps/fermix_core/priv/management/` (`PROTOCOL.md`, the JSON schema, and golden
 fixtures).
+`Management.PhoneCalls` answers `phone_calls.status`, `phone_calls.list`,
+`phone_calls.stop`, `phone_calls.recovery.get` and `phone_calls.recovery.confirm`
+(the owner's word that an unresolved call ended), and the Phone calls pane's
+section (`Management.Settings.PhoneCalls`) applies its switch in the same
+operation as its write. `lifecycle.prepare_restart`, the owner's restart, is
+refused while a call's worker runs, and allowed when that cannot be told.
 
 `Realtime` serves local full-duplex voice on `FERMIX_HOME/realtime.sock`
 (newline-delimited JSON defined by `Realtime.Protocol`, exported in
@@ -1337,13 +1825,17 @@ auth (`setup`, `auth`), talking to the agent over the daemon socket (`ask`,
 `chat`), lifecycle (`run`, `service`, `start`, `stop`, `restart`, `status`,
 `health`, `upgrade`, `uninstall`, `migrate-to-app`), diagnostics (`doctor`,
 `diagnostics`, `logs`), administration (`agents`, `capabilities`, `skills`,
-`plugins`, `memory`, `sandbox`, `grant`, `revoke`, `home`, `always-on`), and companion surfaces
-(`voice`, `acp`, `pair`, `devices`). `always-on` (`Fermix.CLI.AlwaysOnCommand`) is a
+`plugins`, `memory`, `sandbox`, `grant`, `revoke`, `settings`, `home`, `always-on`,
+`computer`), and companion surfaces (`voice`, `acp`, `browser`,
+`browser-bridge`, `pair`, `devices`). `settings` is the headless renderer of
+the management settings sections, and `settings phone-calls recovery` and
+`confirm-ended` are the terminal's way to settle a phone call whose end is
+unconfirmed. `always-on` (`Fermix.CLI.AlwaysOnCommand`) is a
 renderer of the Always On summary like the apps and the setup page: it collects what a
 step needs (masked secrets or flags, never argv), sends one `home.act`, and follows the
 step with `home.status {after, wait_ms}`, bounded at 45 minutes and reconnecting for 90 s
 across a move's restart; it never sequences calls itself. Mix tasks: `fermix.dev`, `fermix.setup`,
-`fermix.resource.*`, and the eval tasks in core; `fermix.bench*` in channels;
+`fermix.resource.*`, `fermix.cues.*`, `fermix.iroh_helper`, `fermix.memory_write_latency`, and the eval tasks in core; `fermix.bench*` in channels;
 `opik.ping` and `opik.replay` in opik. `Release.AppEngineManifest` records the
 version, source commit, tree digest, and protocol ranges that the macOS app
 verifies.
@@ -1352,7 +1844,10 @@ verifies.
 capabilities) for the daemon socket, the management `overview.get` method, and
 the web home page. `FermixCore.Bench` and `FermixChannels.Bench` are latency
 tooling that drives scenarios through the real gateway and queue with a mock
-provider.
+provider. The Mix tasks start no tree, so `FermixChannels.Bench.Boot` gives a run
+a home of its own, the boot facts and the processes a turn calls by name, and
+removes them however the run ends; a turn that does not end with its scenario's
+reply fails the run.
 
 Architecture Invariant: only `run` and `service run` start the daemon tree
 (`setup` and `memory` start it only when needed); every other verb halts before
@@ -1384,25 +1879,34 @@ clouds serve them from the same address (the `output` hook: the
 host's own processes, which is why the server runs no containers), with a root
 unit that loads it before the network at every boot and a `user@<uid>` drop-in
 that will not start the engine account's service manager without it; gives a
-host with no swap a 2 GB `/swapfile`; installs the Linux package through
-`https://fermix.ai/install --no-setup --version X`, the release the computer
-that sets it up runs; turns on Debian's daily
+host with no swap a 2 GB `/swapfile`; installs the Linux package of the
+release the computer that sets it up runs through `install_checked`, the
+one install path the update shares, on fermix.ai's digest alone (the first
+install: no cosign exists before the package); turns on Debian's daily
 unattended-upgrades and installs two root timers over one script,
 `fermix-update`: `fermix-follow.timer` every five minutes (`--follow`) and
 `fermix-update.timer` at 04:00 UTC. Each installs `fermix home status
---json`'s `update_ceiling` (the oldest engine among the desktops the
-server served in the last 30 days, `FermixCore.Home.EngineCeiling`, which
-the server records from each desktop's `hello`) when it is newer than the
+--json`'s `update_ceiling`, which is `update.eligible` (the newest release,
+at or above the one running, whose home a published app of each system whose
+computers keep the home's backups reads, by the home formats the release
+table names; read from the release table `Home.ReleaseTable` keeps,
+`FermixCore.Home.Releases.eligible/3`) when it is newer than the
 installed release in `dpkg --compare-versions`' order, never back down
-and nothing when there is none, then `fermix restart` as the engine
+and nothing when there is none, never through the site's installer:
+`install_checked` installs the release's `.deb` only when fermix.ai's
+digest and the release workflow's cosign signature (checked with
+`/usr/lib/fermix/cosign`, its TUF cache in `/var/lib/fermix-update/sigstore`,
+the identity pinned in the update script) agree, and the release's
+`fermix_always_on.sh` takes over the update script under the same two
+checks; then `fermix restart` as the engine
 account when `fermix service status` says the running engine is behind
 the installed one (not while `fermix home status` shows a pending move
-phase, nor when either read fails), so the server takes its computers'
-release within minutes. Only the night runs `systemctl reboot` when
+phase, nor when either read fails), so the server runs the release it
+installed within minutes. Only the night runs `systemctl reboot` when
 `/run/reboot-required` exists, which a move may defer at most two nights
 in a row (a root-owned count under `/var/lib/fermix-update`); a follow
 run never reboots. Each run stops before the restart and the reboot when
-the installer ran and failed (one that could not be downloaded changed
+`apt-get` ran and failed (a release the table or a check refused changed
 nothing, so both are still decided), and both take an exclusive `flock`
 on `/run/fermix-update.lock` first: a follow run that finds it held
 leaves the update to that run, and the night waits for it at most 15
@@ -1446,9 +1950,11 @@ every command line it starts), then in throwaway Debian containers against
 stand-ins for systemd, curl, apt, `tailscale` and `fermix`, and once with the
 real apt and Chromium.
 
-Architecture Invariant: a server's Fermix is never newer than the oldest of
-the desktops it serves, so the home can always move back to one of them
-(the move's review refuses a server newer than the computer moving to it).
+Architecture Invariant: a server installs only a release whose home a
+published app of every system keeping the home's backups reads, so the home can
+always move back to one of them, and a move's review refuses a server whose
+home this computer could not read back unless a published update for this
+computer's system reads it (`Home.Releases.restorable?/3`, `Home.MoveReadiness`).
 No engine process reaches the instance metadata
 service. The enrollment code reaches the engine only as a file, never in an
 argument, an environment the engine inherits, or the console output, and the
@@ -1512,6 +2018,20 @@ the attachments under the workspace's `media/inbound/`
 `FermixChannels.Dispatcher` remains only as a thin alias for `Gateway.ingest/2`,
 used by tests.
 
+Telegram and WhatsApp deliver an album as separate messages, so each hands
+every inbound message to its channel's `Gateway.AlbumBuffer`, which coalesces
+an album's parts on a short debounce. The buffer never runs `Gateway.ingest/2`
+itself: each delivery runs in a task of the buffer's own linked
+`Task.Supervisor`, ordered by `Gateway.IngressLanes` (pure data): first in,
+first out within a conversation, keyed by `Gateway.conversation_key/2` (the key
+the queue gives the turn, threads included), up to 8 conversations at once,
+and at most 200 deliveries waiting. Past that a delivery is refused, logged and
+counted (`[:fermix, :dispatcher, :ingress_failed]`, `reason:
+:ingress_lanes_full`), and a webhook's ids are forgotten so the provider's
+retry runs. So one chat's slow attachment holds neither another chat nor the
+buffer's flush timers, a dispatch that crashes ends only its own task, and a
+dispatch in flight stops with its buffer.
+
 Current channels:
 
 - `Telegram` uses long polling through `Telegram.Poller`, with albums coalesced
@@ -1558,8 +2078,12 @@ Current channels:
   delivery it writes (a job's result, `send_to_channel`), unlike a reply, is
   pushed to the phones while their channel runs, as the phone's own deliveries
   are, since the two draw one timeline.
-- `Mobile` serves the iOS companion on its own Bandit TLS listener (port 4031,
-  Noise sessions, a pairing window, APNs push). It is on by default, its
+- `Mobile` serves the phone companion on its own Bandit TLS listener (port 4031,
+  Noise sessions, a pairing window, APNs push to an iPhone paired earlier and
+  relayed push to an Android phone). A phone pairs only with Android key
+  attestation (`Mobile.Attestation`, against `priv/mobile/attestation_roots.json`
+  and `android_signers.json`, which lists the app's development and release
+  signing keys, compiled in). It is on by default, its
   listener dormant until the first pairing window creates the identity and
   its mDNS announcement off unless `advertise_mdns` is set, and
   `FermixCore.Companion.Timeline` keeps each profile's synced timeline apart from
@@ -1849,7 +2373,13 @@ Current channels:
   answered inline), in mailbox order. A turn it tracks settles from the
   Queue's outcome: a companion turn's replies are held and written, with
   `text_done`, only on `{:completed}`, while a phone turn streams and writes
-  its own rows and is only settled. Both transports' turns run in the chat's
+  its own rows and is only settled. A report Fermix starts in the chat (a
+  finished phone call's or coding run's notice, handed to `Turns` by the
+  continuation dispatcher as `ChannelRegistry.agent/1` names it) is tracked
+  the same way and shown to no client as a turn: nothing of it is streamed,
+  and each reply is written on `{:completed}` as a delivery, a `row` every
+  watcher hears, or, when its turn failed, one row that says the report could
+  not be written. Both transports' turns run in the chat's
   one queue lane, so each waits for the other, and a stop names its own
   turn's message id there. A `cancel` from either transport
   (`Requests.cancel`) is recorded on the request (`cancelled_at`) before
@@ -1872,12 +2402,19 @@ Current channels:
   `Companion.Output.row/2`, in the phone's history-message shape, and
   projected to the Mac's `row` fields); a turn's stream and ending stay with
   the transport that ran it, and the other one learns the reply as a `row`.
-- `Companion.Approvals` keeps the approval cards still waiting for the owner,
-  each for the transport whose turn raised it, the only one its token resolves
-  from. It announces each card and, when it resolves or expires, its
-  `approval_resolved`, through one announce, to the connections open then; it
-  re-sends the cards after a phone's `hello_ack` and a Mac client's
-  `server_hello` with the time each has left, and holds at most 64.
+- `Companion.Approvals` is the one way approval cards reach the apps. It
+  keeps the cards still waiting for the owner, each a turn raised for the
+  transport whose turn raised it, the only one its token resolves from, and
+  each asked in the app with no turn (an access confirmation that had no chat
+  of its own) for both. It announces each card and, when it resolves or
+  expires, its `approval_resolved`, through one announce, to the connections
+  open then; it re-sends the cards after a phone's `hello_ack` and a Mac
+  client's `server_hello` with the time each has left, and holds at most 64. A
+  heal's proposal (`job_change`) is never kept: it is offered to both
+  transports when sent, read again from its record by the store's `:durable`
+  source in the caller at every hello (so the store never waits on the Repo,
+  and a source that fails or answers nonsense is logged and the hello goes
+  on), and resolved to both when it ends.
   A card that ended while a client was away is never withdrawn, so both wires'
   clients drop every card they show at that handshake and keep only the ones
   sent after it. It runs on every boot, after the registry and `Turns` in
@@ -1894,7 +2431,8 @@ Current channels:
   (`VoiceCall.excluded_categories/1`): a call in the chat may start a coding
   run, which reports back into the chat, and a private call may not. While a
   call in the chat is up, `Companion.Turns` tells it each chat turn it hands off and that turn's
-  answer (`Voice.ChatMirror`), finding the call in Core's `CallRegistry`, and
+  answer (`Voice.ChatMirror`), a report Fermix starts aside, which nobody
+  typed and which is told to no call, finding the call in Core's `CallRegistry`, and
   each such turn is told the call is up (`Voice.Bridge.chat_call/2`): it can
   read the call (`voice_call_context`) and may end with no reply, which its
   runner tells the companion stream and `Companion.Turns` ends with
@@ -1923,6 +2461,13 @@ Current channels:
 
 `outbound/` holds pure long-form text helpers, and `harness/` re-ingests
 coding-harness completion notices.
+`PhoneCalls.Bridge` (in `phone_calls/`) is core's `PhoneCalls.Delegate`, named
+in config (`PhoneCalls.Delegate.configured/0`) and handed to every call's
+worker by the composition root: it enqueues one phone-call
+delegation straight onto the call's own conversation and queue lane, never
+through `Gateway.ingest/2`, and a watcher answers the call's worker with
+exactly one result. A finished call's report re-enters its chat through the
+same continuation dispatcher as a coding run's.
 
 `Gateway.WebhookIngress` is the one path a verified webhook payload takes: the
 adapter parses it, `Gateway.Idempotency` drops the ids it has seen, and the rest
@@ -2007,9 +2552,10 @@ instance for trace inspection. It is compiled into dev and prod builds but stays
 inert unless enabled: `FermixOpik.enabled?/0` requires a non-test compile-time
 env and `FERMIX_OPIK_ENABLED` (or the `:fermix_opik, :enabled` config), and when
 disabled it attaches no telemetry handler. The reporter covers agent, provider,
-tool, job, memory, harness, curation, plugin, MCP, reminder, realtime, meeting,
-management, and computer-use events and nests runs by `session_id` and
-`parent_session`. `mix opik.ping` and `mix opik.replay` help debug the export.
+tool, job (job heals among them), memory, harness, curation, plugin, MCP,
+reminder, open-loop, cue, realtime and voice, meeting, phone-call, management,
+doctor, accessory, list, trip, attachment, timeout, computer-invocation and
+computer-use events and nests runs by `session_id` and `parent_session`. `mix opik.ping` and `mix opik.replay` help debug the export.
 
 Architecture Invariant: observability export is opt-in and side-car. The handler
 only casts to a bounded aggregator; it never sits on the reply path, and its
@@ -2017,10 +2563,11 @@ absence or failure must not affect a turn.
 
 ### `docs/` and `benchmark/`
 
-Milestone design documents live in `docs/design/`. Most are machine-local
-(gitignored), and all are more detailed and more historical than this file.
+Milestone design documents live in the private `tezra-io/fermix-design-docs`
+repository; `docs/design/` is only a link to its `fermix/` folder, and those
+documents are more detailed and more historical than this file.
 Tracked contracts and runbooks include `docs/TELEMETRY_CONTRACT.md`,
-`docs/RELEASING.md`, and `docs/DEVELOPMENT.md`. `docs/lessons.md` holds the
+`docs/RELEASING.md`, `docs/DEVELOPMENT.md`, and `docs/VULTR_BOX.md`. `docs/lessons.md` holds the
 incident write-ups behind the one-line rules in `AGENTS.md`; the wire contracts are exported
 under `apps/fermix_core/priv/{management,realtime,companion,mobile}/`. When a milestone is
 implemented, update this map only for durable boundaries and invariants, not for
@@ -2030,6 +2577,12 @@ every implementation detail.
 the real agent path: behavioral suites (`benchmark/suites/*.yaml`,
 `make -C benchmark regression`) and capability suites
 (`benchmark/suites/capability/*.yaml`, `make -C benchmark capability-auto`).
+
+`tla/` holds TLA+ specs of the parts where several processes act on one state
+(the turn queue, job runs, a home's move, one engine per home in
+`tla/specs/engine_boot`, and the rest), each pinned to the source it models:
+`make -C tla check` runs TLC and reports a spec whose pinned source changed as
+stale (`tla/README.md`).
 
 ## Cross-Cutting Concerns
 
@@ -2078,11 +2631,16 @@ callback instead.
 ### Testing
 
 Tests live beside each umbrella app; shared support is in the root
-`test/support/` and compiles into core. `mix quality` is the local full gate. CI
-runs four legs (Linux and macOS, x64 and arm64) with compile, format, credo, and
-`mix test --warnings-as-errors`, plus jobs for the benchmark harness, the release
-scripts, and the disclaim shim, gathered by an aggregate `gate` job; CI does not
-run dialyzer.
+`test/support/` and compiles into core; each test database starts as a copy
+of one migrated template (`test/support/repo_template.ex`). The gate before a
+push is `scripts/dev/gate.py`, which runs every tree check CI runs once on the
+final tree and remembers the pass for that tree; `mix quality` adds dialyzer.
+CI runs the suite on Linux and macOS, x64 and arm64 (the Intel Mac's suite in
+three partitioned legs) with compile and `mix test --warnings-as-errors`, and
+format and credo on linux-x64, plus jobs for the stress run of changed test
+files, the catalog and compux checksums, the benchmark harness, the release,
+CI and dev scripts with the TLA+ runner's tests, and the disclaim shim,
+gathered by an aggregate `gate` job; CI does not run dialyzer.
 
 For focused work, run the smallest relevant `mix test` target first, then
 broaden before merging. The umbrella runs every child app's tests in one VM, so a
@@ -2091,9 +2649,9 @@ test must not leak global state (see `AGENTS.md`).
 ### Observability
 
 Telemetry is the common event surface for provider calls, tool execution,
-channel messages, agent turns, memory review, jobs, reminders, the harness,
-meetings, curation, MCP, plugins, management, voice, computer use, and sandbox
-decisions. Durable traces are JSONL. Logs go to `FERMIX_HOME/logs/fermix.log`
+channel messages, agent turns, memory review, jobs and their heals,
+reminders, open loops, the harness, meetings, phone calls, curation, MCP,
+plugins, management, voice, computer use, and sandbox decisions. Durable traces are JSONL. Logs go to `FERMIX_HOME/logs/fermix.log`
 through a redacting formatter, rotated at 10 MB with ten files kept.
 
 Architecture Invariant: observability should be added at boundaries where work

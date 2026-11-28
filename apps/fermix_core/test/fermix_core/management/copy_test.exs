@@ -67,6 +67,7 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.McpServers.Row, as: McpRow
   alias FermixCore.Management.Mobile
+  alias FermixCore.Management.PhoneCalls
   alias FermixCore.Management.Placement
   alias FermixCore.Management.Plugins
   alias FermixCore.Management.Plugins.Row, as: PluginRow
@@ -74,7 +75,9 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Management.Router
   alias FermixCore.Management.Settings
   alias FermixCore.Management.Settings.CodingMachine
+  alias FermixCore.Management.Settings.PhoneCalls, as: PhoneCallsSection
   alias FermixCore.Management.Settings.ThisComputer
+  alias FermixCore.PhoneCalls.Report, as: PhoneCallReport
   alias FermixCore.Providers.DecisionModel
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Readiness
@@ -335,6 +338,35 @@ defmodule FermixCore.Management.CopyTest do
       for sentence <- Accessories.sentences() do
         assert_clean(sentence, :prose, [], "accessories sentence")
         assert internal_terms(sentence) == []
+      end
+    end
+
+    # M94 §12: what Phone calls says, composed ones and the readiness reasons
+    # its summary carries included, and what its write refuses with.
+    test "every phone call sentence obeys the rules" do
+      sentences = PhoneCalls.sentences() ++ PhoneCallsSection.refusal_sentences()
+
+      assert length(sentences) > 40
+
+      for sentence <- sentences do
+        assert_clean(sentence, :prose, [], "phone calls sentence")
+        assert internal_terms(sentence) == []
+        refute_command(sentence, "phone calls sentence")
+      end
+    end
+
+    # The reader rule (M94 §12): a call's own sentences (`PhoneCalls.Report`:
+    # its report, its call view, a stop and its refusal) are relayed by a
+    # model and shown in the apps alike, so they never address their reader;
+    # only the family's own sentences for the owner in a settings surface say
+    # "you".
+    test "a call's own sentences address no reader" do
+      sentences = PhoneCallReport.sentences()
+      assert length(sentences) > 60
+
+      for sentence <- sentences do
+        refute sentence =~ ~r/\b(you|your|yours)\b/i, sentence
+        assert_clean(sentence, :prose, [], "phone call report sentence")
       end
     end
 
@@ -1576,6 +1608,7 @@ defmodule FermixCore.Management.CopyTest do
       carried: [:whatsapp, :cues],
       costs: [:telegram],
       telegram: true,
+      leaving: ["loft-linux", "attic-pc"],
       to: "studio-mac",
       name: "loft-linux",
       system: "Linux",
@@ -1656,7 +1689,7 @@ defmodule FermixCore.Management.CopyTest do
     test "the sweep reads every producer" do
       files = summary_sources() |> Enum.map(&Path.basename(elem(&1, 0))) |> Enum.uniq()
 
-      assert Enum.sort(files) == ~w(enrollment.ex link.ex move_readiness.ex)
+      assert Enum.sort(files) == ~w(enrollment.ex join.ex link.ex move_readiness.ex)
       assert Enum.count(summary_sources()) > 40
     end
   end
@@ -1777,7 +1810,8 @@ defmodule FermixCore.Management.CopyTest do
       plugin_copy() ++
       Enum.map(summary_copy(), &elem(&1, 1)) ++
       Enum.map(source_sentences(), &elem(&1, 1)) ++
-      linux_computer_use_copy()
+      linux_computer_use_copy() ++
+      PhoneCalls.sentences()
   end
 
   defp linux_computer_use_copy do
@@ -2490,7 +2524,13 @@ defmodule FermixCore.Management.CopyTest do
       Enum.map(
         ["home/move_readiness.ex"],
         &Path.join(@lib, &1)
-      ) ++ Enum.map(["home/enrollment.ex", "home/link.ex"], &Path.join(@channels_lib, &1))
+      ) ++
+        Enum.map(
+          # A computer's join that was not added: its sentence is the screen's
+          # (M102 N9).
+          ["home/enrollment.ex", "home/link.ex", "desktop/join.ex"],
+          &Path.join(@channels_lib, &1)
+        )
 
     collect(files, &literal/1) ++ collect(files, &template/1) ++ collect(files, &joined/1)
   end

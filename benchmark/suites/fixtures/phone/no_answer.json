@@ -1,0 +1,9 @@
+{
+  "name": "no_answer",
+  "number": "+15035550118",
+  "party": "Oakhurst Bike Works, a bike shop in Portland. It rings and nobody answers; the line rings until Fermix ends the call or the provider's three-minute ringing limit does.",
+  "steps": [
+    {"ring": true},
+    {"hold_ms": 180000}
+  ]
+}

@@ -1,0 +1,160 @@
+{
+  "about": "The GPT-Live SIP wire shapes the engine's transport (PhoneCalls.OpenAILive, its Sideband, Events and Controls) and the eval runners' simulated endpoint (benchmark/bin/evallib/phone_sim.py) must agree on. Read by apps/fermix_core/test/fermix_core/phone_calls/gpt_live_wire_contract_test.exs, which normalizes and classifies every exemplar, and by benchmark/bin/test_phone_sim.py, which holds everything the simulator sends and answers to these shapes. Change a shape here and both sides are tested against it. Every key, password and number is invented.",
+  "server_events": {
+    "transport.ringing": {
+      "normalized": "ringing",
+      "event": {"type": "transport.ringing", "event_id": "evt_sim_1", "session_id": "live_sim_0123456789abcdef"}
+    },
+    "transport.answered": {
+      "normalized": "answered",
+      "event": {"type": "transport.answered", "event_id": "evt_sim_2", "session_id": "live_sim_0123456789abcdef"}
+    },
+    "transport.failed": {
+      "normalized": "call_failed",
+      "event": {"type": "transport.failed", "event_id": "evt_sim_3", "session_id": "live_sim_0123456789abcdef",
+                "error": {"type": "call_error", "code": "busy", "message": "The called number is busy."}}
+    },
+    "session.input_transcript.delta": {
+      "normalized": "transcript",
+      "event": {"type": "session.input_transcript.delta", "event_id": "evt_sim_4",
+                "delta": "Copperleaf Grill, this is Imani.", "start_ms": 1000, "end_ms": 3100}
+    },
+    "session.output_transcript.delta": {
+      "normalized": "transcript",
+      "event": {"type": "session.output_transcript.delta", "event_id": "evt_sim_5",
+                "delta": "A table for four, please.", "start_ms": 3500, "end_ms": 5900}
+    },
+    "session.delegation.created": {
+      "normalized": "delegation",
+      "event": {"type": "session.delegation.created", "event_id": "evt_sim_6", "offset_ms": 5900,
+                "delegation": {"id": "dlg_sim_3", "type": "delegation", "target": "client"}}
+    },
+    "session.usage.updated": {
+      "normalized": "usage",
+      "event": {"type": "session.usage.updated", "event_id": "evt_sim_7", "usage": {"seconds": 42},
+                "context_window": {"usage_ratio": 0.05}}
+    },
+    "session.closed": {
+      "normalized": "session_closed",
+      "event": {"type": "session.closed", "event_id": "evt_sim_8", "reason": "close_requested",
+                "usage": {"seconds": 42}, "session": {"id": "live_sim_0123456789abcdef", "status": "closed"}}
+    },
+    "transport.dtmf.sent": {
+      "normalized": "dtmf_sent",
+      "event": {"type": "transport.dtmf.sent", "event_id": "evt_sim_9", "event": "2", "client_event_id": "ev_wire_1"}
+    },
+    "session.commentary.appended": {
+      "normalized": "append_acked",
+      "event": {"type": "session.commentary.appended", "event_id": "evt_sim_10", "client_event_id": "ev_wire_2"}
+    },
+    "session.thinking.appended": {
+      "normalized": "append_acked",
+      "event": {"type": "session.thinking.appended", "event_id": "evt_sim_11", "client_event_id": "ev_wire_4"}
+    },
+    "session.instructions.appended": {
+      "normalized": "append_acked",
+      "event": {"type": "session.instructions.appended", "event_id": "evt_sim_12", "client_event_id": "ev_wire_6"}
+    },
+    "error": {
+      "normalized": "vendor_error",
+      "event": {"type": "error", "event_id": "evt_sim_13",
+                "error": {"type": "invalid_request_error", "code": "unsupported_event",
+                          "message": "session.start is not accepted on this sideband.", "param": null,
+                          "client_event_id": "ev_wire_7"}}
+    }
+  },
+  "replayed": "transport.answered",
+  "client_events": {
+    "transport.dtmf.send": {
+      "acknowledged_by": "transport.dtmf.sent",
+      "event": {"type": "transport.dtmf.send", "event_id": "ev_wire_1", "event": "2"}
+    },
+    "session.commentary.append": {
+      "acknowledged_by": "session.commentary.appended",
+      "event": {"type": "session.commentary.append", "event_id": "ev_wire_2", "delegation_id": "dlg_sim_3",
+                "content": "A table for four, please."}
+    },
+    "session.thinking.append": {
+      "acknowledged_by": "session.thinking.appended",
+      "event": {"type": "session.thinking.append", "event_id": "ev_wire_4", "delegation_id": null,
+                "content": "Checking the brief."}
+    },
+    "session.instructions.append": {
+      "acknowledged_by": "session.instructions.appended",
+      "event": {"type": "session.instructions.append", "event_id": "ev_wire_6", "delegation_id": null,
+                "content": "Keep it short."}
+    },
+    "session.close": {
+      "acknowledged_by": "session.closed",
+      "event": {"type": "session.close", "event_id": "ev_wire_5"}
+    }
+  },
+  "create": {
+    "request": {
+      "api_key": "sk-eval-invented-phone-0094",
+      "model": "gpt-live-1",
+      "instructions": "You are an AI assistant making a phone call on behalf of the person you work for.",
+      "input": [{"type": "message", "role": "developer",
+                 "content": [{"type": "input_text", "text": "Call brief. Objective: \"A table for four on Friday, February 5, 2027 at 7:30 PM.\""}]}],
+      "voice": "marin",
+      "destination": "+12125550147",
+      "trunk": {"provider_url": "sips:sip.telnyx.com:5061", "username": "fermix-eval-trunk-94",
+                "password": "eval-trunk-pw-K7r2-Wq9d", "caller_number": "+16465550108"}
+    },
+    "body": {
+      "session": {
+        "model": "gpt-live-1",
+        "instructions": "You are an AI assistant making a phone call on behalf of the person you work for.",
+        "input": [{"type": "message", "role": "developer",
+                   "content": [{"type": "input_text", "text": "Call brief. Objective: \"A table for four on Friday, February 5, 2027 at 7:30 PM.\""}]}],
+        "audio": {"output": {"voice": "marin"}},
+        "delegation": {"type": "client"},
+        "store": false
+      },
+      "transport": {
+        "type": "sip",
+        "destination": "+12125550147",
+        "trunk": {
+          "provider_url": "sips:sip.telnyx.com:5061",
+          "auth": {"type": "digest", "username": "fermix-eval-trunk-94", "password": "eval-trunk-pw-K7r2-Wq9d"},
+          "caller_number": "+16465550108"
+        }
+      }
+    },
+    "answers": {
+      "accepted": {
+        "classified": "ok",
+        "status": 201,
+        "body": {"session": {"id": "live_sim_0123456789abcdef", "object": "live.session", "model": "gpt-live-1"},
+                 "transport": {"type": "sip"}}
+      },
+      "refused": {
+        "classified": "rejected",
+        "status": 403,
+        "body": {"error": {"message": "Outbound call rejected by the SIP trunk: the caller number is not enabled for outbound calls on this connection.",
+                           "type": "invalid_request_error", "code": "sip_trunk_rejected"}}
+      },
+      "malformed": {
+        "classified": "rejected",
+        "status": 400,
+        "body": {"error": {"message": "session.audio.format is set; SIP negotiates it",
+                           "type": "invalid_request_error", "code": "invalid_request_error"}}
+      },
+      "initialization_timeout": {
+        "classified": "unknown",
+        "status": 504,
+        "body": {"error": {"message": "The session did not finish initializing in time.",
+                           "type": "server_error", "code": "initialization_timeout"}}
+      }
+    }
+  },
+  "hangup": {
+    "accepted": {"classified": "accepted", "status": 200, "body": ""},
+    "ended": {
+      "classified": "already_ended",
+      "status": 404,
+      "body": {"error": {"message": "No live session with that id.", "type": "invalid_request_error",
+                         "code": "session_not_found"}}
+    }
+  }
+}

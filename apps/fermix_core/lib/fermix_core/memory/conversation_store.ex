@@ -148,8 +148,10 @@ defmodule FermixCore.Memory.ConversationStore do
     {:ok,
      %{
        conversations: %{},
-       clear_versions: %{},
        history_versions: %{},
+       # Per conversation with a durable step running: that step's monitor and
+       # the steps queued behind it, in call order (`enqueue_durable/3`).
+       durable: %{},
        max_messages: max_messages,
        repo: Keyword.get(opts, :repo, Repo),
        agent_id: Config.agent_id(opts),
@@ -164,6 +166,7 @@ defmodule FermixCore.Memory.ConversationStore do
 
   @impl true
   def handle_call({:add_message, key, role, content, opts}, _from, state) do
+    state = ensure_loaded(state, key)
     bump_history_version({:reply, :ok, append_and_persist(state, key, role, content, opts)}, key)
   end
 
@@ -171,6 +174,8 @@ defmodule FermixCore.Memory.ConversationStore do
   # last stored message is the orphaned user turn, so we never break role
   # alternation or mark a turn that already has a reply.
   def handle_call({:append_stopped_marker, key, content, opts}, _from, state) do
+    state = ensure_loaded(state, key)
+
     if last_message_user?(state, key) do
       marker_opts = Keyword.put_new(opts, :sender, "main")
       next_state = append_and_persist(state, key, "assistant", content, marker_opts)
@@ -181,19 +186,16 @@ defmodule FermixCore.Memory.ConversationStore do
   end
 
   def handle_call({:clear, key}, _from, state) do
-    next_clear_versions = Map.update(state.clear_versions, key, 1, &(&1 + 1))
-    next_history_versions = bump_history_versions(state.history_versions, key)
-    clear_version = Map.fetch!(next_clear_versions, key)
-    history_version = Map.fetch!(next_history_versions, key)
-
+    # A cleared conversation is loaded and empty, not absent: its stored rows
+    # are deleted asynchronously, so they must never be read back in
+    # (`ensure_loaded/2`) by a read or write that comes before the delete lands.
     next_state = %{
       state
-      | conversations: Map.delete(state.conversations, key),
-        clear_versions: next_clear_versions,
-        history_versions: next_history_versions
+      | conversations: Map.put(state.conversations, key, []),
+        history_versions: bump_history_versions(state.history_versions, key)
     }
 
-    _durable? = enqueue_delete_history(next_state, key, clear_version, history_version)
+    {_durable?, next_state} = enqueue_delete_history(next_state, key)
     {:reply, :ok, next_state}
   end
 
@@ -202,33 +204,17 @@ defmodule FermixCore.Memory.ConversationStore do
       {:reply, {:error, :stale_history}, state}
     else
       normalized = Enum.map(messages, &normalize_history_message/1)
-      next_clear_versions = Map.update(state.clear_versions, key, 1, &(&1 + 1))
-      next_history_versions = bump_history_versions(state.history_versions, key)
-      clear_version = Map.fetch!(next_clear_versions, key)
-      history_version = Map.fetch!(next_history_versions, key)
       cached = cache_window(normalized, state.max_messages)
 
       next_state = %{
         state
         | conversations: Map.put(state.conversations, key, cached),
-          clear_versions: next_clear_versions,
-          history_versions: next_history_versions
+          history_versions: bump_history_versions(state.history_versions, key)
       }
 
-      _durable? =
-        enqueue_replace_history(next_state, key, normalized, opts, clear_version, history_version)
-
+      {_durable?, next_state} = enqueue_replace_history(next_state, key, normalized, opts)
       {:reply, :ok, next_state}
     end
-  end
-
-  def handle_call({:clear_version, key}, _from, state) do
-    {:reply, Map.get(state.clear_versions, key, 0), state}
-  end
-
-  def handle_call({:durable_version, key}, _from, state) do
-    version = {Map.get(state.clear_versions, key, 0), Map.get(state.history_versions, key, 0)}
-    {:reply, version, state}
   end
 
   def handle_call({:get_history, key, nil}, from, state) do
@@ -253,18 +239,38 @@ defmodule FermixCore.Memory.ConversationStore do
      next_state}
   end
 
+  # A cleared conversation stays in memory as an empty history; it has no
+  # messages, so it is not listed.
   def handle_call(:list_conversations, _from, state) do
-    {:reply, Map.keys(state.conversations), state}
+    {:reply, for({key, [_ | _]} <- state.conversations, do: key), state}
+  end
+
+  # A conversation's durable step exited: start the next one, in call order.
+  @impl true
+  def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
+    case Enum.find(state.durable, fn {_key, running} -> running.ref == ref end) do
+      {key, running} ->
+        log_step_exit(key, reason)
+        {:noreply, start_next_step(state, key, running.pending)}
+
+      nil ->
+        Logger.error("conversation store got a DOWN for no durable step: #{inspect(reason)}")
+        {:noreply, state}
+    end
+  end
+
+  def handle_info(message, state) do
+    Logger.error("conversation store received an unexpected message: #{inspect(message)}")
+    {:noreply, state}
   end
 
   defp append_and_persist(state, {channel, chat_id, _thread_scope} = key, role, content, opts) do
     start = System.monotonic_time()
     message = new_message(role, content, opts)
     updated = append_message(state, key, message)
-    version = Map.get(state.clear_versions, key, 0)
 
-    durable? =
-      enqueue_persist_message(state, key, role, content, opts, message.timestamp, version)
+    {durable?, state} =
+      enqueue_persist_message(state, key, role, content, opts, message.timestamp)
 
     :telemetry.execute(
       [:fermix, :memory, :message],
@@ -292,6 +298,7 @@ defmodule FermixCore.Memory.ConversationStore do
     |> maybe_mark_tainted(Keyword.get(opts, :metadata))
     |> maybe_mark_guest(Keyword.get(opts, :metadata))
     |> maybe_mark_continuation(Keyword.get(opts, :metadata))
+    |> maybe_mark_phone_call_result(Keyword.get(opts, :metadata))
     |> maybe_mark_forwarded(Keyword.get(opts, :metadata))
     |> maybe_mark_spoken(Keyword.get(opts, :metadata))
   end
@@ -319,6 +326,15 @@ defmodule FermixCore.Memory.ConversationStore do
     do: Map.put(message, :harness_continuation, true)
 
   defp maybe_mark_continuation(message, _metadata), do: message
+
+  # A finished phone call's report, a continuation notice too, keeps a flag of
+  # its own (a boolean, never the call's id): the owner's message that answers
+  # it is told by it that it answers a call's report (`Agents.TurnRunner`), so
+  # a compaction's retained tail and a reload must keep it as well.
+  defp maybe_mark_phone_call_result(message, %{phone_call_result: true}),
+    do: Map.put(message, :phone_call_result, true)
+
+  defp maybe_mark_phone_call_result(message, _metadata), do: message
 
   # A message the owner forwarded keeps its marker for the same reason: someone
   # else wrote it, and a retained one that lost the marker would be read by the
@@ -353,6 +369,7 @@ defmodule FermixCore.Memory.ConversationStore do
     |> carry_taint(message)
     |> carry_guest(message)
     |> carry_continuation(message)
+    |> carry_phone_call_result(message)
     |> carry_forwarded(message)
     |> carry_spoken(message)
   end
@@ -382,6 +399,14 @@ defmodule FermixCore.Memory.ConversationStore do
 
     if marked == true do
       Map.put(normalized, :harness_continuation, true)
+    else
+      normalized
+    end
+  end
+
+  defp carry_phone_call_result(normalized, message) do
+    if Map.get(message, :phone_call_result, Map.get(message, "phone_call_result")) == true do
+      Map.put(normalized, :phone_call_result, true)
     else
       normalized
     end
@@ -427,16 +452,36 @@ defmodule FermixCore.Memory.ConversationStore do
   end
 
   defp history_from_repo(state, key, limit) do
-    repo_limit = repo_read_limit(limit, state.max_messages)
+    {messages, next_state} = load_conversation(state, key, limit)
+    {take_recent_chronological(messages, limit), next_state}
+  end
 
-    case load_messages_from_repo(state, key, repo_limit) do
+  # Every write takes this step before it touches a conversation, as every read
+  # does on a miss: a conversation absent from memory is loaded first, so a
+  # message added outside any turn lands after the stored history instead of
+  # standing in for it (M106 §5.8).
+  defp ensure_loaded(state, key) do
+    if Map.has_key?(state.conversations, key) do
+      state
+    else
+      {_messages, next_state} = load_conversation(state, key, state.max_messages)
+      next_state
+    end
+  end
+
+  # The one place a conversation's entry is filled from the repo. The entry is
+  # either absent or the conversation's whole history up to the store's bound,
+  # never a fragment: the read takes at least that bound whatever the caller
+  # asked for (`repo_read_limit/2`), and nothing is cached when there is
+  # nothing stored or no repo.
+  defp load_conversation(state, key, limit) do
+    case load_messages_from_repo(state, key, repo_read_limit(limit, state.max_messages)) do
       {:ok, []} ->
         {[], state}
 
       {:ok, messages} ->
         cached = cache_window(messages, state.max_messages)
-        next_state = put_in(state, [:conversations, key], cached)
-        {take_recent_chronological(messages, limit), next_state}
+        {messages, put_in(state, [:conversations, key], cached)}
 
       {:error, :disabled} ->
         {[], state}
@@ -467,46 +512,39 @@ defmodule FermixCore.Memory.ConversationStore do
     |> Enum.reverse()
   end
 
-  defp enqueue_persist_message(state, key, role, content, opts, timestamp, version) do
+  defp enqueue_persist_message(state, key, role, content, opts, timestamp) do
     case configured_repo(state.repo) do
       nil ->
-        false
+        {false, state}
 
       repo ->
         ctx = %{
-          store: self(),
-          key: key,
-          version: version,
+          operation: :insert,
           repo: repo,
           attrs: message_attrs(state, key, role, content, opts, timestamp),
           max_attempts: state.durable_max_attempts,
           retry_initial_ms: state.durable_retry_initial_ms
         }
 
-        start_persist_task(state.durable_task_supervisor, ctx)
+        enqueue_durable(state, key, ctx)
     end
   end
 
-  defp enqueue_delete_history(state, key, clear_version, history_version) do
+  defp enqueue_delete_history(state, key) do
     case configured_repo(state.repo) do
       nil ->
-        false
+        {false, state}
 
       repo ->
-        ctx =
-          history_operation_context(state, key, repo, :delete, [], [],
-            clear_version: clear_version,
-            history_version: history_version
-          )
-
-        start_history_task(state.durable_task_supervisor, ctx)
+        ctx = history_operation_context(state, key, repo, :delete, [], [])
+        enqueue_durable(state, key, ctx)
     end
   end
 
-  defp enqueue_replace_history(state, key, messages, opts, clear_version, history_version) do
+  defp enqueue_replace_history(state, key, messages, opts) do
     case configured_repo(state.repo) do
       nil ->
-        false
+        {false, state}
 
       repo ->
         attrs =
@@ -521,23 +559,26 @@ defmodule FermixCore.Memory.ConversationStore do
             )
           end)
 
-        ctx =
-          history_operation_context(state, key, repo, :replace, opts, attrs,
-            clear_version: clear_version,
-            history_version: history_version
-          )
-
-        start_history_task(state.durable_task_supervisor, ctx)
+        ctx = history_operation_context(state, key, repo, :replace, opts, attrs)
+        enqueue_durable(state, key, ctx)
     end
   end
 
   # Per-message metadata on the durable replace: a retained message persists
   # the markers it carries — Computer History taint, guest authorship, a coding
-  # run's notice, a forwarded message, a spoken request and its call — and the
-  # backfill side re-derives them from the row's metadata; an unmarked message
-  # keeps the caller's opts.
+  # run's or a phone call's notice, a forwarded message, a spoken request and
+  # its call — and the backfill side re-derives them from the row's metadata;
+  # an unmarked message keeps the caller's opts.
   defp replace_message_opts(opts, message) do
-    markers = [:history_tainted, :guest, :harness_continuation, :forwarded, :spoken, :call_uuid]
+    markers = [
+      :history_tainted,
+      :guest,
+      :harness_continuation,
+      :phone_call_result,
+      :forwarded,
+      :spoken,
+      :call_uuid
+    ]
 
     case Map.take(message, markers) do
       markers when map_size(markers) == 0 -> opts
@@ -545,15 +586,11 @@ defmodule FermixCore.Memory.ConversationStore do
     end
   end
 
-  defp history_operation_context(state, key, repo, operation, opts, attrs, versions) do
+  defp history_operation_context(state, key, repo, operation, opts, attrs) do
     %{
       operation: operation,
-      store: self(),
-      key: key,
-      version:
-        {Keyword.fetch!(versions, :clear_version), Keyword.fetch!(versions, :history_version)},
       repo: repo,
-      selector: chat_selector(state, key, opts),
+      selector: history_selector(operation, state, key, opts),
       attrs: attrs,
       max_attempts: state.durable_max_attempts,
       retry_initial_ms: state.durable_retry_initial_ms
@@ -570,32 +607,75 @@ defmodule FermixCore.Memory.ConversationStore do
     Repo.enabled_server(repo)
   end
 
-  defp start_persist_task(supervisor, ctx) do
-    case start_child(supervisor, fn -> persist_message(ctx, 1) end) do
-      {:ok, _pid} ->
-        true
+  # A conversation's durable steps run one at a time, in the order the store's
+  # calls made them: a step starts only once the step before it has exited, so
+  # a later write can neither cancel an earlier replace or clear nor land
+  # before it, and the database ends as the calls describe (M106 §5.8). The
+  # store never waits on the database for this: a step that has to wait is
+  # queued, and `handle_info/2` starts it when the step before it exits.
+  # Returns whether the step was taken: started now, or queued behind one.
+  defp enqueue_durable(state, key, ctx) do
+    case Map.fetch(state.durable, key) do
+      {:ok, running} ->
+        queued = %{running | pending: :queue.in(ctx, running.pending)}
+        {true, put_in(state, [:durable, key], queued)}
 
-      {:error, reason} ->
-        Logger.error(
-          "failed to start conversation durable write task for #{ctx.attrs.channel}/#{ctx.attrs.chat_id}: #{inspect(reason)}"
-        )
-
-        false
+      :error ->
+        next_state = start_next_step(state, key, :queue.from_list([ctx]))
+        {Map.has_key?(next_state.durable, key), next_state}
     end
   end
 
-  defp start_history_task(supervisor, ctx) do
-    case start_child(supervisor, fn -> persist_history_operation(ctx, 1) end) do
-      {:ok, _pid} ->
-        true
+  # Starts the first of `pending` that will start. One that cannot is logged
+  # and dropped, so the walk is bounded by the queue.
+  defp start_next_step(state, key, pending) do
+    case :queue.out(pending) do
+      {:empty, _pending} ->
+        %{state | durable: Map.delete(state.durable, key)}
+
+      {{:value, ctx}, rest} ->
+        case start_step(state.durable_task_supervisor, ctx) do
+          {:ok, ref} -> put_in(state, [:durable, key], %{ref: ref, pending: rest})
+          :error -> start_next_step(state, key, rest)
+        end
+    end
+  end
+
+  defp start_step(supervisor, ctx) do
+    case start_child(supervisor, fn -> run_step(ctx) end) do
+      {:ok, pid} ->
+        {:ok, Process.monitor(pid)}
 
       {:error, reason} ->
-        Logger.error(
-          "failed to start conversation durable #{ctx.operation} task for #{ctx.selector.channel}/#{ctx.selector.chat_id}: #{inspect(reason)}"
-        )
-
-        false
+        log_start_failure(ctx, reason)
+        :error
     end
+  end
+
+  defp run_step(%{operation: :insert} = ctx), do: do_persist_message(ctx, 1)
+  defp run_step(ctx), do: do_persist_history_operation(ctx, 1)
+
+  defp log_start_failure(%{operation: :insert} = ctx, reason) do
+    Logger.error(
+      "failed to start conversation durable write task for #{ctx.attrs.channel}/#{ctx.attrs.chat_id}: #{inspect(reason)}"
+    )
+  end
+
+  defp log_start_failure(ctx, reason) do
+    Logger.error(
+      "failed to start conversation durable #{ctx.operation} task for #{ctx.selector.channel}/#{ctx.selector.chat_id}: #{inspect(reason)}"
+    )
+  end
+
+  # A step ends `:normal`, or `:noproc` when it had already ended before the
+  # store monitored it. Anything else is a crash, said here before the next
+  # step starts.
+  defp log_step_exit(_key, reason) when reason in [:normal, :noproc], do: :ok
+
+  defp log_step_exit({channel, chat_id, _thread_scope}, reason) do
+    Logger.error(
+      "conversation durable write step for #{channel}/#{chat_id} exited: #{inspect(reason)}"
+    )
   end
 
   # `nil` means the caller explicitly opted out of supervision (test wiring,
@@ -609,18 +689,6 @@ defmodule FermixCore.Memory.ConversationStore do
     Task.Supervisor.start_child(supervisor, task)
   catch
     :exit, reason -> {:error, {:task_supervisor_exit, reason}}
-  end
-
-  defp persist_message(ctx, attempt) do
-    if current_clear_version(ctx.store, ctx.key) == ctx.version do
-      do_persist_message(ctx, attempt)
-    end
-  end
-
-  defp persist_history_operation(ctx, attempt) do
-    if current_durable_version(ctx.store, ctx.key) == ctx.version do
-      do_persist_history_operation(ctx, attempt)
-    end
   end
 
   defp do_persist_message(ctx, attempt) do
@@ -640,26 +708,25 @@ defmodule FermixCore.Memory.ConversationStore do
     end
   end
 
-  defp current_clear_version(store, key) do
-    GenServer.call(store, {:clear_version, key})
-  catch
-    :exit, _reason -> :cleared
-  end
-
-  defp current_durable_version(store, key) do
-    GenServer.call(store, {:durable_version, key})
-  catch
-    :exit, _reason -> :stale
-  end
-
+  # A durable step is a background task nobody waits on, so its Repo call
+  # waits its turn in the Repo's queue with no deadline: a call that timed out
+  # would still run when the Repo reached it (`Repo.periodic_opts/2`), and the
+  # retry would write it a second time. A Repo that is down or dies mid-call
+  # still exits the call, and the bounded retry covers it.
   defp safe_insert_message(repo, attrs) do
-    Repo.insert_message(attrs, server: repo)
+    Repo.insert_message(attrs, server: repo, timeout: :infinity)
   catch
     :exit, reason -> {:error, {:exit, reason}}
   end
 
   defp safe_delete_messages(repo, selector) do
-    Repo.delete_messages(selector, server: repo)
+    Repo.delete_messages(selector, server: repo, timeout: :infinity)
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  defp safe_replace_messages(repo, selector, rows) do
+    Repo.replace_messages(selector, rows, server: repo, timeout: :infinity)
   catch
     :exit, reason -> {:error, {:exit, reason}}
   end
@@ -684,18 +751,7 @@ defmodule FermixCore.Memory.ConversationStore do
   end
 
   defp safe_history_operation(%{operation: :replace} = ctx) do
-    with :ok <- safe_delete_messages(ctx.repo, ctx.selector) do
-      insert_replacement_attrs(ctx.repo, ctx.attrs)
-    end
-  end
-
-  defp insert_replacement_attrs(repo, attrs) do
-    Enum.reduce_while(attrs, :ok, fn attrs, :ok ->
-      case safe_insert_message(repo, attrs) do
-        {:ok, _row} -> {:cont, :ok}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
+    safe_replace_messages(ctx.repo, ctx.selector, ctx.attrs)
   end
 
   defp retry_or_log_persist_failure(ctx, attempt, reason) do
@@ -710,7 +766,7 @@ defmodule FermixCore.Memory.ConversationStore do
         Process.sleep(delay_ms)
       end
 
-      persist_message(ctx, attempt + 1)
+      do_persist_message(ctx, attempt + 1)
     else
       Logger.error(
         "conversation durable write failed after #{attempt} attempts for #{ctx.attrs.channel}/#{ctx.attrs.chat_id}: #{inspect(reason)}"
@@ -730,7 +786,7 @@ defmodule FermixCore.Memory.ConversationStore do
         Process.sleep(delay_ms)
       end
 
-      persist_history_operation(ctx, attempt + 1)
+      do_persist_history_operation(ctx, attempt + 1)
     else
       Logger.error(
         "conversation durable #{ctx.operation} failed after #{attempt} attempts for #{ctx.selector.channel}/#{ctx.selector.chat_id}: #{inspect(reason)}"
@@ -776,13 +832,20 @@ defmodule FermixCore.Memory.ConversationStore do
     }
   end
 
-  defp chat_selector(state, key, opts) do
+  # A clear deletes every row of the conversation, its compaction checkpoints
+  # too (`Repo.delete_messages/2` reads no kind); a replace rewrites only its
+  # chat messages, so the checkpoint a compaction wrote beside them survives.
+  defp history_selector(:delete, state, key, opts), do: conversation_selector(state, key, opts)
+
+  defp history_selector(:replace, state, key, opts),
+    do: Map.put(conversation_selector(state, key, opts), :kind, "chat_message")
+
+  defp conversation_selector(state, key, opts) do
     %{
       agent_id: Keyword.get(opts, :agent_id, state.agent_id),
       channel: elem(key, 0),
       chat_id: elem(key, 1),
-      thread_scope: elem(key, 2),
-      kind: "chat_message"
+      thread_scope: elem(key, 2)
     }
   end
 
@@ -803,15 +866,14 @@ defmodule FermixCore.Memory.ConversationStore do
   defp take_limit(list, :infinity), do: list
   defp take_limit(list, n) when is_integer(n), do: Enum.take(list, n)
 
-  # Bound the DB cache-miss read even when in-memory history is unbounded:
-  # take the largest concrete request, falling back to the backfill floor when
-  # every input is `:infinity`. Preserves the prior `max(limit, max_messages)`
-  # behavior whenever both are integers.
+  # Bound the DB cache-miss read even when in-memory history is unbounded. The
+  # read never takes less than the store's own bound (the backfill floor when
+  # that is `:infinity`): what it returns is cached as the whole window, so a
+  # small `limit` must not shrink it to the caller's slice. A larger `limit`
+  # still reads that many rows, as `max(limit, max_messages)` always did.
   defp repo_read_limit(limit, max_messages) do
-    case Enum.filter([limit, max_messages], &is_integer/1) do
-      [] -> @repo_backfill_limit
-      integers -> Enum.max(integers)
-    end
+    bound = if is_integer(max_messages), do: max_messages, else: @repo_backfill_limit
+    if is_integer(limit), do: max(limit, bound), else: bound
   end
 
   defp load_messages_from_repo(state, key, limit) do
@@ -862,6 +924,7 @@ defmodule FermixCore.Memory.ConversationStore do
     |> maybe_mark_tainted_from_row(row)
     |> maybe_mark_guest_from_row(row)
     |> maybe_mark_continuation_from_row(row)
+    |> maybe_mark_phone_call_result_from_row(row)
     |> maybe_mark_forwarded_from_row(row)
     |> maybe_mark_spoken_from_row(row)
   end
@@ -883,6 +946,22 @@ defmodule FermixCore.Memory.ConversationStore do
     do: Map.put(message, :harness_continuation, true)
 
   defp maybe_mark_continuation_from_row(message, _row), do: message
+
+  defp maybe_mark_phone_call_result_from_row(
+         message,
+         %{metadata: %{"phone_call_result" => true}}
+       ),
+       do: Map.put(message, :phone_call_result, true)
+
+  # A report stored before the flag was its own holds the call's id under the
+  # same key, beside the continuation's: it is the same report.
+  defp maybe_mark_phone_call_result_from_row(
+         message,
+         %{metadata: %{"phone_call_result" => "pc_" <> _id, "harness_continuation" => true}}
+       ),
+       do: Map.put(message, :phone_call_result, true)
+
+  defp maybe_mark_phone_call_result_from_row(message, _row), do: message
 
   defp maybe_mark_forwarded_from_row(message, %{metadata: %{"forwarded" => true}}),
     do: Map.put(message, :forwarded, true)

@@ -6,6 +6,353 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-11-27
+
+### Security
+
+- **Your Always On server installs an update only when fermix.ai and the
+  release's own signature both vouch for it.** The server updated itself by
+  running `https://fermix.ai/install` as root, and every check in that ran
+  against the same site, so whoever could change what fermix.ai serves could
+  run code as root on every server. Each update now downloads the release's
+  package from GitHub, checks its sha256 against the list at
+  https://fermix.ai/install/releases and its cosign signature against Fermix's
+  release workflow for that tag, using the cosign the installed package ships,
+  and installs nothing when either check fails; the next check tries again.
+  The server's first install, before any cosign is on it, checks the list
+  alone. A server set up with 0.20.0 takes this release through its old
+  updater once, and checks every update after it both ways.
+
+### Added
+
+- **Fermix can make a phone call for you.** Off by default. Ask in your chat,
+  the Fermix app or by voice, and Fermix phones a business, or your own phone,
+  for a concrete task such as asking whether a table is free or booking one,
+  then reports what was said and agreed. GPT-Live speaks on the call (not
+  Grok, whichever voice you talk to Fermix with), from your own Telnyx number;
+  calls are outbound only, and that number takes no incoming calls. Fermix
+  calls only a business or your own phone, never another person, which is what
+  the request states and not something Fermix can check from a number, and
+  only a number in the 50 US states or DC, which it does check: a number
+  elsewhere on +1 (Canada, the Caribbean, Puerto Rico and the other US
+  territories) or an emergency, service, toll-free or premium number is
+  refused before anything is dialed. One call runs at a time, with at most
+  twenty attempts in any 24 hours, and Fermix asks for the hang-up at ten
+  minutes while it is running. A request made after Fermix read something
+  someone else wrote (a forwarded message, a web page, its own search for the
+  number) waits up to five minutes for your yes in your chat, and such a
+  request made by voice is refused; a scheduled job, a guest or a watcher
+  cannot start a call at all. On the line the assistant says it is an AI
+  calling for you, is told never to pay, take a deposit or give card details,
+  and to hang up on voicemail. The report arrives by itself within about a
+  minute of the call ending: confirmed, in the other person's own words,
+  unavailable, options, needs you, finished when the conversation ended with
+  nothing confirmed in it, or unknown when Fermix could not tell what
+  happened. Reporting is all Fermix does by itself after a call: the message
+  that brings the report is written with no tools, so Fermix looks nothing up
+  and sends, changes or starts nothing on what was said, and what happens next
+  waits for your own next message. A report for a call asked in a chat then
+  stays in that conversation, so that next request is answered with it in
+  view, and since it answers what the other person said, another call it asks
+  for (or anything else that needs your yes after outside content) waits for
+  your confirmation; a message after that one is an ordinary request. The
+  report of a call asked by voice (sent to your inbox), of one you stopped, or
+  of one whose report could not be brought back as that message is a plain
+  message, and a reply to it is an ordinary request. While a call
+  is in progress Fermix refuses `fermix restart`, the setup page's **Apply &
+  restart**, and a change of the OpenAI key or the connection's password (the
+  Linux app's Restart and an app's Restart of an Always On server are not
+  held, and hang the call up); a call whose end OpenAI never confirmed keeps
+  the one call slot for a little over two hours, or until you confirm in the
+  Phone calls tab or with `fermix settings phone-calls confirm-ended` that it
+  ended. Calls are not recorded. It needs a Telnyx number with a credential
+  connection and that connection's username and password, and an OpenAI API
+  key (a ChatGPT sign-in or a SpaceXAI key does not place a call); only the
+  computer your home runs on places calls. Turn it on in the setup page's new
+  **Phone calls** tab or with `fermix settings` (section `phone_calls`). No
+  Fermix app shows phone calls yet: the Mac app's Settings > Phone calls pane
+  comes with the app release that carries it.
+
+- **Auto Heal: Fermix notices a scheduled job that fails, and tells you
+  once.** A run of a repeating job that fails before it did anything, on
+  something waiting can clear (a provider's rate limit or outage, a lost
+  connection), is run again quietly, up to three times. Any other failure, and
+  any failure of a one-off job, opens a heal: one message in your own inbox,
+  written from Fermix's own facts (the job, what failed and when, how often
+  lately, when it runs next), in place of an error sent where the job delivers
+  (a job a guest set up keeps its error there and is not healed). Later
+  failures of the same job join it and send nothing, and every job failing on
+  one provider shares one message. A job that keeps ending ok while one of its
+  tools never once succeeds, three runs in a row, is noticed the same way.
+  Before the message Fermix takes one short look at the job and may, on its
+  own, run it once more, raise its time limit (never past 30 minutes) or pause
+  it. Anything else, such as a different task, schedule or skill, it only
+  proposes, on an approval card with **Approve** and **Deny** (or `/confirm`
+  and `/deny` in the chat the card went to): a yes makes exactly the change
+  shown, and only if the job is still as it was when the change was drawn.
+  Editing, pausing or resuming the job yourself closes a proposal still
+  waiting. A fix that does not hold is said once, and a heal nobody answers
+  closes after seven days. Each step of a heal, and what became of each failed
+  run, is also one line in the engine log. None of this applies to a watcher's
+  task, which reports its own failures as before. A failed run's error now
+  reads as a plain sentence wherever it is shown, such as a time limit in
+  minutes that names the tool still running, or a missing skill by name.
+
+- **Vercel AI Gateway is a provider.** Save an AI Gateway API key under
+  Providers and Vercel AI Gateway joins the fallback chain after Venice, ahead
+  of the local Ollama hop. The model picker lists every tool-calling chat model
+  the gateway serves that your Vercel team may use, so a team with Zero Data
+  Retention on is not offered the models Vercel refuses under it, grouped by
+  maker with the newest first, and suggests the same models OpenRouter does;
+  the default is Claude Sonnet 4.6. Every request asks the gateway to place the
+  prompt-cache markers itself, so turns of a Claude conversation that follow
+  within minutes read its repeated instructions from the cache instead of
+  paying for them in full. The gateway is paid from credits bought in your
+  Vercel account: a team that has bought none is on a free tier with fewer
+  models and lower limits. Vercel serves no request until the team has a
+  payment method on file, and a turn refused for that says so instead of
+  blaming the key. A PDF sent to a Grok model through it goes to the next
+  provider in the chain, because xAI reads no PDF inline, and a conversation
+  too long for a Grok model's window there is shortened, as on any other
+  provider, instead of failing with "Bad Request".
+
+- **Fast mode is back, for an OpenAI API key and Anthropic.** A Fast mode
+  switch under each of those providers asks for the vendor's faster tier, at
+  about twice the price per token: every model in OpenAI's list, and Claude
+  Opus 5.5 and Claude Fable 5.2 with an Anthropic API key. Other models, and
+  the Claude sign-in, run at standard speed while it is on, and each call's
+  trace says which speed it ran at. OpenAI Codex stays without one: signed in
+  with ChatGPT, OpenAI refuses the fast tier or runs the turn at standard speed.
+
+- **GPT-Live 1.1 is in the voice model menu.** OpenAI's newer Live model sits
+  above GPT-Live 1 under Settings > Voice > Model, at the same price per
+  minute, and hands tasks to the Fermix agent the same way; it transcribes
+  speech more accurately and keeps one accent across languages. A GPT-Live
+  setup that names no model still takes GPT-Live 1, and phone calls stay on
+  GPT-Live 1.
+
+- **GPT-6.2 Astra and GPT-6.2 Sol are in the model lists.** OpenAI's two new
+  models follow GPT-6 Astra for an OpenAI API key and on OpenRouter; no
+  provider's default changes. A ChatGPT sign-in offers them whenever the
+  account does, and Fermix knows their context window there, so a
+  conversation on either compacts where the rest of the GPT-6 generation does.
+
+- **The Android app's release key can pair.** A phone running a build of the
+  Fermix Android app signed with its release key now passes the pairing
+  check, and its device record says it is a release build. Until now only the
+  development key was trusted, so no release build could pair.
+
+### Changed
+
+- **Open loops are on by default.** Fermix keeps track of what you say you
+  will do, decide or are waiting on, and may check in on it, without being
+  switched on first: a home that never set `[fermix_core.open_loops] enabled`
+  has open loops running after this update. To turn them off, switch off
+  **Check in on things you plan to do by a date** on browser setup's
+  Personalization tab or under About you in the Fermix app's settings, or set
+  `enabled = false` under `[fermix_core.open_loops]`, then restart. A check-in
+  now arrives in the chat where you mentioned the loop, when that is the
+  app's chat or your Telegram, Signal, WhatsApp or iMessage chat with Fermix,
+  and a loop mentioned anywhere else follows your inbox; an install with only
+  the app, where no loop could be recorded, now records the ones said in its
+  chat. Active hours count a message before 04:00 as the end of the evening
+  before, so a late night no longer starts them at 01:00 and sends a check-in
+  near 04:00. A loop noted after Fermix read outside content is no longer
+  marked as possibly not yours when you typed its words and its date (month
+  and day) yourself in that message.
+
+- **Your inbox is the Fermix app while a phone is paired.** What Fermix sends
+  you on its own (a heal's message, a watcher's notice, a voice call's report,
+  an access confirmation that had no chat of its own) went to the default
+  target you configured or to your chat on Telegram, Signal, WhatsApp or
+  iMessage, and never to the app. The order is now: the default target you
+  configured, which may be the app; the Fermix app while a phone is paired;
+  your messaging chat; and with none of those, the app's chat on an install
+  with the app or on an Always On server with a computer linked to it. An
+  approval asked this way shows in the app as the approval card it already
+  draws, on the Mac and the phone alike, and is answered from either. A
+  watcher's proposal card and reminders stay where they were.
+
+- **The setup page's Realtime tab is now Voice.** It opens with **Talk to
+  Fermix**, and its Back, Save and Save & next buttons sit at the foot of the
+  page, below StackChan, where they sat between the voice settings and
+  StackChan and it was not clear what they saved. Phone calls have a tab of
+  their own, the step after Voice.
+
+- **One slow attachment no longer holds up your other chats.** On Telegram and
+  WhatsApp, Fermix downloaded and read each message's attachments one message
+  at a time for the whole channel, so a big album, a video or a voice note in
+  one chat delayed every other chat's messages until it was done. Each chat is
+  now handled on its own, up to eight at once, and messages within a chat
+  still reach Fermix in the order you sent them.
+
+- **The setup page asks a provider for its model list once.** It asked again on
+  every page load, whichever tab was open, and on every edit to the provider
+  form, and the page waited each time, for up to two seconds when the provider
+  could not be reached. It now asks when the Provider tab shows a provider,
+  server address, key or ChatGPT sign-in it has not read yet, without holding
+  up the page, and a **Refresh** button beside the list asks again (after
+  `ollama pull`, for example).
+
+- **The Logs page opens faster on a large log.** A page formatted every entry
+  in the last 2 MB of the log to show 200 of them; it now formats only the
+  entries it shows.
+
+- **Open-loop check-ins and skill curation no longer sort your whole chat
+  history.** Working out your active hours, and reading your recent messages
+  when skills are reviewed, each sorted every message you have sent. They now
+  read an index, which an existing home gains the first time it starts.
+
+### Fixed
+
+- **The Fermix app's chat no longer stays on Thinking after a report.** When a
+  phone call or a coding run started from the app's chat finished, Fermix
+  wrote its report there in a turn of its own, told the app a turn had
+  started, and never told it the turn had ended, so the chat showed Thinking
+  with a Cancel that did nothing until the app reconnected. A report is now
+  sent as what it is, a message of Fermix's own: nothing is shown while it is
+  written, it arrives when it is done, and a paired phone that is away is
+  notified of it as of any other message Fermix sends by itself. If the report
+  cannot be written, a message says so instead of nothing arriving. A request
+  that carries on after you approve something had the same fault in another
+  form, its start and its end naming two different turns on the app and on
+  the phone, and now ends as any other reply does.
+
+- **An Always On server's log no longer fills with one Messages warning.**
+  While the Mac that carries Messages for a home was linked and Fermix
+  Messages was not running on it, the server asked it again every five seconds
+  and logged a warning each time, about seven hundred lines an hour, which
+  buried everything else in the log. Why Messages cannot be reached is now
+  logged once, and again only when the reason changes, with one line when it
+  works again. The server keeps asking for as long as that Mac offers
+  Messages, at waits that grow from five seconds to one minute.
+
+- **Fermix no longer loses the start of a long conversation.** When a
+  conversation outgrows its limit, Fermix summarizes the older turns and keeps
+  the summary. Saving the shortened conversation also deleted the stored copy
+  of that summary, so the next summary was written without it, and everything
+  from before the previous one was dropped. The summary is now kept and each
+  new one builds on it. The shortened conversation is also saved in one step,
+  so a failure partway through cannot leave part of it behind.
+
+- **A message Fermix sends on its own no longer hides a conversation's
+  history.** After a restart, a message Fermix wrote into a conversation
+  before you next wrote there (a check-in or a notice, for one) became that
+  conversation's whole history: the next reply saw only that message, and the
+  next summary deleted the stored rest. Fermix now reads the conversation
+  first. A message that arrives while a long conversation is being summarized
+  is no longer summarized away, and a conversation you cleared with `/new`
+  stays cleared after a restart even when a message reached it right after.
+
+- **Starting Fermix twice on one home no longer disturbs the one that is
+  running.** A second engine started on a home already in use (a second
+  `fermix run`, or two services pointed at one home) was refused only at the
+  end of its startup. By then it had marked the running engine's scheduled
+  runs failed, reset reminders that were being sent so they went out twice,
+  ended its coding runs as interrupted and failed its meetings. It is now
+  refused before it reads or changes anything in the home.
+
+- **A job you pause, edit or remove stays that way.** When Fermix skipped a
+  run that was too old to start, expired a job, or switched off one whose
+  schedule no longer read, it wrote the whole job back from a copy it had read
+  a moment earlier. A pause or an edit made in that moment was undone, and a
+  job removed in that moment came back and ran. Each of those writes now
+  changes only its own fields, and only while the job is still as it was read.
+
+- **Signing out of ChatGPT lets you sign in with another account or
+  workspace.** OpenAI ties Fermix's registration to the account and workspace
+  chosen when it was made, and Fermix kept that registration across a
+  sign-out, so a home stayed on its first account: a sign-in as another
+  account was refused as a mismatch, and a workspace joined later, such as a
+  ChatGPT Business one, could never be chosen. A sign-out now forgets the
+  registration, so the next sign-in asks which account and workspace to use.
+
+- **Calling Fermix again right after you hang up connects.** A voice call
+  started the moment the last one ended could be handed to the call that was
+  closing: from a Mac linked to your server it waited forever, and from a
+  phone or a linked computer it could be told a call was still in progress.
+  A call now counts as closed only once nothing of it is left, and a call
+  started while the last one is closing opens as soon as it has closed.
+
+- **Stop on the screen indicator holds for the request it interrupts.** While
+  Fermix used your computer, Stop was recorded against the request that first
+  opened the session. Pressed during a later request in the same conversation,
+  it ended the session, and that request opened a new one and carried on. Stop
+  now holds the request that was acting when you pressed it, until you ask
+  again.
+
+- **The first phone you pair can be on any network.** Turning phone access on
+  and pairing straight away made the pairing code before the relay connection
+  had started, so a phone on another Wi-Fi or on mobile data could not reach
+  this computer, and only a second code worked. The code now waits for the
+  relay, up to 5 seconds, so the first scan pairs from anywhere.
+
+- **A request to a computer's browser just after the last one ended no longer
+  fails.** When Fermix on your server used a computer's browser, a request
+  that reached the computer just as the turn holding that browser there had
+  ended (its turn finished, or it sat idle long enough to close) could be
+  refused with "the browser turn … could not be held here". It now starts a
+  fresh one, as any later request does.
+
+- **A computer that joins your server is in Fermix's next reply.** Fermix on
+  your server kept the list of the home's computers it read first, so a
+  computer that joined afterwards was missing from every later turn: asked to
+  run something there, Fermix ran it on the server itself and then tried SSH.
+  Each turn and each voice call now sees the computers as they are. A computer
+  with every switch off can be named too, so Fermix says what is switched off
+  there instead of trying elsewhere.
+
+- **A Google Meet link sent to your server gets a straight answer.** On an
+  Always On server without Zoom set up, the meeting tools were not offered at
+  all, so Fermix could open a Meet link in your Mac's signed-in browser
+  instead. With meetings on, the server now answers every link: a Zoom link
+  joins or says to set Zoom up, and a Meet link says "Google Meet is not
+  available on your server yet: the notetaker needs a Google sign-in on a
+  computer with a screen."
+
+- **A command stopped partway on a computer says it ran.** When Files and
+  commands was switched off on a computer while a command Fermix had started
+  there was running, your server was told the command had not run. It now
+  says it ran, for how long, that it was stopped partway when its switch went
+  off, and that what it did stands. Work that had not started is still
+  refused as switched off.
+
+- **A Mac's first backup after a move is no longer six hours late.** When your
+  server started, its first backup could run before the Mac had connected,
+  and the Mac's own copy was then planned six hours later. A computer still
+  owed a copy now gets one as soon as it connects.
+
+- **Joining your server says where to type the code, and a removed computer
+  can join again.** The joining computer's screen and `fermix computer join`
+  sent you to the server, which has no screen; they now say to type the code
+  in Always On on a computer already in your Fermix. A computer removed from
+  the home offers **Join again**, with a code field on the setup page's Always
+  On tab and in `fermix always-on join`. `fermix computer join` now joins
+  through the running Fermix, as the apps do, and with Fermix stopped it says
+  to start it first.
+
+- **Moving back from your server leaves a clean home.** After a move back, the
+  Mac was shown as a server (a notice such as "This server's disk is 89%
+  full.", and no way to set Always On up again); it is now shown as itself. A
+  move back, and Restore here, now disconnect every computer that had joined
+  the server, not only this one, since a home off a server holds no computer:
+  the move back's confirmation names each computer that leaves, and that
+  computer's screen offers **Join again** for when Fermix is on a server.
+
+- **Notices about iMessage's helper and Slack's Socket Mode read as
+  sentences.** They were titled with an internal id, such as
+  "imessage:helper is on but not finished"; they now carry Fermix's own words.
+
+- **`/history status` says when a computer records nothing.** A computer
+  whose recorder runs with no apps chosen for computer history records
+  nothing, which its status did not say; it now reads "no apps chosen there,
+  so nothing is recorded".
+
+- **An empty model list no longer tells you to run `ollama pull`.** On the
+  setup page, a provider other than Ollama whose list came back empty showed
+  Ollama's hint; it now says the provider listed no models Fermix can use and
+  to enter a model id.
+
 ## [0.20.0] - 2026-11-15
 
 ### Security

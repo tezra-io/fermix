@@ -79,13 +79,13 @@ everything else left out.
   (`computer_history.ex:235`, `:243-247`, `:306`, `controller.ex:63-64`,
   `:202`).
 - `SaveBeforeReply`: `/history off` writes `machine.toml` before it replies
-  (`computer_history.ex:234-237` before `history.ex:747-748`).
+  (`computer_history.ex:234-237` before `history.ex:758-759`).
 - `BootReconciles`: a started or restarted Controller reconciles in
   `handle_continue` (`controller.ex:67-89`).
 - `OffConfirmsStop`: an exit of the reconcile call (no Controller, a crash
   mid-call, a timeout) comes back as `{:error, {:reconcile_failed, _}}`
   (`computer_history.ex:304-311`), and `/history off` then says the stop could
-  not be confirmed instead of "nothing new is captured" (`history.ex:827-832`).
+  not be confirmed instead of "nothing new is captured" (`history.ex:838-843`).
   Off, the exit reads as a confirmed stop (the code at 693970b7).
 - `InitChecksEnabled`: every Capturer start, a DynamicSupervisor restart
   included, re-reads `ComputerHistory.operative?/0` and returns `:ignore`
@@ -260,14 +260,14 @@ Controller's split lookup and crashes at any point) both held: 01 with
   (`:659-702`).
 - **`/history off`: env flip, then terminate the Capturer, then save
   config: confirmed.** The order is (`ComputerHistory.switch_off/1`, from
-  `disable/1`, `history.ex:859-864`):
+  `disable/1`, `history.ex:870-875`):
   1. flip (`computer_history.ex:224-230`);
   2. a synchronous reconcile (`:235`, `:243-247`), which returns after
      `DynamicSupervisor.terminate_child` returns, which waits for
      `terminate/2`; since the CH-3 fix an exit of the call comes back as an
      error, not `:ok`;
   3. save to `machine.toml` (`:236`), whatever the reconcile returned;
-  4. reply (`history.ex:812-843`), chosen by both outcomes.
+  4. reply (`history.ex:823-854`), chosen by both outcomes.
 - **Events captured during a pause but flushed after it ends are stored:
   confirmed → CH-1 (fixed).**
 - **Buffered events land inside a purged window, known and tolerated:
@@ -886,3 +886,13 @@ children, their order and `:rest_for_one` are unchanged. No modelled step
 changed; the moduledoc and the removed probe move the lines the spec cites
 by 32, and the spec and this README's Assumptions point at the committed
 file.
+
+## Re-read for a computer's apps in its report (M102 N15, 2026-11-17)
+
+Re-read for M102 N15, which stales the `history.ex` pin. A computer's
+report of its recorder (`ComputerHistory.Report`, version 2) counts the
+apps chosen there, and `/history status` says "no apps chosen there, so
+nothing is recorded" for one that reports none (`recorded_clause/1`). A
+status read is no step here, which models the capture path, pause, purge
+and off, and none of those changed. The comments' line numbers into
+`history.ex` move by eleven and point at this code.

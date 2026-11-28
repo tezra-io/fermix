@@ -3,6 +3,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
 
   alias FermixCore.Acp.Identity
   alias FermixCore.Agents.ConversationKey
+  alias FermixCore.Agents.RequestIdentity
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Agents.TurnRunner
   alias FermixCore.Agents.VoiceCall
@@ -14,7 +15,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   alias FermixCore.ComputerHistory.Gate.Snapshot
   alias FermixCore.ComputerHistory.Taint
   alias FermixCore.ComputerUse.Safety
-  alias FermixCore.Harness.Delivery, as: HarnessDelivery
+  alias FermixCore.Delivery.FrozenOrigin
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
   alias FermixCore.OpenLoops.Reactions
@@ -1044,7 +1045,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
                 destination: "main",
                 thread: nil,
                 client_origin: nil
-              }} = HarnessDelivery.resolve_snapshot(context)
+              }} = FrozenOrigin.resolve(context)
     end
 
     # The reason a private call still may not: its conversation is the call's
@@ -1059,7 +1060,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
         })
 
       assert {:ok, %{platform: "voice", destination: "6f1c2a4e-9b3d-4c5e-8a7f-0123456789ab"}} =
-               HarnessDelivery.resolve_snapshot(context)
+               FrozenOrigin.resolve(context)
     end
 
     test "voice_call_id is nil on a chat turn carrying a forged voice_call" do
@@ -1705,6 +1706,45 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert reply =~ "check the Anthropic API key in Fermix's Providers settings"
     end
 
+    # Vercel AI Gateway answers HTTP 403 to every request from a team with no
+    # payment method on file, free credits included, and 401 to a wrong or
+    # missing key (M105 §11). The body is the live gateway's answer.
+    test "a Vercel AI Gateway 403 names the payment method instead of the key" do
+      reason =
+        ProviderError.api(:vercel, :chat_completions, 403, %{
+          "error" => %{
+            "message" =>
+              "AI Gateway requires a valid credit card on file to service requests. " <>
+                "Please visit " <>
+                "https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai%3Fmodal%3Dadd-credit-card " <>
+                "to add a card and unlock your free credits.",
+            "type" => "customer_verification_required"
+          }
+        })
+
+      expected =
+        "Vercel AI Gateway refused this request (HTTP 403), which it does when the Vercel " <>
+          "team has to add a payment method before AI Gateway serves it. Add one in the " <>
+          "Vercel dashboard under AI Gateway and retry; if one is already on file, check the " <>
+          "Vercel AI Gateway API key in Fermix's Providers settings."
+
+      assert TurnRunner.error_reply(reason, get_env: fn _ -> nil end) == expected
+
+      env = %{"AI_GATEWAY_API_KEY" => "vck-from-env"}
+      assert TurnRunner.error_reply(reason, get_env: &Map.get(env, &1)) == expected
+    end
+
+    test "a Vercel AI Gateway 401 keeps the API key advice" do
+      reason =
+        ProviderError.api(:vercel, :chat_completions, 401, %{
+          "error" => %{"message" => "Invalid API key", "type" => "authentication_error"}
+        })
+
+      assert TurnRunner.error_reply(reason, get_env: fn _ -> nil end) ==
+               "vercel authentication failed — check the vercel API key in Fermix's " <>
+                 "Providers settings and retry."
+    end
+
     test "maps Anthropic OAuth auth failures to a subscription reconnect hint" do
       reply =
         TurnRunner.error_reply(
@@ -1893,7 +1933,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert format =~ "xai/grok-5"
       assert format =~ "JPEG or PNG"
       assert pdf =~ "the current model (xai/grok-5) can't take a PDF inline"
-      assert pdf =~ "OpenAI Codex, OpenAI, Anthropic, OpenRouter, Venice"
+      assert pdf =~ "OpenAI Codex, OpenAI, Anthropic, OpenRouter, Venice, Vercel AI Gateway,"
       refute pdf =~ "SpaceXAI"
       assert pdf =~ "send the pages as pictures"
     end
@@ -2040,7 +2080,8 @@ defmodule FermixCore.Agents.TurnRunnerTest do
 
       assert reply =~
                "This ChatGPT account or workspace can't use its plan in Fermix. " <>
-                 "ChatGPT Plus and Pro plans can."
+                 "Check your ChatGPT plan, or ask your workspace admin to let apps use the " <>
+                 "ChatGPT plan."
 
       refute reply =~ "authentication failed"
     end
@@ -3752,6 +3793,72 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   @private_key {"voice", "6f1c2a4e-9b3d-4c5e-8a7f-0123456789ab", :root}
   @chat_key {"companion", "main", :root}
 
+  # M102 N10: `## Computers` is the turn's own, rendered in the turn's process
+  # at its trust (`Computers.prompt_section/1`) and carried in the turn-only
+  # system slot, never in the runtime context MainAgent caches, which nothing
+  # invalidates when a computer joins. So a computer that joins after the
+  # context was built is in the very next turn's section.
+  describe "the home's computers" do
+    @computers_host %{
+      install: :general,
+      os: :linux,
+      os_version: "Debian 13",
+      architecture: "x86_64",
+      linux_app: false
+    }
+
+    defp computers_opts(rows) do
+      [
+        role: :primary,
+        rows: fn -> {:ok, Agent.get(rows, & &1)} end,
+        live: %{},
+        records: %{},
+        version: "0.19.2",
+        host_facts: @computers_host
+      ]
+    end
+
+    defp computer_row(name) do
+      %{
+        device_id: "0d3f8a7e-5c21-4b9e-8f60-2a4c6e8b1d37",
+        name: name,
+        platform: "linux",
+        last_seen: nil,
+        backups: nil,
+        connected: false,
+        since: nil
+      }
+    end
+
+    defp computers_messages(messages),
+      do: Enum.filter(messages, &String.starts_with?(&1.content, "## Computers"))
+
+    test "a computer that joins after the context was built is in the next turn's section" do
+      rows = start_supervised!({Agent, fn -> [] end})
+      ctx = runtime_context()
+      msg = %{channel: "telegram", chat_id: "computers_join"}
+      state = [runtime_context: ctx, computers_opts: computers_opts(rows)]
+
+      assert computers_messages(capture_prompt(msg, state)) == []
+
+      :ok = Agent.update(rows, fn _none -> [computer_row("cellar Linux")] end)
+      messages = capture_prompt(msg, state)
+
+      assert [%{role: "system", content: section}] = computers_messages(messages)
+      assert section =~ "- cellar Linux (Linux, not connected yet): offers nothing."
+      # It follows the cached runtime contract, which is unchanged.
+      assert [%{content: "base prompt"}, %{content: "runtime contract"}, %{content: ^section} | _] =
+               messages
+    end
+
+    test "a guest's turn carries no section" do
+      rows = start_supervised!({Agent, fn -> [computer_row("cellar Linux")] end})
+      msg = %{channel: "telegram", chat_id: "computers_guest", source_trust: :guest}
+
+      assert computers_messages(capture_prompt(msg, computers_opts: computers_opts(rows))) == []
+    end
+  end
+
   # The records a reply draws are its own turn's (EVENTS_DRAWN_AS_CARDS §04,
   # M85 §07, M89 §06). What an earlier turn in the conversation put and no
   # reply took is dropped as the next turn begins: a Live call's hand-off in
@@ -4592,6 +4699,47 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     assert {:error, "adapter failed"} = TurnRunner.run(msg, turn_state, fn _part -> :ok end)
     assert_receive {:message_error, metadata}, 5_000
     metadata
+  end
+
+  # Each turn is the owner request its tools act for: every tool call in it
+  # shares one identity, and the next turn in the same conversation is a new
+  # request with its own.
+  describe "the owner request's identity" do
+    test "each turn mints its own, and a second request in the same chat gets another" do
+      registry_name = :"tr_request_reg_#{System.unique_integer([:positive])}"
+      store_name = :"tr_request_store_#{System.unique_integer([:positive])}"
+      start_supervised!({CapabilityRegistry, name: registry_name})
+
+      store =
+        start_supervised!(
+          {ConversationStore, name: store_name, max_messages: :infinity, repo: nil}
+        )
+
+      msg = %{channel: "cli", chat_id: "requests", sender: "user", content: "hi"}
+
+      turn_state =
+        turn_state(
+          adapter: RecordCwdAdapter,
+          adapter_opts: [model: "mock-model"],
+          capability_registry: registry_name,
+          conversation_store: store,
+          runtime_context: record_cwd_runtime_context(self())
+        )
+
+      [first, second] =
+        for _request <- 1..2 do
+          Process.delete(:record_cwd_step)
+          msg = Map.put(msg, :source_trust, :operator)
+          assert {:ok, "done", _tokens} = TurnRunner.run(msg, turn_state, fn _part -> :ok end)
+          assert_receive {:tool_context, context}
+          context
+        end
+
+      assert RequestIdentity.valid?(first.request_id)
+      assert RequestIdentity.valid?(second.request_id)
+      assert first.request_id != second.request_id
+      assert first.conversation_key == second.conversation_key
+    end
   end
 
   defp run_record_cwd_turn(trust, request_cwd, extra_msg \\ %{}) do

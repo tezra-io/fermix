@@ -10,21 +10,23 @@ defmodule FermixCore.Home.Join do
        "secret": "<32 bytes>", "expires_at": "2031-05-04T10:30:00Z",
        "sas": null, "sentence": null}
 
-  `start/3` (`computer.join.start`; `fermix computer join`, the code on stdin) refuses a
+  `start/3` runs in the engine, the one join path: `computer.join.start`,
+  which the apps and `fermix computer join` send (the code on stdin there),
+  and Always On's Join again (`home.act`'s `join`, M102 J1). It refuses a
   computer that has a home of its own (below), then decodes the code, which
   must be a computer's (`EnrollmentCode`, version 2) and not expired, then
   lets go of a link its server revoked (below), then makes this computer's
   key in the secret store (`ComputerKey.create/2`), then writes the file
   with the code's route and secret, then makes this engine a device
-  (`[fermix_core.engine] role`), and then restarts it, which a CLI with no
-  engine running leaves to the next start. A refusal before the letting go
-  changes nothing. A step after it that fails takes back what the join
-  itself wrote (its key and its file), never the link it let go of.
+  (`[fermix_core.engine] role`), and then restarts it. A refusal before the
+  letting go changes nothing. A step after it that fails takes back what the
+  join itself wrote (its key and its file), never the link it let go of.
 
   The device tree dials the server while the file is here
   (`FermixChannels.Desktop.Join`), and records what it learns (`record/3`):
   `dialing`, `awaiting_approval` with the six digits it shows, which the
-  owner types on the server, or
+  owner types in Always On on a computer already in the home (the server
+  has no screen), or
   `denied` with the sentence that says why; the code's secret leaves the
   file once denied. `finish/3` takes the server's approval: this
   computer's switches, every offer off but those on by default (Apple Maps,
@@ -62,8 +64,13 @@ defmodule FermixCore.Home.Join do
   restored from a snapshot taken before this computer joined it), so the link
   reaches nothing; the relay keeps the server's word in it (`DesktopLink`'s
   `revoked`), the one record of it, which the summary reads too, Fermix
-  running or stopped. Once the code is one this computer can join with, the
-  join lets go of that link here as a disconnect does
+  running or stopped. The word reaches this computer only as the server's
+  answer to its relay's dial, so an unmarked link is a home of its own only
+  once the relay has a session up with its server (`Home.Link.status/0`'s
+  `primary`, the server knowing this computer); until then whether the
+  server still knows it is not known, and the join is refused saying so
+  (`:server_not_reached`, M102 J2). Once the code is one this computer can
+  join with, the join lets go of that link here as a disconnect does
   (`Home.Unlink.let_go/4`, `:revoked`): the relay stops first, and only
   while its link still holds that word (one whose session came up since,
   its server knowing this computer again, keeps its link, and the join is
@@ -77,12 +84,11 @@ defmodule FermixCore.Home.Join do
   moved marker first, so its link and its own copies of the server's
   backups stay.
 
-  `opts`: `:now` (a `DateTime`), `:restart` (0-arity, in place of
-  `Management.Lifecycle.restart_self/0`; a CLI passes one that does
-  nothing), `:release` (handed to `Home.Unlink.let_go/4`; a CLI, where no
-  relay runs, passes one that stops nothing), and `:key_opts` (handed to
-  `ComputerKey`: `supervised: false` for a caller with no engine tree, and
-  the secret writer's test seams).
+  Test seams in `opts`: `:now` (a `DateTime`), `:restart` (0-arity, in
+  place of `Management.Lifecycle.restart_self/0`), `:release` (handed to
+  `Home.Unlink.let_go/4`), `:link_status` (0-arity, in place of
+  `Home.Link.impl().status/0`) and `:key_opts` (handed to `ComputerKey`: the
+  secret writer's seams).
   """
 
   require Logger
@@ -92,6 +98,7 @@ defmodule FermixCore.Home.Join do
   alias FermixCore.Home.ComputerKey
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.EnrollmentCode
+  alias FermixCore.Home.Link
   alias FermixCore.Home.Moved
   alias FermixCore.Home.Unlink
   alias FermixCore.Management.Lifecycle
@@ -120,6 +127,7 @@ defmodule FermixCore.Home.Join do
           :computer_join_running
           | :not_joining
           | {:home_of_its_own, String.t()}
+          | :server_not_reached
           | {:invalid_code, String.t()}
           | {:code_purpose, EnrollmentCode.purpose()}
           | :code_expired
@@ -147,7 +155,7 @@ defmodule FermixCore.Home.Join do
   def start(home, code, opts \\ [])
       when is_binary(home) and home != "" and is_binary(code) and is_list(opts) do
     with :ok <- not_joining(home),
-         {:ok, revoked} <- standing(home),
+         {:ok, revoked} <- standing(home, opts),
          {:ok, facts} <- computer_code(code, now(opts)),
          :ok <- let_go(home, revoked, opts),
          {:ok, keypair, store} <- new_key(home, opts),
@@ -241,8 +249,10 @@ defmodule FermixCore.Home.Join do
   defp phase_sentence(%{"phase" => "dialing", "server" => %{"name" => name}}),
     do: "Connecting to your Fermix on #{name}."
 
-  defp phase_sentence(%{"phase" => "awaiting_approval", "server" => %{"name" => name}}),
-    do: "Waiting for you to add this computer on #{name}."
+  # The owner adds it in Always On on a computer already in the home, never
+  # on the server, which has no screen (M102 N9, D7).
+  defp phase_sentence(%{"phase" => "awaiting_approval"}),
+    do: "Waiting for you to add this computer in Always On on a computer already in your Fermix."
 
   defp phase_sentence(_state), do: "This computer was not added to your Fermix."
 
@@ -257,6 +267,11 @@ defmodule FermixCore.Home.Join do
     do:
       "This computer already has a Fermix of its own (it holds #{what}), so it cannot join " <>
         "another. Two homes cannot be merged."
+
+  def error_sentence(:server_not_reached),
+    do:
+      "Fermix has not reached your server from this computer yet, so it cannot tell whether " <>
+        "your server still knows this computer. Try again in a minute."
 
   def error_sentence({:invalid_code, _what}),
     do: "That is not a code Fermix opened. Copy the code again from Add a computer."
@@ -297,6 +312,7 @@ defmodule FermixCore.Home.Join do
           {:home_of_its_own, "a home that moved to a server"},
           {:home_of_its_own, "a link to a server"},
           {:home_of_its_own, "a paired phone or computer"},
+          :server_not_reached,
           {:invalid_code, "v"},
           {:code_purpose, :candidate},
           :code_expired,
@@ -394,9 +410,9 @@ defmodule FermixCore.Home.Join do
   # -- a home of its own ------------------------------------------------------------
 
   # No home of its own, and the link its server revoked, if it holds one.
-  defp standing(home) do
+  defp standing(home, opts) do
     with :ok <- not_moved(home),
-         {:ok, revoked} <- not_linked(home),
+         {:ok, revoked} <- not_linked(home, opts),
          :ok <- no_devices(home),
          {:ok, settings} <- setting_memories(home),
          :ok <- no_memory(Path.join(home, "memory.db"), settings) do
@@ -412,11 +428,22 @@ defmodule FermixCore.Home.Join do
   end
 
   # A link that cannot be read is one: only the server's word ends it.
-  defp not_linked(home) do
+  defp not_linked(home, opts) do
     case DesktopLink.read(home) do
       {:error, {:file, _path, :enoent}} -> {:ok, nil}
       {:ok, %{revoked: true} = link} -> {:ok, link}
-      _known_or_unread -> {:error, {:home_of_its_own, "a link to a server"}}
+      {:ok, _unmarked} -> unmarked(opts)
+      {:error, _unread} -> {:error, {:home_of_its_own, "a link to a server"}}
+    end
+  end
+
+  # The server's word reaches this computer only as the answer to its
+  # relay's dial: while a session is up the server knows this computer, and
+  # until one is, whether it still does is not known yet (M102 J2).
+  defp unmarked(opts) do
+    case Keyword.get(opts, :link_status, fn -> Link.impl().status() end).() do
+      %{primary: %{connected: true}} -> {:error, {:home_of_its_own, "a link to a server"}}
+      _not_reached -> {:error, :server_not_reached}
     end
   end
 

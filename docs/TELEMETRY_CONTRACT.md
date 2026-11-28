@@ -65,7 +65,10 @@ command, the local coding runs `codex_run` and `claude_code_run`) after the turn
 read outside content, where Fermix cannot sandbox that call (no kernel
 enforcement, or a preset or coding run that runs unconfined; the next run a
 finished coding run's follow-up turn starts in that run's folder dispatches as
-`chained`); any call made
+`chained`); a built-in whose call makes an effect outside the machine (a
+`Capabilities.ExternalEffect`: `phone_call`'s `start`) in a turn that read
+outside content or came from a shared Buzz channel; a `browser` call of `act`
+kind `sign_in`, which it only refuses; any call made
 while another call of the same turn is parked,
 and, through its first clause (`Cues.MandateGate`), **every** call a run woken
 by a cue makes, flagged or not (see "Access-gate labels"). It derives the map
@@ -97,8 +100,9 @@ invocations").
 
 ### Access-gate labels
 
-Every call the gate decides (every access-sensitive call, every host command it
-decides, and every call of a run a cue woke) also carries
+Every call the gate decides (every access-sensitive call, every host command and
+effect outside the machine it decides, every sign-in, and every call of a run a
+cue woke) also carries
 `access_gate`, a closed enum of how the gate
 settled it: `direct` (the owner's clean, attended request), `scheduled` (a
 job whose `allowed_tools` names it), `confirmed`, `chained` (the next run of a
@@ -108,12 +112,21 @@ per finished run (no run yet names it as the run it continued), having read
 nothing but the run's report, with only its task,
 folder, model, effort and limits), or one of `held_this_chat`,
 `held_owner_inbox`, `held_voice`, `already_confirmed`, `refused_worker`,
-`refused_cue_run`, `refused_unattended`, `refused_not_allowlisted`,
+`refused_cue_run`, `refused_unattended`, `refused_scheduled` (an effect outside
+the machine from a scheduled run, which no job's `allowed_tools` admits),
+`refused_not_allowlisted`,
 `refused_no_surface`, `refused_full`, `refused_confirm_mismatch`,
-`refused_voice_surface` (a host command on a voice call, which cannot show the
-owner the exact command), `refused_command_too_long` (a host command too long to
+`refused_voice_surface` (a host command or an effect outside the machine on a
+voice call, which cannot show the owner what they would confirm),
+`refused_command_too_long` (a host command too long to
 show the owner whole), `refused_unshown_file` (a coding run naming
-`append_system_prompt_file`, whose contents the owner could not review). The refused
+`append_system_prompt_file`, whose contents the owner could not review),
+`refused_confirmation_too_long` (an effect whose confirmation is too long to
+show the owner whole), `refused_unconfirmable` (an effect its own module
+refuses before the owner is asked, in that module's sentence),
+`refused_sign_in_not_allowed` (a sign-in outside the owner's attended turn, or
+from a shared Buzz channel) and `refused_sign_in_not_on_voice` (a sign-in on a
+voice turn). The refused
 labels are one function's output (`refused_<reason>`), so a new refusal reason
 is a new label here. `refused_cue_run` is an access-sensitive call made by a job
 run a cue woke (`trigger: "cue"` on the context) outside its mandate: it read
@@ -203,7 +216,8 @@ readiness publishes the name in the sandbox pane until it resolves.
 ## Adding a provider / adapter
 
 Emit the LLM call via the single provider emitter, and pass the correlation ids
-(which `AgentLoop.build_adapter_opts/3` already puts into `adapter_opts`):
+(which the agent loop's `bind_route/2` already merges into every route's
+`adapter_opts`):
 
 ```elixir
 alias FermixCore.Providers.Telemetry, as: ProviderTelemetry
@@ -278,6 +292,23 @@ the naive `prompt × full_input_rate + completion × output_rate` — so this sp
 is the only record in the trace from which a cache-aware price can be computed
 at all. The allowlist in `Mapper.usage/1` is the whole contract: a token key not
 named there never reaches a span.
+
+### `:speed` (Fast mode)
+
+A call on a route with Fast mode on carries `speed: "fast" | "standard"`: the
+speed it **ran** at, never the one asked for. The route asks for the vendor's
+fast tier only where the model has one and the route takes it
+(`RouteResolver`, `ModelCatalog.fast?/2`); anywhere else it runs at `standard`
+and the call says so. On a fast request the adapter reads what the vendor
+reports: OpenAI Responses `service_tier` (`fast`, or `priority` from GPT-5.6
+and older, is `fast`; `default` means OpenAI ran it at standard speed and
+price), Anthropic Messages `usage.speed` (absent is `standard`). A route with
+Fast mode off, and a call that did not complete, carry no `:speed` key at all.
+`FermixOpik.Mapper.llm_span/3` exports it in the span metadata, and the
+benchmark rate card reads it there: a `fast` call is priced from the fast table
+(`evallib.pricing.FAST_CARD`), every other call from the standard one, and a
+`fast` call on a route the fast table lacks is reported unpriced rather than
+priced at the standard rate.
 
 ## Adding a new "run kind" (something that drives the agent loop)
 
@@ -843,17 +874,189 @@ claim time), scheduled, manual and cue runs alike: the random suffix keeps two
 runs started in one second apart, and the `cron_` prefix is kept, so
 `fermix_opik`'s `infer_kind`, `Meetings.Session`'s origin and every other prefix
 check read a cue run as a scheduled one. The bookends carry `trigger`
-(`"schedule"`, `"manual"` or `"cue"`) on every run, and on a cue run also
+(`"schedule"`, `"manual"`, `"retry"`, `"cue"` or `"watcher"`) on every run, and on a cue run also
 `watcher_id` (which the runner puts on the run map it passes, since the run row
 does not hold it) and `delivery_id` (the row's `cue_delivery_id`, the
-`cue_deliveries.id` the run held); both are absent on any other run. The Opik
-run trace's metadata carries `trigger`, `watcher_id` and `delivery_id`, and
-`mix opik.replay` keeps all three. A cue run's tools are ordinary
-`[:fermix, :tool, :exec]` events under the run's session, one per model call:
+`cue_deliveries.id` the run held). A watcher's follow-up run (`trigger:
+"watcher"`) carries `watcher_id` too, with `cue_id` (the cue that set it off)
+and `trigger_id` (its trigger); none of the four is on any other run. The
+runner puts `watcher_id`, `cue_id` and `trigger_id` on the run map, so they are
+on the bookends it emits only: a `run_error` the Scheduler emits for a dead
+runner reads the run row, so for a follow-up run it carries `trigger` alone.
+The Scheduler emits no `run_error` for a dead cue run: it settles that run
+through `CueAdmission.settle/3`, whose `retry` or `exhausted` lifecycle event
+(reason `reaped`) carries `delivery_id` and `watcher_id`. The Opik
+run trace's metadata carries `trigger`, `watcher_id`, `delivery_id`, `cue_id`
+and `trigger_id`, and `mix opik.replay` keeps them. A cue run's tools are
+ordinary `[:fermix, :tool, :exec]` events under the run's session, one per model call:
 the gate labels each call it decides, a mandate call with a `mandate_*` label,
 a refused read tool `refused_reader_writes` or a `mandate_*` label, a call
 outside the run's tools `refused_cue_surface`, an access-sensitive one outside
 its mandate `refused_cue_run` (see "Access-gate labels").
+
+### Scheduled job retries
+
+A scheduled run's `run_error` `error` is Fermix's sentence for its failure's
+kind (`Jobs.Failure.sentence/2`, one per kind on the closed list, a limit in
+minutes), or for a failure Fermix has no sentence for (`:other`) its own text;
+the term itself is the run's artifact's detail, never a field here.
+
+A failed scheduled run is run again quietly when it failed before its first
+tool on a failure waiting can clear (M106 §5.3), and its
+`[:fermix, :job, :run_error]` bookend says what became of it:
+`retry_disposition` (`"none"`, `"retry"` or `"exhausted"`), `retry_attempts`
+(its place in the job's run of retried failures, 0 for `"none"`) and, for a
+retry with a time, `retry_at` (ISO 8601). A cue run's `run_error` carries none
+of the three. A run the Scheduler settles because its runner died or was never
+found (a monitored crash, a reap) has a `run_error` of its own, emitted by
+`Jobs.Scheduler` through `Jobs.Telemetry` with the same three fields. A retry's
+run is an ordinary job run whose bookends carry `trigger: "retry"`. The Opik
+run trace's metadata and `mix opik.replay` keep all three retry fields.
+
+What became of a scheduled run's failure is also one line in the engine log,
+written beside the event by `Jobs.Telemetry.run_error/5` from its settlement
+(`run_line/3`): `Scheduled job <job_id> run <run_id> failed (<failure_kind>);`
+then a quiet retry set (`quiet retry <n> runs at <time>`, to the second in
+UTC, or `is the job's next run`), its quiet retries used up (`after <n>
+failed runs in a row`, a `warning`), the owner not told because a heal for the
+same failure closed lately (`heal: "quiet"`), or no heal opened because the
+job was not set up by the owner (`heal: "out_of_scope"`), two of them in the
+same line when both hold; `info` otherwise. A failure a heal opened, joined
+or concluded is said by the heal's own line, so it adds none here, but for
+quiet retries used up: that is said here, and the heal's `opened`, `joined`
+or `verdict` line follows, the two saying different things. An ok run whose
+tool never worked (M106 §6) has no `run_error`; when it is kept quiet,
+`heal_settled/3` writes its one line, `Scheduled job <job_id> run <run_id>
+ended ok without working (tool_never_succeeded); the owner is not told: ...`.
+The words "quiet retry" keep it apart from the Runner's in-run transient
+retries, which log `retry <n>/<max>`. Never the run's `error`.
+
+### Scheduled job heals
+
+A failure that is not retried goes to a heal (M106 §5.4), and the run's
+`run_error` says what became of it: `heal` (`"none"` for a retried failure,
+`"opened"`, `"joined"`, `"verdict"` for a failure that concludes a watching
+heal a second time (§5.9), `"quiet"` or `"out_of_scope"`, a guest's job) and,
+for one opened, joined or concluded, `heal_id`. A cue run's carries neither.
+
+The heal itself has one point event, `[:fermix, :job, :heal]` (`count: 1`),
+emitted only through `Jobs.Telemetry.heal/2` and `heal_settled/3`, with a
+`phase`:
+
+| phase | emitted by | when |
+|---|---|---|
+| `opened`, `joined` | the runner or the Scheduler's crash settle (`heal_settled/3`) | the settle took the failure, or an ok run whose tool never succeeded in it nor in the job's two runs before it (M106 §6, `failure_kind: "tool_never_succeeded"`) |
+| `verdict` | the same | a failure, or such an ok run, joined a `watching` heal, which is open again for its second message |
+| `closed` | the same, `outcome: "healed"` | an ok run closed the heal |
+| `closed` | `Jobs.Scheduler`'s reconcile pass, `outcome: "expired"` | the heal waited, or watched, 7 days |
+| `closed` | `Jobs.Registry`, `outcome: "superseded"` | an owner's edit, pause or resume moved the job's definition while a proposal waited, and its own write closed the proposal |
+| `answered` | `Jobs.HealAnswer`, `decision: "propose"`, `answer` (`apply` or `leave`), `applied`, `platform` | the owner's answer to a waiting proposal, on its card (`Jobs.HealCard`, from the chat the card went to, by token, tap or bare command), was recorded: `applied` true when the change was written with the heal's move to watching, false for a leave or for an apply to a job no longer the version the change was drawn for; `platform` is the kind of surface it came from (the first part of the heal's `decided_from`, such as `telegram` or `cli`, or `companion` for an answer typed in the Fermix app, on the Mac chat or a paired phone alike, M106 §8), never a chat or a user |
+| `closed` | `Jobs.HealAnswer`, `outcome: "skipped"` or `"superseded"` | the answer just recorded closed the heal: a leave, or an apply to a job that moved on |
+| `decided` | `Jobs.HealRun` | its diagnosis's decision, as code carries it out, was recorded |
+| `delivered` | `Jobs.HealRun` | the one message was sent and marked; its `platform` is the inbox's, `companion` for the Fermix app, where a proposal's message is a row and its card an approval card beside it (M106 §8) |
+| `delivery_failed` | `Jobs.HealRun`, `dead_letter` true or false | a send failed, or no inbox |
+| `closed` | `Jobs.HealRun`, `outcome: "still_failing"` | the verdict's message was sent or dead-lettered |
+| `rerun` | `Jobs.HealRun`, `rerun_outcome`, with `run_id` the run started or `error` | the rerun's one run was asked for: `started`, `running` (a run already held the job), `refused` (no run will come: the Scheduler answered that the job cannot run now, no Scheduler was there to ask, or the check before the ask stopped it, its `error` then `{:not_asked, _}`; the heal waits on the owner) or `unanswered` (a run may still come: the call ran out of time, the Scheduler stopped while it held it, or its reply could not tell, such as a store timeout under the claim; the heal keeps watching) |
+
+Every event carries `heal_id` and `agent` (`"scheduled:<job_id>"`, or
+`"job_heal"` for a provider's or a plugin's heal with no run behind the event), and whichever
+of `job_id`, `run_id`, `subject_kind`, `subject_id`, `failure_kind`, `outcome`,
+`attempts`, `dead_letter`, `platform`, `error` (bounded to 500 characters),
+`conclusion` (`first` or `verdict`), `decision` (what code carried out:
+`rerun`, `raise_limit`, `pause`, `propose`, `tell` or `none`), `requested`
+(what the heal run asked), `refusal` (why a check did not carry the request
+out as asked: `not_upward`, `past_ceiling`, `not_runnable`, `not_running`,
+`consent_required`, `watcher_unreadable`, `invalid_change`, `move_failed`,
+`job_changed` when the owner wrote the job while the diagnosis ran, whatever
+value the write left, or anything else moved its definition, so its raised
+limit or pause was not written, `card_too_large` when a proposal's card would
+pass its bound, with its length in `error`, or `no_card_chat` when the owner's
+inbox has no chat a card's answer can come from; each of the last two keeps
+the proposal as `tell`), `read_outside`,
+`rerun_outcome`, and on `answered` the owner's `answer` and whether the change
+was `applied` the phase knows. A settle's `opened`, `joined` and
+`verdict` always carry `failure_kind`, `subject_kind` (`job`, `provider` or
+`plugin`) and `subject_id`. A heal's events are points, not a run:
+they have no `session_id`, and its diagnosis is the run kind below. The trace
+stream writes it as the `job_heal` agent event; Opik
+makes each phase its own self-closing trace named `job_heal:<phase>`, tagged
+`job_heal`, correlated by `heal_id` and never nested under the run, and
+`mix opik.replay` reads the row back as the same event. The Opik run trace's
+metadata and the replay keep `heal` and `heal_id` on a run's error.
+
+Each phase is also one line in the engine log, written beside the event by
+`Jobs.Telemetry.heal/2` from the same facts (`heal_line/2`): `Job heal
+<heal_id>: ...` with only ids and Fermix's own vocabulary (`job_id`, `run_id`,
+`failure_kind`, the subject, `decision`, `outcome`, `platform`, `answer` and
+`applied`, a failed send's attempt), never `error`, the heal run's note or a
+change's values, which can hold outside content. A job's heal is placed by
+its job once; a provider's or a plugin's names its subject on every line whose
+facts carry it. A `closed` with `outcome: "healed"` carries only the ok run
+that closed it and that run's job, which for a provider's or a plugin's heal
+is whichever job's run proved it, so the line names them as that run
+(`closed as healed: job <job_id> run <run_id> ended ok`), never as the heal's
+own job. The line is a `warning` for a `verdict`, a `delivery_failed` whose
+attempt was not its last, and a `closed` with `outcome: "still_failing"`, and
+`info` for the rest. A step its caller already logs adds no line, so no step
+is two lines: a `decided` with a `refusal` (`Jobs.HealRun` warns what was
+asked and what Fermix carries out), a `rerun` other than `started`
+(`Jobs.HealRun` logs `running` at info, `refused` and `unanswered` as
+warnings), and a `delivery_failed` that is a dead letter or counted no
+attempt (a warning each in `Jobs.HealRun`). A failure has two lines in one
+case only, which say different things: quiet retries used up, the run's line,
+then the heal's `opened`, `joined` or `verdict`. The lines the callers keep
+are theirs, not these: a refused or redirected decision's carries its
+`refusal_detail`, and a dead letter's, a message never sent's and a rerun
+refused or unanswered's quote the error, each of which can hold a provider's
+or a chat app's words; only the lines `Jobs.Telemetry` writes hold ids and
+Fermix's vocabulary alone. Every value is said as one token, checked where it
+is said: letters, digits and `_ . : @ + / -`, any other byte as `?`, at most
+512 bytes, so every id Fermix makes is whole (a look's session is its job id
+and 28 bytes, whole for any job whose name is under about 470 characters); a
+value past that keeps its first and last 254 bytes around `...`, so a session
+keeps its time and suffix. A value that is not a string, an atom or an
+integer is not said. The builder is total: a phase whose fact is missing
+still gets a plain line with the ids it has.
+
+### Job heal runs
+
+A job's heal of a kind a model could help with is diagnosed by one isolated
+loop inside its heal run (M106 §5.5): a run kind of its own, always a root.
+`Jobs.HealDiagnosis.session_id/2` mints `session_id =
+"heal_<job_id>_<YYYYMMDD_HHMMSS>_<6 hex>"` (UTC) and the loop context takes it
+with `agent: "job_heal:<job_id>"`, so its provider and tool spans correlate
+with the bookends by construction; the failed run's session is its
+`parent_session`, which the loop hands every span. Every emission goes
+through `Jobs.Telemetry`: `[:fermix, :job, :heal_run_start]` (`count: 1`,
+before the loop), then `[:fermix, :job, :heal_run_complete]` (`duration_ms`,
+the loop finished) or `[:fermix, :job, :heal_run_error]` (`count: 1`,
+`duration_ms`; the watchdog stopped it or it failed). All three carry `agent`,
+`session_id`, `parent_session`, `heal_id`, `job_id`, `run_id` (the failed
+run) and `failure_kind`; `start` adds `max_duration_ms` (the watchdog, the
+exporter's sweep floor), `complete` adds `decision` (what the run asked, or
+`none`), `error` adds `status` (`timeout | error`) and `error` (bounded to
+500 characters). What code then made of the decision is the heal's `decided`
+phase above. Each bookend is also one engine log line (`look_line/2`), with
+the same token rule: `start` an `info` line naming the job, the failed run
+and the `session_id`, the key to the look's trace; `complete` an `info` line
+with its `duration_ms`; an `error` with `status: "timeout"` a `warning` with
+how long it ran. An `error` with `status: "error"` adds none, since
+`Jobs.HealDiagnosis` warns of it with its reason. The run's tools are
+ordinary `[:fermix, :tool, :exec]` events through `Tools.Telemetry.exec/5`
+and its model calls go through `Providers.Telemetry.emit_call/3`; a refused `job_heal_respond` call carries
+`error_code` (its failure-mode tag, or `not_heal_run`) and `error_summary`.
+
+`Trace.TelemetryHandler` registers the three as `agent_event` rows
+`job_heal_run_start`, `_complete` and `_error`, keyed on `agent`. `FermixOpik`
+binds all three: the opener opens a root of kind `:job_heal_run`
+(`infer_kind("heal_" <> _)`, so a closer whose opener was missed is never a
+`:subagent` phantom), named by its agent, threaded by its job and swept by
+`max_duration_ms`; its `parent_session` is correlation metadata and never a
+parent, because the failed run's trace has shipped. `complete` closes it
+`ok`, `error` with its `status` word and the error as its output. The root's
+metadata is `heal_id`, `job_id`, `run_id`, `parent_session`, `failure_kind`
+and `decision`. `mix opik.replay` reads the three rows back as the same
+events.
 
 ## Meeting notetaker runs
 
@@ -878,12 +1081,75 @@ stream session is *not* a run kind. Summarizer calls are ordinary llm spans
 inside the meeting session. Ingress voice-note transcription stays sessionless
 (pre-turn), unchanged.
 
+## Phone call runs
+
+A phone call (M94) is a **run kind**: `FermixCore.PhoneCalls.Telemetry` mints
+`session_id = "phone_call_<call id>"` (`session_id/1`) with `parent_session` =
+the requesting turn's session, which the row keeps as its `parent_session`
+beside the owner request's own identity (`request_id`, `Agents.RequestIdentity`,
+which is no session), and the call's own backend turns and provider calls carry
+that `session_id` as theirs.
+`PhoneCalls.Manager` is the single emitter of the bookends
+`[:fermix, :phone_call, :run_start | :run_complete | :run_error]`, never
+hand-rolled: `run_start` once, when a call is admitted and its worker started
+(carrying `max_duration_ms`, the Opik sweep floor); one closer when its
+terminal row is written. `run_complete` closes an `ended` call, whatever its
+outcome; `run_error` closes a `failed`, `dispatch_unknown` or
+`closure_unconfirmed` one, with `error` = the failure word (else the status).
+Shared metadata: `agent: "phone_call:<id>"`, `call_id`, `origin_kind`
+(`chat | voice`), `model`, `carrier_profile`, `authorization`
+(`direct | confirmed`) and the row's `status`; the closers add `outcome`,
+`usage_state`, `failure_reason` and the vendor's own words (`vendor_message`, cut to
+`PhoneCalls.Limits.max_record_text_bytes/0`, 500 bytes, every digit run that
+reads as a phone number replaced by `[number]`), and measure `duration_ms`,
+`voice_seconds`, `core_turns`, `dtmf_keys`, `cleanup_attempts` (`run_error`
+adds `count: 1`). The
+destination, the mandate and transcripts never reach these events, and no
+vendor word carries either credential: one scrub in `OpenAILive` (the
+function the sideband holds is `scrubber/1`) replaces the API key and the
+trunk password in the create's and the hang-up's answers and in every message
+the sideband hands the worker during the call (an error event, a carrier
+failure, a `session.closed` reason, a close frame, an event of an unknown
+type, raw or not), before any of it becomes a call's words: each as stored,
+trimmed, as printed, as JSON escapes it, percent-encoded and in base64, in a
+charlist as in a string, and the key as OpenAI quotes it back masked. A vendor
+message that refuses the key is withheld whole for the engine's own sentence
+(`OpenAILive.key_refusal/2`). `Trace.TelemetryHandler`
+registers all three; `FermixOpik` binds them (`kind: :phone_call`,
+`infer_kind("phone_call_" <> _)`) as a root of its own, the meeting shape:
+`parent_session` is correlation metadata, never a parent, because the
+requesting turn ships long before the call ends. `mix opik.replay` skips the
+three rows, as it skips a meeting's.
+
+The call's backend turns (`Agents.PhoneCallTurn`) are children of the call's
+session: each carries the call's `session_id` as its own, with no
+`parent_session`, and `agent: "phone_call"`, so its provider spans and tool
+spans nest under the call's root as its turns, never as a root of their own;
+a turn emits no `[:fermix, :agent, :message]`, which would close the trace as
+a turn's end. The outcome extraction's provider call, and its one retry
+after a transient provider failure, each
+(`Providers.Telemetry.emit_call/3`, through the adapter) carry the same
+session with `agent: "phone_call_outcome"`. The feature's three tools,
+`phone_call`, `phone_call_press_keys` and `phone_call_end`, each emit exactly
+one `[:fermix, :tool, :exec]` per model call under the tool's own name, held
+and refused calls included (`Tools.Telemetry.exec/5`): `phone_call` on the
+requesting turn's session, the two in-call controls on the call's. Their own
+metadata is a word or a count, beside the access gate's label on a gated call
+(`access_gate`, and `policy_enforcement` on a start the gate held or refused as
+an external effect): `action` (`start | status | cancel |
+invalid`), `key_count` (how many keys were asked for, never the keys),
+`reason` (`done | needs_owner | cannot_proceed | voicemail | invalid`, never
+the note), and on a refusal the refusal's sentence as `error`, which names no
+number. No phone number, keypad key, finish note or transcript reaches any of
+these events' metadata; a captured content preview follows the content policy
+above.
+
 ## Live voice runs
 
 A call on a **task engine**, one that hands every task to Fermix through the
 voice bridge, is a **run kind**, and it is always a **root**. There are two
 task engines, GPT Live (`openai_live`) and Grok (`xai_realtime`, M70), and they
-share this run kind, its six events and its id prefixes: `engine` and
+share this run kind, its eight events and its id prefixes: `engine` and
 `provider` on every event are what tell them apart. The local voice socket
 mints `session_id = "voice_live:<n>"` for the call on either engine; the call's
 session mints a *separate* `"voice_delegation_<n>"` for every backend turn it
@@ -1398,6 +1664,15 @@ Opik does **not** subscribe. A message whose attachments are all unreadable is
 answered at the gateway and counted as `[:fermix, :dispatcher, :ingress_failed]`
 with `reason: :attachments_unusable`. Never hand-roll the event.
 
+The album buffer of Telegram and WhatsApp (`Gateway.AlbumBuffer`) counts a
+delivery it refuses because its ingress lanes are full (`Gateway.IngressLanes`:
+the most deliveries that may wait already do) as the same
+`[:fermix, :dispatcher, :ingress_failed]` (`count: 1`) with
+`reason: :ingress_lanes_full` and `channel` (the message's channel name). No
+turn ran, so it has no session; the error log beside it names the channel and
+both bounds, and a webhook's message ids are forgotten so the provider's retry
+runs.
+
 An operator turn that keeps its attachments in the workspace
 (`FermixCore.Attachments.Workspace`, `media/inbound/<date>/`) emits **one point
 event per turn** through `FermixCore.Attachments.Telemetry.emit_save/4`:
@@ -1447,7 +1722,7 @@ exporter places each under its turn's or job run's trace as a point span
 call, under the name the model used, and a refused call's event carries
 `error_code` (`Trips.Registry.error_tag/1`) and `error_summary`, the sentence
 the model received. The place lookups inside a `trip_edit` call are the
-engine's, not the model's: they go through `PlaceSearch.lookup/3`, which emits
+engine's, not the model's: they go through `PlaceSearch.searcher/2`, which emits
 no `place_search` row, and are counted on the call's `[:fermix, :trip, :edit]`
 event below.
 
@@ -1556,7 +1831,7 @@ one ordinary `[:fermix, :trip, :edit]` under the run's `session_id`, with
 each trip whose towns it writes one more, `ops: 0`, with that trip's
 `towns` (its geocodes that reached the place search, answered or not),
 `towns_found` and `towns_not_found`. Its
-lookups go through `PlaceSearch.lookup/3` as a call's do (no `place_search`
+lookups go through `PlaceSearch.searcher/2` as a call's do (no `place_search`
 row), and on a Mac of the home each is one `places` invocation whose turn is
 the run (`origin: background`, the run's `session_id`).
 `Trace.TelemetryHandler` records the bookends as `trip_place_run_start`,

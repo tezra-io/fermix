@@ -174,6 +174,32 @@ defmodule Fermix.CLI.DaemonForwardingTest do
     refute_received {:forwarded, _request, _opts}
   end
 
+  # M94 §09: a phone call's record is the primary's memory.db too, so a device
+  # with no link refuses every phone call method the same way, before reading
+  # anything.
+  test "without a desktop link a device refuses every phone call method as retired", ctx do
+    socket = start_daemon!(ctx, engine_role: @device, desktop_link?: false)
+    moved!(socket)
+    machine = if :os.type() == {:unix, :darwin}, do: "this Mac", else: "this computer"
+
+    phone_methods =
+      Enum.filter(FermixCore.Management.Protocol.methods(), &(&1 =~ ~r/^phone_calls\./))
+
+    assert length(phone_methods) == 5
+
+    for method <- phone_methods do
+      assert {:error, {:management_error, "primary_unreachable", _message, details}} =
+               Client.request_v1(method, %{}, socket_path: socket, timeout: @reply_ms),
+             method
+
+      assert details["sentence"] ==
+               "Fermix moved to your server, and #{machine} is no longer connected to it.",
+             method
+    end
+
+    refute_received {:forwarded, _request, _opts}
+  end
+
   test "on a Mac the retired sentence names the Mac", ctx do
     socket = start_daemon!(ctx, engine_role: @device, desktop_link?: false, os: {:unix, :darwin})
     moved!(socket)

@@ -90,7 +90,7 @@ defmodule FermixChannels.Companion.Supervisor do
     children =
       [{Registry, keys: :duplicate, name: registry}] ++
         settling(settle?) ++
-        [approvals_child(approvals, registry)] ++
+        [approvals_child(approvals, registry, Keyword.get(opts, :approvals_durable))] ++
         serving(serve?, opts, registry, approvals)
 
     Supervisor.init(children, strategy: :rest_for_one)
@@ -108,11 +108,14 @@ defmodule FermixChannels.Companion.Supervisor do
   end
 
   # A card and its end are announced to the connections of this tree's
-  # registry, or to the phones, whichever transport raised it.
-  defp approvals_child(approvals, registry) do
+  # registry, or to the phones, whichever transport raised it, or to both. A
+  # heal's proposals in the app are read again after a hello from `durable`
+  # (`Approvals.job_change_cards/1` on a real boot; none in a test's tree).
+  defp approvals_child(approvals, registry, durable) do
     {Approvals,
      name: approvals,
-     announce: &Fanout.announce(&1, &2, companion_registry: registry, audience: &3)}
+     announce: &Fanout.announce(&1, &2, companion_registry: registry, audience: &3),
+     durable: durable}
   end
 
   defp settling(true), do: [Turns]

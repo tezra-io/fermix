@@ -11,9 +11,13 @@ defmodule Fermix.CLI.AlwaysOnCommand.Step do
   the file. Either is sent as `input.recovery_passphrase`, and Fermix checks
   it. `sas` (M97 §7.5) is the six digits the computer that asks to join
   shows, read from `--sas` or asked on the terminal, sent as `input.sas`.
+  `code` (M102 J1, Join again) is the code Add a computer opened, which
+  carries a one-time secret: asked on the terminal with echo off and sent as
+  `input.code`; with no terminal it is never read here, and
+  `fermix computer join`, which reads it piped in, is named instead.
 
   The input is held as `AlwaysOn.Input`, whose `Inspect` withholds the
-  passphrase, until the one call that sends it.
+  passphrase and the code, until the one call that sends it.
 
   Answers `{:acted, record, answer}`, `{:opened, record}` for the step the
   surface opens itself (`update`), `{:changed, sentence}`, `{:unconfirmed, record,
@@ -34,6 +38,8 @@ defmodule Fermix.CLI.AlwaysOnCommand.Step do
   @act_ms 90_000
   @passphrase_flag "--recovery-passphrase-file PATH"
   @sas_flag "--sas DIGITS"
+  @code_label "Code from Add a computer"
+  @code_elsewhere "the code to fermix computer join"
 
   @type outcome ::
           {:acted, map(), map()}
@@ -69,6 +75,7 @@ defmodule Fermix.CLI.AlwaysOnCommand.Step do
   defp need("new_recovery_passphrase", input, ctx), do: passphrase(:twice, input, ctx)
   defp need("recovery_passphrase", input, ctx), do: passphrase(:once, input, ctx)
   defp need("sas", input, ctx), do: digits(input, ctx)
+  defp need("code", input, ctx), do: code(input, ctx)
 
   defp need(need, _input, _ctx) do
     {:refused, :action_refused,
@@ -85,6 +92,13 @@ defmodule Fermix.CLI.AlwaysOnCommand.Step do
   end
 
   defp digits(_input, _ctx), do: {:missing, @sas_flag}
+
+  defp code(input, %{interactive?: true} = ctx) do
+    with {:ok, code} <- secret(SecretInput.read_masked(@code_label, ctx.secret), @code_elsewhere),
+         do: {:ok, %{input | code: code}}
+  end
+
+  defp code(_input, _ctx), do: {:missing, @code_elsewhere}
 
   defp passphrase(_times, input, %{flags: %{passphrase_file: path}}) when is_binary(path) do
     case HomeCommand.read_passphrase_file(Path.expand(path)) do

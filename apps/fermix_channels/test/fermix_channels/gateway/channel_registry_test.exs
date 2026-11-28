@@ -99,6 +99,20 @@ defmodule FermixChannels.Gateway.ChannelRegistryTest do
     end
   end
 
+  describe "agent/1" do
+    test "the Mac app's chat and the phone hand their turns to Companion.Turns" do
+      for name <- ~w(companion mobile) do
+        assert ChannelRegistry.agent(name) == FermixChannels.Companion.Turns
+      end
+    end
+
+    test "every other channel, and an unknown one, hands them to the turn queue" do
+      for name <- ~w(telegram whatsapp slack discord signal imessage acp voice cli daemon nowhere) do
+        assert ChannelRegistry.agent(name) == FermixChannels.Gateway.Queue
+      end
+    end
+  end
+
   describe "ingress_auth/1" do
     test "mobile requires paired-device transport proof" do
       assert ChannelRegistry.ingress_auth("mobile") == :paired_device

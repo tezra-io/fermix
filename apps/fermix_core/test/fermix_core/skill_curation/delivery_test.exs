@@ -47,6 +47,12 @@ defmodule FermixCore.SkillCuration.DeliveryTest do
                )
     end
 
+    # M106 §8, D3: with a phone paired the app's chat is first.
+    test "with a phone paired the app's chat comes first" do
+      assert {:ok, %{platform: "companion", destination: "main"}} =
+               Delivery.resolve_target(FermixTestSupport.AppInbox.opts())
+    end
+
     test "no owner-configured channel resolves to no_delivery_target" do
       assert :no_delivery_target =
                Delivery.resolve_target(configured_owners: %{}, jobs_config: [])

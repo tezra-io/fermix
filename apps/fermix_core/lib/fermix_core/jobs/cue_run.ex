@@ -31,10 +31,10 @@ defmodule FermixCore.Jobs.CueRun do
   alias FermixCore.Cues.Mandates
   alias FermixCore.Cues.Pins
   alias FermixCore.Jobs.Delivery
+  alias FermixCore.Jobs.Failure
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesMandateSql
   alias FermixCore.Memory.Repo.CuesRunsSql
-  alias FermixCore.Providers.Transient
   alias FermixCore.Temporal.Access
 
   # The cue's payload text in the prompt, in characters (the payload itself is
@@ -51,12 +51,6 @@ defmodule FermixCore.Jobs.CueRun do
   # (`companion`, which draws only the previews the engine fetches) are told to.
   # iMessage and Signal stay refused until checked.
   @report_platforms ~w(telegram slack discord whatsapp mobile companion)
-
-  # Provider error kinds that end a cue run as a provider failure (design §9.4:
-  # no route, a transport error, a rate limit, a 5xx). An exhausted account
-  # (`:quota`) clears the same way a rate limit does. Every transport error
-  # counts, whatever its kind.
-  @provider_api_kinds [:rate_limit, :quota, :provider_unavailable, :timeout]
 
   # A cue run's fields that can carry text the model wrote from the cue (§9.3).
   @withheld_run_fields [:final_response, :error, :prompt_snapshot, :output_ref]
@@ -293,26 +287,8 @@ defmodule FermixCore.Jobs.CueRun do
   def outcome({:timeout, _reason}, _job, calls) when is_list(calls), do: {:failed, :other}
 
   def outcome({:error, reason}, _job, calls) when is_list(calls) do
-    if provider_failure?(reason), do: {:failed, :provider}, else: {:failed, :other}
+    if Failure.provider_failure?(reason), do: {:failed, :provider}, else: {:failed, :other}
   end
-
-  @doc "Whether a run's error reason is a provider failure (design §9.4)."
-  @spec provider_failure?(term()) :: boolean()
-  def provider_failure?({:provider_transport_error, %{kind: kind}}) when is_atom(kind), do: true
-
-  def provider_failure?({:provider_error, %{kind: kind} = error}) when is_atom(kind),
-    do: kind in @provider_api_kinds or server_error?(Map.get(error, :status))
-
-  def provider_failure?({:all_routes_failed, [_ | _] = attempts}),
-    do: Enum.all?(attempts, fn {_provider, reason} -> provider_failure?(reason) end)
-
-  def provider_failure?({:context_recovery_failed, reason}), do: provider_failure?(reason)
-  def provider_failure?({:no_route, message}) when is_binary(message), do: true
-  def provider_failure?(:no_routes), do: true
-  def provider_failure?(%RuntimeError{} = error), do: Transient.connection_unavailable?(error)
-  def provider_failure?(_reason), do: false
-
-  defp server_error?(status), do: is_integer(status) and status >= 500
 
   # --- what the owner receives ---------------------------------------------------------------
 
@@ -614,21 +590,27 @@ defmodule FermixCore.Jobs.CueRun do
   payload, with a cue run's reply, error, prompt and output reference held back
   outside an attended operator turn, and its reply, error and prompt framed on
   one (the output reference is a path Fermix wrote, and the artifact holds no
-  reply). A cue run's payload also carries its delivery's outcome. Every other
-  run passes through unchanged.
+  reply). A cue run's payload also carries its delivery's outcome. Inside a
+  job's heal run (its context carries `job_heal`, M106 §9), every other run's
+  reply, error and prompt are framed as text someone else could have written,
+  as the failure's words are; for any other caller every other run passes
+  through unchanged.
   """
   @spec present_runs([{map(), map()}], map(), keyword()) :: {:ok, [map()]} | {:error, term()}
   def present_runs(pairs, context, opts) when is_list(pairs) and is_map(context) do
     ids = for {_payload, %{trigger: "cue", cue_delivery_id: id}} <- pairs, is_integer(id), do: id
     attended? = Access.attended_operator_turn?(context)
+    heal_run? = Map.has_key?(context, :job_heal)
 
     with {:ok, outcomes} <- delivery_outcomes(Enum.uniq(ids), opts) do
       {:ok,
-       Enum.map(pairs, fn {payload, run} -> present_run(payload, run, outcomes, attended?) end)}
+       Enum.map(pairs, fn {payload, run} ->
+         present_run(payload, run, outcomes, attended?, heal_run?)
+       end)}
     end
   end
 
-  defp present_run(payload, %{trigger: "cue"} = run, outcomes, attended?) do
+  defp present_run(payload, %{trigger: "cue"} = run, outcomes, attended?, _heal_run?) do
     delivery = Map.get(outcomes, Map.get(run, :cue_delivery_id))
 
     payload
@@ -636,20 +618,26 @@ defmodule FermixCore.Jobs.CueRun do
     |> cue_run_fields(delivery, attended?)
   end
 
-  defp present_run(payload, _run, _outcomes, _attended?), do: payload
+  defp present_run(payload, _run, _outcomes, _attended?, true),
+    do: frame_run_fields(payload, "job_run")
+
+  defp present_run(payload, _run, _outcomes, _attended?, false), do: payload
 
   defp cue_run_fields(payload, delivery, true) do
     label = if delivery, do: "cue:" <> delivery.source_ref, else: "cue run"
-
-    Enum.reduce(@framed_run_fields, payload, fn key, acc ->
-      Map.replace_lazy(acc, key, &UntrustedContent.frame(label, &1))
-    end)
+    frame_run_fields(payload, label)
   end
 
   defp cue_run_fields(payload, _delivery, false) do
     payload
     |> Map.drop(@withheld_run_fields)
     |> Map.put(:cue_run_note, @withheld_note)
+  end
+
+  defp frame_run_fields(payload, label) do
+    Enum.reduce(@framed_run_fields, payload, fn key, acc ->
+      Map.replace_lazy(acc, key, &UntrustedContent.frame(label, &1))
+    end)
   end
 
   # --- helpers ------------------------------------------------------------------------------

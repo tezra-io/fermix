@@ -13,10 +13,16 @@ defmodule FermixChannels.Channels.Companion do
   broadcasts the logical events to every connection watching the profile,
   through the `registry/0` those connections join after their handshake. A row
   it writes reaches the phones too (`Companion.Fanout`), and a delivery is
-  pushed to them while their channel runs; an approval stays on this socket,
-  the only transport its token resolves from. A turn's replies
+  pushed to them while their channel runs; an approval a turn here raised
+  stays on this socket, the only transport its token resolves from, and one
+  asked in the owner's inbox when that is the app goes to the phones too
+  (`send_approval/2`). A turn's replies
   and its ending go through `Companion.Turns`, which writes and announces them
-  only once the queue fires the turn's outcome.
+  only once the queue fires the turn's outcome, and every event of a turn
+  names it by the id `Turns.turn_id/1` gives, the one it ends by. A turn
+  Fermix started itself (`Turns.own?/1`, a finished run's report) is shown to
+  no client as a turn: nothing of it is streamed here, and its reply arrives
+  as the row `Turns` writes when it completes.
 
   The stream tier is `:raw`: the gateway hands the turn `build_raw_stream_callback/1`
   verbatim. The loop's stream events are cumulative snapshots, so the callback
@@ -196,7 +202,11 @@ defmodule FermixChannels.Channels.Companion do
   def terminal_error_capability, do: :turn_result
 
   @impl true
-  def build_raw_stream_callback(%Message{chat_id: profile_id} = message) do
+  def build_raw_stream_callback(%Message{} = message) do
+    if Turns.own?(message), do: fn _unshown -> :ok end, else: turn_stream(message)
+  end
+
+  defp turn_stream(%Message{chat_id: profile_id} = message) do
     turn_id = turn_id(message)
     started = Output.turn_started(profile_id, turn_id, client_message_id(message))
 
@@ -247,6 +257,10 @@ defmodule FermixChannels.Channels.Companion do
   # `Capabilities.Activity`), which the client shows instead of the tool's name.
   @impl true
   def build_activity_callback(%Message{} = message) do
+    if Turns.own?(message), do: fn _unshown -> :ok end, else: turn_activity(message)
+  end
+
+  defp turn_activity(%Message{} = message) do
     turn_id = turn_id(message)
 
     fn
@@ -278,16 +292,48 @@ defmodule FermixChannels.Channels.Companion do
   end
 
   @doc """
-  Deliver a kind-aware approval card with exact approve and deny routes, to
-  this socket's connections alone: its token resolves only from here (M19
-  §9.5). It is kept until it resolves or expires, for a client that connects
-  later.
+  Deliver a kind-aware approval card with exact approve and deny routes.
+
+  A card a turn on this socket raised goes to this socket's connections
+  alone: its token resolves only from here (M19 §9.5). It is kept until it
+  resolves or expires, for a client that connects later.
+
+  A card asked in the owner's inbox when that is the Fermix app (M106 §8,
+  D12; the message `Gateway.OwnerInboxApproval` hands over, marked
+  `owner_inbox`) is answered from the Mac chat or a paired phone, so it goes
+  to both, and each paired phone that is away is pushed, for as long as the
+  card lives: an access confirmation that had no chat of its own, kept as a
+  turn's card is, and a heal's proposal for a job (`:job_change`), offered
+  and never kept, since its record offers it again after every hello.
   """
   @impl true
   @spec send_approval(Message.t(), map()) :: :ok | {:error, term()}
+  def send_approval(%Message{} = message, %{kind: :job_change, text: text, token: token} = spec)
+      when is_binary(text) and is_binary(token) do
+    %{"ttl_s" => ttl_s} = card = Output.approval(spec)
+    :ok = Approvals.offer(Approvals.server(), message.chat_id, card)
+    push_approval(message.chat_id, ttl_s)
+  end
+
+  def send_approval(
+        %Message{metadata: %{owner_inbox: true}} = message,
+        %{kind: kind, text: text, token: token} = spec
+      )
+      when kind in [:sandbox, :soul] and is_binary(text) and is_binary(token) do
+    %{"ttl_s" => ttl_s} = card = Output.approval(spec)
+    :ok = Approvals.announce(Approvals.server(), message.chat_id, card, :all)
+    push_approval(message.chat_id, ttl_s)
+  end
+
   def send_approval(%Message{} = message, %{kind: kind, text: text, token: token} = spec)
       when kind in [:sandbox, :soul] and is_binary(text) and is_binary(token) do
     Approvals.announce(Approvals.server(), message.chat_id, Output.approval(spec), :companion)
+  end
+
+  # A card in the owner's inbox reaches the paired phones that are away while
+  # their channel runs, as a delivered row does (`push_delivered/4`).
+  defp push_approval(profile_id, ttl_s) do
+    if MobileSupervisor.running?(), do: Mobile.push_approval(profile_id, ttl_s), else: :ok
   end
 
   @doc """
@@ -534,7 +580,7 @@ defmodule FermixChannels.Channels.Companion do
       attempt: request_attempt(message)
     ]
 
-  defp turn_id(%Message{metadata: metadata}), do: Map.get(metadata, :turn_id) || new_turn_id()
+  defp turn_id(%Message{} = message), do: Turns.turn_id(message)
 
   defp client_message_id(%Message{} = message),
     do: Map.get(message.metadata, :client_msg_id) || message.id
@@ -581,6 +627,4 @@ defmodule FermixChannels.Channels.Companion do
   @doc "The timeline this channel writes through (a test injects another)."
   @spec store() :: module()
   def store, do: Application.get_env(:fermix_channels, :companion_store, Timeline)
-
-  defp new_turn_id, do: "turn-#{System.unique_integer([:positive, :monotonic])}"
 end

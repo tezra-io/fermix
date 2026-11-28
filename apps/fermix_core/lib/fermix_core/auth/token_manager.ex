@@ -322,8 +322,9 @@ defmodule FermixCore.Auth.TokenManager do
   defp stored_entry_error({:provider_missing, _provider} = reason), do: {:signed_out, reason}
   defp stored_entry_error(:no_auth_file), do: {:signed_out, :no_auth_file}
 
-  # An entry left with no token is a sign-out that keeps its registration
-  # (ChatGPT's): there is no stored sign-in to refresh either.
+  # An entry with no token is a ChatGPT sign-in that has not finished, its
+  # issued client stored before the exchange: there is no stored sign-in to
+  # refresh either.
   defp stored_entry_error({:invalid_auth_entry, _provider, :missing_access_token} = reason),
     do: {:signed_out, reason}
 

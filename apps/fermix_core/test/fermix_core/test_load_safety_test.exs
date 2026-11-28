@@ -154,7 +154,7 @@ defmodule FermixCore.TestLoadSafetyTest do
 
   defp file_offenders(file) do
     path = TestSourceScan.relative_path(file)
-    source = File.read!(file)
+    source = TestSourceScan.read!(file)
 
     (text_findings(source) ++ ast_findings(file, source))
     |> Enum.uniq()

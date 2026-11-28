@@ -130,9 +130,16 @@ runs `--quiet`.
    memory the kernel stops a Chromium process before the engine. Both values
    are constants until a measurement on a small real server sets them
    (M75 §3).
-4. Installs the Linux package through `https://fermix.ai/install --no-setup`
-   (`--version X` when it was given one), the installer every host uses, with
-   its checks. The package's user unit
+4. Installs the Linux package of the release it was given (`--version X`;
+   the table's `latest` without one) through the update script's own
+   `install_checked`, so the server has one install path and runs no
+   installer the site serves: `fermix_X_ARCH.deb` from the release's GitHub
+   release, installed with `apt-get install -y --no-remove` only when its
+   sha256 is the one `https://fermix.ai/install/releases` lists. This is the
+   first install, so the site's digest alone vouches for it: no cosign
+   exists before the package does, and the owner's `curl … | sudo sh` has
+   trusted the site already. Every update checks the signature as well
+   (below). The package's user unit
    runs the engine with `Restart=always` and at most five starts in ten
    minutes, so a crash loop stops and the budget comes back.
 5. Updates, as nobody logs in to the server. Debian's own: `unattended-upgrades`
@@ -155,21 +162,47 @@ runs `--quiet`.
    it runs, that the app of each system whose computers keep the home's
    backups carries, from the release table the engine reads from fermix.ai
    every five minutes (`FermixCore.Home.ReleaseTable`; an app row is added
-   when that app release is published). They install it with the installer
-   again (`--no-setup --version X`, with its sha256 check and the cosign
-   signature check through the package's own cosign) when it is newer than
-   the installed one in `dpkg --compare-versions`' order; an installed
-   release newer than it is never installed back down, and no home, none
+   when that app release is published). When it is newer than the installed
+   one in `dpkg --compare-versions`' order they install it, and never through
+   the site's installer: root runs only the installed release's own code.
+   `install_checked` downloads `fermix_X_ARCH.deb` with its `.sig` and
+   `.pem` from the release's GitHub release and installs it with `apt-get
+   install -y --no-remove` only when two independent roots agree: its sha256
+   is the one fermix.ai's table lists, and `/usr/lib/fermix/cosign
+   verify-blob`, the cosign the installed package ships, verifies its
+   signature as the release workflow's for that tag (certificate identity
+   `https://github.com/tezra-io/fermix/.github/workflows/release.yml@refs/tags/vX`,
+   issuer `https://token.actions.githubusercontent.com`; the repository,
+   workflow and issuer are constants the release's own server script wrote
+   into the update script). cosign reaches Sigstore online, as `fermix
+   upgrade` does, with its TUF cache in `/var/lib/fermix-update/sigstore`
+   (`TUF_ROOT`, root's own 0700 folder, so the engine account can neither
+   seed nor replace it; one that exists in any other shape is refused,
+   never repaired). Each check that fails installs nothing and says which it
+   was, in one line, such as `Fermix is not updated tonight: the package for
+   Fermix X is not signed by the Fermix release workflow (cosign's message
+   above says why)`; the engine keeps running, and the next timer tries
+   again. No cosign is no reason to install on the digest alone: an update
+   without `/usr/lib/fermix/cosign` installs nothing. So the site alone, or
+   GitHub alone, cannot put code on a server, and the engine account, which
+   picks only the version, can at most choose among signed releases. An
+   installed release newer than it is never installed back down, and no home, none
    eligible (a table not read yet among the reasons, so it fails closed) or
    a `home status` that fails installs nothing on that run (the last fails
    the run). A stopped engine reads no table, so nothing is installed until
    it runs. After each install the script becomes that release's own: it
-   fetches the release's `fermix_always_on.sh` from its GitHub release,
-   refuses it unless its sha256 is the one the table lists, and runs it with
-   `--update-script-only`, which writes `/usr/local/sbin/fermix-update`
+   fetches the release's `fermix_always_on.sh` with its `.sig` and `.pem`
+   from its GitHub release, refuses it unless both roots agree on it as on a
+   package (the table's sha256 and the release workflow's signature), and
+   runs it with `--update-script-only`, which writes `/usr/local/sbin/fermix-update`
    again as that release writes it and nothing else (a script that cannot
    be fetched, checked or run leaves the old one, says so, and fails the run
-   once the restart is decided). The owner's own update on the server is
+   once the restart is decided). A server set up from 0.20.0 runs 0.20.0's
+   update script, which installs through the site's installer: it takes the
+   first release with these checks that way, one last time, then runs that
+   release's server script with `--update-script-only` (checked against the
+   table, as 0.20.0 checks one), which writes the checked update script;
+   from then on both roots hold, with nobody logging in to the server. The owner's own update on the server is
    the same act behind the same gate: `fermix-update --release X` refuses X
    below the installed release (an older Fermix cannot read the home), a
    release the table does not list, and one newer than the eligible release
@@ -201,8 +234,8 @@ runs `--quiet`.
    holds the night's reboot. The two never run at once: each
    takes an exclusive `flock` on `/run/fermix-update.lock` (root's, 0600; a
    file only root can make, as `/run` is root's) before anything else, with
-   the lock's descriptor closed for the installer and every `fermix` call, so
-   nothing they leave running holds it. A follow run that finds it held
+   the lock's descriptor closed for `cosign`, `apt-get` and every `fermix`
+   call, so nothing they leave running holds it. A follow run that finds it held
    leaves the update to the run that holds it and exits 0, in one line; the
    night says it waits and waits at most 15 minutes, half its unit's
    timeout, then fails in one sentence and the next night tries again. A
@@ -220,13 +253,12 @@ runs `--quiet`.
    (root's, 0600, in a 0700 directory; cleared by a reboot and by a night
    without a move; a count that is not a number reads as the limit), and the
    third night reboots all the same and says so; a failed read of the engine
-   counts as no move. Each night says what it did in one line per step. An
-   installer that cannot be downloaded from `fermix.ai` never ran, so
-   nothing changed and the restart (and at night the reboot) is still
-   decided; one that ran and failed stops the run before both and leaves the
-   running engine as it was, since its exit status (1 for a refusal before
-   the package manager runs and for a failure after it) cannot say whether
-   the package was touched. Any failure says why on stderr (the journal:
+   counts as no move. Each night says what it did in one line per step. A
+   release whose table cannot be read, or that a check refuses, was never
+   installed, so nothing changed and the restart (and at night the reboot)
+   is still decided; an `apt-get` that ran and failed stops the run before
+   both and leaves the running engine as it was, since its exit status
+   cannot say whether dpkg had begun. Any failure says why on stderr (the journal:
    `journalctl -u fermix-follow` and `journalctl -u fermix-update`) and the
    run exits non-zero; the next one tries again. Any argument but `--follow`
    or `--release X [--ahead-of-apps]` is refused in one sentence before
@@ -487,11 +519,17 @@ The containers need Docker with `debian:trixie-slim`, and network inside them
 `apt-config` run for real (`--cap-add NET_ADMIN`, `/run` on a tmpfs);
 `systemctl` (which runs a unit's `ExecStart` for `start` and `restart`, and
 says the link an `enable` makes unless `--quiet`),
-`loginctl`, `curl` (the fake installer, which records the release it
-installed; a stand-in digest table and release script for the regular
-installer's `--always-on`; `pkgs.tailscale.com` fetched for real), `apt-get`, `dpkg-query`,
+`loginctl`, `curl` (a stand-in digest table and each invented release's
+files: a package built with `dpkg-deb` that installs the stand-in `fermix`,
+the package's user unit and the stand-in `cosign`, and this script as its
+Always On server script, each signed for that `cosign` as the release
+workflow on its tag; `https://fermix.ai/install` refused, so a fetch of
+the site's installer shows in the calls; `pkgs.tailscale.com` fetched for
+real), `apt-get` (a local package installed by the real `dpkg`), `dpkg-query`,
 `perl` (the Landlock ABI from a fixture), `swapon`, `fallocate`, `mkswap`,
-`tailscale` (which records the key file it read, never the key) and `fermix`
+`cosign` (which accepts a file only when its signature covers its bytes and
+names the identity and issuer it is asked for, with its TUF cache in root's
+folder), `tailscale` (which records the key file it read, never the key) and `fermix`
 (which runs the release its last start installed, whose status reads can
 fail, and which records the process that started it, its ids and its
 environment's names) are the stand-ins in `test/stubs/`; `apt-get` says
@@ -518,9 +556,11 @@ failures that stop the
 first boot, each by its exit status and its one sentence on stderr; an
 Ubuntu host with swap of its own; the nightly update, one night per case (the
 eligible release already installed, a newer one and then the update script
-it publishes, checked against the table, a marked copy proving it replaced
-the script, a failed installer while a reboot is asked for, the reboot, an
-installer that cannot be downloaded (the reboot all the same), a failed
+it publishes, checked against the table and its signature, a marked copy
+proving it replaced the script, a failed `apt-get` while a reboot is asked
+for, the reboot, a table that cannot be read, a package the release
+workflow did not sign and a Sigstore cache that is not a folder (each
+refused before `apt-get` runs, the reboot all the same), a failed
 `service status` and a failed `home status` (no restart, the reboot all the
 same), three nights under a move (the reboot waits two, then goes), a move
 in an ended phase, a failed restart (the reboot all the same), an older
@@ -548,7 +588,12 @@ change, no secret in any command line, each of the helper's failures in its
 own words, a first boot whose helper fails stopped before enrolling, the
 destination file's refusals, and a restore host. It is not wired into CI;
 `scripts/release/test_fermix_update.py` runs the update's release choice,
-the update script each release takes (and every way it refuses one), the
+its checked install (the site's installer never run, a package refused
+before `apt-get` when it is not the release workflow's or not the one the
+table lists, an update without the package's cosign or with a Sigstore
+cache root cannot read refused in its own sentence), first boot's install
+through the same function on the digest alone, the update script each
+release takes (and every way it refuses one), the
 owner's hand update and its gate, the restart a computer's work holds, the
 follow run, the lock (with a stand-in `flock` and the night's wait cut to a
 second) and first boot's `--version` hermetically, in CI. What only a

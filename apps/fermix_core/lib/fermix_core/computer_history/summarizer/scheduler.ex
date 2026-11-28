@@ -9,7 +9,9 @@ defmodule FermixCore.ComputerHistory.Summarizer.Scheduler do
     sitting to the home, under an atomic claim in this machine's store with
     stale-claim recovery, so two daemons on one machine never send the same
     sitting at once. A computer (`:report` given) then sends its home the
-    report of its recorder (`ComputerHistory.Report`), from the same cycle.
+    report of its recorder (`ComputerHistory.Report`), from the same cycle,
+    with how many apps are chosen here, taken as it is built (`:apps_fun`,
+    `Config.apps/0`), never which.
   - **Where this engine is the home** (`:repo` given): this machine applies
     any purge or pause from chat it has not yet applied, when it keeps a store
     (`Delivery.apply_here/1`: one whose own apply failed is applied here, at
@@ -30,6 +32,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.Scheduler do
 
   alias FermixCore.ComputerHistory
   alias FermixCore.ComputerHistory.Capturer
+  alias FermixCore.ComputerHistory.Config
   alias FermixCore.ComputerHistory.Delivery
   alias FermixCore.ComputerHistory.Report
   alias FermixCore.ComputerHistory.Sittings
@@ -63,6 +66,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.Scheduler do
       report: Keyword.get(opts, :report),
       recording_fun: Keyword.get(opts, :recording_fun, &ComputerHistory.operative?/0),
       status_fun: Keyword.get(opts, :status_fun, fn -> Capturer.status() end),
+      apps_fun: Keyword.get(opts, :apps_fun, &Config.apps/0),
       task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
       tick_interval_ms: Keyword.get(opts, :tick_interval_ms, @tick_interval_ms),
       claim_stale_after_ms: Keyword.get(opts, :claim_stale_after_ms, @claim_stale_after_ms),
@@ -129,7 +133,8 @@ defmodule FermixCore.ComputerHistory.Summarizer.Scheduler do
         spool: state.spool,
         now_ms: System.system_time(:millisecond),
         recording?: state.recording_fun.(),
-        status: state.status_fun.()
+        status: state.status_fun.(),
+        apps: length(state.apps_fun.())
       )
 
     with {:ok, report} <- built, :ok <- state.report.(report) do

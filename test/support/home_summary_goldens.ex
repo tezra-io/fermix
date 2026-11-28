@@ -3,7 +3,8 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
   The `home.status` goldens beyond the first (`success.jsonl`), one for each
   family of the summary's states (M75 lean v1 §7): the computer that sets
   Always On up while its server connects and once it is ready, the server
-  before and after its move, a linked desktop when all is well (Move back
+  before and after its move, a computer its server removed (Join again), a
+  linked desktop when all is well (Move back
   among its steps, its backup settings, and the Tailscale Funnel mounts of
   what its server serves), when its server's last backup failed (the
   `backup_failed` problem, the try's own words its note), and when its
@@ -16,6 +17,7 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
   """
 
   alias FermixCore.Home.MoveReadiness
+  alias FermixCore.Home.ServerPrimary
   alias FermixCore.Home.Snapshot
   alias FermixCore.Home.Snapshot.S3, as: SnapshotS3
   alias FermixCore.Home.Snapshot.Status, as: SnapshotStatus
@@ -51,6 +53,7 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
       {"home_status_server_asking", server_asking()},
       {"home_status_server_joined", server_joined()},
       {"home_status_joining", joining()},
+      {"home_status_removed", removed()},
       {"home_status_moving", moving()},
       {"home_status_return_ready", return_ready()}
     ]
@@ -184,6 +187,7 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
       :primary,
       %{epoch: 5, snapshots: server_snapshots(), disk: disk(0.42), update_ceiling: "1.2.3"},
       %{
+        host_os: :linux,
         link:
           link(
             desktops: [Map.merge(desktop, %{connected: true, since: ~U[2031-05-04 09:00:00Z]})],
@@ -201,11 +205,34 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
       "phase" => "awaiting_approval",
       "server" => @server_name,
       "sas" => "482913",
-      "sentence" => "Waiting for you to add this computer on #{@server_name}."
+      "sentence" =>
+        "Waiting for you to add this computer in Always On on a computer already in your " <>
+          "Fermix."
     }
 
     record(:device, %{epoch: nil, snapshots: retired_snapshots(:device), join: join}, %{
       join: join
+    })
+  end
+
+  # M102 J1: a computer that joined, which its server removed (the owner
+  # removed it, or the server was restored from before it joined): its link
+  # keeps the server's word, its server answers it nothing, and Join again
+  # takes a new code from Add a computer.
+  defp removed do
+    revoked = %{
+      primary(:revoked, 3 * 60_000)
+      | sentence:
+          "The server #{@server_name} does not know this computer: it was removed from the " <>
+            "server's devices, or the server was restored from a snapshot taken before this " <>
+            "computer joined it. Fermix stopped reaching it."
+    }
+
+    record(:device, %{epoch: 4, snapshots: retired_snapshots(:device)}, %{
+      link: link(primary: revoked),
+      linked: true,
+      revoked: true,
+      primary_missing: "The server #{@server_name} does not know this computer."
     })
   end
 
@@ -270,6 +297,7 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
         ]
       },
       %{
+        host_os: :linux,
         link:
           link(
             desktops: [Map.merge(desktop, %{connected: true, since: ~U[2031-05-04 09:00:00Z]})]
@@ -302,9 +330,11 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
   end
 
   # The record for `role` from its own facts (`own`) and the summary's
-  # (`extra`), as `Management.Home.status/1` puts them together.
+  # (`extra`), as `Management.Home.status/1` puts them together. A server is
+  # Linux (`ServerPrimary` refuses macOS); every other golden is a Mac's.
   defp record(role, own, extra) do
     link = Map.get(extra, :link, link([]))
+    host_os = Map.get(extra, :host_os, :macos)
 
     facts =
       Map.merge(
@@ -329,12 +359,14 @@ defmodule FermixTestSupport.HomeSummaryGoldens do
     summary =
       HomeSummary.summary(%{
         role: role,
-        host_os: :macos,
+        host_os: host_os,
         now: @now,
         linked: Map.get(extra, :linked, false),
+        revoked: Map.get(extra, :revoked, false),
         moved: facts.moved,
         move: facts.move,
         link: link,
+        server: ServerPrimary.of(host_os, link.desktops) == :server,
         candidates: facts.candidates,
         review: Map.get(extra, :review),
         move_items: Map.get(extra, :move_items, []),

@@ -37,7 +37,11 @@ channels or realtime, and provide both `--confirm-daemon-isolated` and
 `--confirm-isolated-env`. Conventional pairs are `~/.fermix-eval` /
 `fermix-eval` for behavioral runs and `~/.fermix-capability-eval` /
 `fermix-capability-eval` for capability runs. The confirmations are operator
-attestations, not containment.
+attestations, not containment. An isolated behavioral run (`run_eval.py`) also needs
+the home's disposable workspace to be a git snapshot at this checkout's HEAD, and is
+refused otherwise; seed with `--workspace-snapshot` (in `FERMIX_CAP_SEED_ARGS` for
+`capability-daemon.sh up`), which copies this checkout in, `.git` included and
+`_build` and `deps` left out, as the CI eval box does.
 
 Judged runs use an **independent external judge** — the Claude API, called
 directly by the harness through the official `anthropic` SDK (no daemon or core
@@ -878,7 +882,7 @@ also need `--cue-mandates`, which adds the stub ticket plugin to every turn of t
 home, and are held out without it:
 
 ```sh
-FERMIX_CAP_SEED_ARGS="--cues --cue-mandates" bin/capability-daemon.sh up
+FERMIX_CAP_SEED_ARGS="--cues --cue-mandates --workspace-snapshot" bin/capability-daemon.sh up
 uv run bin/run_capability.py --candidates --suite cap_cues --trials 3 \
   --confirm-daemon-isolated --confirm-isolated-env
 FERMIX_EVAL_HOME=~/.fermix-capability-eval uv run bin/run_eval.py --suite cues \
@@ -910,6 +914,54 @@ a companion socket that never answers included, stops the run: the case is
 reported INCOMPLETE, the rest are left unrun, as an exhausted account does, and the
 banner names the harness. Reports redact every `drive_error` by default;
 `--include-content` keeps the text.
+
+### Auto Heal (M106)
+
+A failed or degraded job's heal runs outside every turn, so the capability candidate
+`cap_job_auto_heal` seeds each trial's jobs and runs (`checker.state`) and grades the
+heal from memory.db and the trace (and what became of a stored proposal on its card,
+answered by a typed `/confirm` or `/deny` with no model: `checkers/job_proposal.py`), and
+the behavioral suite `job_auto_heal` seeds
+each case's record (`state:`) and asks about it. Both need the local chat as the owner's
+inbox (`--owner-inbox-cli`; held out as NOT EVALUATED without it), and the behavioral
+run needs the workspace snapshot:
+
+```sh
+FERMIX_CAP_SEED_ARGS="--owner-inbox-cli --workspace-snapshot --dev-provider anthropic" \
+  bin/capability-daemon.sh up
+uv run bin/run_capability.py --candidates --suite cap_job_auto_heal --trials 3 --estimate
+uv run bin/run_capability.py --candidates --suite cap_job_auto_heal --trials 3 \
+  --confirm-daemon-isolated --confirm-isolated-env
+FERMIX_EVAL_HOME=~/.fermix-capability-eval uv run bin/run_eval.py --suite job_auto_heal \
+  --profile isolated_mutation --judge --dry-run
+FERMIX_EVAL_HOME=~/.fermix-capability-eval uv run bin/run_eval.py --suite job_auto_heal \
+  --profile isolated_mutation --judge --fail-retries 2 \
+  --confirm-daemon-isolated --confirm-isolated-env
+bin/capability-daemon.sh down
+```
+
+`--dev-provider anthropic` because a fixture's route pin names the home's one
+provider (`mistyped_model_offered_as_a_pair` pins an Anthropic model; suites/SCHEMA.md),
+and the eval box seeds `--provider anthropic` too. With `FERMIX_CAP_HOME` set to another
+home, give both runners the same home as
+`FERMIX_EVAL_HOME`. `--estimate` counts turns only: each diagnosed task also runs one
+diagnosis on the home's main model (at most six steps), and every turn is followed by
+the home's memory review. Seeded runs sit at their jobs' own fire times
+(`bin/seed_run_times.exs`).
+
+The Fermix app as the owner's inbox (stage S6) is its own candidate,
+`cap_job_heal_app_inbox`, on a home seeded with `--owner-inbox-app` instead (one inbox
+per home; each suite is held out of the other's): each trial seeds a heal whose
+conclusion is recorded and left for the daemon to send, and drives the companion
+socket as the app does (`drive: app`), so only its one edit task runs a model turn.
+
+```sh
+FERMIX_CAP_SEED_ARGS="--owner-inbox-app" bin/capability-daemon.sh up
+uv run bin/run_capability.py --candidates --suite cap_job_heal_app_inbox --trials 3 --estimate
+uv run bin/run_capability.py --candidates --suite cap_job_heal_app_inbox --trials 3 \
+  --confirm-daemon-isolated --confirm-isolated-env
+bin/capability-daemon.sh down
+```
 
 ### The Cues screen (`make capability-screen`)
 
@@ -1103,6 +1155,54 @@ The fixture audio is regenerated, and checked for reproducibility, with
 `uv run bin/make_voice_fixtures.py [--check]` (macOS only: `say` +
 `afconvert -f WAVE -d LEI16@24000 -c 1`); the clips' texts live in that script and
 `suites/fixtures/voice/manifest.json` records each WAV's text and sha256.
+
+### Phone calls (`suites/phone_call.yaml`, M94)
+
+The owner asks Fermix to phone a business or their own phone; every call reaches
+the runners' simulated GPT-Live endpoint (`bin/evallib/phone_sim.py`, on the
+fixture server, loopback only) and plays the script its destination number owns
+(`suites/fixtures/phone/`), so no carrier, no voice model and no OpenAI request
+is involved. The eval daemon is a development build, and where its calls go is
+decided once, at boot (`FermixCore.Application.phone_call_transport_opts/2`): to
+`FERMIX_EVAL_FIXTURE_ORIGIN` when the home's fixture manifest honours it
+(`Tools.WebFetch.EvalFixture.origin/1`), every call refused when it is set and not
+honoured, never the vendor's. So the manifest and the variable are in place before
+the daemon starts: `capability-daemon.sh` sets the variable from the manifest on
+every start (`up` after the seed, `reset` after the restore, which leaves
+`eval-fixtures/` alone), refuses to start a phone home without the manifest, and
+drops a caller's `OPENAI_API_KEY` so the seed's invented key is the one in use; the
+seed refuses a home whose daemon answers, so no manifest appears under a running
+daemon. The suite grades the agent path and what the owner
+is told, not how the voice converses (its header says what else it cannot prove).
+Each dial spends one of the home's twenty daily attempts and a lost create holds its
+one call slot for hours, so a phone case runs only with `--reset-home` (every
+attempt starts from the seeded world, one daemon restart each); without it every
+case is NOT EVALUATED. `phone_call` is registered in every home and offered to
+the owner's own turn while phone calls are on, which the seed does, and while a
+call still holds the slot, so it can be asked about and stopped; the keypad and hang-up
+controls are built by a call's own backend turn and are in no registry. The simulator's wire shapes are the engine's: both
+`apps/fermix_core/test/fermix_core/phone_calls/gpt_live_wire_contract_test.exs`
+and `bin/test_phone_sim.py` read
+`apps/fermix_core/test/fixtures/phone_calls/gpt_live_wire.json`. The suite is in
+no CI tier.
+
+```sh
+# from benchmark/, the eval daemon DOWN; any scored provider but openai
+FERMIX_CAP_SEED_ARGS="--phone-calls --workspace-snapshot" bin/capability-daemon.sh up
+# validate and plan, spending nothing
+FERMIX_EVAL_HOME=~/.fermix-capability-eval OPIK_PROJECT=fermix-capability-eval \
+  uv run bin/run_eval.py --suite phone_call --profile isolated_mutation --judge \
+  --reset-home --dry-run
+# one case first, then the suite
+FERMIX_EVAL_HOME=~/.fermix-capability-eval OPIK_PROJECT=fermix-capability-eval \
+  uv run bin/run_eval.py --suite phone_call --case book_table_readback_confirmed \
+  --profile isolated_mutation --judge --reset-home \
+  --confirm-daemon-isolated --confirm-isolated-env
+FERMIX_EVAL_HOME=~/.fermix-capability-eval OPIK_PROJECT=fermix-capability-eval \
+  uv run bin/run_eval.py --suite phone_call --profile isolated_mutation --judge \
+  --reset-home --confirm-daemon-isolated --confirm-isolated-env
+bin/capability-daemon.sh down
+```
 
 ---
 

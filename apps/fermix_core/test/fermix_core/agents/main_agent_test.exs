@@ -2010,6 +2010,23 @@ defmodule FermixCore.Agents.MainAgentTest do
       refute_received {:chat_call_asked, _key, _channel}
     end
 
+    # A report Fermix starts in the chat (a finished run's notice, above zero
+    # in its chain) was typed by nobody: it is no material for the call, and
+    # it must not be offered the ending with no reply, or the report is lost.
+    test "a report Fermix starts is never told of the call", ctx do
+      msg =
+        make_message("[phone call pc_1] The call ended.",
+          chat_id: "main",
+          source_trust: :operator,
+          metadata: %{harness_continuation: true, harness_continuation_depth: 1}
+        )
+
+      {:ok, turn_state, _cache} = MainAgent.checkout_turn_state(ctx.live_agent, msg)
+
+      assert turn_state.live_call == nil
+      refute_received {:chat_call_asked, _key, _channel}
+    end
+
     test "a guest's turn is never told of the call", ctx do
       msg = make_message("hello", source_trust: :guest)
 

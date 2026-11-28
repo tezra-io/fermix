@@ -182,7 +182,7 @@ defmodule FermixCore.Realtime.ConfigTest do
 
     test "valid_models/1 is engine-scoped and valid_models/0 stays the Realtime list" do
       assert Config.valid_models("openai_realtime") == Config.valid_models()
-      assert Config.valid_models("openai_live") == ["gpt-live-1"]
+      assert Config.valid_models("openai_live") == ["gpt-live-1.1", "gpt-live-1"]
     end
 
     # The model is the one operator-facing choice, so the combined list and the
@@ -194,7 +194,7 @@ defmodule FermixCore.Realtime.ConfigTest do
                  Config.valid_models("openai_live") ++ Config.valid_models("xai_realtime")
 
       assert Config.all_models() == ~w(gpt-realtime-2.1-mini gpt-realtime-2.1 gpt-realtime-2
-               gpt-live-1 grok-voice-3.0)
+               gpt-live-1.1 gpt-live-1 grok-voice-3.0)
 
       for model <- Config.all_models() do
         assert {:ok, engine} = Config.engine_for_model(model)
@@ -205,6 +205,7 @@ defmodule FermixCore.Realtime.ConfigTest do
     test "engine_for_model/1 names each engine and answers :error for a slug no engine ships" do
       assert Config.engine_for_model("gpt-realtime-2") == {:ok, "openai_realtime"}
       assert Config.engine_for_model("gpt-realtime-2.1-mini") == {:ok, "openai_realtime"}
+      assert Config.engine_for_model("gpt-live-1.1") == {:ok, "openai_live"}
       assert Config.engine_for_model("gpt-live-1") == {:ok, "openai_live"}
       assert Config.engine_for_model("grok-voice-3.0") == {:ok, "xai_realtime"}
       assert Config.engine_for_model("gpt-realtime-9") == :error
@@ -236,9 +237,27 @@ defmodule FermixCore.Realtime.ConfigTest do
       assert config.engine == "openai_live"
     end
 
+    # A config written with the newer Live model keeps it through a save and a
+    # load: the persist path writes the model back as it was chosen.
+    test "the live engine keeps the newer Live model through a round trip" do
+      config = Config.normalize(engine: "openai_live", model: "gpt-live-1.1")
+
+      assert config.model == "gpt-live-1.1"
+      assert Config.live?(config)
+      assert Config.normalize(Config.to_keyword(config)).model == "gpt-live-1.1"
+    end
+
+    test "the newer Live model under the Realtime engine names the setting to change" do
+      assert_raise ArgumentError,
+                   ~s(realtime.model gpt-live-1.1 requires engine = "openai_live"; ) <>
+                     ~s(set [fermix_core.realtime] engine = "openai_live" or pick a Realtime model),
+                   fn -> Config.normalize(engine: "openai_realtime", model: "gpt-live-1.1") end
+    end
+
     test "a Realtime model under the live engine is refused" do
       assert_raise ArgumentError,
-                   ~s(realtime.model must be gpt-live-1 when engine = "openai_live", got: "gpt-realtime-2.1"),
+                   ~s(realtime.model must be one of gpt-live-1.1, gpt-live-1 when engine = "openai_live", ) <>
+                     ~s(got: "gpt-realtime-2.1"),
                    fn -> Config.normalize(engine: "openai_live", model: "gpt-realtime-2.1") end
     end
 

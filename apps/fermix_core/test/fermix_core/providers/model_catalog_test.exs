@@ -13,6 +13,7 @@ defmodule FermixCore.Providers.ModelCatalogTest do
                :openrouter,
                :mistral,
                :venice,
+               :vercel,
                :ollama
              ]
     end
@@ -66,7 +67,7 @@ defmodule FermixCore.Providers.ModelCatalogTest do
     # The plan route serves the public API's models, so a listed slug takes the
     # openai catalog's facts; a slug neither knows takes the unknown-model window.
     test "an openai_codex slug takes the openai catalog's facts" do
-      for model <- ~w(gpt-6-astra gpt-6.1-sol gpt-6.1-terra gpt-6-luna) do
+      for model <- ~w(gpt-6-astra gpt-6.2-astra gpt-6.2-sol gpt-6.1-sol gpt-6.1-terra gpt-6-luna) do
         assert ModelCatalog.context_window_for(:openai_codex, model) == 1_050_000
       end
 
@@ -87,7 +88,7 @@ defmodule FermixCore.Providers.ModelCatalogTest do
     # A ChatGPT plan has usage limits, not the API's 272k repricing, so a GPT-6
     # conversation on Codex compacts at 500k; the direct API keeps its calibration.
     test "a GPT-6 conversation on openai_codex compacts at 500k" do
-      for model <- ~w(gpt-6-astra gpt-6.1-sol gpt-6.1-terra gpt-6-luna),
+      for model <- ~w(gpt-6-astra gpt-6.2-astra gpt-6.2-sol gpt-6.1-sol gpt-6.1-terra gpt-6-luna),
           threshold <- [0.85, 0.95, 1.0] do
         assert ModelCatalog.compact_at_tokens_for(:openai_codex, model, threshold) == 500_000
         assert ModelCatalog.context_budget_for(:openai_codex, model) == 500_000
@@ -109,9 +110,15 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       assert ModelCatalog.default_model_for(:xai) == "grok-4.7"
     end
 
-    test "GPT-6.1 Sol, GPT-6.1 Terra and GPT-6 Luna follow Astra on OpenAI, and GPT-6 Sol is gone" do
-      assert ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna" | _rest] =
-               Enum.map(ModelCatalog.models_for(:openai), & &1.id)
+    test "GPT-6.2 Astra, GPT-6.2 Sol, GPT-6.1 Sol, GPT-6.1 Terra and GPT-6 Luna follow Astra on OpenAI, and GPT-6 Sol is gone" do
+      assert [
+               "gpt-6-astra",
+               "gpt-6.2-astra",
+               "gpt-6.2-sol",
+               "gpt-6.1-sol",
+               "gpt-6.1-terra",
+               "gpt-6-luna" | _rest
+             ] = Enum.map(ModelCatalog.models_for(:openai), & &1.id)
 
       refute ModelCatalog.known_model?(:openai, "gpt-6-sol")
     end
@@ -187,6 +194,8 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       # 1,050,000 window: 0.85 * 320_000 = 272_000, exactly the input-token
       # boundary above which OpenAI reprices the full request at 2x/1.5x.
       assert ModelCatalog.context_window_for(:openai, "gpt-6-astra") == 320_000
+      assert ModelCatalog.context_window_for(:openai, "gpt-6.2-astra") == 320_000
+      assert ModelCatalog.context_window_for(:openai, "gpt-6.2-sol") == 320_000
       assert ModelCatalog.context_window_for(:openai, "gpt-6.1-sol") == 320_000
       assert ModelCatalog.context_window_for(:openai, "gpt-6.1-terra") == 320_000
       assert ModelCatalog.context_window_for(:openai, "gpt-6-luna") == 320_000
@@ -371,17 +380,39 @@ defmodule FermixCore.Providers.ModelCatalogTest do
     end
   end
 
+  # Vercel AI Gateway sends a `spacexai/` model to xAI, which refuses an inline
+  # PDF (M105 §11.8), whatever the gateway's listing says about the model.
+  describe "documents?/2" do
+    test "a Grok model through Vercel AI Gateway takes no inline PDF, listed or curated" do
+      refute ModelCatalog.documents?(:vercel, "spacexai/grok-4.7")
+      refute ModelCatalog.documents?(:vercel, "spacexai/grok-4.3")
+      refute ModelCatalog.documents?(:vercel, "spacexai/grok-future-unlisted")
+    end
+
+    test "every other model takes one where its provider does" do
+      assert ModelCatalog.documents?(:vercel, "anthropic/claude-sonnet-4.6")
+      assert ModelCatalog.documents?(:vercel, "openai/gpt-6-luna")
+      assert ModelCatalog.documents?(:openrouter, "x-ai/grok-4.7")
+      assert ModelCatalog.documents?(:anthropic, "claude-opus-4-8")
+      assert ModelCatalog.documents?(:mock, "mock")
+    end
+  end
+
   describe "model_effort_ceiling/2, effort_levels_for/2, clamp_effort/3" do
     test "older OpenAI models cap at :xhigh; the current generation is uncapped" do
       assert ModelCatalog.model_effort_ceiling(:openai, "gpt-5.5") == :xhigh
       assert ModelCatalog.model_effort_ceiling(:openai, "gpt-5.4") == :xhigh
       assert ModelCatalog.model_effort_ceiling(:openai, "gpt-5.4-mini") == :xhigh
       assert ModelCatalog.model_effort_ceiling(:openai, "gpt-6-astra") == nil
+      assert ModelCatalog.model_effort_ceiling(:openai, "gpt-6.2-astra") == nil
+      assert ModelCatalog.model_effort_ceiling(:openai, "gpt-6.2-sol") == nil
       assert ModelCatalog.model_effort_ceiling(:openai, "gpt-6.1-sol") == nil
       assert ModelCatalog.model_effort_ceiling(:openai, "gpt-6.1-terra") == nil
       assert ModelCatalog.model_effort_ceiling(:openai, "gpt-5.6-sol") == nil
       # OpenAI Codex serves the public API's models: their caps are openai's.
       assert ModelCatalog.model_effort_ceiling(:openai_codex, "gpt-5.5") == :xhigh
+      assert ModelCatalog.model_effort_ceiling(:openai_codex, "gpt-6.2-astra") == nil
+      assert ModelCatalog.model_effort_ceiling(:openai_codex, "gpt-6.2-sol") == nil
       assert ModelCatalog.model_effort_ceiling(:openai_codex, "gpt-6.1-sol") == nil
       assert ModelCatalog.model_effort_ceiling(:openai_codex, "gpt-6.1-terra") == nil
       # xhigh arrived with Grok 4.6: 4.6+ is uncapped, every older Grok tops
@@ -392,6 +423,29 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       assert ModelCatalog.model_effort_ceiling(:xai, "grok-4.3") == :high
       assert ModelCatalog.model_effort_ceiling(:xai, "grok-code-fast-1") == :high
       assert ModelCatalog.model_effort_ceiling(:openai, "unknown-model") == nil
+    end
+
+    # Every OpenAI model the catalog offers is in OpenAI's Fast pricing table;
+    # on Anthropic only Claude Opus 5.5 and Claude Fable 5.2 have a fast tier.
+    test "fast?/2 is true exactly for the catalog models with a fast tier" do
+      for %{id: id} <- ModelCatalog.models_for(:openai) do
+        assert ModelCatalog.fast?(:openai, id), id
+      end
+
+      for {id, expected} <- [
+            {"claude-opus-5-5", true},
+            {"claude-fable-5-2", true},
+            {"claude-sonnet-4-6", false},
+            {"claude-opus-5", false},
+            {"claude-opus-4-8", false},
+            {"claude-haiku-5-5", false}
+          ] do
+        assert ModelCatalog.fast?(:anthropic, id) == expected, id
+      end
+
+      refute ModelCatalog.fast?(:openai, "gpt-plan-unlisted")
+      refute ModelCatalog.fast?(:openrouter, "openai/gpt-6.2-sol")
+      refute ModelCatalog.fast?(:mock, "anything")
     end
 
     test "effort_levels_for/2 drops levels above the model's ceiling" do
@@ -527,6 +581,8 @@ defmodule FermixCore.Providers.ModelCatalogTest do
                "anthropic/claude-opus-5.5",
                "anthropic/claude-opus-4.8",
                "openai/gpt-6-astra",
+               "openai/gpt-6.2-astra",
+               "openai/gpt-6.2-sol",
                "openai/gpt-6.1-sol",
                "openai/gpt-6.1-terra",
                "openai/gpt-6-luna",
@@ -554,6 +610,66 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       end
     end
   end
+
+  # M105 §3.3: the curated Vercel list mirrors OpenRouter's entry for entry, in
+  # the same order, under Vercel's own ids (Grok is `spacexai/` there and
+  # `x-ai/` on OpenRouter) and at the windows Vercel's listing publishes.
+  describe "the Vercel catalog" do
+    test "mirrors the OpenRouter list entry for entry, under Vercel's ids" do
+      vercel = ModelCatalog.models_for(:vercel)
+      openrouter = ModelCatalog.models_for(:openrouter)
+
+      assert Enum.map(vercel, &openrouter_id(&1.id)) == Enum.map(openrouter, & &1.id)
+
+      assert Enum.map(vercel, & &1.label) ==
+               Enum.map(openrouter, &String.replace(&1.label, "via OpenRouter", "via Vercel"))
+    end
+
+    test "defaults to the OpenRouter head, which follows the Anthropic default" do
+      assert ModelCatalog.default_model_for(:vercel) == "anthropic/claude-sonnet-4.6"
+
+      assert hd(ModelCatalog.models_for(:vercel)).label ==
+               "Claude Sonnet 4.6 via Vercel (default)"
+    end
+
+    test "every entry is a model its vendor's list carries" do
+      for %{id: id} <- ModelCatalog.models_for(:vercel) do
+        {vendor, vendor_id} = vendor_model(openrouter_id(id))
+        assert ModelCatalog.known_model?(vendor, vendor_id), "#{id} has no #{vendor} entry"
+      end
+    end
+
+    # The Claude entries compact at @anthropic's ceiling and the GPT-6 entries at
+    # @openai's 320,000 calibration, as on OpenRouter; GPT-5.5 and the Groks take
+    # the window Vercel's listing publishes for them.
+    test "windows are the listed ones, with the vendor calibrations OpenRouter's carry" do
+      by_id = Map.new(ModelCatalog.models_for(:vercel), &{&1.id, &1})
+
+      for {id, entry} <- by_id, String.starts_with?(id, "anthropic/") do
+        assert {entry.context_window, entry.compaction_ceiling} == {1_000_000, 200_000}, id
+      end
+
+      for {id, entry} <- by_id, String.starts_with?(id, "openai/gpt-6") do
+        assert entry.context_window == 320_000, id
+      end
+
+      assert by_id["openai/gpt-5.5"].context_window == 1_000_000
+      assert by_id["spacexai/grok-4.7"].context_window == 500_000
+      assert by_id["spacexai/grok-4.3"].context_window == 1_000_000
+    end
+
+    # The gateway takes the model's own default rather than an effort level (the
+    # descriptor's `effort?: false`), so no entry may carry a per-model cap.
+    test "no Vercel entry declares a reasoning-effort ceiling" do
+      for entry <- ModelCatalog.models_for(:vercel) do
+        assert ModelCatalog.model_effort_ceiling(:vercel, entry.id) == nil
+      end
+    end
+  end
+
+  # Vercel names Grok's maker `spacexai`; OpenRouter names it `x-ai`.
+  defp openrouter_id("spacexai/" <> model), do: "x-ai/" <> model
+  defp openrouter_id(id), do: id
 
   # OpenRouter prefixes every vendor and writes Anthropic's dashes as dots.
   defp vendor_model("anthropic/" <> model), do: {:anthropic, String.replace(model, ".", "-")}

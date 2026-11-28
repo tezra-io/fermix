@@ -287,8 +287,11 @@ defmodule FermixCore.Cues.LiveFiltersTest do
       LiveFilters.watchers(live, ctx.ref, [w])
       offer(live, ctx, [item("p-1"), item("p-2")], [w])
 
-      assert {_pid, "p-1"} = first = next_call()
-      assert {_pid, "p-2"} = second = next_call()
+      # The two are judged at once, so their calls arrive in either order.
+      calls = [next_call(), next_call()]
+      assert calls |> Enum.map(&elem(&1, 1)) |> Enum.sort() == ~w(p-1 p-2)
+      first = Enum.find(calls, &(elem(&1, 1) == "p-1"))
+      second = Enum.find(calls, &(elem(&1, 1) == "p-2"))
       finish(live, first, pass())
       assert_receive :woke_scheduler
       finish(live, second, drop())

@@ -267,7 +267,13 @@
     "accessories.check.start": 2,
     "accessories.check.stop": 2,
     "accessories.calibrate": 2,
-    "accessories.set": 2
+    "accessories.set": 2,
+    "phone_calls.status": 2,
+    "phone_calls.list": 2,
+    "phone_calls.stop": 2,
+    "phone_calls.recovery.get": 2,
+    "phone_calls.recovery.confirm": 2,
+    "lifecycle.prepare_restart": 2
   },
   "$defs": {
     "request": {
@@ -408,7 +414,13 @@
             "accessories.check.start",
             "accessories.check.stop",
             "accessories.calibrate",
-            "accessories.set"
+            "accessories.set",
+            "phone_calls.status",
+            "phone_calls.list",
+            "phone_calls.stop",
+            "phone_calls.recovery.get",
+            "phone_calls.recovery.confirm",
+            "lifecycle.prepare_restart"
           ]
         },
         "params": { "type": "object" }
@@ -1300,6 +1312,54 @@
             "properties": { "method": { "const": "accessories.set" } }
           },
           "then": { "properties": { "params": { "$ref": "#/$defs/accessories_set_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "phone_calls.status" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/phone_calls_status_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "phone_calls.list" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/phone_calls_list_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "phone_calls.stop" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/phone_calls_stop_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "phone_calls.recovery.get" } }
+          },
+          "then": {
+            "properties": { "params": { "$ref": "#/$defs/phone_calls_recovery_get_params" } }
+          }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "phone_calls.recovery.confirm" } }
+          },
+          "then": {
+            "properties": { "params": { "$ref": "#/$defs/phone_calls_recovery_confirm_params" } }
+          }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "lifecycle.prepare_restart" } }
+          },
+          "then": {
+            "properties": { "params": { "$ref": "#/$defs/lifecycle_prepare_restart_params" } }
+          }
         }
       ]
     },
@@ -1495,7 +1555,13 @@
         { "$ref": "#/$defs/accessories_check_start_result" },
         { "$ref": "#/$defs/accessories_check_stop_result" },
         { "$ref": "#/$defs/accessories_calibrate_result" },
-        { "$ref": "#/$defs/accessories_set_result" }
+        { "$ref": "#/$defs/accessories_set_result" },
+        { "$ref": "#/$defs/phone_calls_status_result" },
+        { "$ref": "#/$defs/phone_calls_list_result" },
+        { "$ref": "#/$defs/phone_calls_stop_result" },
+        { "$ref": "#/$defs/phone_calls_recovery_get_result" },
+        { "$ref": "#/$defs/phone_calls_recovery_confirm_result" },
+        { "$ref": "#/$defs/lifecycle_prepare_restart_result" }
       ]
     },
     "hello_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
@@ -1788,6 +1854,13 @@
         "ttl_ms": { "type": "integer", "minimum": 1 }
       }
     },
+    "lifecycle_prepare_restart_params": {
+      "type": "object",
+      "description": "The owner's own restart (fermix restart, the apps' restart to apply): the drain window lifecycle.prepare opens, refused with unavailable (capability phone_calls, and the sentence saying how to go on) while a phone call is positively in progress (its worker runs), since the restart would hang it up with no outcome read; unreadable call records do not refuse it. An update, a move or a disable takes lifecycle.prepare, which no call holds.",
+      "maxProperties": 0,
+      "additionalProperties": false
+    },
+    "lifecycle_prepare_restart_result": { "$ref": "#/$defs/lifecycle_prepare_result" },
     "lifecycle_commit_params": {
       "type": "object",
       "required": ["lease_id"],
@@ -2071,6 +2144,7 @@
         "cues",
         "integrations",
         "voice",
+        "phone_calls",
         "meetings",
         "computer",
         "browser",
@@ -2091,9 +2165,12 @@
         "component": { "type": "string" },
         "gating": { "type": "boolean" },
         "pane": { "$ref": "#/$defs/settingsPane" },
-        "detail_key": { "type": "string" },
+        "detail_key": {
+          "description": "The closed-set copy key: a fixed key, an iMessage carrier key (channel:imessage:carrier, channel:imessage:conflict, channel:imessage:away), or channel:<channel> for a channel the engine lists, whose rest a client reads as the channel's name. Engines before M102 sent channel:imessage:helper and channel:slack:socket for two rows that now use channel:imessage and channel:slack with a sentence.",
+          "type": "string"
+        },
         "sentence": {
-          "description": "The engine's own sentence for this failure where it publishes one, which a client shows in place of its own words for the detail_key: the iMessage rows channel:imessage:helper, channel:imessage:carrier, channel:imessage:conflict and channel:imessage:away, which name the Mac that carries Messages where the engine knows it. Null on every other row, whose words each client keeps by its detail_key. Absent from an engine older than it, which a client reads as null.",
+          "description": "The engine's own sentence for this failure where it publishes one, set where the row is built, which a client shows in place of its own words for the detail_key: iMessage's missing helper (channel:imessage), the iMessage carrier rows, which name the Mac that carries Messages where the engine knows it, and Slack's Socket Mode credentials (channel:slack). Null on every other row, a channel's own included, whose words each client keeps by its detail_key. Absent from an engine older than it, which a client reads as null.",
           "type": ["string", "null"],
           "minLength": 1
         }
@@ -6331,9 +6408,9 @@
       "required": ["id", "label", "needs", "confirm", "key"],
       "additionalProperties": false,
       "properties": {
-        "id": { "enum": ["cancel", "move_now", "try_again", "update", "back_up_now", "check_again", "own_server", "move_back", "restore_here", "review_offers", "add_computer", "approve_computer", "deny_computer", "change_passphrase", "restart_server"] },
+        "id": { "enum": ["cancel", "move_now", "try_again", "update", "back_up_now", "check_again", "own_server", "move_back", "restore_here", "review_offers", "add_computer", "approve_computer", "deny_computer", "join", "change_passphrase", "restart_server"] },
         "label": { "type": "string", "minLength": 1 },
-        "needs": { "type": "array", "maxItems": 1, "uniqueItems": true, "items": { "enum": ["recovery_passphrase", "new_recovery_passphrase", "sas"] } },
+        "needs": { "type": "array", "maxItems": 1, "uniqueItems": true, "items": { "enum": ["recovery_passphrase", "new_recovery_passphrase", "sas", "code"] } },
         "confirm": { "type": ["string", "null"], "minLength": 1 },
         "key": { "type": "string", "minLength": 1, "maxLength": 64 }
       }
@@ -6824,6 +6901,7 @@
             "add_computer",
             "approve_computer",
             "deny_computer",
+            "join",
             "change_passphrase",
             "restart_server"
           ]
@@ -6834,7 +6912,7 @@
     },
     "homeActInput": {
       "type": "object",
-      "description": "What the action's needs collected: recovery_passphrase (needs recovery_passphrase, typed once, or new_recovery_passphrase, typed twice and compared by the surface; restore_here's opens the copy it restores, change_passphrase's is the new one), never logged and never answered; keep_offers, the offers of the keeps_on block left ticked; and sas (needs sas), the six digits the computer that asks to join shows.",
+      "description": "What the action's needs collected: recovery_passphrase (needs recovery_passphrase, typed once, or new_recovery_passphrase, typed twice and compared by the surface; restore_here's opens the copy it restores, change_passphrase's is the new one), never logged and never answered; keep_offers, the offers of the keeps_on block left ticked; sas (needs sas), the six digits the computer that asks to join shows; and code (needs code), the code Add a computer opened, for join, never logged and never answered.",
       "additionalProperties": false,
       "properties": {
         "recovery_passphrase": { "type": "string", "minLength": 12, "maxLength": 1024 },
@@ -6844,6 +6922,12 @@
           "minLength": 6,
           "maxLength": 32,
           "pattern": "^[0-9 ]+$"
+        },
+        "code": {
+          "description": "For join (Join again, on a computer its server removed), the code Add a computer opened on a computer already in the home; it carries a one-time secret. It joins as computer.join.start does: a code that is not a computer's, that expired or that Fermix did not open is refused (invalid_params on code), and so is none, and the old link stays.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
         },
         "keep_offers": {
           "description": "For move_now and try_again on the computer that sets Always On up, the offers of the ready screen's detail.keeps_on left ticked: what this computer keeps on for its server after the move; absent, the block as it was shown. For review_offers, absent: this computer's switches as they are (set under This computer); an app from before the review's switches moved there sends the lines it left ticked, which stay on. A list that is not of text is refused (invalid_params on keep_offers), and so is an id other than files_and_shell, browser, computer_use, imessage, places and history, or files and shell: the two lines an app from before M97 D27 sends for files and commands, which keep files_and_shell on only when both are sent (one alone keeps it off).",
@@ -7267,6 +7351,266 @@
       }
     },
     "accessories_set_result": { "$ref": "#/$defs/accessoriesStatus" },
+    "phone_calls_status_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
+    "phone_calls_status_result": {
+      "type": "object",
+      "description": "Phone calls as they stand (M94 §12): three facts kept apart (enabled, readiness and call), the summary that reads them as one word, and the engine that calls. A client renders each as it is and derives none of them.",
+      "required": ["enabled", "readiness", "call", "summary", "engine"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean", "description": "Whether the owner turned phone calls on, [fermix_core.phone_calls] enabled." },
+        "readiness": { "$ref": "#/$defs/phoneCallsReadiness" },
+        "call": {
+          "description": "The owner's call holding the one-call slot: in progress, or one whose termination is unconfirmed until the owner confirms it ended (phone_calls.recovery.confirm) or OpenAI's own limit on a call passes. Null when no call holds it.",
+          "oneOf": [{ "$ref": "#/$defs/phoneCall" }, { "type": "null" }]
+        },
+        "summary": { "$ref": "#/$defs/phoneCallsSummary" },
+        "engine": {
+          "type": "object",
+          "description": "The engine that calls, a fact of this build and not a setting: the voice engine's name, the model it runs and the carrier it dials through.",
+          "required": ["name", "model", "carrier"],
+          "additionalProperties": false,
+          "properties": {
+            "name": { "const": "GPT-Live" },
+            "model": { "type": "string", "minLength": 1 },
+            "carrier": { "const": "Telnyx" }
+          }
+        }
+      }
+    },
+    "phone_calls_list_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
+    "phone_calls_list_result": {
+      "type": "object",
+      "description": "The owner's recent calls, newest first.",
+      "required": ["calls"],
+      "additionalProperties": false,
+      "properties": {
+        "calls": { "type": "array", "maxItems": 20, "items": { "$ref": "#/$defs/phoneCall" } }
+      }
+    },
+    "phone_calls_stop_params": {
+      "type": "object",
+      "required": ["call_id"],
+      "additionalProperties": false,
+      "properties": { "call_id": { "$ref": "#/$defs/phoneCallId" } }
+    },
+    "phone_calls_stop_result": {
+      "type": "object",
+      "required": ["stop", "sentence", "call"],
+      "additionalProperties": false,
+      "properties": {
+        "stop": {
+          "description": "cancelled: the call had not been placed, so it ended with nothing dialed; stopping: it was asked to end, and reads stopping until its end is known.",
+          "enum": ["cancelled", "stopping"]
+        },
+        "sentence": { "type": "string", "minLength": 1 },
+        "call": { "$ref": "#/$defs/phoneCall" }
+      }
+    },
+    "phone_calls_recovery_get_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
+    "phone_calls_recovery_get_result": {
+      "type": "object",
+      "description": "Every unresolved call of the owner's: whether it was placed is unknown, or its end is unconfirmed, and it still holds the one-call slot.",
+      "required": ["calls"],
+      "additionalProperties": false,
+      "properties": {
+        "calls": { "type": "array", "maxItems": 20, "items": { "$ref": "#/$defs/phoneCallRecovery" } }
+      }
+    },
+    "phone_calls_recovery_confirm_params": {
+      "type": "object",
+      "description": "The owner's word that the call has ended, which they checked in their Telnyx portal. If they are wrong, a second call can be placed while the first is still up, bounded by the connection's one channel if the owner set it as the setup asks.",
+      "required": ["call_id"],
+      "additionalProperties": false,
+      "properties": { "call_id": { "$ref": "#/$defs/phoneCallId" } }
+    },
+    "phone_calls_recovery_confirm_result": {
+      "type": "object",
+      "description": "The unresolved call released on the owner's word: its slot is free (reason owner_confirmed, at that time) and the outcome already recorded is unchanged. Refused with unavailable for a call in progress, one already over or released, and one past OpenAI's own limit; invalid_params for another owner's.",
+      "required": ["sentence", "call"],
+      "additionalProperties": false,
+      "properties": {
+        "sentence": { "type": "string", "minLength": 1 },
+        "call": { "$ref": "#/$defs/phoneCall" }
+      }
+    },
+    "phoneCallId": { "type": "string", "pattern": "^pc_[0-9a-f]{12}$" },
+    "phoneCallsReadiness": {
+      "type": "object",
+      "description": "Whether the setup a call needs is complete, read as if phone calls were on, so a home with them off still names what it lacks. Each missing requirement carries the owner's sentence.",
+      "required": ["ready", "missing"],
+      "additionalProperties": false,
+      "properties": {
+        "ready": { "type": "boolean" },
+        "missing": {
+          "type": "array",
+          "maxItems": 9,
+          "items": {
+            "type": "object",
+            "required": ["requirement", "sentence"],
+            "additionalProperties": false,
+            "properties": {
+              "requirement": {
+                "enum": [
+                  "not_primary",
+                  "durable_memory_off",
+                  "openai_api_key_missing",
+                  "openai_api_key_unsendable",
+                  "caller_number_missing",
+                  "sip_username_missing",
+                  "sip_password_missing",
+                  "egress_proxy_unsupported",
+                  "call_backend_missing"
+                ]
+              },
+              "sentence": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    },
+    "phoneCallsSummary": {
+      "type": "object",
+      "description": "The three facts as one word: the call first (calling, stopping, or placement_unknown or termination_unconfirmed while an uncertain call holds the slot, whether phone calls are on or off), then disabled, then needs_setup, then ready. label and sentence are the engine's words.",
+      "required": ["state", "label", "sentence"],
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "enum": [
+            "disabled",
+            "needs_setup",
+            "ready",
+            "calling",
+            "stopping",
+            "placement_unknown",
+            "termination_unconfirmed"
+          ]
+        },
+        "label": { "type": "string", "minLength": 1 },
+        "sentence": { "type": "string", "minLength": 1 }
+      }
+    },
+    "phoneCall": {
+      "type": "object",
+      "description": "One call as its owner reads it, in the words its report uses. state is the ledger's, or stopping for a call not yet over that was asked to end; placed is yes, no (nothing reached OpenAI, or it refused) or unknown (OpenAI never said); uncertain says the remote call is not proven gone (dispatch_unknown, closure_unconfirmed). No destination number: the recovery view carries it. failure_reason is the engine's code, for support, and never prose a client shows: why_stopped says it.",
+      "required": [
+        "call_id",
+        "state",
+        "placed",
+        "contact_name",
+        "destination_kind",
+        "outcome",
+        "outcome_sentence",
+        "uncertain",
+        "holds_slot",
+        "sentence",
+        "slot",
+        "usage",
+        "why_stopped",
+        "failure_reason",
+        "vendor_message",
+        "report",
+        "created_at",
+        "ended_at"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "call_id": { "$ref": "#/$defs/phoneCallId" },
+        "state": {
+          "enum": [
+            "admitted",
+            "dispatching",
+            "connecting",
+            "ringing",
+            "active",
+            "closing",
+            "stopping",
+            "ended",
+            "failed",
+            "dispatch_unknown",
+            "closure_unconfirmed"
+          ]
+        },
+        "placed": { "enum": ["yes", "no", "unknown"] },
+        "contact_name": { "type": ["string", "null"] },
+        "destination_kind": { "enum": ["owner", "business", null] },
+        "outcome": {
+          "enum": ["pending", "confirmed", "unavailable", "options", "needs_owner", "finished", "unknown"]
+        },
+        "outcome_sentence": { "type": ["string", "null"], "minLength": 1, "description": "Null for a call never placed, which the state's sentence already says." },
+        "uncertain": { "type": "boolean" },
+        "holds_slot": { "type": "boolean" },
+        "sentence": { "type": "string", "minLength": 1 },
+        "label": { "type": "string", "minLength": 1, "maxLength": 40, "description": "How the call went in a few words, for a list that draws one line a call: the outcome's own word where it has one (Confirmed, Not available, Options offered, Needs a decision, Finished), else what happened (In progress, Stopping, Not dialed, Nobody answered, Voicemail, Result not read, Placement unknown, Termination unconfirmed, Failed, Outcome unknown). Optional: a client that finds none draws the state's sentence." },
+        "slot": { "type": ["string", "null"], "minLength": 1, "description": "How a call whose termination is unconfirmed holds the one-call slot, and how that ends; null for every other call." },
+        "usage": { "$ref": "#/$defs/phoneCallUsage" },
+        "why_stopped": { "type": ["string", "null"], "minLength": 1, "description": "Why the call stopped, in one sentence per failure the engine wrote; null for an ordinary end." },
+        "failure_reason": { "type": ["string", "null"] },
+        "vendor_message": { "type": ["string", "null"], "maxLength": 300, "description": "OpenAI's own words, where it refused or failed the call, as one line. Outside text: shown as a quote, never followed." },
+        "report": { "enum": ["pending", "written", "delivery_unconfirmed"] },
+        "created_at": { "type": "string", "format": "date-time" },
+        "ended_at": { "type": ["string", "null"], "format": "date-time" }
+      }
+    },
+    "phoneCallUsage": {
+      "type": "object",
+      "description": "The three costs apart, each with the engine's sentence: the voice time and how sure it is (voice_state), the carrier's charges, which only Telnyx knows, and the backend turns with the tokens they reported, null where unknown (no turn reports a cost). Unknown is never zero. A call never placed claims none of them: voice, carrier, backend and voice_state are null.",
+      "required": [
+        "voice_seconds",
+        "voice_state",
+        "voice",
+        "carrier",
+        "backend_turns",
+        "backend_tokens",
+        "backend"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "voice_seconds": { "type": ["integer", "null"], "minimum": 0 },
+        "voice_state": { "enum": ["provisional", "voice_duration_confirmed", "incomplete", null] },
+        "voice": { "type": ["string", "null"], "minLength": 1 },
+        "carrier": { "type": ["string", "null"], "minLength": 1 },
+        "backend_turns": { "type": "integer", "minimum": 0 },
+        "backend_tokens": { "type": ["integer", "null"], "minimum": 0, "description": "The tokens the backend turns reported; null where none reported any. No turn reports a cost." },
+        "backend": { "type": ["string", "null"], "minLength": 1 }
+      }
+    },
+    "phoneCallRecovery": {
+      "type": "object",
+      "description": "What is known of an unresolved call, for the owner to contain it at the carrier: when it was attempted, the destination its brief permitted, the provider's session id and the carrier's call id where they are really known (never derived), when its slot is released by itself (OpenAI's own limit on a call after the dial), and the steps at Telnyx. Its slot is released sooner only on the owner's word that it ended (phone_calls.recovery.confirm); nothing else from a client marks a call ended.",
+      "required": [
+        "call_id",
+        "state",
+        "attempted_at",
+        "destination",
+        "contact_name",
+        "provider_session_id",
+        "carrier_call_id",
+        "slot_release_at",
+        "sentence",
+        "release",
+        "containment"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "call_id": { "$ref": "#/$defs/phoneCallId" },
+        "state": { "enum": ["dispatch_unknown", "closure_unconfirmed"] },
+        "attempted_at": { "type": "string", "format": "date-time" },
+        "destination": { "type": ["string", "null"], "pattern": "^\\+[1-9][0-9]{1,14}$" },
+        "contact_name": { "type": ["string", "null"] },
+        "provider_session_id": { "type": ["string", "null"] },
+        "carrier_call_id": { "type": ["string", "null"] },
+        "slot_release_at": { "type": ["string", "null"], "format": "date-time" },
+        "sentence": { "type": "string", "minLength": 1 },
+        "release": { "type": "string", "minLength": 1 },
+        "containment": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
     "accessoryPortPath": { "type": "string", "minLength": 1, "maxLength": 256 },
     "accessoryId": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "accessoryAttempt": { "type": "string", "pattern": "^[0-9a-f]{32}$" },

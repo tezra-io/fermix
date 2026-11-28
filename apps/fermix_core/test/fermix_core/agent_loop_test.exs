@@ -1938,6 +1938,77 @@ defmodule FermixCore.AgentLoopTest do
     end
   end
 
+  # A caller's gate before each tool call (`before_tool`): a scheduled job
+  # stores its first tool start there, so it must run before the call starts
+  # and its refusal must leave the tool unrun.
+  describe "run/1 before_tool gate" do
+    test "it runs ahead of the call's start, and the tool after it", %{registry: registry} do
+      :ok = CapabilityRegistry.register(registry, noting_capability(self()))
+      test_pid = self()
+      gate = fn name -> send(test_pid, {:gate, name}) && :ok end
+      set_mock_responses([turn("", tool_calls: [tool_call("c1", "noting", %{})]), turn("done")])
+
+      assert {:ok, %{response: "done"}} =
+               run_loop(
+                 capability_registry: registry,
+                 before_tool: gate,
+                 activity_callback: forward_activity()
+               )
+
+      assert [{:gate, "noting"}, {:activity, {:tool_start, "noting"}}, :tool_entered] =
+               gate_trail()
+    end
+
+    test "a refusal runs no tool, leaves one unexecuted tool event, and ends the run with its reason",
+         %{registry: registry} do
+      :ok = CapabilityRegistry.register(registry, noting_capability(self()))
+      attach_tool_exec()
+      calls = [tool_call("c1", "noting", %{}), tool_call("c2", "noting", %{})]
+      set_mock_responses([turn("", tool_calls: calls), turn("unreachable")])
+
+      assert {:error, {:not_recorded, :disk_full}} =
+               run_loop(
+                 capability_registry: registry,
+                 before_tool: fn _name -> {:error, {:not_recorded, :disk_full}} end,
+                 activity_callback: forward_activity()
+               )
+
+      assert gate_trail() == []
+      assert_received {:tool_exec, _measurements, %{tool: "noting", success: false} = event}
+      assert event.error =~ "was not run"
+      refute_received {:tool_exec, _measurements, _metadata}
+      assert mock_continues() == []
+    end
+  end
+
+  def note_entry(_args, _context, test_pid) do
+    send(test_pid, :tool_entered)
+    {:ok, %{success: true, output: "noted"}}
+  end
+
+  defp noting_capability(test_pid) do
+    Capability.new(%{
+      name: "noting",
+      description: "Notes that it ran",
+      parameters: %{"type" => "object", "properties" => %{}},
+      kind: :builtin,
+      executor: {__MODULE__, :note_entry, [test_pid]},
+      policy_class: :read_only
+    })
+  end
+
+  # The gate's call, the call's activity and the tool's entry, in the order
+  # they reached the test.
+  defp gate_trail do
+    receive do
+      {:gate, _name} = gate -> [gate | gate_trail()]
+      {:activity, {:tool_start, _name}} = start -> [start | gate_trail()]
+      :tool_entered -> [:tool_entered | gate_trail()]
+    after
+      0 -> []
+    end
+  end
+
   describe "run/1 activity callback" do
     test "logs callback failures without failing the loop", %{registry: registry} do
       set_mock_responses([turn("Hello there!")])
@@ -3154,6 +3225,37 @@ defmodule FermixCore.AgentLoopTest do
                )
 
       refute_received {:chat, :eligible_fail}
+    end
+
+    test "a PDF on a Grok model through Vercel AI Gateway falls over before the call",
+         %{registry: registry} do
+      pdf = %{type: :document, mime_type: "application/pdf", data: "%PDF-1.4", name: "lease.pdf"}
+
+      routes = [
+        {%{
+           provider: :vercel,
+           model: "spacexai/grok-4.7",
+           auth_mode: :api_key,
+           base_url: "https://1/v1"
+         }, [adapter: EligibleFailAdapter, model: "spacexai/grok-4.7", test_pid: self()]},
+        {%{
+           provider: :vercel,
+           model: "anthropic/claude-sonnet-4.6",
+           auth_mode: :api_key,
+           base_url: "https://2/v1"
+         }, [adapter: RecoveringAdapter, model: "anthropic/claude-sonnet-4.6", test_pid: self()]}
+      ]
+
+      assert {:ok, %{response: "recovered"}} =
+               AgentLoop.run(
+                 messages: [%{role: "user", content: "read this", parts: [pdf]}],
+                 routes: routes,
+                 capability_registry: registry,
+                 context: %{agent_name: "test", conversation_key: :test}
+               )
+
+      refute_received {:chat, :eligible_fail}
+      assert_received {:chat, :recovering}
     end
 
     test "a picture in a format the provider refuses falls over", %{registry: registry} do

@@ -12,11 +12,13 @@ defmodule FermixCore.ComputerUse.OperatorStop do
   the one door a computer-use session is opened through.
 
   **What "until they ask again" means.** A turn. The tool's context carries the
-  turn's own `session_id` (the same value a session records as `parent_session`),
-  so a Stop records which turn was stopped and every later call FROM THAT TURN is
-  refused. The next turn is the person speaking again, and it clears the record
-  on its way through. There is no configuration: an operator who has just pressed
-  Stop should not also have to decide how long it lasts.
+  turn's own `session_id`, and every request the tool sends a session names it
+  (`ComputerDriver.with_turn/2`). A session outlives the turn that opened it, so
+  it keeps the turn of the latest request it admitted, and a Stop records THAT
+  turn: every later call from it is refused. The next turn is the person speaking
+  again, and it clears the record on its way through. There is no configuration:
+  an operator who has just pressed Stop should not also have to decide how long
+  it lasts.
 
   **Bounded.** One entry per conversation, replaced rather than accumulated,
   cleared the moment a different turn asks, and expired after

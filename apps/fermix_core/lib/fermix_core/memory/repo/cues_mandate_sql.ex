@@ -169,6 +169,13 @@ defmodule FermixCore.Memory.Repo.CuesMandateSql do
     end)
   end
 
+  # Whether a proposal holds a `cp_` token's digest: the answer rail's lookup
+  # for its mandate holder (`Cues.CardHolder`).
+  def handle(conn, {:token_held, digest}) when is_binary(digest) do
+    sql = "SELECT 1 FROM cue_proposals WHERE token_digest = ? LIMIT 1"
+    with {:ok, rows} <- CuesSql.query_all(conn, sql, [digest]), do: {:ok, rows != []}
+  end
+
   # The owner's confirm: `waiting → confirmed`, fenced on the token, the chat it
   # was sent to and the expiry. `{:error, why}` names why nothing changed.
   def handle(conn, {:confirm_proposal, digest, origin, %DateTime{} = now})
@@ -451,7 +458,14 @@ defmodule FermixCore.Memory.Repo.CuesMandateSql do
     end
   end
 
-  defp mark_tools_started(conn, run_id, stamp) do
+  @doc """
+  Sets `job_runs.tools_started_at` to `stamp` unless it is set: the run's
+  first allowed or proposed mandate call, in that call's transaction, and a
+  scheduled run's first tool start, stored by its loop before that tool runs
+  (`Memory.Repo.mark_job_run_tools_started/3`). The first writer wins.
+  """
+  @spec mark_tools_started(CuesSql.conn(), String.t(), String.t()) :: :ok | {:error, term()}
+  def mark_tools_started(conn, run_id, stamp) when is_binary(run_id) and is_binary(stamp) do
     sql = "UPDATE job_runs SET tools_started_at = ? WHERE id = ? AND tools_started_at IS NULL"
     CuesSql.execute(conn, sql, [stamp, run_id])
   end

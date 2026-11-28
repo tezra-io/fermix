@@ -6,7 +6,6 @@ defmodule FermixWebWeb.SetupLiveTest do
   alias Fermix.CLI.Doctor.Checks
   alias Fermix.CLI.Upgrade.Manifest
   alias FermixCore.Auth.AnthropicLogin
-  alias FermixCore.Auth.ChatGPT.Registration, as: ChatGPTRegistration
   alias FermixCore.Auth.ClientRejection
   alias FermixCore.Auth.Store
   alias FermixCore.Capabilities.MCP.RuntimeStatus
@@ -171,6 +170,23 @@ defmodule FermixWebWeb.SetupLiveTest do
 
     def live_models(:openai_codex, _opts),
       do: {:error, "unexpected response from https://api.openai.test/v1/models"}
+  end
+
+  # Vercel AI Gateway's listing as the key asked with decides it (M105 §11.9):
+  # the public list with none, else one model named for the key's byte size.
+  defmodule VercelKeyedListing do
+    def live?(:vercel), do: true
+    def live?(_provider), do: false
+
+    def live_models(:vercel, opts) do
+      case Keyword.get(opts, :api_key) do
+        nil ->
+          {:ok, [%{id: "public/every-model", label: "Every Model", context_window: 200_000}]}
+
+        key ->
+          {:ok, [%{id: "team/key-#{byte_size(key)}", label: "Team", context_window: 200_000}]}
+      end
+    end
   end
 
   setup %{conn: conn} do
@@ -581,7 +597,8 @@ defmodule FermixWebWeb.SetupLiveTest do
       for label <-
             [
               "Provider",
-              "Realtime",
+              "Voice",
+              "Phone calls",
               "Channels",
               "Plugins",
               "Search",
@@ -606,7 +623,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert render(view) =~ "Provider &amp; Model"
 
       html = view |> element("button[phx-value-tab=\"realtime\"]") |> render_click()
-      assert html =~ "Voice companion"
+      assert html =~ ~s(id="setup-pane-realtime")
 
       # Switch to Personalization
       html = view |> element("button[phx-value-tab=\"personalization\"]") |> render_click()
@@ -1575,7 +1592,7 @@ defmodule FermixWebWeb.SetupLiveTest do
         |> render_submit(%{"__nav" => "next"})
 
       assert html =~ "Provider saved."
-      assert html =~ "Voice companion"
+      assert html =~ ~s(id="setup-pane-realtime")
     end
 
     test "provider pane offers canonical reasoning effort levels (xhigh, not minimal)", %{
@@ -3166,7 +3183,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       )
       |> render_submit()
 
-      assert render(view) =~ "Realtime saved."
+      assert render(view) =~ "Voice saved."
       assert render(view) =~ "Apply &amp; restart"
 
       realtime = Application.get_env(:fermix_core, :realtime, [])
@@ -3279,7 +3296,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       )
       |> render_submit()
 
-      assert render(view) =~ "Realtime saved."
+      assert render(view) =~ "Voice saved."
 
       realtime = Application.get_env(:fermix_core, :realtime, [])
       assert Keyword.get(realtime, :engine) == "openai_live"
@@ -3314,7 +3331,7 @@ defmodule FermixWebWeb.SetupLiveTest do
         |> element("button[phx-value-tab=\"realtime\"]")
         |> render_click()
 
-      assert openai_html =~ "OpenAI API key for Realtime"
+      assert openai_html =~ "OpenAI API key for voice"
 
       grok_html =
         view
@@ -3326,7 +3343,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert selected_options(view, "voice") == ["eve"]
       refute grok_html =~ ~s(name="realtime_form[reasoning_effort]")
       assert grok_html =~ "SpaceXAI API key for Grok voice"
-      refute grok_html =~ "OpenAI API key for Realtime"
+      refute grok_html =~ "OpenAI API key for voice"
       assert Application.get_env(:fermix_core, :realtime) == []
     end
 
@@ -3384,7 +3401,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       )
       |> render_submit()
 
-      assert render(view) =~ "Realtime saved."
+      assert render(view) =~ "Voice saved."
 
       realtime = Application.get_env(:fermix_core, :realtime, [])
       assert Keyword.get(realtime, :provider) == "xai"
@@ -4675,6 +4692,293 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert Keyword.get(providers[:venice], :default_model) == "grok-4-6"
     end
 
+    # M105 §4: the Vercel AI Gateway card is descriptor-driven too — the pane,
+    # its key field and the save path, with no Vercel-specific page code.
+    test "vercel pane renders its key field and saves the provider block", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup?tab=provider")
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "vercel"})
+        |> render_change()
+
+      assert html =~ "Configuring Vercel AI Gateway"
+      assert html =~ ~s(name="provider_form[vercel_api_key]")
+
+      view
+      |> form("form[phx-submit=\"save_provider\"]",
+        provider_form: %{
+          provider: "vercel",
+          vercel_api_key: "vck-live",
+          default_model: "spacexai/grok-4.7"
+        }
+      )
+      |> render_submit()
+
+      {:ok, persisted} = ConfigStore.load_runtime_config()
+      providers = Keyword.get(persisted.fermix_core, :providers, [])
+
+      assert Keyword.get(providers[:vercel], :api_key) == "vck-live"
+      assert Keyword.get(providers[:vercel], :default_model) == "spacexai/grok-4.7"
+    end
+
+    # The page lists a provider's live models when the registry says it has a
+    # listing (`impl.live?/1`). This stub asks the real registry for Vercel and
+    # answers the listing itself, so nothing leaves the test.
+    test "vercel pane offers the live gateway listing", %{conn: conn} do
+      defmodule VercelLiveListing do
+        alias FermixCore.Providers.ModelListing
+
+        def live?(:vercel), do: ModelListing.live?(:vercel)
+        def live?(_provider), do: false
+
+        def live_models(:vercel, _opts) do
+          {:ok,
+           [
+             %{id: "vendor/brand-new", label: "Brand New", context_window: 2_000_000},
+             %{
+               id: "anthropic/claude-sonnet-4.6",
+               label: "Claude Sonnet 4.6",
+               context_window: 1_000_000
+             }
+           ]}
+        end
+      end
+
+      Application.put_env(:fermix_web, :model_listing_impl, VercelLiveListing)
+
+      on_exit(fn ->
+        Application.put_env(
+          :fermix_web,
+          :model_listing_impl,
+          FermixWebWeb.TestSupport.StaticModelListing
+        )
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup?tab=provider")
+
+      view
+      |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "vercel"})
+      |> render_change()
+
+      html = render_async(view)
+
+      assert html =~ "vendor/brand-new"
+      assert html =~ "Brand New"
+      # The live listing replaces the curated suggestions.
+      refute html =~ "GPT-6 Luna via Vercel"
+      assert html =~ ~s(name="provider_form[default_model]")
+      assert html =~ "<datalist"
+    end
+
+    # With a key, Vercel AI Gateway lists only what the key's team may use
+    # (M105 §11.9), so the pane asks with the key as soon as it is entered,
+    # before it is saved, and with the bytes a save would store. The key field
+    # reports on blur, so a key being typed sends no request per keystroke.
+    test "vercel pane lists with the key being entered", %{conn: conn} do
+      Application.put_env(:fermix_web, :model_listing_impl, VercelKeyedListing)
+
+      on_exit(fn ->
+        Application.put_env(
+          :fermix_web,
+          :model_listing_impl,
+          FermixWebWeb.TestSupport.StaticModelListing
+        )
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup?tab=provider")
+      form = form(view, "form[phx-submit=\"save_provider\"]")
+
+      render_change(form, provider_form: %{provider: "vercel"})
+      html = render_async(view)
+      assert html =~ "public/every-model"
+
+      [key_input] = Regex.run(~r/<input[^>]*name="provider_form\[vercel_api_key\]"[^>]*>/, html)
+      assert key_input =~ ~s(phx-debounce="blur")
+      assert key_input =~ ~s(phx-update="ignore")
+
+      render_change(form, provider_form: %{provider: "vercel", vercel_api_key: "vck-entered"})
+      html = render_async(view)
+
+      assert html =~ "team/key-11"
+      refute html =~ "public/every-model"
+
+      # A save stores the key as pasted, spaces and all, so the listing asks
+      # with the same 13 bytes.
+      render_change(form, provider_form: %{provider: "vercel", vercel_api_key: " vck-entered "})
+      assert render_async(view) =~ "team/key-13"
+
+      render_change(form, provider_form: %{provider: "vercel", vercel_api_key: "  "})
+      assert render_async(view) =~ "public/every-model"
+    end
+
+    # The key field is the browser's (`phx-update="ignore"`). The reply to the
+    # event its own blur sends would otherwise reset it to the blank it is
+    # rendered with, and a save would then keep the old key: headless Chrome
+    # showed exactly that (M105 §11.9). It is a new, empty element whenever the
+    # form is built again from the saved settings: another provider's pane, a
+    # save.
+    test "the key field is the browser's until the form is built again", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup?tab=provider")
+      form = form(view, "form[phx-submit=\"save_provider\"]")
+      key_field = fn html -> hd(Regex.run(~r/<input[^>]*type="password"[^>]*>/, html)) end
+      id_of = fn input -> hd(Regex.run(~r/ id="([^"]+)"/, input, capture: :all_but_first)) end
+
+      first = form |> render_change(provider_form: %{provider: "vercel"}) |> key_field.()
+      assert first =~ ~s(phx-update="ignore")
+
+      typed =
+        form
+        |> render_change(provider_form: %{provider: "vercel", vercel_api_key: "vck-typed"})
+        |> key_field.()
+
+      assert id_of.(typed) == id_of.(first)
+
+      other = form |> render_change(provider_form: %{provider: "openai"}) |> key_field.()
+      back = form |> render_change(provider_form: %{provider: "vercel"}) |> key_field.()
+      refute id_of.(back) in [id_of.(first), id_of.(other)]
+
+      saved =
+        form
+        |> render_submit(
+          provider_form: %{
+            provider: "vercel",
+            vercel_api_key: "vck-live",
+            default_model: "spacexai/grok-4.7"
+          }
+        )
+        |> key_field.()
+
+      # The page rebuilds the form for the configuration's current provider
+      # (OpenAI here): the same provider's key field as before, as a new element.
+      assert saved =~ ~s(name="provider_form[openai_api_key]")
+      refute id_of.(saved) == id_of.(other)
+    end
+
+    # Leaving the pane drops the key field, so the list on return is the
+    # configured key's again, not the team's of a key no longer entered.
+    test "back on the provider tab, the vercel list follows the empty key field", %{conn: conn} do
+      Application.put_env(:fermix_web, :model_listing_impl, VercelKeyedListing)
+
+      on_exit(fn ->
+        Application.put_env(
+          :fermix_web,
+          :model_listing_impl,
+          FermixWebWeb.TestSupport.StaticModelListing
+        )
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup?tab=provider")
+
+      view
+      |> form("form[phx-submit=\"save_provider\"]")
+      |> render_change(provider_form: %{provider: "vercel", vercel_api_key: "vck-entered"})
+
+      assert render_async(view) =~ "team/key-11"
+      render_click(view, "select_tab", %{"tab" => "search"})
+      render_click(view, "select_tab", %{"tab" => "provider"})
+      html = render_async(view)
+      assert html =~ "public/every-model"
+      refute html =~ "team/key-11"
+    end
+
+    # A refused key or a team with no usable models leaves a typed model field.
+    # It reports on blur like the picker, so a model id typed letter by letter
+    # is one change rather than one per letter.
+    test "vercel pane's typed model field after a refused key reports on blur", %{conn: conn} do
+      defmodule VercelRefusedListing do
+        alias FermixCore.Providers.ModelListing
+
+        def live?(:vercel), do: ModelListing.live?(:vercel)
+        def live?(_provider), do: false
+
+        def live_models(:vercel, opts) do
+          case Keyword.get(opts, :api_key) do
+            nil -> {:ok, [%{id: "public/every-model", label: "Every", context_window: 200_000}]}
+            "vck-refused" -> {:error, "HTTP 401 from https://ai-gateway.vercel.sh/v1/models"}
+            "vck-no-models" -> {:ok, []}
+          end
+        end
+      end
+
+      Application.put_env(:fermix_web, :model_listing_impl, VercelRefusedListing)
+
+      on_exit(fn ->
+        Application.put_env(
+          :fermix_web,
+          :model_listing_impl,
+          FermixWebWeb.TestSupport.StaticModelListing
+        )
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup?tab=provider")
+      form = form(view, "form[phx-submit=\"save_provider\"]")
+
+      for key <- ["vck-refused", "vck-no-models"] do
+        render_change(form, provider_form: %{provider: "vercel", vercel_api_key: key})
+        html = render_async(view)
+
+        [model_input] =
+          Regex.run(~r/<input[^>]*name="provider_form\[default_model\]"[^>]*>/, html)
+
+        refute model_input =~ ~s(list=")
+        assert model_input =~ ~s(phx-debounce="blur")
+      end
+    end
+
+    # An empty live list is Ollama's "nothing pulled" only on the Ollama pane.
+    # Any other provider with a listing names itself and keeps the typed field;
+    # the default-model field is read alone, since the provider cards above it
+    # name Ollama on every pane.
+    test "an empty live list names the provider, and only Ollama's says ollama pull", %{
+      conn: conn
+    } do
+      defmodule EmptyLiveListing do
+        alias FermixCore.Providers.ModelListing
+
+        @listed [:vercel, :openrouter, :venice, :ollama]
+
+        def live?(provider) when provider in @listed, do: ModelListing.live?(provider)
+        def live?(_provider), do: false
+
+        def live_models(provider, _opts) when provider in @listed, do: {:ok, []}
+      end
+
+      Application.put_env(:fermix_web, :model_listing_impl, EmptyLiveListing)
+
+      on_exit(fn ->
+        Application.put_env(
+          :fermix_web,
+          :model_listing_impl,
+          FermixWebWeb.TestSupport.StaticModelListing
+        )
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup?tab=provider")
+
+      for provider <- [:vercel, :openrouter, :venice] do
+        provider_pane_html(view, Atom.to_string(provider))
+        render_async(view)
+        field = view |> element("label.form-control", "Default model") |> render()
+        label = Descriptor.fetch!(provider).label
+
+        assert field =~ "#{label} listed no models Fermix can use; enter a model id manually."
+        assert field =~ ~s(type="text" name="provider_form[default_model]")
+        refute field =~ "<datalist"
+        refute String.downcase(field) =~ "ollama"
+      end
+
+      provider_pane_html(view, "ollama")
+      render_async(view)
+      field = view |> element("label.form-control", "Default model") |> render()
+
+      assert field =~
+               "No models installed on this server; run <code>ollama pull &lt;model&gt;</code>."
+
+      assert field =~ ~s(type="text" name="provider_form[default_model]")
+      refute field =~ "listed no models"
+    end
+
     # M49 §3.4: the model explanation is the descriptor's, drawn beside "Default
     # model" behind an info control rather than inline, and read out of the same
     # field the management wire publishes as the row's `info`. A provider that
@@ -4742,10 +5046,11 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       {:ok, view, _html} = live(conn, "/setup?tab=provider")
 
-      html =
-        view
-        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "ollama"})
-        |> render_change()
+      view
+      |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "ollama"})
+      |> render_change()
+
+      html = render_async(view)
 
       assert html =~ "Ollama server detected"
       assert html =~ "2 installed model(s)"
@@ -4778,10 +5083,11 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       {:ok, view, _html} = live(conn, "/setup?tab=provider")
 
-      html =
-        view
-        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "ollama"})
-        |> render_change()
+      view
+      |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "ollama"})
+      |> render_change()
+
+      html = render_async(view)
 
       assert html =~ "No Ollama server responded"
       assert html =~ "ollama serve"
@@ -4821,10 +5127,11 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       {:ok, view, _html} = live(conn, "/setup?tab=provider")
 
-      html =
-        view
-        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "openrouter"})
-        |> render_change()
+      view
+      |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "openrouter"})
+      |> render_change()
+
+      html = render_async(view)
 
       assert html =~ "vendor/brand-new"
       assert html =~ "Brand New"
@@ -4977,6 +5284,54 @@ defmodule FermixWebWeb.SetupLiveTest do
       contents = File.read!(Path.join(tmp_home, "config.toml"))
       assert contents =~ ~s(default_model = "gpt-5.5")
       assert contents =~ ~s(reasoning_effort = "high")
+    end
+
+    test "the Fast mode switch is offered where a provider has one, and not on OpenAI Codex", %{
+      conn: conn
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      for {provider, offered?} <- [{"openai", true}, {"anthropic", true}, {"openai_codex", false}] do
+        html =
+          view
+          |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: provider})
+          |> render_change()
+
+        assert html =~ ~s(name="provider_form[fast]") == offered?, provider
+      end
+    end
+
+    test "submitting persists fast mode on the provider being configured", %{
+      conn: conn,
+      tmp_home: tmp_home
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view
+      |> form("form[phx-submit=\"save_provider\"]",
+        provider_form: %{
+          provider: "openai",
+          default_model: "gpt-6.2-sol",
+          fast: "true",
+          openai_api_key: "sk-from-live-test"
+        }
+      )
+      |> render_submit()
+
+      assert render(view) =~ "Provider saved."
+
+      openai = :fermix_core |> Application.get_env(:providers, []) |> Keyword.get(:openai, [])
+      assert Keyword.get(openai, :fast) == true
+      assert File.read!(Path.join(tmp_home, "config.toml")) =~ "fast = true"
+
+      view
+      |> form("form[phx-submit=\"save_provider\"]",
+        provider_form: %{provider: "openai", fast: "false"}
+      )
+      |> render_submit()
+
+      openai = :fermix_core |> Application.get_env(:providers, []) |> Keyword.get(:openai, [])
+      assert Keyword.get(openai, :fast) == false
     end
 
     test "submitting persists Anthropic model and api key", %{
@@ -5232,7 +5587,8 @@ defmodule FermixWebWeb.SetupLiveTest do
       :ok = Store.write("chatgpt", chatgpt_entry())
       Application.put_env(:fermix_web, :model_listing_impl, CodexListing)
 
-      {view, html} = open_codex_card(conn)
+      {view, _html} = open_codex_card(conn)
+      html = render_async(view)
 
       assert html =~ "mara@example.test · Connected · Using ChatGPT plan"
 
@@ -5603,7 +5959,7 @@ defmodule FermixWebWeb.SetupLiveTest do
   defp signing_out_runner(parent, revoked?) do
     fn opts ->
       send(parent, {:chatgpt_logout, opts})
-      :ok = Store.write("chatgpt", ChatGPTRegistration.signed_out(chatgpt_entry()))
+      :ok = Store.delete_provider("chatgpt")
       {:ok, %{revoked: revoked?}}
     end
   end
@@ -5669,6 +6025,38 @@ defmodule FermixWebWeb.SetupLiveTest do
       refute html =~ ~s(name="coding_form[harness_approved]")
     end
 
+    # M106 §8: the line names where proposals arrive: the Fermix app as a
+    # place, never its internal word; a DM by its platform's word as before.
+    test "the skill-curation line names the Fermix app as a place, a DM as it always did", %{
+      conn: conn
+    } do
+      jobs = Application.fetch_env(:fermix_core, :jobs)
+      telegram = Application.fetch_env(:fermix_channels, :telegram)
+
+      on_exit(fn ->
+        restore_env(:fermix_core, :jobs, jobs)
+        restore_env(:fermix_channels, :telegram, telegram)
+      end)
+
+      Application.delete_env(:fermix_channels, :telegram)
+
+      Application.put_env(:fermix_core, :jobs,
+        delivery_channels: FermixTestSupport.AppInbox.channels()
+      )
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element("button[phx-value-tab=\"personalization\"]") |> render_click()
+      assert html =~ "Proposals arrive in the Fermix app."
+      refute html =~ "Proposals arrive in companion."
+
+      Application.put_env(:fermix_core, :jobs, delivery_channels: %{})
+      Application.put_env(:fermix_channels, :telegram, owner_user_id: "40017")
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element("button[phx-value-tab=\"personalization\"]") |> render_click()
+      assert html =~ "Proposals arrive in telegram."
+    end
+
     test "the skill-curation toggle renders checked by default and names the destination", %{
       conn: conn
     } do
@@ -5714,7 +6102,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       refute File.read!(Path.join(tmp_home, "config.toml")) =~ "[fermix_core.skill_curation]"
     end
 
-    test "the open-loops toggle renders off by default and names where check-ins land", %{
+    test "the open-loops toggle renders on by default and names where check-ins land", %{
       conn: conn
     } do
       Application.put_env(:fermix_core, :open_loops, [])
@@ -5724,12 +6112,11 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       assert html =~ "Check in on things you plan to do by a date"
       assert html =~ ~s(name="personalization_form[open_loops_enabled]")
-      assert html =~ ~s(data-open-loops="false")
-      # No channel owner configured in the test home.
-      assert html =~ "Until a channel has an owner configured, Fermix records no loops."
+      assert html =~ ~s(data-open-loops="true")
+      assert html =~ "A check-in arrives in the chat where you mentioned it."
     end
 
-    test "enabling open loops persists enabled=true; turning it off removes the key", %{
+    test "turning open loops off persists enabled=false; turning it on removes the key", %{
       conn: conn,
       tmp_home: tmp_home
     } do
@@ -5740,7 +6127,7 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       view
       |> form("form[phx-submit=\"save_personalization\"]",
-        personalization_form: %{open_loops_enabled: "true"}
+        personalization_form: %{open_loops_enabled: "false"}
       )
       |> render_submit()
 
@@ -5748,15 +6135,15 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ "Personalization saved."
       # The scheduler is a child-absent gate, so the change offers a restart.
       assert html =~ "Apply &amp; restart"
-      assert html =~ ~s(data-open-loops="true")
+      assert html =~ ~s(data-open-loops="false")
 
       contents = File.read!(Path.join(tmp_home, "config.toml"))
-      assert contents =~ "[fermix_core.open_loops]\nenabled = true"
+      assert contents =~ "[fermix_core.open_loops]\nenabled = false"
 
-      # Turning it off writes NOTHING: the default is already off.
+      # Turning it on writes NOTHING: the default is already on.
       view
       |> form("form[phx-submit=\"save_personalization\"]",
-        personalization_form: %{open_loops_enabled: "false"}
+        personalization_form: %{open_loops_enabled: "true"}
       )
       |> render_submit()
 

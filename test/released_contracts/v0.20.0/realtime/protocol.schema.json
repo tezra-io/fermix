@@ -1,0 +1,364 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fermix.sh/realtime/protocol.schema.json",
+  "title": "Fermix Realtime voice socket protocol",
+  "description": "Newline-delimited JSON wire contract between the Fermix daemon and the FermixPet companion. Source of truth: FermixCore.Realtime.Protocol. See PROTOCOL.md.",
+  "x-protocol-version": 5,
+  "x-supported-version-range": { "min": 1, "max": 5 },
+  "$defs": {
+    "clientEvent": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "enum": [
+            "client_hello",
+            "call_start",
+            "audio_chunk",
+            "interrupt",
+            "mute",
+            "call_stop",
+            "task_cancel",
+            "playback_progress",
+            "camera"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "client_hello" } } },
+          "then": { "$ref": "#/$defs/client_hello" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "audio_chunk" } } },
+          "then": { "$ref": "#/$defs/audio_chunk" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "interrupt" } } },
+          "then": { "$ref": "#/$defs/interrupt" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "task_cancel" } } },
+          "then": { "$ref": "#/$defs/task_cancel" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "playback_progress" } } },
+          "then": { "$ref": "#/$defs/playback_progress" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "camera" } } },
+          "then": { "$ref": "#/$defs/camera" }
+        }
+      ]
+    },
+    "serverEvent": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "enum": [
+            "server_hello",
+            "state",
+            "audio_delta",
+            "transcript_delta",
+            "assistant_text_delta",
+            "assistant_text_done",
+            "tool_event",
+            "usage",
+            "error",
+            "playback_stop",
+            "call_ready",
+            "caption",
+            "task",
+            "call_ended"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "server_hello" } } },
+          "then": { "$ref": "#/$defs/server_hello" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "audio_delta" } } },
+          "then": { "$ref": "#/$defs/audio_delta" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "error" } } },
+          "then": { "$ref": "#/$defs/error" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "call_ready" } } },
+          "then": { "$ref": "#/$defs/call_ready" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "caption" } } },
+          "then": { "$ref": "#/$defs/caption" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "task" } } },
+          "then": { "$ref": "#/$defs/task" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "usage" } } },
+          "then": { "$ref": "#/$defs/usage" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "call_ended" } } },
+          "then": { "$ref": "#/$defs/call_ended" }
+        }
+      ]
+    },
+    "client_hello": {
+      "type": "object",
+      "required": ["type", "protocol_version"],
+      "properties": {
+        "type": { "const": "client_hello" },
+        "protocol_version": { "type": "integer", "minimum": 1 },
+        "camera": {
+          "type": "boolean",
+          "description": "v4, optional: whether this endpoint has a camera it can share in a call (a phone). Absent means false, which is every older client's hello."
+        }
+      }
+    },
+    "audio_chunk": {
+      "type": "object",
+      "required": ["type", "audio"],
+      "properties": {
+        "type": { "const": "audio_chunk" },
+        "audio": { "type": "string", "contentEncoding": "base64" }
+      }
+    },
+    "interrupt": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "interrupt" },
+        "audio_end_ms": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "task_cancel": {
+      "type": "object",
+      "description": "Cancels one backend delegation of a task-engine call (openai_live, xai_realtime). Refused with error(unsupported_by_engine) under openai_realtime.",
+      "required": ["type", "delegation_id"],
+      "properties": {
+        "type": { "const": "task_cancel" },
+        "delegation_id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "playback_progress": {
+      "type": "object",
+      "description": "v3, xai_realtime only: how much of one playback_id's audio the client has rendered. Sent at most every 100 ms while it plays, and at once when it drains or playback stops. Refused with error(unsupported_by_engine) under the OpenAI engines.",
+      "required": ["type", "playback_id", "played_ms", "drained"],
+      "properties": {
+        "type": { "const": "playback_progress" },
+        "playback_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "An id the daemon sent on audio_delta in this call, echoed as received; at most 64 bytes."
+        },
+        "played_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Milliseconds of this id's audio rendered so far. Never decreases, and never exceeds the audio sent under the id."
+        },
+        "drained": {
+          "type": "boolean",
+          "description": "True when everything sent under this id so far has played."
+        }
+      }
+    },
+    "camera": {
+      "type": "object",
+      "description": "v4: turns the call's camera on or off, stating the state it wants, so a repeat is harmless. Taken only during a call on a task engine (openai_live, xai_realtime), from an endpoint whose client_hello at version 4 or later said camera: true; the frames themselves ride the endpoint's own transport. Refused with error(unsupported_by_endpoint) from any other endpoint, error(unsupported_by_engine) under openai_realtime, and the connection closes after either. For on: true while the call's camera_share reading (taken when the call opened, kept for its life) is off, error(camera_off) refuses that camera alone: the camera stays off and the call goes on. No frame answers it.",
+      "required": ["type", "on"],
+      "properties": {
+        "type": { "const": "camera" },
+        "on": { "type": "boolean", "description": "The state the camera should be in." }
+      }
+    },
+    "server_hello": {
+      "type": "object",
+      "required": ["type", "min_version", "max_version"],
+      "properties": {
+        "type": { "const": "server_hello" },
+        "min_version": { "type": "integer", "minimum": 1 },
+        "max_version": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "call_ended": {
+      "type": "object",
+      "description": "v5: the daemon ended the call itself, normally: a call on a task engine (openai_live, xai_realtime) whose owner said goodbye, once the voice's goodbye played. Sent only to a client whose client_hello was at version 5 or later, after state idle and before the call's last task and usage frames. A client treats it as its own hang-up: stop the microphone and playback, show the call ended, no error. The connection stays open for a fresh call_start, as after call_stop, and the client sends no call_stop for it.",
+      "required": ["type", "reason"],
+      "properties": {
+        "type": { "const": "call_ended" },
+        "reason": {
+          "type": "string",
+          "description": "Why the call ended. Today goodbye: the owner said goodbye. The vocabulary is open: a client treats any reason as a normal end."
+        }
+      }
+    },
+    "audio_delta": {
+      "type": "object",
+      "description": "A chunk of assistant voice output.",
+      "required": ["type", "audio"],
+      "properties": {
+        "type": { "const": "audio_delta" },
+        "audio": { "type": "string", "contentEncoding": "base64" },
+        "playback_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "v3, xai_realtime only: the call-local id the client reports playback_progress against. Absent on every OpenAI-engine call."
+        }
+      }
+    },
+    "call_ready": {
+      "type": "object",
+      "description": "The provider session is established and the call can carry audio.",
+      "required": ["type", "engine", "call_id", "captions"],
+      "properties": {
+        "type": { "const": "call_ready" },
+        "engine": { "enum": ["openai_realtime", "openai_live", "xai_realtime"] },
+        "call_id": { "type": "string", "minLength": 1 },
+        "call_uuid": {
+          "type": "string",
+          "format": "uuid",
+          "description": "The task-engine call's durable identity, the key of its record. call_id stays the trace session id."
+        },
+        "conversation": {
+          "enum": ["chat", "private"],
+          "description": "Task engines (openai_live, xai_realtime) only: chat when the call's hand-offs run in the chat's own conversation, private when they keep to a conversation of the call's own."
+        },
+        "tasks_outlive_call": {
+          "type": "boolean",
+          "description": "Task engines (openai_live, xai_realtime) only: true for a call in the chat, whose task still running when the call ends finishes into the chat; false for a private call, whose tasks end with it."
+        },
+        "provider_session_id": { "type": "string" },
+        "expires_at": {
+          "type": "integer",
+          "description": "Unix seconds at which the provider session expires; absent when unknown."
+        },
+        "captions": {
+          "type": "boolean",
+          "description": "True when caption frames will be sent for this call."
+        }
+      }
+    },
+    "caption": {
+      "type": "object",
+      "description": "One verbatim transcript fragment. Concatenate deltas without trimming or inserting spaces.",
+      "required": ["type", "speaker", "delta", "start_ms", "end_ms"],
+      "properties": {
+        "type": { "const": "caption" },
+        "speaker": { "enum": ["user", "assistant"] },
+        "delta": { "type": "string" },
+        "start_ms": { "type": "integer", "minimum": 0 },
+        "end_ms": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "task": {
+      "type": "object",
+      "description": "Lifecycle of one backend delegation. revision fences a re-asked task.",
+      "required": ["type", "delegation_id", "revision", "status"],
+      "properties": {
+        "type": { "const": "task" },
+        "call_uuid": {
+          "type": "string",
+          "format": "uuid",
+          "description": "The task-engine call's durable identity, the key of its record. call_id stays the trace session id."
+        },
+        "delegation_id": { "type": "string", "minLength": 1 },
+        "revision": { "type": "integer", "minimum": 1 },
+        "status": { "enum": ["pending", "running", "completed", "failed", "cancelled"] },
+        "summary": { "type": "string", "maxLength": 240 },
+        "server_seq": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "A task-engine call in the chat: the chat timeline row the result was shown at. Absent when nothing was shown."
+        },
+        "detached": {
+          "type": "boolean",
+          "description": "A task-engine call in the chat: true on the one running frame sent as the call ends, for a task that will finish into the chat instead of being cancelled. Absent otherwise."
+        }
+      }
+    },
+    "usage": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "usage" },
+        "call_uuid": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Task engines only: the durable identity of the call the bill belongs to."
+        },
+        "status": { "type": "string" },
+        "input_tokens": { "type": "integer" },
+        "output_tokens": { "type": "integer" },
+        "voice_seconds": { "type": "number" },
+        "voice_cost_cents": { "type": "number" },
+        "voice_text_items": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "xai_realtime only: text items the call sent the voice provider, each billed as a text event."
+        },
+        "backend_turns": { "type": "integer" },
+        "backend_cost": { "const": "unknown" },
+        "accounting": { "enum": ["complete", "incomplete", "running"] }
+      }
+    },
+    "error": {
+      "type": "object",
+      "required": ["type", "reason"],
+      "properties": {
+        "type": { "const": "error" },
+        "reason": {
+          "type": "string",
+          "description": "The failure's code. call_in_progress refuses a call_start while another call is up or still settling, on any engine and from any endpoint; the connection closes after it. voice_device_elsewhere refuses this socket's call_start while the owner's voice device is a paired accessory, before any session, with voice_device and sentence, and voice_device_unreadable while that choice cannot be read, with sentence; the connection closes after either. On an xai_realtime call, unknown_playback, playback_regressed and playback_beyond_sent refuse a playback_progress (an id never sent, an offset that went backwards, an offset beyond the audio sent) and close the connection; playback_stalled ends a call whose sent audio went unacknowledged for 2 seconds, playback_overflow one whose reply outgrew the audio the daemon holds, and call_ids_exhausted one that raised more function calls than it can remember. A camera from an endpoint whose client_hello did not say camera: true at version 4 or later is refused with unsupported_by_endpoint, and the connection closes after it; a camera with on: true while the call's camera_share reading is off with camera_off, and the call goes on: the one reason that does not end the call."
+        },
+        "kind": {
+          "enum": [
+            "update_required",
+            "provider_refused",
+            "cost_limit",
+            "session_expired",
+            "close_timeout",
+            "bridge_unavailable",
+            "max_session_duration",
+            "provider_disconnected"
+          ]
+        },
+        "detail": {
+          "type": "string",
+          "description": "The vendor's own sentence, bounded. Present when the provider explained the failure."
+        },
+        "held_by": {
+          "type": "string",
+          "description": "On call_in_progress: the endpoint holding the call, desktop or accessory:<accessory_id>. Absent only when the holder ended while being read."
+        },
+        "voice_device": {
+          "type": "string",
+          "description": "On voice_device_elsewhere: the owner's voice device, accessory:<accessory_id>."
+        },
+        "sentence": {
+          "type": "string",
+          "description": "On voice_device_elsewhere and voice_device_unreadable: the daemon's own sentence for the refusal, which a client shows as it is."
+        },
+        "required_for": {
+          "enum": ["openai_live", "xai_realtime"],
+          "description": "On update_required: the engine that needs the higher protocol version."
+        },
+        "direction": { "enum": ["client_too_old", "client_too_new"] },
+        "client_version": { "type": "integer" },
+        "min_version": { "type": "integer" },
+        "max_version": { "type": "integer" }
+      }
+    }
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/clientEvent" },
+    { "$ref": "#/$defs/serverEvent" }
+  ]
+}

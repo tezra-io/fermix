@@ -49,6 +49,7 @@ defmodule FermixOpik.Mapper do
         drop_nil(%{
           status: stringify(Map.get(metadata, :status)),
           reasoning_effort: Map.get(metadata, :reasoning_effort),
+          speed: Map.get(metadata, :speed),
           adapter: Map.get(metadata, :adapter)
         })
     }
@@ -900,6 +901,7 @@ defmodule FermixOpik.Mapper do
   def provider_string(:ollama), do: "ollama"
   def provider_string(:mistral), do: "mistral"
   def provider_string(:venice), do: "venice"
+  def provider_string(:vercel), do: "vercel"
   # The transcription backends emit provider calls of their own (M21). Opik
   # prices neither, but the clause + test is the same documented contract as
   # above: `:local` in particular must read as the on-device backend rather than

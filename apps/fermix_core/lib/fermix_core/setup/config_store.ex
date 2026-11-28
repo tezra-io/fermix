@@ -31,6 +31,7 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Net.Egress
   alias FermixCore.OpenLoops.Config, as: OpenLoopsConfig
+  alias FermixCore.PhoneCalls.Config, as: PhoneCallsConfig
   alias FermixCore.Plugins.Dist.Lock
   alias FermixCore.Plugins.Registry, as: PluginRegistry
   alias FermixCore.Plugins.Retired
@@ -156,6 +157,7 @@ defmodule FermixCore.Setup.ConfigStore do
         cues: Application.get_env(:fermix_core, :cues, []),
         memory: Application.get_env(:fermix_core, :memory, []),
         realtime: Application.get_env(:fermix_core, :realtime, []),
+        phone_calls: Application.get_env(:fermix_core, :phone_calls, []),
         computer_use: Application.get_env(:fermix_core, :computer_use, []),
         computer_history: Application.get_env(:fermix_core, :computer_history, []),
         transcription: Application.get_env(:fermix_core, :transcription, []),
@@ -840,6 +842,7 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_cues_config(Keyword.get(persisted.fermix_core, :cues, []))
     apply_memory_config(Keyword.get(persisted.fermix_core, :memory, []))
     apply_realtime_config(Keyword.get(persisted.fermix_core, :realtime, []))
+    apply_phone_calls_config(Keyword.get(persisted.fermix_core, :phone_calls, []))
     apply_computer_use_config(Keyword.get(persisted.fermix_core, :computer_use, []))
 
     apply_computer_history_config(
@@ -1221,6 +1224,11 @@ defmodule FermixCore.Setup.ConfigStore do
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:realtime, [])
           |> normalize_realtime(),
+        phone_calls:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:phone_calls, [])
+          |> normalize_phone_calls(),
         computer_use:
           snapshot
           |> Map.get(:fermix_core, [])
@@ -1446,6 +1454,7 @@ defmodule FermixCore.Setup.ConfigStore do
         cues: [],
         memory: [],
         realtime: [],
+        phone_calls: [],
         computer_use: [],
         computer_history: [],
         transcription: [],
@@ -1862,6 +1871,16 @@ defmodule FermixCore.Setup.ConfigStore do
     :ok
   end
 
+  # Replace (not merge): the section has no compile-time baseline, and
+  # `to_keyword/1` leaves out an off switch, so a merge would keep an earlier
+  # `enabled: true` after a save that turned phone calls off. The section is
+  # fully normalized by `persistable_snapshot/1`. Live, not boot-bound: the off
+  # switch takes effect without a restart (M94 §12).
+  defp apply_phone_calls_config(phone_calls_config) do
+    Application.put_env(:fermix_core, :phone_calls, phone_calls_config)
+    :ok
+  end
+
   # Replace (not merge) so a disabled snapshot can't leave a stale `enabled: true`
   # behind — the computer-use section is fully normalized by persistable_snapshot,
   # so the persisted keyword is the complete intended state.
@@ -2001,6 +2020,7 @@ defmodule FermixCore.Setup.ConfigStore do
     cues = Keyword.get(fermix_core, :cues, [])
     memory = Keyword.get(fermix_core, :memory, [])
     realtime = Keyword.get(fermix_core, :realtime, [])
+    phone_calls = Keyword.get(fermix_core, :phone_calls, [])
     computer_history = Keyword.get(fermix_core, :computer_history, [])
     transcription = Keyword.get(fermix_core, :transcription, [])
     meetings = Keyword.get(fermix_core, :meetings, [])
@@ -2051,6 +2071,7 @@ defmodule FermixCore.Setup.ConfigStore do
       render_cues(cues),
       render_section(["fermix_core", "memory"], memory),
       render_section(["fermix_core", "realtime"], realtime),
+      render_section(["fermix_core", "phone_calls"], phone_calls),
       # The home's history keys: the route it summarizes on and its grants (M97 §4).
       render_section(
         ["fermix_core", "computer_history"],
@@ -2506,6 +2527,7 @@ defmodule FermixCore.Setup.ConfigStore do
       cues: normalize_cues(get_in(document, ["fermix_core", "cues"])),
       memory: normalize_memory(get_in(document, ["fermix_core", "memory"])),
       realtime: normalize_realtime(get_in(document, ["fermix_core", "realtime"])),
+      phone_calls: normalize_phone_calls(get_in(document, ["fermix_core", "phone_calls"])),
       computer_use: normalize_computer_use(get_in(document, ["fermix_core", "computer_use"])),
       computer_history: computer_history,
       transcription: normalize_transcription(get_in(document, ["fermix_core", "transcription"])),
@@ -2658,6 +2680,7 @@ defmodule FermixCore.Setup.ConfigStore do
   defp normalize_provider_value(:default_model, value), do: normalize_string(value)
   defp normalize_provider_value(:auth_mode, value), do: normalize_auth_mode(value)
   defp normalize_provider_value(:primary, value), do: normalize_bool(value)
+  defp normalize_provider_value(:fast, value), do: normalize_bool(value)
 
   defp normalize_provider_value(:reasoning_effort, value),
     do: normalize_reasoning_effort(value)
@@ -2700,6 +2723,16 @@ defmodule FermixCore.Setup.ConfigStore do
     config
     |> RealtimeConfig.normalize()
     |> RealtimeConfig.to_keyword()
+  end
+
+  # `[fermix_core.phone_calls]` (M94 §12). `PhoneCallsConfig.normalize/1`
+  # refuses an unknown key and an invalid value, naming the section and each
+  # key; `to_keyword/1` is its inverse, so the section survives
+  # save→load→apply. A new section, so it carries no retired key to tolerate.
+  defp normalize_phone_calls(config) do
+    config
+    |> PhoneCallsConfig.normalize()
+    |> PhoneCallsConfig.to_keyword()
   end
 
   # `[fermix_core.computer_use]`. Value validation lives in

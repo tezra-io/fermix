@@ -48,15 +48,18 @@ defmodule Fermix.CLI.Daemon do
   Started only inside `fermix run` (the supervision tree branches on
   `:fermix_core, :daemon_socket_enabled`). Stale sockets from prior
   crashes are removed on boot; double-binding fails fast on
-  EADDRINUSE rather than silently overwriting. The daemon holds the lock
-  beside its socket for its life (`Fermix.CLI.Daemon.Lock`), which a client
-  asks when the socket turns it away: a second daemon that finds it held
-  does not start, and never removes the socket of one too busy to accept.
+  EADDRINUSE rather than silently overwriting. The lock beside the socket
+  (`Fermix.CLI.Daemon.Lock`), which a client asks when the socket turns it
+  away, is the engine's, not this process's: a daemon boot takes it before it
+  reads or writes anything else in the home and before any child starts, and
+  holds it until the application stops (`FermixCore.Application`). A second
+  daemon that finds it held starts nothing, this process included, so it
+  never removes the socket of one too busy to accept. Both name the path
+  `default_socket_path/0` gives.
   """
 
   use GenServer
 
-  alias Fermix.CLI.Daemon.Lock
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Auth.TokenSupervisor
@@ -179,6 +182,18 @@ defmodule Fermix.CLI.Daemon do
   def default_stopper, do: Lifecycle.default_stopper()
 
   @doc """
+  The control socket this daemon listens on when `start_link/1` names none:
+  `daemon.sock` in `FERMIX_HOME`, else in `~/.fermix`. The engine's boot takes
+  the home's lock beside the same path (`FermixCore.Application`), so the lock
+  and the socket can never name two places.
+  """
+  @spec default_socket_path() :: Path.t()
+  def default_socket_path do
+    fermix_home = System.get_env("FERMIX_HOME") || Path.join(System.user_home!(), ".fermix")
+    Path.join(fermix_home, "daemon.sock")
+  end
+
+  @doc """
   Answers one management request a desktop forwarded over the rail (M75 §6),
   on the primary: `frame` is the request as this socket would read it, and the
   answer is the response this socket would send. It runs in the caller with
@@ -268,37 +283,20 @@ defmodule Fermix.CLI.Daemon do
     end
   end
 
-  # The lock first (`Fermix.CLI.Daemon.Lock`): a daemon that holds it lives,
-  # however busy, so its socket is never taken, whatever a connect to it
-  # answers. Held from here until `terminate/2`, and let go of on every path
-  # that does not start.
+  # No lock is taken here: the engine takes the home's lock
+  # (`Fermix.CLI.Daemon.Lock`) before its first child starts and holds it until
+  # the application stops (`FermixCore.Application`), so in a daemon's tree this
+  # process starts only once no other daemon holds it, however busy that one is.
   defp bind(socket_path, opts) do
     File.mkdir_p!(Path.dirname(socket_path))
 
-    case Lock.acquire(socket_path) do
-      {:ok, lock} -> bind_locked(socket_path, lock, opts)
-      {:error, :held} -> {:stop, {:another_daemon_running, socket_path}}
+    case clear_stale_socket(socket_path) do
+      :ok -> do_listen(socket_path, opts)
       {:error, reason} -> {:stop, reason}
     end
   end
 
-  defp bind_locked(socket_path, lock, opts) do
-    case clear_stale_socket(socket_path) do
-      :ok -> do_listen(socket_path, lock, opts)
-      {:error, reason} -> stop_unlocked(lock, reason)
-    end
-  end
-
-  defp stop_unlocked(lock, reason) do
-    case Lock.release(lock) do
-      :ok -> :ok
-      {:error, failed} -> Logger.error("Daemon lock not released: #{inspect(failed)}")
-    end
-
-    {:stop, reason}
-  end
-
-  defp do_listen(socket_path, lock, opts) do
+  defp do_listen(socket_path, opts) do
     listen_opts = [
       :binary,
       {:active, false},
@@ -318,7 +316,6 @@ defmodule Fermix.CLI.Daemon do
          %{
            listen_socket: listen_socket,
            socket_path: socket_path,
-           lock: lock,
            task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
            plugins_runtime: Keyword.get(opts, :plugins_runtime, PluginsRuntime),
            token_supervisor: Keyword.get(opts, :token_supervisor, TokenSupervisor),
@@ -342,15 +339,17 @@ defmodule Fermix.CLI.Daemon do
          }, {:continue, :accept}}
 
       {:error, reason} ->
-        stop_unlocked(lock, {:listen_failed, reason, socket_path})
+        {:stop, {:listen_failed, reason, socket_path}}
     end
   end
 
-  # Once this daemon holds the lock, no daemon that holds one lives, so a
-  # socket file here is one that crashed left, or one a daemon from before
-  # the lock listens on, which answers. Probe it before deleting: unlinking a
-  # live socket would let us bind the same path while the original daemon
-  # stays running but unreachable via status/stop.
+  # In a daemon's tree the engine has held the home's lock since before its
+  # first child started (`FermixCore.Application`), so no daemon that holds one
+  # lives here, and a socket file here is one that crashed left, or one a daemon
+  # from before the lock listens on, which answers. A daemon started outside
+  # that tree (a test's) takes no lock at all. Either way, probe it before
+  # deleting: unlinking a live socket would let us bind the same path while the
+  # original daemon stays running but unreachable via status/stop.
   defp clear_stale_socket(socket_path) do
     cond do
       not File.exists?(socket_path) -> :ok
@@ -392,12 +391,10 @@ defmodule Fermix.CLI.Daemon do
   # daemon takes a call the moment it comes (`serve_forwarded/3` asks it for
   # its options on every forwarded request), never once an accept's wait
   # ends. The acceptor serves each connection with the state init left,
-  # which nothing changes after, but the lock: only the daemon holds it, so
-  # no handler outlives the daemon with it.
+  # which nothing changes after.
   @impl true
   def handle_continue(:accept, state) do
-    served = Map.delete(state, :lock)
-    acceptor = spawn_link(fn -> accept_loop(served) end)
+    acceptor = spawn_link(fn -> accept_loop(state) end)
     {:noreply, Map.put(state, :acceptor, acceptor)}
   end
 
@@ -407,14 +404,15 @@ defmodule Fermix.CLI.Daemon do
   def handle_info({:EXIT, acceptor, reason}, %{acceptor: acceptor} = state),
     do: {:stop, reason, state}
 
-  # The lock goes last: while the socket may still answer, it says the
-  # daemon lives.
+  # The lock is not this process's to let go of: the engine holds it until the
+  # application stops (`FermixCore.Application.stop/1`), after this process and
+  # every other child are down, so a home whose socket is gone still reads as
+  # running while any of its tree does.
   @impl true
-  def terminate(_reason, %{listen_socket: socket, socket_path: path, lock: lock}) do
+  def terminate(_reason, %{listen_socket: socket, socket_path: path}) do
     close_result = :gen_tcp.close(socket)
     unlink_result = unlink_socket(path)
-    release_result = Lock.release(lock)
-    report_cleanup(close_result, unlink_result, release_result)
+    report_cleanup(close_result, unlink_result)
   end
 
   defp unlink_socket(path) do
@@ -425,13 +423,12 @@ defmodule Fermix.CLI.Daemon do
     end
   end
 
-  defp report_cleanup(:ok, :ok, :ok), do: :ok
+  defp report_cleanup(:ok, :ok), do: :ok
 
-  defp report_cleanup(close_result, unlink_result, release_result) do
+  defp report_cleanup(close_result, unlink_result) do
     Logger.error(
       "Daemon socket cleanup failed: " <>
-        "listener_close=#{inspect(close_result)} socket_unlink=#{inspect(unlink_result)} " <>
-        "lock_release=#{inspect(release_result)}"
+        "listener_close=#{inspect(close_result)} socket_unlink=#{inspect(unlink_result)}"
     )
 
     :ok
@@ -1596,9 +1593,4 @@ defmodule Fermix.CLI.Daemon do
 
   defp maybe_finalize(%{status: "shutting_down"}, state), do: state.stopper.()
   defp maybe_finalize(_response, _state), do: :ok
-
-  defp default_socket_path do
-    fermix_home = System.get_env("FERMIX_HOME") || Path.join(System.user_home!(), ".fermix")
-    Path.join(fermix_home, "daemon.sock")
-  end
 end

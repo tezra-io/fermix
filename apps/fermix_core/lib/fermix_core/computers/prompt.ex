@@ -1,12 +1,13 @@
 defmodule FermixCore.Computers.Prompt do
   @moduledoc """
-  The `## Computers` section of the owner's prompt (M97 §6.5), after
-  `## This Fermix`: this server first, then each computer by name, its
-  system, whether it is connected or when the home last heard it, and what
-  it offers, and the folders its files and commands reach there with where
-  any other is allowed (`Offers.Files.reach/2`, M97 §6.4, finding F5), so
-  the model asks for a folder it may use or says plainly that the owner
-  must allow it at that computer. Names, state, offers and those folders
+  The `## Computers` section of the owner's prompt (M97 §6.5), rendered for
+  each turn and each voice session as it starts, never cached with the
+  runtime contract (M102 N10): this server first, then each computer by
+  name, its system, whether it is connected or when the home last heard
+  it, and what it offers, and the folders its files and commands reach
+  there with where any other is allowed (`Offers.Files.reach/2`, M97 §6.4,
+  finding F5), so the model asks for a folder it may use or says plainly
+  that the owner must allow it at that computer. Names, state, offers and those folders
   only: never an address or an id. A computer that is away is still listed
   with what it last offered, so the model says it is away rather than
   guess. Times are stated in the owner's zone (`FermixCore.Clock`). Pure.

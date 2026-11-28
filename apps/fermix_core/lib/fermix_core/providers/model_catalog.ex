@@ -28,6 +28,7 @@ defmodule FermixCore.Providers.ModelCatalog do
           | :ollama
           | :mistral
           | :venice
+          | :vercel
   @type entry :: Entry.t()
 
   @unknown_model_default_ctx 100_000
@@ -49,22 +50,25 @@ defmodule FermixCore.Providers.ModelCatalog do
   # The OpenAI API models. `context_window` is the compaction denominator
   # (`context_tokens / context_window >= compaction.threshold`, default 0.85 —
   # see `TurnRunner`), NOT a declared capability, so it is not a straight copy
-  # of a published number. astra = frontier (default); GPT-6.1 sol, GPT-6.1
-  # terra and GPT-6 luna = the generation's cheaper frontier/balanced/fast
-  # tiers; the gpt-5.6 sol/terra/luna = frontier/balanced/fast of the prior
-  # generation.
+  # of a published number. astra = frontier (default); GPT-6.2 astra and
+  # GPT-6.2 sol = the newest frontier and cheaper frontier, released
+  # 2026-11-17, beside the default rather than replacing it; GPT-6.1 sol,
+  # GPT-6.1 terra and GPT-6 luna = the generation's cheaper
+  # frontier/balanced/fast tiers; the gpt-5.6 sol/terra/luna =
+  # frontier/balanced/fast of the prior generation.
   #
   # Windows: the published window from
   # developers.openai.com/api/docs/models/<id> for gpt-5.5, gpt-5.4 and
-  # gpt-5.4-mini only. The other seven are deliberate deviations, because every
+  # gpt-5.4-mini only. The other nine are deliberate deviations, because every
   # current model reprices a request above 272k INPUT tokens at 2x input/cache
   # and 1.5x output "for the full request" — a cliff rather than a ramp, so one
   # token over doubles the bill for everything before it:
   #
-  #   * astra, GPT-6.1 sol, GPT-6.1 terra and GPT-6 luna, 320_000 is NOT their
-  #     real 1,050,000 window (6.1 sol takes the calibration of the GPT-6 sol
-  #     it replaced, and 6.1 terra, released 2026-10-26 under the same cliff,
-  #     takes it too).
+  #   * astra, GPT-6.2 astra, GPT-6.2 sol, GPT-6.1 sol, GPT-6.1 terra and
+  #     GPT-6 luna, 320_000 is NOT their real 1,050,000 window (6.1 sol takes
+  #     the calibration of the GPT-6 sol it replaced, and 6.1 terra, released
+  #     2026-10-26, and the two 6.2 models, released 2026-11-17, all under the
+  #     same cliff, take it too).
   #     0.85 * 320_000 = 272_000 puts compaction exactly on that
   #     boundary, so the standard-priced tier is used in full. Do not
   #     "correct" it upward.
@@ -95,51 +99,96 @@ defmodule FermixCore.Providers.ModelCatalog do
   # `openai_codex_window` is the GPT-6 generation's published window, which
   # OpenAI Codex runs it within (`find_entry/2`); a GPT-6-or-later entry
   # carries it, an older one runs on Codex as it does on the API.
+  #
+  # `fast?`: every model here is in the Fast table of
+  # developers.openai.com/api/docs/pricing (read 2026-11-18; Fast is what
+  # OpenAI renamed Priority processing on 2026-07-30), billed at about twice
+  # the standard rate, gpt-5.5 and gpt-5.4 below 272K context only. OpenAI may
+  # run a fast request at standard speed and price and says so in the
+  # response's `service_tier`. The OpenAI Codex plan route does not offer it
+  # (a 2026-11-18 probe: `"fast"` is refused with a 400, `"priority"` runs at
+  # `default`), so `fast?` is read for `:openai` only.
   @openai [
     %Entry{
       id: "gpt-6-astra",
       label: "GPT-6 Astra (default, recommended)",
       context_window: 320_000,
-      openai_codex_window: 1_050_000
+      openai_codex_window: 1_050_000,
+      fast?: true
+    },
+    %Entry{
+      id: "gpt-6.2-astra",
+      label: "GPT-6.2 Astra",
+      context_window: 320_000,
+      openai_codex_window: 1_050_000,
+      fast?: true
+    },
+    %Entry{
+      id: "gpt-6.2-sol",
+      label: "GPT-6.2 Sol",
+      context_window: 320_000,
+      openai_codex_window: 1_050_000,
+      fast?: true
     },
     %Entry{
       id: "gpt-6.1-sol",
       label: "GPT-6.1 Sol",
       context_window: 320_000,
-      openai_codex_window: 1_050_000
+      openai_codex_window: 1_050_000,
+      fast?: true
     },
     %Entry{
       id: "gpt-6.1-terra",
       label: "GPT-6.1 Terra (balanced)",
       context_window: 320_000,
-      openai_codex_window: 1_050_000
+      openai_codex_window: 1_050_000,
+      fast?: true
     },
     %Entry{
       id: "gpt-6-luna",
       label: "GPT-6 Luna (fast, cheaper)",
       context_window: 320_000,
-      openai_codex_window: 1_050_000
+      openai_codex_window: 1_050_000,
+      fast?: true
     },
-    %Entry{id: "gpt-5.6-sol", label: "GPT-5.6 Sol", context_window: 272_000},
-    %Entry{id: "gpt-5.6-terra", label: "GPT-5.6 Terra (balanced)", context_window: 272_000},
-    %Entry{id: "gpt-5.6-luna", label: "GPT-5.6 Luna (fast, cheaper)", context_window: 272_000},
+    %Entry{
+      id: "gpt-5.6-sol",
+      label: "GPT-5.6 Sol",
+      context_window: 272_000,
+      fast?: true
+    },
+    %Entry{
+      id: "gpt-5.6-terra",
+      label: "GPT-5.6 Terra (balanced)",
+      context_window: 272_000,
+      fast?: true
+    },
+    %Entry{
+      id: "gpt-5.6-luna",
+      label: "GPT-5.6 Luna (fast, cheaper)",
+      context_window: 272_000,
+      fast?: true
+    },
     %Entry{
       id: "gpt-5.5",
       label: "GPT-5.5",
       context_window: 1_050_000,
-      max_reasoning_effort: :xhigh
+      max_reasoning_effort: :xhigh,
+      fast?: true
     },
     %Entry{
       id: "gpt-5.4",
       label: "GPT-5.4",
       context_window: 1_050_000,
-      max_reasoning_effort: :xhigh
+      max_reasoning_effort: :xhigh,
+      fast?: true
     },
     %Entry{
       id: "gpt-5.4-mini",
       label: "GPT-5.4 mini",
       context_window: 400_000,
-      max_reasoning_effort: :xhigh
+      max_reasoning_effort: :xhigh,
+      fast?: true
     }
   ]
 
@@ -173,6 +222,14 @@ defmodule FermixCore.Providers.ModelCatalog do
   # disabled thinking, forced tool_choice and sampling params; its "sonnet-5"
   # substring sends adaptive thinking and no sampling params, and the adapter
   # never sends tool_choice.
+  #
+  # `fast?`: fast mode (`speed: "fast"`, no beta flag) is generally available
+  # on Claude Opus 5.5 ($8/$40 per MTok, twice standard) and Claude Fable 5.2
+  # ($16/$80), Messages API only. Opus 5 and Opus 4.8 offer it as a research
+  # preview behind a beta flag and an access list (4.8's ends 2026-11-30), so
+  # they run at standard speed. Unverified on the Claude sign-in (both probe
+  # tokens were dead on 2026-11-18), so the route asks for it only with an API
+  # key (`RouteResolver`).
   @anthropic [
     %Entry{
       id: "claude-sonnet-4-6",
@@ -193,7 +250,8 @@ defmodule FermixCore.Providers.ModelCatalog do
       label: "Claude Fable 5.2",
       context_window: 1_000_000,
       compaction_ceiling: 200_000,
-      max_output_tokens: 128_000
+      max_output_tokens: 128_000,
+      fast?: true
     },
     %Entry{
       id: "claude-fable-5-1",
@@ -214,7 +272,8 @@ defmodule FermixCore.Providers.ModelCatalog do
       label: "Claude Opus 5.5 (best quality)",
       context_window: 1_000_000,
       compaction_ceiling: 200_000,
-      max_output_tokens: 128_000
+      max_output_tokens: 128_000,
+      fast?: true
     },
     %Entry{
       id: "claude-opus-5",
@@ -367,6 +426,16 @@ defmodule FermixCore.Providers.ModelCatalog do
       context_window: 320_000
     },
     %Entry{
+      id: "openai/gpt-6.2-astra",
+      label: "GPT-6.2 Astra via OpenRouter",
+      context_window: 320_000
+    },
+    %Entry{
+      id: "openai/gpt-6.2-sol",
+      label: "GPT-6.2 Sol via OpenRouter",
+      context_window: 320_000
+    },
+    %Entry{
       id: "openai/gpt-6.1-sol",
       label: "GPT-6.1 Sol via OpenRouter",
       context_window: 320_000
@@ -457,6 +526,76 @@ defmodule FermixCore.Providers.ModelCatalog do
     }
   ]
 
+  # Vercel AI Gateway (M105 §3.3): the mirror of @openrouter, entry for entry
+  # and in the same order, under Vercel's own ids from its public listing of
+  # 2026-11-22. They are `maker/model` like OpenRouter's but not always the same
+  # string: Grok is `spacexai/` here and `x-ai/` there. The Claude entries take
+  # @anthropic's 200_000 compaction ceiling and the GPT-6 entries @openai's
+  # 320_000 calibration, as on OpenRouter: Vercel lists them at 1,050,000 and
+  # reprices the input above 272k tokens. GPT-5.5 and the Groks take the
+  # listed window. When a vendor's list moves, this one moves with @openrouter.
+  @vercel [
+    %Entry{
+      id: "anthropic/claude-sonnet-4.6",
+      label: "Claude Sonnet 4.6 via Vercel (default)",
+      context_window: 1_000_000,
+      compaction_ceiling: 200_000
+    },
+    %Entry{
+      id: "anthropic/claude-sonnet-5.5",
+      label: "Claude Sonnet 5.5 via Vercel",
+      context_window: 1_000_000,
+      compaction_ceiling: 200_000
+    },
+    %Entry{
+      id: "anthropic/claude-fable-5.2",
+      label: "Claude Fable 5.2 via Vercel",
+      context_window: 1_000_000,
+      compaction_ceiling: 200_000
+    },
+    %Entry{
+      id: "anthropic/claude-fable-5.1",
+      label: "Claude Fable 5.1 via Vercel",
+      context_window: 1_000_000,
+      compaction_ceiling: 200_000
+    },
+    %Entry{
+      id: "anthropic/claude-fable-5",
+      label: "Claude Fable 5 via Vercel",
+      context_window: 1_000_000,
+      compaction_ceiling: 200_000
+    },
+    %Entry{
+      id: "anthropic/claude-opus-5.5",
+      label: "Claude Opus 5.5 via Vercel",
+      context_window: 1_000_000,
+      compaction_ceiling: 200_000
+    },
+    %Entry{
+      id: "anthropic/claude-opus-4.8",
+      label: "Claude Opus 4.8 via Vercel",
+      context_window: 1_000_000,
+      compaction_ceiling: 200_000
+    },
+    %Entry{id: "openai/gpt-6-astra", label: "GPT-6 Astra via Vercel", context_window: 320_000},
+    %Entry{
+      id: "openai/gpt-6.2-astra",
+      label: "GPT-6.2 Astra via Vercel",
+      context_window: 320_000
+    },
+    %Entry{id: "openai/gpt-6.2-sol", label: "GPT-6.2 Sol via Vercel", context_window: 320_000},
+    %Entry{id: "openai/gpt-6.1-sol", label: "GPT-6.1 Sol via Vercel", context_window: 320_000},
+    %Entry{
+      id: "openai/gpt-6.1-terra",
+      label: "GPT-6.1 Terra via Vercel",
+      context_window: 320_000
+    },
+    %Entry{id: "openai/gpt-6-luna", label: "GPT-6 Luna via Vercel", context_window: 320_000},
+    %Entry{id: "openai/gpt-5.5", label: "GPT-5.5 via Vercel", context_window: 1_000_000},
+    %Entry{id: "spacexai/grok-4.7", label: "Grok 4.7 via Vercel", context_window: 500_000},
+    %Entry{id: "spacexai/grok-4.3", label: "Grok 4.3 via Vercel", context_window: 1_000_000}
+  ]
+
   # Ollama windows are model CAPABILITY; the local server may serve far
   # less (default num_ctx is small) and truncates silently — the doctor
   # probe checks the served num_ctx against these (M12 §3.2, [verify]
@@ -500,6 +639,7 @@ defmodule FermixCore.Providers.ModelCatalog do
   def models_for(:openrouter), do: @openrouter
   def models_for(:mistral), do: @mistral
   def models_for(:venice), do: @venice
+  def models_for(:vercel), do: @vercel
   def models_for(:ollama), do: @ollama
 
   @doc """
@@ -687,6 +827,19 @@ defmodule FermixCore.Providers.ModelCatalog do
   end
 
   @doc """
+  Whether the vendor runs `model_id` at a faster tier when its provider's Fast
+  mode is on (`Entry.fast?`). `false` for a model the catalog does not know and
+  for a provider outside it, so an unknown model runs at standard speed.
+  """
+  @spec fast?(atom(), String.t()) :: boolean()
+  def fast?(provider, model_id) when is_atom(provider) and is_binary(model_id) do
+    case find_entry(provider, model_id) do
+      %Entry{fast?: value} -> value
+      nil -> false
+    end
+  end
+
+  @doc """
   Whether `model_id` accepts image (vision) input. Defaults to `true`; only
   models known to be text-only carry `vision?: false`. Unknown ids and
   non-catalog providers (e.g. the `:mock` test adapter, or a free-form custom
@@ -700,6 +853,19 @@ defmodule FermixCore.Providers.ModelCatalog do
       nil -> true
     end
   end
+
+  @doc """
+  Whether `model_id` takes an inline PDF on a provider whose wire does
+  (`Descriptor.documents?/1`). Vercel AI Gateway sends a `spacexai/` model to
+  xAI, which takes no inline PDF (the direct `:xai` descriptor's `documents?`
+  is false for the same reason): the gateway answered HTTP 400 "Bad Request"
+  for Grok 4.7 and Grok 4.3 on 2026-11-24, though its listing names `pdf`
+  among Grok 4.3's inputs (M105 §11.8). Every other model is `true`, and its
+  provider's refusal is the reply.
+  """
+  @spec documents?(atom(), String.t()) :: boolean()
+  def documents?(:vercel, "spacexai/" <> _model), do: false
+  def documents?(provider, model_id) when is_atom(provider) and is_binary(model_id), do: true
 
   # Quiet lookup — no unknown_model telemetry. Callers that need that signal
   # use context_window_for/2, which wraps this and emits on a miss. Returns nil

@@ -29,6 +29,9 @@ defmodule FermixCore.Home.JoinTest do
 
     opts = [
       now: @now,
+      # The relay has a session up with the server, so a link it holds is one
+      # its server knows (`reached/0`).
+      link_status: reached(),
       # No relay runs here: letting go of the link stops none, and says so.
       release: fn which ->
         send(test, {:released, which})
@@ -177,6 +180,12 @@ defmodule FermixCore.Home.JoinTest do
     :ok = Join.start(ctx.home, code(), ctx.opts)
     :ok = Join.record(ctx.home, "awaiting_approval", %{"sas" => "482913"})
     assert Join.view(ctx.home)["sas"] == "482913"
+
+    # The owner adds it in Always On on a computer already in the home,
+    # never on the server, which has no screen (M102 N9, D7).
+    assert Join.view(ctx.home)["sentence"] ==
+             "Waiting for you to add this computer in Always On on a computer already in " <>
+               "your Fermix."
 
     :ok = Join.record(ctx.home, "denied", %{"sentence" => "studio-mac did not add it."})
 
@@ -446,6 +455,29 @@ defmodule FermixCore.Home.JoinTest do
       refute_received {:released, _which}
     end
 
+    # M102 J2, D4: the removal reaches this computer only as the server's
+    # answer to its relay's dial, which the link then keeps. Until the relay
+    # reached the server, an unmarked link may be one it already removed, so
+    # the join says it cannot tell yet, and leaves everything as it is.
+    test "a link whose relay has not reached its server yet is refused as not known", ctx do
+      for status <- [primary(:renewing), primary(:unreachable), nil] do
+        opts = [link_status: fn -> %{primary: status, desktops: [], enrollment: nil} end]
+
+        assert Join.start(ctx.home, code(), opts ++ ctx.opts) == {:error, :server_not_reached}
+      end
+
+      assert Join.error_sentence(:server_not_reached) ==
+               "Fermix has not reached your server from this computer yet, so it cannot tell " <>
+                 "whether your server still knows this computer. Try again in a minute."
+
+      assert {:ok, %{revoked: false}} = DesktopLink.read(ctx.home)
+      assert {:ok, %{public: kept}} = ComputerKey.read(ctx.home, store: :keyring)
+      assert kept == ctx.old
+      refute Join.present?(ctx.home)
+      refute_received {:released, _which}
+      refute_received :restarted
+    end
+
     # While Fermix runs, its relay may bring a session up between the join's
     # read of the link and its letting go: a server restored to a backup
     # that knows this computer again. The relay answers for the link it
@@ -538,6 +570,13 @@ defmodule FermixCore.Home.JoinTest do
     link = path |> File.read!() |> Jason.decode!()
     File.write!(path, Jason.encode!(Map.put(link, "revoked", true)))
   end
+
+  # The relay's word for the link, as `Home.Link.status/0` gives it: a
+  # session up with its server (`reached/0`), or `primary(status)`.
+  defp reached, do: fn -> %{primary: primary(:connected), desktops: [], enrollment: nil} end
+
+  defp primary(status),
+    do: %{name: "studio-mac", connected: status == :connected, status: status}
 
   # This machine's history store, holding the mark 7 of an earlier home.
   defp marked_spool!(home) do

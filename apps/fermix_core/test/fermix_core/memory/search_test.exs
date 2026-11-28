@@ -146,6 +146,41 @@ defmodule FermixCore.Memory.SearchTest do
     assert results == Enum.sort_by(results, & &1.rank)
   end
 
+  # A compaction keeps its checkpoint beside the conversation's messages, and
+  # the compacted transcript already carries the same summary as a message.
+  test "history search reads chat messages, not a compaction's checkpoint rows", %{repo: repo} do
+    insert_message(repo, "telegram", "chat-1", "root", "the harbour ferry timetable")
+
+    assert {:ok, _checkpoint} =
+             Repo.insert_message(
+               %{
+                 agent_id: "main",
+                 owner_id: "default",
+                 channel: "telegram",
+                 chat_id: "chat-1",
+                 thread_scope: "root",
+                 sender: "compactor",
+                 role: "system",
+                 kind: "checkpoint_summary",
+                 content: "earlier turns covered the harbour ferry timetable"
+               },
+               server: repo
+             )
+
+    results =
+      Search.query(
+        "ferry",
+        repo: repo,
+        source: :history,
+        scope: :owner,
+        limit: 5,
+        agent_id: "main",
+        owner_id: "default"
+      )
+
+    assert [%{source: :messages, content: "the harbour ferry timetable"}] = results
+  end
+
   test "source all expands only candidate windows that can still affect the final limit" do
     {:ok, repo} =
       FakeSearchRepo.start_link(

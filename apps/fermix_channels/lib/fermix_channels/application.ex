@@ -17,6 +17,7 @@ defmodule FermixChannels.Application do
   alias FermixChannels.Mobile.Supervisor, as: MobileSupervisor
   alias FermixCore.Home.DesktopLink
   alias FermixCore.Home.Role
+  alias FermixCore.PhoneCalls.Manager, as: PhoneCallsManager
   alias FermixCore.Readiness
   alias FermixCore.Setup.ConfigStore
 
@@ -25,6 +26,16 @@ defmodule FermixChannels.Application do
   @compiled_env Mix.env()
   @held_key {__MODULE__, :held_at_boot}
   @started_key {__MODULE__, :started}
+
+  # An orderly stop stops this application before the core it needs, and
+  # with it the backend a phone call's turns run on, so the call in progress
+  # is drained here first (`FermixCore.PhoneCalls.Manager.drain_for_stop/0`,
+  # which answers at once when the web application drained it already).
+  @impl true
+  def prep_stop(state) do
+    _drained = PhoneCallsManager.drain_for_stop()
+    state
+  end
 
   @impl true
   def start(_type, _args) do
@@ -113,6 +124,15 @@ defmodule FermixChannels.Application do
       :fermix_core,
       :cue_follow_up_sender,
       FermixChannels.Gateway.OwnerInboxApproval
+    )
+
+    # A heal's proposal waiting on its card in the Fermix app is resolved
+    # there when it ends by any road (M106 §8): core tells this listener,
+    # registered here for the same reason, and with none tells nobody.
+    Application.put_env(
+      :fermix_core,
+      :app_approval_listener,
+      FermixChannels.Companion.Approvals
     )
 
     # Every waiting proposal is offered to the Mac app's chat, and its end told
@@ -235,7 +255,8 @@ defmodule FermixChannels.Application do
          serve?: daemon_boot?(),
          settle?: settles?(),
          boot_epoch: request_boot_epoch,
-         tunnel: tunnel},
+         tunnel: tunnel,
+         approvals_durable: approvals_durable(settles?())},
         # The Fermix app's browser host socket; it runs whenever the daemon does.
         {BrowserHost.Supervisor, serve?: daemon_boot?()},
         FermixChannels.Gateway.BackgroundSupervisor,
@@ -386,6 +407,12 @@ defmodule FermixChannels.Application do
   defp daemon_boot? do
     @compiled_env != :test and Application.get_env(:fermix_core, :daemon_socket_enabled, false)
   end
+
+  # A heal's proposals waiting in the app are offered again after every
+  # hello from their record (M106 §8) on every real boot; a test tree offers
+  # what each test gives its own store.
+  defp approvals_durable(true), do: &Companion.Approvals.job_change_cards/1
+  defp approvals_durable(false), do: nil
 
   # Every real boot settles companion and phone turns, a `:source` boot that
   # serves no daemon socket included; a test tree starts the settlement each

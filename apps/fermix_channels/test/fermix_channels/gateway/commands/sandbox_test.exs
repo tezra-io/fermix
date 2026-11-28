@@ -14,11 +14,14 @@ defmodule FermixChannels.Gateway.Commands.SandboxTest do
   alias FermixCore.Cues.Pins
   alias FermixCore.Cues.Proposals
   alias FermixCore.Cues.Watchers
+  alias FermixCore.Delivery.OwnerInbox
+  alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesFollowUpSql
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.PathPolicy
   alias FermixTestSupport.CueFixtures
+  alias FermixTestSupport.HealCards
   alias FermixTestSupport.MandateFixtures
 
   @bare_owner "owner-bare"
@@ -407,6 +410,193 @@ defmodule FermixChannels.Gateway.Commands.SandboxTest do
     end
   end
 
+  # M106 §5.7, D5 (stage S4b): a heal's proposal is answered on its card, by
+  # the same commands and taps as a watcher's card, through the same rail,
+  # only from the DM it went to, with no model between the answer and the
+  # change. The cues feature is off here, as it is by default.
+  describe "a heal's proposal card" do
+    setup do
+      heal_card_setup(%{platform: "telegram", chat_id: "owner-1", user_id: "owner-1"})
+    end
+
+    test "/confirm with its token makes the recorded change, and a second says so", ctx do
+      refute FermixCore.Cues.enabled?()
+
+      assert :ok = dispatch_proposal(dm("/confirm #{ctx.token}"), ctx)
+      assert_receive {:sandbox_reply, "Fermix made the change it proposed to job " <> _rest}
+      assert {:ok, %{schedule_expr: "every 2 hours"}} = job(ctx)
+
+      assert {:ok, %{decided_from: "telegram:owner-1:owner-1", state: "watching"}} =
+               Repo.job_heals_call({:get, ctx.heal.id}, server: ctx.repo)
+
+      assert :ok = dispatch_proposal(dm("/confirm #{ctx.token}"), ctx)
+      assert_receive {:sandbox_reply, "Fermix already made this change to job " <> _rest}
+    end
+
+    test "a tap is answered on the card it came from", ctx do
+      tap = %{
+        dm("/deny #{ctx.token}")
+        | metadata: %{user_id: "owner-1", approval_message_id: "61"}
+      }
+
+      assert :ok = dispatch_proposal(tap, ctx)
+
+      assert_receive {:sandbox_reply, {:approval_answer, "61", line}}
+      assert line =~ ~s(Job "#{ctx.job.name}" is left as it is)
+      assert {:ok, %{schedule_expr: "every 1 hour"}} = job(ctx)
+    end
+
+    test "from a group chat it is refused and changes nothing; the DM still answers it", ctx do
+      group = message("/confirm #{ctx.token}", user_id: "owner-1")
+      assert :ok = dispatch_proposal(group, ctx)
+
+      assert_receive {:sandbox_reply,
+                      "Answer it from the chat Fermix sent it to; nothing was changed."}
+
+      assert {:ok, %{schedule_expr: "every 1 hour"}} = job(ctx)
+
+      assert :ok = dispatch_proposal(dm("/confirm #{ctx.token}"), ctx)
+      assert_receive {:sandbox_reply, "Fermix made the change it proposed to job " <> _rest}
+    end
+
+    test "/always takes nothing from it, by token or bare, and it still waits", ctx do
+      assert :ok = dispatch_proposal(dm("/always #{ctx.token}"), ctx)
+      assert_receive {:sandbox_reply, "Only a follow-up's card offers Always allow; nothing ran."}
+
+      assert :ok = dispatch_proposal(dm("/always"), ctx)
+
+      assert_receive {:sandbox_reply,
+                      "Nothing here offers Always allow: only a follow-up's card waiting in " <>
+                        "this chat does."}
+
+      assert {:ok, %{state: "waiting"}} =
+               Repo.job_heals_call({:get, ctx.heal.id}, server: ctx.repo)
+    end
+
+    test "a tap after the owner edited the job says the proposal is closed, on the card", ctx do
+      {:ok, _edited} =
+        JobsRegistry.update_job(ctx.job.id, %{task_prompt: "Read the tide board."},
+          repo: ctx.repo,
+          scheduler: nil
+        )
+
+      tap = %{
+        dm("/confirm #{ctx.token}")
+        | metadata: %{user_id: "owner-1", approval_message_id: "62"}
+      }
+
+      assert :ok = dispatch_proposal(tap, ctx)
+
+      assert_receive {:sandbox_reply, {:approval_answer, "62", line}}
+      assert line =~ "is no longer the version Fermix drew this change for"
+      assert {:ok, %{schedule_expr: "every 1 hour"}} = job(ctx)
+    end
+  end
+
+  # M106 §8, D12 (stage S6): a heal's card in the Fermix app is answered by
+  # the heal's id from the Mac chat or a paired phone, the app's one origin,
+  # and from no other place, and never from a client Fermix itself started.
+  describe "a heal's card in the Fermix app" do
+    setup do
+      heal_card_setup(OwnerInbox.app_origin("main"))
+    end
+
+    test "the Mac chat's Approve makes the recorded change", ctx do
+      assert :ok = dispatch_proposal(app_message("companion", "/confirm #{ctx.heal.id}"), ctx)
+      assert_receive {:sandbox_reply, "Fermix made the change it proposed to job " <> _rest}
+      assert {:ok, %{schedule_expr: "every 2 hours"}} = job(ctx)
+
+      assert {:ok, %{decided_from: "companion:main:app", state: "watching"}} =
+               Repo.job_heals_call({:get, ctx.heal.id}, server: ctx.repo)
+    end
+
+    test "a paired phone's Deny leaves the job as it is", ctx do
+      assert :ok = dispatch_proposal(app_message("mobile", "/deny #{ctx.heal.id}"), ctx)
+      assert_receive {:sandbox_reply, "Job " <> rest}
+      assert rest =~ "is left as it is"
+
+      assert {:ok, %{state: "closed", outcome: "skipped"}} =
+               Repo.job_heals_call({:get, ctx.heal.id}, server: ctx.repo)
+    end
+
+    test "a DM or the cli chat cannot answer it, and it still waits", ctx do
+      {:ok, [cli]} = FermixChannels.CLI.parse_input("/confirm #{ctx.heal.id}", session_id: "main")
+
+      for elsewhere <- [dm("/confirm #{ctx.heal.id}"), cli] do
+        assert :ok = dispatch_proposal(elsewhere, ctx)
+        assert_receive {:sandbox_reply, "That card is not waiting in this chat; nothing ran."}
+      end
+
+      assert {:ok, %{schedule_expr: "every 1 hour"}} = job(ctx)
+
+      assert {:ok, %{state: "waiting", answer: nil}} =
+               Repo.job_heals_call({:get, ctx.heal.id}, server: ctx.repo)
+    end
+
+    test "a client Fermix started cannot answer it", ctx do
+      started = app_message("companion", "/confirm #{ctx.heal.id}", caller: :daemon_descendant)
+
+      assert {:error, :unauthorized} = dispatch_proposal(started, ctx)
+      assert_receive {:sandbox_reply, "This command must come from the owner in person" <> _rest}
+      assert {:ok, %{schedule_expr: "every 1 hour"}} = job(ctx)
+    end
+  end
+
+  # M19 §9.5: a card a turn raised stays its own transport's, though the
+  # Fermix app's two transports share one inbox for the cards no turn raised.
+  test "a grant a phone's turn proposed is confirmed from the phone alone", %{root: root} do
+    assert :ok = dispatch(app_message("mobile", "/grant path #{root}"))
+    assert_receive {:sandbox_approval, %{token: token}}
+    assert_receive {:sandbox_reply, _confirm_text}
+
+    assert :ok = dispatch(app_message("companion", "/confirm #{token}"))
+    assert_receive {:sandbox_reply, "Confirmation failed: :origin_mismatch"}
+
+    assert :ok = dispatch(app_message("mobile", "/confirm #{token}"))
+    assert_receive {:sandbox_reply, "Sandbox updated." <> _rest}
+  end
+
+  # The eval home's inbox is the local cli chat: a card held to it is
+  # answered by a `/confirm` typed there, as `fermix ask` types it, with no
+  # model; another session of the cli is another chat.
+  describe "a heal's card held to the local cli chat" do
+    # Held as the heal run holds it: to the chat core's rule names for the
+    # local cli inbox, which must be the one a typed command carries.
+    setup do
+      # A session of the cli no other test types in: a bare answer counts the
+      # live confirmations of its chat, and that store is the application's.
+      {:ok, origin} =
+        OwnerInbox.answer_origin(%{platform: "cli", destination: "tides-cli"})
+
+      heal_card_setup(origin)
+    end
+
+    test "a bare /confirm typed there answers it", ctx do
+      {:ok, [elsewhere]} = FermixChannels.CLI.parse_input("/confirm", session_id: "tides-2")
+      assert :ok = dispatch_proposal(elsewhere, ctx)
+      assert_receive {:sandbox_reply, "Nothing is waiting for your answer here."}
+
+      {:ok, [typed]} = FermixChannels.CLI.parse_input("/confirm", session_id: "tides-cli")
+      assert :ok = dispatch_proposal(typed, ctx)
+      assert_receive {:sandbox_reply, "Fermix made the change it proposed to job " <> _rest}
+      assert {:ok, %{schedule_expr: "every 2 hours"}} = job(ctx)
+
+      assert {:ok, %{decided_from: "cli:tides-cli:cli"}} =
+               Repo.job_heals_call({:get, ctx.heal.id}, server: ctx.repo)
+    end
+  end
+
+  # A heal's proposal waiting on its card in `origin`'s chat, on a store of
+  # its own; the rail's seams for it.
+  defp heal_card_setup(origin) do
+    %{repo: repo} = CueFixtures.start_repo("gateway_heal")
+    card = HealCards.waiting_card!(repo, origin)
+    now = DateTime.add(HealCards.delivered_at(), 600, :second)
+    Map.merge(card, %{repo: repo, opts: [repo: repo, now: now, scheduler: nil]})
+  end
+
+  defp job(ctx), do: Repo.get_scheduled_job(ctx.job.id, server: ctx.repo)
+
   # A watcher whose follow-up's card waits in owner-1's DM, sent with a token
   # the test holds.
   defp follow_up_setup do
@@ -528,6 +718,29 @@ defmodule FermixChannels.Gateway.Commands.SandboxTest do
       assert_receive {:sandbox_reply, "Confirmed. github_create_issue ran:\n" <> _framed}
     end
 
+    # M106 §5.7: a heal's card waits beside a watcher's, and the list names both.
+    test "with a watcher's card and a heal's card, it lists both; each id answers its own", ctx do
+      repo = Keyword.fetch!(ctx.opts, :repo)
+      origin = %{platform: "telegram", chat_id: @bare_owner, user_id: @bare_owner}
+      %{heal: heal, job: job} = HealCards.waiting_card!(repo, origin)
+      opts = Keyword.put(ctx.opts, :scheduler, nil)
+
+      assert :ok = dispatch_with_context(dm("/deny", @bare_owner), cue_proposal_opts: opts)
+      assert_receive {:sandbox_reply, listing}
+      assert listing =~ "Several things are waiting for your answer here:"
+      assert listing =~ ~r{for release-watch\? /deny cpr_\w+}
+      assert listing =~ ~s(- Change job "#{job.name}"? /deny #{heal.id})
+
+      assert :ok =
+               dispatch_with_context(dm("/deny #{heal.id}", @bare_owner), cue_proposal_opts: opts)
+
+      assert_receive {:sandbox_reply, "Job " <> left}
+      assert left =~ "is left as it is"
+
+      assert :ok = dispatch_with_context(dm("/deny", @bare_owner), cue_proposal_opts: opts)
+      assert_receive {:sandbox_reply, "Denied. github_create_issue will not run."}
+    end
+
     test "a card's id answers only from the chat it went to", ctx do
       assert :ok = dispatch_proposal(dm("/deny", @bare_owner), ctx)
       assert_receive {:sandbox_reply, "Denied. " <> _rest}
@@ -569,6 +782,21 @@ defmodule FermixChannels.Gateway.Commands.SandboxTest do
   end
 
   defp proposal_args, do: %{"owner" => "example-org", "repo" => "ops", "title" => "Phoenix 2.0"}
+
+  # A command typed in the Fermix app: on the Mac chat (`companion`) or a
+  # paired phone (`mobile`), in the app's chat `main`, with no user id, each
+  # transport authenticated by itself (the phone's device stands in here).
+  defp app_message(channel, content, metadata \\ []) do
+    Message.new!(%{
+      id: "app-#{System.unique_integer([:positive])}",
+      content: content,
+      sender: "Companion owner",
+      channel: channel,
+      chat_id: "main",
+      reply_target: "main",
+      metadata: Map.new(metadata)
+    })
+  end
 
   defp dm(content, owner \\ "owner-1") do
     %{message(content, user_id: owner) | chat_id: owner, reply_target: owner}
@@ -616,6 +844,11 @@ defmodule FermixChannels.Gateway.Commands.SandboxTest do
       2_000 -> flunk("no confirm reply within 2s")
     end
   end
+
+  # A phone's command is the operator's by its paired device, which the
+  # transport proves and this test stands in for.
+  defp build_authorization(%Message{channel: "mobile"}),
+    do: %FermixChannels.Gateway.Authorization{role: :operator, trust: :operator}
 
   defp build_authorization(message) do
     case message |> Map.from_struct() |> Source.from_message() |> Authorizer.resolve() do

@@ -62,27 +62,29 @@ a machine-mode verb: it becomes the daemon and never returns an envelope.
 
 `fermix computer join` joins this computer to a Fermix that already runs,
 with the code Add a computer opened there. It is not a machine-mode verb
-either: it runs with Fermix stopped here and no engine tree, writes this
-computer's key to the secret store and its join to the home, and prints one
-sentence. The code is read from stdin, never from argv: on a terminal it is
-asked for with echo off (the prompt on stderr), and from a pipe or a file it
-is the first line. It is asked for only once the verb found Fermix stopped.
-The next start of Fermix dials the server and shows six digits, and the
-owner adds this computer on the server only if the same digits show there.
-A link to a server is a home of its own, but not one whose server no longer
-knows this computer (the owner removed it there, or the server was restored
-from before it joined), which the link records once Fermix has run here
-since: once the code is one this computer can join with, it first lets go
-of that link here as a disconnect does (its key, what the server may use
-here, the link), then joins.
-Exit `0` done; `1` refused, with one sentence on stderr after `fermix
-computer join: ` (Fermix runs here; no code read; a home of its own; a code
-that is not a computer's or expired; a secret store that cannot keep the
-key; a link it could not let go of). A refusal of the home or the code
-leaves everything as it was. A letting go that fails part-way leaves the
-link, and the next join finishes letting go of it; a refusal after the link
-went (the secret store, say) leaves this computer the primary of its own
-home, with no link. `2` a usage error, a code given as an argument among them.
+either: it joins as the apps do, through Fermix running here, and prints one
+sentence. It says `hello` to this home's control socket first, and only once
+Fermix answered reads the code: from stdin, never from argv; on a terminal
+it is asked for with echo off (the prompt on stderr), and from a pipe or a
+file it is the first line. It sends the code as the management
+`computer.join.start` and prints "This computer is joining your Fermix. Once
+Fermix restarts here, fermix home status shows six digits: type them in
+Always On on a computer already in your Fermix." Fermix then restarts, dials
+the server and shows the six digits, and the owner adds this computer in
+Always On on a computer already in the home only if the same digits show
+there. Every refusal of the join is the running Fermix's own sentence
+(`computer.join.start`'s): a home of its own (a link to a server is one,
+but not one whose server no longer knows this computer, which the join
+first lets go of as a disconnect does, nor one whose relay has not reached
+its server since Fermix started here, which is refused as not known yet), a
+code that is not a computer's or expired, a secret store that cannot keep
+the key, a link it could not let go of.
+Exit `0` the join started; `1` refused, with one sentence on stderr after
+`fermix computer join: ` (Fermix is not running here, "Fermix is not running
+here. Start it, then run this again.", and then no code is read; Fermix
+could not tell whether it runs; no code read; the engine's refusal). A
+refusal of the home or the code leaves everything as it was. `2` a usage
+error, a code given as an argument among them.
 
 ## The action result
 
@@ -370,7 +372,10 @@ the action's `needs` lists, from flags only: `--recovery-passphrase-file
 PATH` the recovery passphrase (a new one for `change-passphrase`, the backup
 settings' Change, and for the first `move-now`), and `--sas DIGITS` the six digits the
 computer that asks to join shows (`approve-computer`; they are no secret,
-and on a terminal the verb asks for them). A need no flag gives is a usage error, exit
+and on a terminal the verb asks for them). `join` (Join again, on a computer
+its server removed) needs the code Add a computer opened, which no flag
+gives: on a terminal the verb asks for it with echo off, and otherwise it
+names `fermix computer join`, which reads the code piped in. A need no flag gives is a usage error, exit
 `2`, naming the flag. A step whose `confirm` is not null needs `--yes`;
 without it the verb refuses `confirm_required`. A passphrase typed as an
 argument is a usage error. `--wait` follows the step while the screen's

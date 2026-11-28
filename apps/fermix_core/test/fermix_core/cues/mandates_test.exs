@@ -92,6 +92,19 @@ defmodule FermixCore.Cues.MandatesTest do
     assert status(fixture, approve, configured_owners: %{}, app_surface?: true) == :active
   end
 
+  # M106 §8: a mandate's proposal is a proposal card, which the phone's wire
+  # does not carry, so a paired phone is no chat to ask in: it changes nothing.
+  test "a paired phone changes nothing for approve mode's reach", %{fixture: fixture} do
+    approve = %{"mode" => "approve"}
+    paired = [jobs_config: [delivery_channels: FermixTestSupport.AppInbox.channels()]]
+
+    assert {:inactive, _sentence} =
+             status(fixture, approve, [configured_owners: %{}, app_surface?: false] ++ paired)
+
+    assert status(fixture, approve, [configured_owners: %{"signal" => "+15550100"}] ++ paired) ==
+             :active
+  end
+
   # The Linux desktop app's package carries the same engine a headless server's
   # package does, and the earlier Flatpak sat beside it, so a package build
   # alone says nothing about it: a headless server with the package and no app

@@ -51,7 +51,20 @@ FERMIX_BIN=/usr/bin/fermix
 RUN_DIR=/run/fermix
 CODE_FILE=$RUN_DIR/enroll.code
 UNIT_DIR=/etc/systemd/system
-INSTALL_URL=https://fermix.ai/install
+# Where a release comes from and who vouches for it: the digest table
+# fermix.ai serves, and the release's own files on its GitHub release, signed
+# there by the release workflow (release.yml on the release's v* tag of this
+# repository, as GitHub's OIDC issuer vouches for it). Root installs a file
+# only when they agree (install_checked): the table's sha256, and at every
+# update that signature, checked with the cosign the package ships and a
+# Sigstore cache in root's own folder. First boot writes these into the
+# update script as they are here.
+RELEASES_URL=https://fermix.ai/install/releases
+RELEASE_REPO=tezra-io/fermix
+RELEASE_WORKFLOW=.github/workflows/release.yml
+RELEASE_ISSUER=https://token.actions.githubusercontent.com
+COSIGN=/usr/lib/fermix/cosign
+SIGSTORE_DIR=/var/lib/fermix-update/sigstore
 CODE_PREFIX=fxenroll1.
 CODE_MIN=42
 CODE_MAX=2048
@@ -70,7 +83,8 @@ RESTORE_CLI_HOME=$ACCOUNT_HOME/.fermix-restore
 SWAP_FILE=/swapfile
 SWAP_SIZE=2G
 # Updates: Debian's own through unattended-upgrades, Fermix's through its
-# installer, by root timers every five minutes and every night at 04:00 UTC.
+# checked package (install_checked), by root timers every five minutes and
+# every night at 04:00 UTC.
 UPGRADES_CONF=/etc/apt/apt.conf.d/21fermix-always-on
 UPDATE_SCRIPT=/usr/local/sbin/fermix-update
 # Fermix's Linux sandbox holds commands only from Landlock ABI 3 (Linux 6.2);
@@ -614,22 +628,147 @@ add_swap() {
   fi
 }
 
-# 4. The signed Linux package, through the same installer every host uses:
-# the release it was given, which the computer that set it up runs, so the
-# home can always move back there; the latest without one.
-install_fermix() {
-  set -- --no-setup
-  if [ -n "$RELEASE" ]; then
-    say "Installing Fermix $RELEASE, the release your computer runs, with $INSTALL_URL"
-    set -- "$@" --version "$RELEASE"
-  else
-    say "Installing Fermix with $INSTALL_URL"
+# The checks first boot and the update script share, so the server has one
+# install path, install_checked: the update script carries them after its
+# constants (write_update_script), and first boot reads them into its own
+# shell (install_fermix). They need WORK, the run's own directory, and the
+# release constants above.
+release_checks() {
+  cat <<'FERMIX_CHECKS'
+# The release table, into the run's directory.
+fetch_table() {
+  curl -fsSL --proto '=https' "$RELEASES_URL" -o "$WORK/releases" &&
+    [ "$(awk 'NR == 1 { print; exit }' "$WORK/releases")" = "format 1" ]
+}
+
+# The sha256 the table lists for file $2 of release $1, or nothing unless it
+# lists exactly one, as the installer reads it.
+table_digest() {
+  awk -v version="$1" -v file="$2" '
+    NR > 1 && NF == 3 && $1 == version && $3 == file { digest = $2; rows++ }
+    END { if (rows == 1) print digest }
+  ' "$WORK/releases"
+}
+
+# File $1 of release $2, from that release's GitHub release, into WORK.
+release_file() {
+  curl -fsSL --proto '=https' "https://github.com/$RELEASE_REPO/releases/download/v$2/$1" -o "$WORK/$1"
+}
+
+# Whether cosign's Sigstore cache is a folder root can read and write: made,
+# root's alone, when it is missing; one in any other shape is refused, never
+# repaired.
+sigstore_ready() {
+  if [ ! -e "$SIGSTORE_DIR" ]; then install -d -m 0700 "$SIGSTORE_DIR" || return 1; fi
+  [ -d "$SIGSTORE_DIR" ] && [ -r "$SIGSTORE_DIR" ] && [ -w "$SIGSTORE_DIR" ] && [ -x "$SIGSTORE_DIR" ]
+}
+
+# File $2 of Fermix $1 (the $3 in a sentence) into WORK, kept only when the
+# roots its verifier $4 names agree. digest-only: its sha256 is the one the
+# table, read already, lists. cosign: that, and its signature is the release
+# workflow's (signed_by_the_release). Only first boot passes digest-only: the
+# first install, where no cosign exists before the package does and the
+# owner's curl | sudo sh has trusted the site already; every update passes
+# cosign. 1, with REFUSED the clause that names the check that failed, when
+# one does.
+fetch_checked() {
+  case "$4" in
+    digest-only | cosign) ;;
+    *) fail "fetch_checked takes digest-only or cosign as its verifier, not $4." ;;
+  esac
+  digest=$(table_digest "$1" "$2")
+  if [ -z "$digest" ]; then
+    REFUSED="$RELEASES_URL lists no single $3 for Fermix $1"
+    return 1
   fi
+  if ! release_file "$2" "$1"; then
+    REFUSED="the $3 for Fermix $1 could not be downloaded from its GitHub release (curl's message above says why)"
+    return 1
+  fi
+  if [ "$(sha256sum "$WORK/$2" | cut -d ' ' -f 1)" != "$digest" ]; then
+    REFUSED="the $3 for Fermix $1 is not the one $RELEASES_URL lists"
+    return 1
+  fi
+  [ "$4" = digest-only ] || signed_by_the_release "$@"
+}
+
+# The release workflow's signature on file $2 of Fermix $1 (the $3), checked
+# as fermix upgrade and the release workflow check one: cosign verify-blob,
+# the certificate's identity release.yml on the tag v$1 of this repository
+# and its issuer GitHub's OIDC, with the cosign the installed package ships
+# and its Sigstore cache (TUF_ROOT) in root's own folder, so the engine
+# account can neither seed nor replace what cosign trusts.
+signed_by_the_release() {
+  if [ ! -x "$COSIGN" ]; then
+    REFUSED="$COSIGN, the cosign the Fermix package ships, is not on this server, so the signature of the $3 for Fermix $1 could not be checked"
+    return 1
+  fi
+  if ! sigstore_ready; then
+    REFUSED="cosign's Sigstore cache, $SIGSTORE_DIR, is not a folder root can read and write, so the signature of the $3 for Fermix $1 could not be checked"
+    return 1
+  fi
+  if ! release_file "$2.sig" "$1" || ! release_file "$2.pem" "$1"; then
+    REFUSED="the signature of the $3 for Fermix $1 could not be downloaded from its GitHub release (curl's message above says why)"
+    return 1
+  fi
+  if ! TUF_ROOT=$SIGSTORE_DIR "$COSIGN" verify-blob --certificate "$WORK/$2.pem" --signature "$WORK/$2.sig" \
+    --certificate-identity "https://github.com/$RELEASE_REPO/$RELEASE_WORKFLOW@refs/tags/v$1" \
+    --certificate-oidc-issuer "$RELEASE_ISSUER" "$WORK/$2" </dev/null 9>&-; then
+    REFUSED="the $3 for Fermix $1 is not signed by the Fermix release workflow (cosign's message above says why)"
+    return 1
+  fi
+}
+
+# Fermix $1's Linux package for this server, kept by fetch_checked with the
+# verifier $2, installed by apt as the installer installs one: nothing else is
+# removed to make room. The package restarts nothing, so a running engine is
+# untouched until its restart. 1, with REFUSED, when a check refused it,
+# which installed nothing; an apt-get that fails fails the run, since its
+# exit does not say whether dpkg had begun. apt's output is kept in WORK and
+# shown only then. The lock's descriptor is closed for cosign and apt-get, so
+# nothing they leave running holds it.
+install_checked() {
+  if ! arch=$(dpkg --print-architecture); then
+    REFUSED="dpkg could not name this server's architecture"
+    return 1
+  fi
+  package=fermix_$1_$arch.deb
+  fetch_checked "$1" "$package" package "$2" || return 1
+  # apt reads a local package as its own account (_apt), which must reach it:
+  # the run's directory may be passed through but not listed, and its other
+  # files stay root's alone.
+  chmod 0711 "$WORK"
+  chmod 0644 "$WORK/$package"
+  if ! apt-get -qq install -y --no-remove "$WORK/$package" </dev/null >"$WORK/apt-get.out" 2>&1 9>&-; then
+    cat "$WORK/apt-get.out" >&2
+    fail "apt-get could not install the package for Fermix $1; its message above says why."
+  fi
+}
+FERMIX_CHECKS
+}
+
+# 4. The signed Linux package of the release it was given, which the computer
+# that set it up runs, so the home can always move back there (the latest the
+# table lists without one), through the one install the update script runs
+# too (install_checked): the package from that release's GitHub release,
+# installed only when its sha256 is the one fermix.ai lists. This is the first
+# install, so the site's digest alone vouches for it: no cosign exists before
+# the package does, and the owner's curl | sudo sh has trusted the site
+# already. Every update checks the release workflow's signature as well.
+install_fermix() {
   apt_install ca-certificates curl
-  curl -fsSL --proto '=https' "$INSTALL_URL" -o "$WORK/install.sh" ||
-    fail "Could not download the Fermix installer from $INSTALL_URL."
-  sh "$WORK/install.sh" "$@" </dev/null || fail "The Fermix installer stopped; its message above says why."
-  [ -x "$FERMIX_BIN" ] || fail "The installer finished, but $FERMIX_BIN is not there."
+  eval "$(release_checks)"
+  fetch_table || fail "Fermix is not installed: the release table could not be read from $RELEASES_URL."
+  if [ -n "$RELEASE" ]; then
+    say "Installing Fermix $RELEASE, the release your computer runs, checked against $RELEASES_URL"
+  else
+    RELEASE=$(awk 'NR > 1 && NF == 2 && $1 == "latest" { print $2; exit }' "$WORK/releases")
+    matches "$RELEASE" '^[0-9]+\.[0-9]+\.[0-9]+$' ||
+      fail "Fermix is not installed: $RELEASES_URL names no latest release."
+    say "Installing Fermix $RELEASE, the latest release, checked against $RELEASES_URL"
+  fi
+  install_checked "$RELEASE" digest-only || fail "Fermix is not installed: $REFUSED."
+  [ -x "$FERMIX_BIN" ] || fail "apt-get installed the package for Fermix $RELEASE, but $FERMIX_BIN is not there."
 }
 
 # Whether apt's effective configuration sets APT::Periodic::$1 to 1.
@@ -652,7 +791,8 @@ update_script_only() {
 }
 
 # The script fermix-update.timer and fermix-follow.timer run: first boot's
-# account, home, binary and installer address, then a fixed body.
+# account, home and binary, where a release comes from and who signs it, the
+# checks first boot installs with (release_checks), then a fixed body.
 write_update_script() {
   install -d -m 0755 "$(dirname "$UPDATE_SCRIPT")"
   {
@@ -662,18 +802,27 @@ write_update_script() {
 # runs at 04:00 UTC; with --follow, the follow run fermix-follow.timer starts
 # every five minutes, which installs and restarts but never reboots; with
 # --release X [--ahead-of-apps], the owner's own update to release X, behind
-# the same gate. Written by Fermix's first boot, which writes it again
-# whenever it runs, and by each release this script installs
-# (--update-script-only).
+# the same gate. It installs a release only when fermix.ai's digest and the
+# release workflow's cosign signature agree. Written by Fermix's first boot,
+# which writes it again whenever it runs, and by each release this script
+# installs (--update-script-only).
 set -eu
 
 ENGINE_USER=$ENGINE_USER
 ACCOUNT_HOME=$ACCOUNT_HOME
 FERMIX_HOME_DIR=$FERMIX_HOME_DIR
 FERMIX_BIN=$FERMIX_BIN
-INSTALL_URL=$INSTALL_URL
+RELEASES_URL=$RELEASES_URL
+RELEASE_REPO=$RELEASE_REPO
+RELEASE_WORKFLOW=$RELEASE_WORKFLOW
+RELEASE_ISSUER=$RELEASE_ISSUER
+COSIGN=$COSIGN
+SIGSTORE_DIR=$SIGSTORE_DIR
+
 EOF
+    release_checks
     cat <<'FERMIX_UPDATE'
+
 REBOOT_FLAG=/run/reboot-required
 # Whether a move is under way is the engine account's answer, so it may hold a
 # root reboot off only this many nights in a row, counted in root's own file.
@@ -685,12 +834,8 @@ DEFERRALS_MAX=2
 # this long, half its unit's 30 minutes, so it keeps the rest to update.
 LOCK_FILE=/run/fermix-update.lock
 LOCK_WAIT_SECONDS=900
-# The release table the installer trusts, and where every release's files
-# are, as the installer builds their address: a hand update reads which
-# releases exist from it, and each install checks the release's own update
-# script against it.
-RELEASES_URL=https://fermix.ai/install/releases
-ARTIFACT_ORIGIN=https://github.com/tezra-io/fermix/releases/download/
+# The release's Always On server script, which each install fetches and
+# checks as it checks the package, then runs to write this script again.
 ALWAYS_ON_FILE=fermix_always_on.sh
 WORK=""
 PHASE=""
@@ -701,10 +846,11 @@ WAIT_S=""
 # Set when the engine's answer or its restart failed: the night still decides
 # the reboot, then ends non-zero.
 ENGINE_FAILED=0
-# Set when the installer itself could not be downloaded: it never ran, so
-# nothing on disk changed and the night goes on to the restart and the
-# reboot, then ends non-zero.
-INSTALLER_UNREACHABLE=0
+# Set when the release this run chose was not installed because the table
+# could not be read or a check refused it (install_release): nothing on disk
+# changed, so the night goes on to the restart and the reboot, then ends
+# non-zero.
+NOT_INSTALLED=0
 # Set when the update script of a release just installed could not replace
 # this one (refresh_update_script): the run goes on, then ends non-zero.
 REFRESH_FAILED=0
@@ -714,8 +860,8 @@ RELEASE=""
 ELIGIBLE=""
 # A follow run (--follow, read_mode) installs and restarts but never
 # reboots, and says in its own words what the night says differently: when
-# (WHEN), what is still decided once the installer could not be downloaded
-# (STILL_DECIDED), and what a failed read of the move leaves (AS_IF_NO_MOVE).
+# (WHEN), what is still decided once nothing was installed (STILL_DECIDED),
+# and what a failed read of the move leaves (AS_IF_NO_MOVE).
 FOLLOW=0
 WHEN=tonight
 STILL_DECIDED="the restart and the reboot are still decided"
@@ -823,27 +969,6 @@ installed_version() {
     fail "dpkg lists no fermix package on this server, so there is nothing to update."
 }
 
-# The installer every host uses, downloaded afresh. A failed download changed
-# nothing, so the run carries on without an update.
-fetch_installer() {
-  if ! curl -fsSL --proto '=https' "$INSTALL_URL" -o "$WORK/install.sh"; then
-    warn "Could not download the Fermix installer from $INSTALL_URL, so Fermix is not updated $WHEN; nothing was installed, so $STILL_DECIDED."
-    INSTALLER_UNREACHABLE=1
-    return 1
-  fi
-}
-
-# The installer, checking fermix.ai's digests: it installs the release this
-# run chose (RELEASE). The package restarts nothing, so the running engine is
-# untouched until the restart. Its exit status does not say whether it failed
-# before or after the package manager ran, so any failure stops the run
-# before the restart and the reboot. The lock's descriptor is closed for it,
-# as for every fermix verb, so nothing they leave running holds the lock.
-update_fermix() {
-  sh "$WORK/install.sh" --no-setup --version "$RELEASE" </dev/null 9>&- ||
-    fail "The Fermix installer stopped, so the engine keeps running; its message above says why."
-}
-
 # A fermix verb as the engine account, as first boot runs one: its uid, gid
 # and groups through setpriv, which opens no PAM session (the one runuser
 # opens would log two lines for every call, every five minutes), and the
@@ -904,26 +1029,11 @@ release_due() {
   RELEASE=$ELIGIBLE
 }
 
-# The release table, into the run's directory.
-fetch_table() {
-  curl -fsSL --proto '=https' "$RELEASES_URL" -o "$WORK/releases" &&
-    [ "$(awk 'NR == 1 { print; exit }' "$WORK/releases")" = "format 1" ]
-}
-
 # Whether the table lists release $1: one of its file rows names it.
 table_lists() {
   awk -v version="$1" '
     NR > 1 && NF == 3 && $1 == version { found = 1; exit }
     END { exit !found }
-  ' "$WORK/releases"
-}
-
-# The sha256 the table lists for file $2 of release $1, or nothing unless it
-# lists exactly one, as the installer reads it.
-table_digest() {
-  awk -v version="$1" -v file="$2" '
-    NR > 1 && NF == 3 && $1 == version && $3 == file { digest = $2; rows++ }
-    END { if (rows == 1) print digest }
   ' "$WORK/releases"
 }
 
@@ -955,45 +1065,49 @@ hand_release() {
   RELEASE=$WANTED
 }
 
-# The release chosen, through the installer; then this script becomes the
-# installed release's own.
+# The release chosen (RELEASE), through the one checked install, both roots
+# agreeing: its package's sha256 the one the table lists, and its signature
+# the release workflow's, checked with the installed package's cosign; then
+# this script becomes the installed release's own. A table that cannot be
+# read, or a check that refuses the package, installs nothing and says which
+# it was; the run goes on to the restart (and at night the reboot), then
+# ends non-zero.
 install_release() {
-  if fetch_installer; then
-    update_fermix
+  if ! fetch_table; then
+    not_installed "the release table could not be read from $RELEASES_URL"
+  elif ! install_checked "$RELEASE" cosign; then
+    not_installed "$REFUSED"
+  else
     report_versions "$1"
     refresh_update_script
   fi
 }
 
+not_installed() {
+  warn "Fermix is not updated $WHEN: $1. Nothing was installed, so $STILL_DECIDED."
+  NOT_INSTALLED=1
+}
+
 # The update script of the release just installed, so the next run follows
 # that release's rules: its Always On server script (the copy of
-# first-boot.sh every release publishes as fermix_always_on.sh), checked
-# against the sha256 the release table lists for it as the installer checks
-# a package, rewrites this script and nothing else (--update-script-only).
-# This run goes on as it began: the shell keeps the file it read, which the
-# rewrite replaces by a rename. A script that cannot be fetched or checked
-# leaves this one as it is, says so, and fails the run at its end.
+# first-boot.sh every release publishes as fermix_always_on.sh), kept only
+# when both roots agree as they must for a package, rewrites this script and
+# nothing else (--update-script-only). This run goes on as it began: the
+# shell keeps the file it read, which the rewrite replaces by a rename. A
+# script that cannot be fetched, checked or run leaves this one as it is,
+# says so, and fails the run at its end.
 refresh_update_script() {
   installed=$(installed_version) || exit 1
   if ! fetch_table; then
     refresh_failed "the release table could not be read from $RELEASES_URL"
     return 0
   fi
-  digest=$(table_digest "$installed" "$ALWAYS_ON_FILE")
-  if [ -z "$digest" ]; then
-    refresh_failed "$RELEASES_URL lists no single update script for Fermix $installed"
-    return 0
-  fi
-  if ! curl -fsSL --proto '=https' "${ARTIFACT_ORIGIN}v$installed/$ALWAYS_ON_FILE" -o "$WORK/$ALWAYS_ON_FILE"; then
-    refresh_failed "the update script of Fermix $installed could not be downloaded"
-    return 0
-  fi
-  if [ "$(sha256sum "$WORK/$ALWAYS_ON_FILE" | cut -d ' ' -f 1)" != "$digest" ]; then
-    refresh_failed "the update script of Fermix $installed is not the one $RELEASES_URL lists"
+  if ! fetch_checked "$installed" "$ALWAYS_ON_FILE" "update script" cosign; then
+    refresh_failed "$REFUSED"
     return 0
   fi
   if ! sh "$WORK/$ALWAYS_ON_FILE" --update-script-only </dev/null 9>&-; then
-    refresh_failed "the update script of Fermix $installed stopped; its message above says why"
+    refresh_failed "the update script for Fermix $installed stopped; its message above says why"
     return 0
   fi
   say "This update script is now Fermix $installed's own"
@@ -1184,15 +1298,15 @@ main() {
   before=$(installed_version) || exit 1
   if [ "$HAND" -eq 1 ]; then
     if hand_release "$before"; then
-      say "Updating Fermix $before to $RELEASE, as asked, through $INSTALL_URL"
+      say "Updating Fermix $before to $RELEASE, as asked"
       install_release "$before"
     fi
   elif release_due "$before"; then
-    say "Updating Fermix $before to $RELEASE, the newest release eligible for this server, through $INSTALL_URL"
+    say "Updating Fermix $before to $RELEASE, the newest release eligible for this server"
     install_release "$before"
   fi
   if [ "$FOLLOW" -eq 1 ] || [ "$HAND" -eq 1 ]; then follow_restart; else restart_and_reboot; fi
-  [ "$ENGINE_FAILED" -eq 0 ] && [ "$INSTALLER_UNREACHABLE" -eq 0 ] && [ "$REFRESH_FAILED" -eq 0 ] ||
+  [ "$ENGINE_FAILED" -eq 0 ] && [ "$NOT_INSTALLED" -eq 0 ] && [ "$REFRESH_FAILED" -eq 0 ] ||
     exit 1
 }
 
@@ -1205,21 +1319,23 @@ FERMIX_UPDATE
 # which the Debian 13 cloud image installs and turns on, installed here when a
 # provider's image lacks it, and its two daily switches set in a file of
 # Fermix's. Fermix's own: the package comes from the release files, not an apt
-# source, so unattended-upgrades never sees it; root timers run the installer
-# for the newest release eligible for this server (the engine's `update`, from
-# the release table: one the app of each computer keeping its backups
-# carries; nothing when none is, and never back down), then make the update
-# script that release's own, and restart the engine when it runs an older
+# source, so unattended-upgrades never sees it; root timers install the
+# package of the newest release eligible for this server (the engine's
+# `update`, from the release table: one the app of each computer keeping its
+# backups carries; nothing when none is, and never back down) only when
+# fermix.ai's digest and the release workflow's signature both vouch for it
+# (install_checked), then make the update script that release's own under
+# the same two checks, and restart the engine when it runs an older
 # release than the one installed (not while a move is under way or a
 # computer's work holds it, at most ten minutes, nor when the engine's
 # answers fail): every five minutes (fermix-follow.timer), so the server takes
 # a release within minutes of its apps, and every night at 04:00 UTC
 # (fermix-update.timer), which also reboots when an update asks for it (a
 # move may hold that off two nights in a row, no more). One lock keeps the two
-# from running at once. An installer that ran and failed stops the run before
-# both; one that could not be downloaded changed nothing, so both are still
-# decided. Every failure says why in the journal, and the next run tries
-# again.
+# from running at once. An apt-get that ran and failed stops the run before
+# both; a release that could not be read, fetched or checked changed nothing,
+# so both are still decided. Every failure says why in the journal, and the
+# next run tries again.
 schedule_updates() {
   say "Turning on updates: Debian's security updates every day, Fermix every five minutes to the newest release your apps carry, and the reboots updates ask for at 04:00 UTC"
   apt_install unattended-upgrades
@@ -1236,7 +1352,7 @@ EOF
   write_update_script
   write_file "$UNIT_DIR/fermix-update.service" 0644 <<EOF
 [Unit]
-Description=Fermix: update Fermix through its installer, restart it when it is behind, reboot when an update asks
+Description=Fermix: update Fermix to a checked release, restart it when it is behind, reboot when an update asks
 Wants=network-online.target
 After=network-online.target
 

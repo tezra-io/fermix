@@ -19,6 +19,7 @@ defmodule FermixChannels.Companion.Output do
 
   @sandbox_ttl_s 60
   @soul_ttl_s 300
+  @approval_kinds [:sandbox, :soul, :job_change]
   # A failure reason or a tool's result can be any term, and an event header is
   # capped: its text is cut to these many bytes. Every error message of both
   # wires takes the first bound (`error_message/1`).
@@ -33,20 +34,28 @@ defmodule FermixChannels.Companion.Output do
   @typedoc """
   The approval card a gateway approval becomes. `approval_id`, `detail` and
   `ttl_s` are optional; the kind picks the command routes and the default ttl.
+  A heal's proposal for a job (`:job_change`, M106 §8, `Jobs.HealCard`) names
+  its own `ttl_s`, what is left of its seven days, and its `lines`, which are
+  its text; its `token` is the heal's id, which routes it.
   """
   @type approval_spec :: %{
-          required(:kind) => :sandbox | :soul,
+          required(:kind) => approval_kind(),
           required(:text) => String.t(),
           required(:token) => String.t(),
           optional(:approval_id) => String.t(),
           optional(:detail) => String.t() | nil,
-          optional(:ttl_s) => pos_integer()
+          optional(:ttl_s) => pos_integer(),
+          optional(:lines) => [String.t()],
+          optional(atom()) => term()
         }
 
+  @typedoc "The kinds of approval card the apps are sent."
+  @type approval_kind :: :sandbox | :soul | :job_change
+
   @doc "Stable opaque identifier shared by an approval and its resolution."
-  @spec approval_id(:sandbox | :soul, String.t()) :: String.t()
+  @spec approval_id(approval_kind(), String.t()) :: String.t()
   def approval_id(kind, token)
-      when kind in [:sandbox, :soul] and is_binary(token) and token != "" do
+      when kind in @approval_kinds and is_binary(token) and token != "" do
     digest = :crypto.hash(:sha256, "#{kind}:#{token}")
     "#{kind}-" <> Base.url_encode64(digest, padding: false)
   end
@@ -228,9 +237,11 @@ defmodule FermixChannels.Companion.Output do
   """
   @spec approval(approval_spec()) :: event()
   def approval(%{kind: kind, text: text, token: token} = spec)
-      when kind in [:sandbox, :soul] and is_binary(text) and is_binary(token) do
+      when kind in @approval_kinds and is_binary(text) and is_binary(token) do
     {approve, deny, ttl} = approval_routes(kind, token)
-    clean_text = text |> scrub_command(approve) |> scrub_command(deny) |> String.trim()
+
+    clean_text =
+      spec |> shown_text() |> scrub_command(approve) |> scrub_command(deny) |> String.trim()
 
     %{
       "t" => "approval",
@@ -238,7 +249,7 @@ defmodule FermixChannels.Companion.Output do
       "kind" => Atom.to_string(kind),
       "text" => clean_text,
       "token" => token,
-      "ttl_s" => Map.get(spec, :ttl_s, ttl),
+      "ttl_s" => ttl_s(spec, ttl),
       "approve_command" => approve,
       "deny_command" => deny
     }
@@ -246,7 +257,7 @@ defmodule FermixChannels.Companion.Output do
   end
 
   @doc "How an approval ended."
-  @spec approval_resolved(:sandbox | :soul, String.t(), atom()) :: event()
+  @spec approval_resolved(approval_kind(), String.t(), atom()) :: event()
   def approval_resolved(kind, token, outcome) when is_atom(outcome) do
     %{
       "t" => "approval_resolved",
@@ -418,6 +429,25 @@ defmodule FermixChannels.Companion.Output do
 
   defp approval_routes(:soul, token),
     do: {"/soul apply #{token}", "/soul deny #{token}", @soul_ttl_s}
+
+  # A heal's proposal is routed by its heal's id on the answer rail, and
+  # lives as long as its spec says: it has no default.
+  defp approval_routes(:job_change, token), do: {"/confirm #{token}", "/deny #{token}", nil}
+
+  # A card lives as its spec says, else as its kind does; a heal's proposal
+  # has no default, and one sent without its lifetime fails here.
+  defp ttl_s(spec, default) do
+    case Map.get(spec, :ttl_s, default) do
+      ttl_s when is_integer(ttl_s) and ttl_s > 0 -> ttl_s
+    end
+  end
+
+  # The card's text: a heal's proposal shows its lines alone, since the app
+  # draws its detail and its buttons apart; every other card its text.
+  defp shown_text(%{kind: :job_change, lines: [_first | _rest] = lines}),
+    do: Enum.join(lines, "\n")
+
+  defp shown_text(%{kind: kind, text: text}) when kind in [:sandbox, :soul], do: text
 
   defp scrub_command(text, command), do: String.replace(text, command, "", global: true)
 

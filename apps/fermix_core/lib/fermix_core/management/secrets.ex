@@ -71,6 +71,15 @@ defmodule FermixCore.Management.Secrets do
   `cues.sources.token.new`, an address from `cues.sources.url.get`. On a
   build without cues the family answers `unavailable`, as every `cues.*`
   method does.
+
+  The two registry keys a phone call reads, `openai_api_key` and
+  `phone_calls_sip_password` (M94 §12), are held while a call is in progress
+  by the writer every console's change of them takes
+  (`PhoneCalls.CallHold`, through `Setup.Wizard`): storing or
+  forgetting either then answers `unavailable` {`capability`: `phone_calls`,
+  `sentence`} and changes nothing. A trunk password is also held to the
+  provider's bounds here (`Management.PhoneCalls.check_secret_value/2`).
+  Turning phone calls off forgets neither.
   """
 
   alias FermixCore.Auth.AnthropicLogin
@@ -84,6 +93,7 @@ defmodule FermixCore.Management.Secrets do
   alias FermixCore.Cues.Settings, as: CueSettings
   alias FermixCore.Management.Auth
   alias FermixCore.Management.McpServers.PastedValues
+  alias FermixCore.Management.PhoneCalls
   alias FermixCore.Management.Settings
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.ExternalEnv
@@ -226,10 +236,13 @@ defmodule FermixCore.Management.Secrets do
     end
   end
 
-  def set(id, value, _opts) when is_binary(id) and is_binary(value) do
+  # `:phone_calls` names the ledger the writer's hold on a credential a phone
+  # call reads consults (`PhoneCalls.CallHold`, M94 §12), for a test.
+  def set(id, value, opts) when is_binary(id) and is_binary(value) and is_list(opts) do
     with {:ok, key} <- fetch_key(id),
-         :ok <- validate_value(value) do
-      commit(id, key, fn -> Wizard.put_secret(key, value) end)
+         :ok <- validate_value(value),
+         :ok <- PhoneCalls.check_secret_value(key, value) do
+      commit(id, key, fn -> Wizard.put_secret(key, value, Keyword.take(opts, [:phone_calls])) end)
     end
   end
 
@@ -259,9 +272,9 @@ defmodule FermixCore.Management.Secrets do
     end
   end
 
-  def clear(id, _opts) when is_binary(id) do
+  def clear(id, opts) when is_binary(id) and is_list(opts) do
     with {:ok, key} <- fetch_key(id) do
-      commit(id, key, fn -> Wizard.clear_secret(key) end)
+      commit(id, key, fn -> Wizard.clear_secret(key, Keyword.take(opts, [:phone_calls])) end)
     end
   end
 
@@ -775,6 +788,11 @@ defmodule FermixCore.Management.Secrets do
 
   defp error(_id, {:external_change, sections}), do: {:external_change, sections}
   defp error(_id, {:config_unreadable, sentence}), do: {:config_unreadable, sentence}
+
+  # A credential a phone call in progress reads (M94 §12), said in the hold's
+  # own sentence.
+  defp error(_id, {:credential_held, _key, sentence}),
+    do: {:unavailable, PhoneCalls.capability(), sentence}
 
   defp error(id, reason),
     do: {:secret_store_failed, id, store_reason(reason)}

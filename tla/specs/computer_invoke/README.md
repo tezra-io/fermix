@@ -106,18 +106,20 @@ Not modelled, each covered elsewhere:
   called it, and a caller stops what it asked by ending;
 - a capability's own switch (its offer's: the browser's, the screen's, and
   so on), which Admission hears as it hears the master switch
-  (`handle_cast :switches_changed`): with the master on, it ends that
-  capability's running and waiting work `refused` `off`, the sentence a
+  (`handle_cast :switches_changed`) and answers in the same function
+  (`switched_off`), which `HearSwitch` mirrors for the master: with the
+  master on, it ends only that capability's work, a run `refused`
+  `stopped_here` and what only waited `refused` `off`, the sentence a
   request of it arriving now gets, and lets every other capability's work
-  go on (`offer_switched_off`); and `Browser.HeldTurnListener` (the
+  go on; and `Browser.HeldTurnListener` (the
   switches' fourth listener), which ends every held turn when the master or
   the browser switch goes off: a turn that runs no request holds nothing
   this spec sees, and one at work ends with its run, both ways, since the
   two are linked. A run that ends while its switches no longer let its
   capability run (the listener can end a browser run before Admission
-  hears) is answered as they say, `refused` `stopped_here` for the master
-  and `refused` `off` for its offer, never `failed` (`crash_outcome`)
-  (`held_turn_listener_test.exs`, `two_engines_browser_test.exs`). So does
+  hears) had started, and is answered `refused` `stopped_here`, for the
+  master and its offer alike, never `failed` (`crash_outcome`)
+  (`invoke_test.exs`, `two_engines_browser_test.exs`). So does
   the rule that a conversation's next turn ends the turn held before it,
   which is about whose pane task a request runs in, not whether it runs
   (`held_turn_test.exs`);
@@ -199,11 +201,12 @@ The `.tla` header pins these sources:
 | `ServerDeadline` | mechanism | the caller waits at most its deadline and the link's allowance (`Invocation.await/5`, `gave_up/4`); `FALSE` waits for ever |
 | `HeldEndsWithRun` | mechanism | a held turn runs each request linked to the run that made it (`HeldTurn.handle_call {:run, fun}`, `link/1`), so whatever ends the run ends the request, and one whose run is gone never starts; `FALSE` has the run only call it, and the request goes on (INVOKE-1) |
 | `RestartTold` | mechanism | Admission tells the server each time it stands again (`tell_started/1`, `invoke_restarted`), and the server's family tells every caller still waiting on that computer, as at a new session (`Calls.reconnected/2`); `FALSE` leaves only a new session to tell them (INVOKE-2) |
+| `AnswerByStart` | mechanism | a switch going off answers what it ends by whether it had started (`Admission.switched_off/2`, `ended_by_switch/3`; M102 N7): a run `stopped_here`, what only waited `off`; `FALSE` answers all of it alike by which switch went off, as before the fix: `stopped_here` for the master (`stopped/1`), `off` for an offer's own (`offer_switched_off/2`) |
 
 ## What holds
 
 `01_what_the_computer_keeps` (one effect, two ids at most, two drops, and
-everything the environment can do) holds five rules:
+everything the environment can do) holds six rules:
 - `EffectAtMostOnce`: whatever is lost, what a call changes on the computer
   happens at most once. It needs `NoResendOfEffects` (check 02, 10 states):
   the effect acts, the computer stops before it answers, and its restart
@@ -237,6 +240,16 @@ everything the environment can do) holds five rules:
   effect's registration and its request is asked about it first, answers
   no record, and the request, sent after, runs. That was witness 14
   (`asked before sent`) of the first pin; it is unreachable now.
+- `RefusalSaysWhetherItRan`: M97 §6.1 as M102 D9 reads it, "A refused
+  answer means the work never ran, with one exception: stopped_here is work
+  that started and was stopped at the computer": the computer's record says
+  `refused` `stopped_here` only for a request whose run started (`begun`),
+  and every other refusal only for one whose run never did. It needs
+  `AnswerByStart` (check 26, 6 states): a run starts, the switch goes off,
+  and Admission, hearing it, answers the run `refused` `off`, as an offer's
+  own switch did before the fix: a command stopped partway reported as never
+  run (M102 N7). Answered `stopped_here` alike, as the master did, a request
+  that only waited is the other half's counterexample.
 
 `06_every_call_ends` (an effect and a read asked at once, one drop, a
 computer that may stop) and `24_every_call_ends_answers_expire` (the same
@@ -759,6 +772,41 @@ changed. The change, and what it does to the model:
   does. The comment on `MoveOn` named `relay.ex:1202` and `:1121`; it now
   names `:1250` and `:1158`, and says what a clear that fails is to the
   model, as the header's list of what is not modelled does.
+
+## Re-read (M102 N7, the working tree after `4622396c`: a switch answers by whether the work started, 2026-11-16)
+
+Read against the working tree after `4622396c`, uncommitted when written;
+the commit that carries it is the one to re-pin against. It stales the
+`admission.ex` pin. Each change, and what it does to the model:
+- `admission.ex` (whole): `stopped/1` (the master off: everything it ended
+  `stopped_here`) and `offer_switched_off/2` (an offer's own off: everything
+  `off`) are one function, `switched_off/2` (`:879-892`), which every switch
+  change reaches (`handle_cast :switches_changed`, `:215-216`): what the
+  switches now refuse ends by whether it had started (`ended_by_switch/3`,
+  `:894-895`), a run `refused` `stopped_here` and what only waited for a
+  slot or its upload `refused` `off`, in the sentence a request arriving
+  now gets. `crash_outcome/2` (`:679-684`) answers a run that ended under
+  its switches `stopped_here`, for the master and an offer alike. **This
+  changes `HearSwitch`**: it answered all of `Pending` `refused_stopped_here`;
+  it now answers what is `Live` `refused_stopped_here` and what is queued
+  `refused_off`. `AnswerByStart` switches it (`FALSE`: all of it alike, by
+  either of the two old answers), the history variable `begun` records which
+  runs started (`Open`'s and `StartQueued`'s running branches), and
+  `RefusalSaysWhetherItRan` (check 01) is the rule it keeps; check 26 (6
+  states) is its `needs` check, and either old answer breaks it (the `off`
+  one is the shortest TLC reports; the `stopped_here` one, run by hand, is
+  also 6 states: a request that only waited). Every earlier check keeps its
+  verdict; 01 and 17 go from 13,257 to 13,695 states, 06 from 515,153 to
+  571,544 (38 s).
+- After a switch change, what then has a slot starts (`next/1`), the
+  master's change included; with the master off nothing still waits by then,
+  so no step changes.
+- Every `admission.ex` line the `.tla` cites moved (by +2 above
+  `handle_cast :switches_changed`, by -3 from there to `crash_outcome/2` and
+  by -6 after it), and is moved here.
+- On the server, `Computers.Outcome` now says of `stopped_here` that the
+  work ran, for how long, was stopped partway and that what it did stands
+  (D7): words, no step here.
 
 ## Findings
 

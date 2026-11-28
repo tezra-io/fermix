@@ -44,7 +44,7 @@ the checks that show a property needs it):
   fires `{:failed, _}` (`queue.ex:920-928`).
 - `TurnsShareQueueFate`: turn tasks run under a `Task.Supervisor` that
   `QueueSupervisor` (`:one_for_all`) terminates before it restarts the Queue
-  (`queue_supervisor.ex:46-51`, `application.ex:212`).
+  (`queue_supervisor.ex:46-51`, `application.ex:232`).
 - `CrashClosesUserMessage`: a crashed turn's `:DOWN` writes the stopped marker
   before the next message starts (`queue.ex:879`, `:893-899`).
 - `StopSparesClaimedTurn`: a stop leaves a turn that has claimed its outcome
@@ -164,8 +164,8 @@ watch was added to the model).
 
 - The LLM and tools (one "loop" step), streaming drafts, and typing.
 - The access gate's parked confirmation. `run_message_loop` hands AgentLoop
-  the owner-inbox closure and the Live call id (`turn_runner.ex:610`,
-  `:608`). A parked call is a held tool result inside the one loop step, and
+  the owner-inbox closure and the Live call id (`turn_runner.ex:673`,
+  `:676`). A parked call is a held tool result inside the one loop step, and
   the owner's confirm later runs it on a task outside the Queue, not as a
   new turn.
 - The `terminal_error_owner?` branch, which only changes who sends the error
@@ -189,7 +189,7 @@ watch was added to the model).
 - What a turn does with its attachments before its loop (M67).
   `run_message_loop` composes their manifest into the user text that
   `persist_user_message` stores and, on the owner's chat turn, first saves
-  them to the workspace (`with_attachments`, `turn_runner.ex:482`). These are
+  them to the workspace (`with_attachments`, `turn_runner.ex:487`). These are
   file writes inside the turn's own steps, before its user message is
   persisted, and move no Queue state: a stop or crash during them is one at
   the turn's start, with nothing of the turn in history yet.
@@ -222,7 +222,19 @@ watch was added to the model).
   handed each turn to and answers the turn the Peer's way, with one
   `turn_error` (`interrupted`), dropping a result that arrives after it. It
   holds the request's fence, so the request is failed once, not released for a
-  re-run. Voice watches nothing.
+  re-run. A phone call's delegation watcher (`PhoneCalls.Bridge`, M94) watches
+  the Queue it enqueued its turn on and answers the call's worker once, on the
+  first of the turn's reply, its end, its deadline (after a named stop) and the
+  Queue's `:DOWN`. Voice watches nothing.
+- A phone call's backend turn (M94). It has a conversation, and so a Queue
+  lane, of its own (`{"phone_call", call_id, :root}`), which no other message
+  keys into, and the Queue runs it as any turn. `run/5` hands it to
+  `PhoneCallTurn.run/2` before `run_message_loop` (`turn_runner.ex:106-118`),
+  so it persists no user message, and `commit/4` writes nothing for it
+  (`:199-206`; the owner's commit is `commit_turn/4`). That conversation's
+  history stays empty, a stop's or crash's marker finds no user message to
+  close (`conversation_store.ex:176`), and its Queue steps are the ones the
+  spec models.
 
 ## Findings
 
@@ -249,7 +261,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
     while the new Queue's turn ran, and nobody could stop it.
 - **Fix:** `FermixChannels.Gateway.QueueSupervisor` (`queue_supervisor.ex`)
   runs `{Task.Supervisor, name: FermixChannels.Gateway.TurnTasks}` and the
-  Queue, in that order, `:one_for_all`; `application.ex:212` starts it in the
+  Queue, in that order, `:one_for_all`; `application.ex:223` starts it in the
   Queue's slot. `:task_supervisor` is a required Queue option
   (`queue.ex:199`), so no Queue runs turns under a supervisor that outlives
   it. When the Queue dies, the supervisor terminates the task supervisor, and
@@ -265,12 +277,12 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
 - **Check:** 10 (6 states).
 - **Counterexample:** the reply is delivered (`deliver_final`, `queue.ex:547`).
   `/stop` then arrives before `runner.commit` persists it (`:551` →
-  `turn_runner.ex:162`).
+  `turn_runner.ex:199`, `commit_turn/4` `:231`).
 - **Code:**
   - `stop_active_turn` kills the task and writes the stopped marker
     (`queue.ex:1101-1106`, `:1151-1164`).
   - The marker is written because the last stored message is still the
-    user's (`conversation_store.ex:173`).
+    user's (`conversation_store.ex:176`).
 - **Impact:** the user saw a full answer, but history says "stopped before I
   finished it". The next turn's model does not know it already answered.
 - **Why accepted:** a stop wins until the turn claims its outcome. That is
@@ -290,10 +302,11 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
 - **Counterexample:** the reply is delivered, then `/stop` arrives before the
   task claims its result.
 - **Code:** `commit/4` runs auto-compaction synchronously (`queue.ex:551` →
-  `turn_runner.ex:199`). The claim happens only after that returns
+  `turn_runner.ex:199`, `commit_turn/4` `:245`). The claim happens only after that returns
   (`finish_turn`, `queue.ex:519`), so the window also covers post-delivery
   auto-compaction: seconds to tens of seconds when it runs. The kill aborts
-  that compaction (safely: `replace_history` is one atomic call) and skips
+  that compaction (safely: `replace_history` is one call into the store, and
+  its write to the database is one transaction) and skips
   `record_context_tokens_peak`.
 - **Impact:** the channel gets `{:cancelled}` after the full reply. ACP reports
   stop reason `cancelled` for an answered prompt; mobile marks the rendered
@@ -439,7 +452,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
 - **Fix (ACP):**
   - `hand_off` (`peer.ex:597-605`) resolves the Queue's name to a pid with
     `GenServer.whereis`, as `Companion.Turns` does at its hand-off
-    (`turns.ex:275-280`), gives the prompt to that pid, and monitors it.
+    (`turns.ex:322-327`), gives the prompt to that pid, and monitors it.
     The monitor is on the process that holds the prompt, so it also covers a
     Queue that dies during the hand-off. No Queue registered: the prompt is
     refused at once (`{:queue_unavailable, name}`, the existing "could not be
@@ -559,3 +572,104 @@ a private call's hand-off, the screen's on a call in the chat), `08e03f95`. It i
 context key and a pure choice with no Queue state; no claim, start, stop, result
 or answer the spec models changed, and the line references into `turn_runner.ex`
 moved with the code.
+
+## Re-read for outbound phone calls (M94, 2026-11-17)
+
+`16727975` staled the `turn_runner.ex` pin. `run/5` hands a phone call's
+backend turn to `Agents.PhoneCallTurn.run/2` before anything of the owner's
+turn is composed, and `commit/4` writes nothing for such a turn; its old body
+is now `commit_turn/4`, unchanged. `run_message_loop` puts the turn's own
+`request_id` (`Agents.RequestIdentity`) and, on a call's result turn, its
+`phone_call_result` in the tool context, and outside-source seeding picks the
+call's source or the coding run's (`continuation_source/1`): context keys with
+no Queue state. A phone call's turns run on a conversation and lane of their
+own through the same Queue (see *Not modelled*), so for every other message
+the turn task's steps are as before: the user message persisted before the
+loop, the reply persisted after delivery and before the claim. No claim,
+start, stop, result or answer the spec models changed. `run` and
+`commit_turn` join the pin, since `run/5` now decides whether those steps run
+at all and `commit_turn/4` holds the commit the spec describes. The line
+references into `turn_runner.ex`, several of which had drifted before this
+change, point at the committed code.
+
+## Re-read for a resumed request's identity and the stop's drain (M94, 2026-11-17)
+
+`f2a874b8` staled the `turn_runner.ex` and channels `application.ex` pins.
+`run_message_loop` now takes the turn's `request_id` from `request_id/1`: the
+one a grant resume hands back in its metadata when it is valid, else a fresh
+one. It is a context key with no Queue state. The channels application gains
+`prep_stop/1`, which on an orderly stop asks a phone call in progress to end
+(`PhoneCalls.Manager.drain_for_stop/0`, bounded, and at once when another
+application drained it already) before this application's tree stops, so the
+Queue still runs while the call's last turns finish. Its children, their order
+and the strategy are as before, so `QueueSupervisor`, its `TurnTasks` and the
+Queue run as the spec says, and a daemon stop stays outside the model. No
+claim, start, stop, result or answer the spec models changed. The line
+references into `turn_runner.ex` after the context map and into the channels
+`application.ex` moved with the code.
+
+## Re-read for the app inbox (M106 S6, 2026-11-26)
+
+M106's stage S6 staled the channels `application.ex`, pinned whole.
+- `start/2` now registers `Companion.Approvals` as core's
+  `:app_approval_listener` (an `Application.put_env`).
+- The companion supervisor is given an `approvals_durable` option
+  (`approvals_durable/1`): the heal proposals a hello offers again.
+
+Neither touches the Queue, its supervisor or the children's order, which
+this spec rests on. No claim, start, stop, result or answer the spec models
+changed, and the `application.ex` citation moved with the code (`:232`).
+
+## Re-read for a compaction's checkpoint and the one-transaction replace (c75ee1097, 2026-11-26)
+
+`c75ee1097` staled the `conversation_store.ex` pin, pinned whole.
+- A replace's durable step is one `Repo.replace_messages/3`: one transaction
+  that deletes the conversation's chat messages and inserts the replacement,
+  where it was a delete and then one call for each row. It leaves the
+  conversation's other rows, so a compaction's checkpoint survives the
+  replace that follows it. A clear still deletes every row of the
+  conversation.
+- Each durable step's Repo call waits with no deadline, so a retry never
+  follows a write that timed out and could still commit.
+
+The store's calls, its cache and the order of a conversation's writes are as
+before: a conversation is loaded before any write to it, and its writes land
+one at a time in call order, which is what `history` rests on. Compaction,
+clear and replace are still not modelled here. No claim, start, stop, result
+or answer the spec models changed, and the one line reference into
+`conversation_store.ex` (`:176`, `append_stopped_marker`) still points at
+the code. QUEUE-3's note on the compaction a stop aborts now says what is
+true of the database as well as of the cache.
+
+## Re-read for a call's report that only reports (M94 D23, 2026-11-26)
+
+`ff0cfdc1b` staled the `turn_runner.ex` pin. `run_message_loop` now hands a
+finished phone call's marker (`phone_call_result/1`) to the turn's profile
+choice, and the turn that reports the call runs on a profile with no
+capability (`RuntimeContext.reply_only_profile/1`). The turn's context no
+longer carries the marker, which only a parked request's resume read.
+
+Which tools a turn is offered is not modelled here: that turn is claimed,
+started, stopped, committed and answered as any other. No claim, start,
+stop, result or answer the spec models changed. The line references into
+`turn_runner.ex` moved with the code, and so did the one into `turns.ex`,
+which `5adb44fd8` moved.
+
+## Re-read for the owner's answer to a call's report (M94 D26, 2026-11-27)
+
+`3b772f72d` staled the `turn_runner.ex` pin and the `conversation_store.ex` pin,
+pinned whole. `run_message_loop` now hands the history it replays to the
+seed of the turn's outside sources, which adds the phone call's source when
+the owner has sent nothing since a call's report. `persist_user_message`
+stores a flag of its own on such a report (`phone_call_result`, beside the
+continuation's), and the store carries that flag wherever it carries the
+continuation's: the hot path, a reload and a history replace.
+
+What a turn has read and which markers a stored message keeps are not
+modelled here: a message is still persisted once, in the same step and
+order, and that turn is claimed, started, stopped, committed and answered
+as any other. No claim, start, stop, result or answer the spec models
+changed. The line reference into `turn_runner.ex` (`persist_user_message`,
+which had drifted before this change) points at the function again, and
+the one into `conversation_store.ex` (`:176`, `append_stopped_marker`)
+still points at the code.

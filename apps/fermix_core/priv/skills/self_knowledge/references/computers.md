@@ -8,8 +8,9 @@ it. The server reads, writes and searches files and runs commands and git on
 a computer that offers them (*Files and commands on a computer*) and uses
 its browser (*A computer's browser* in the `browser` reference) and its
 screen (*A computer's screen*), and a Mac's Messages carry the home's
-iMessage (*iMessage through a Mac*). The move, the link and the summary: skill_view(name:
-"self-knowledge", file: "home").
+iMessage (*iMessage through a Mac*). The move and the link: skill_view(name:
+"self-knowledge", file: "home"); the Always On screen and its steps:
+skill_view(name: "self-knowledge", file: "always_on_screen").
 
 ## The record
 
@@ -55,11 +56,17 @@ no memory of its own.
    a new computer code replaces an older one.
 2. **Enter it on the new computer.** In the app's first-run screen, the
    choice to connect to a Fermix that already runs (management
-   `computer.join.start`). With no app: stop Fermix there, run `fermix
-   computer join` and paste the code when it asks (or pipe it in; it is never
-   an argument), then start Fermix.
-3. **Type six digits.** Only the new computer shows them: "Type 482 913 on
-   <server>, where it asks you to add this Mac." The Always On screen of the
+   `computer.join.start`). With no app: with Fermix running there, run
+   `fermix computer join` and paste the code when it asks (or pipe it in; it
+   is never an argument). It hands the code to the running Fermix, as the
+   apps do, and refuses with Fermix stopped ("Fermix is not running here.
+   Start it, then run this again."); Fermix then restarts, and `fermix home
+   status` shows the digits.
+3. **Type six digits.** Only the new computer shows them: "Type 482 913 in
+   Always On on a computer already in your Fermix, where it asks to add this
+   Mac." The server has no screen, so the owner types them on a computer of
+   the home, and the server's name says only where Fermix runs ("Connecting
+   this computer to your Fermix on <server>."). The Always On screen of the
    server and of every linked computer says "A computer named loft-linux
    (Linux) asks to join your Fermix. To add it, type the six digits it
    shows.", with **Add it** (type the digits read on the new computer; on
@@ -73,7 +80,10 @@ no memory of its own.
   Not adding it, typing digits that are not its own ("Those digits are not
   the ones the new computer showed, so it was not added. Open a new code to
   try again.") and the 30 minutes running out add nothing, and the code is
-  spent each time: open a new one. A connection that drops while it waits
+  spent each time: open a new one. The new computer says why, and where:
+  "This computer was not added. Open a new code in Always On on a computer
+  already in your Fermix." (or the code was cancelled, nobody added it in
+  time, the code was used or expired). A connection that drops while it waits
   spends nothing: it reconnects with new digits, and those are the ones to
   type. **Cancel** on the new computer makes it its own Fermix again.
 - Once added it is listed at once, under the name it gave (with " 2" when
@@ -114,20 +124,25 @@ no memory of its own.
   in its link; its Always On then says "Your server no longer knows this
   Mac. To join your Fermix again, enter a new code from Add a computer.",
   with Fermix running or stopped (`fermix home status`), since the link is
-  where that word lives. A computer that cannot write it there says why in
-  its link's status and tries again, as for an outage. A
-  new code joins it as the first one did (`fermix computer join` with
-  Fermix stopped, or `computer.join.start`): it first lets go of the old
-  link here, as Disconnect does (its key, what the server may use there,
-  the link), and a code it cannot join with leaves that link as it is; so
-  does a running Fermix whose server knows the computer again by then
-  ("it holds a link to a server"). It
-  takes that word from the server: a computer removed while its Fermix was
-  stopped is refused ("it holds a link to a server") until Fermix has
-  started there once. The same holds for a server restored from a snapshot
-  taken before the computer joined. The computer the home moved from is
-  still refused: it keeps its link, its moved marker and its own copies of
-  the backups.
+  where that word lives, and offers **Join again** (management `home.act`'s
+  `join`, which asks for the code masked: the setup page's Always On tab and
+  `fermix always-on join` on a terminal take it, and an app once it draws
+  it). A computer that cannot write the word there says why in its
+  link's status and tries again, as for an outage. A new code joins it as
+  the first one did, always through the running Fermix (Join again,
+  `computer.join.start`, or `fermix computer join`): it first lets go of the
+  old link here, as Disconnect does (its key, what the server may use
+  there, the link), and a code it cannot join with leaves that link as it
+  is; so does a running Fermix whose server knows the computer again by
+  then ("it holds a link to a server"). It takes that word from the server,
+  as the answer to its relay's dial: a computer removed while its Fermix
+  was stopped learns it once Fermix runs there and reaches the server, and
+  until then a join is refused ("Fermix has not reached your server from
+  this computer yet, so it cannot tell whether your server still knows this
+  computer. Try again in a minute."). The same holds for a server restored
+  from a snapshot taken before the computer joined. The computer the home
+  moved from is still refused: it keeps its link, its moved marker and its
+  own copies of the backups.
 - **From the computer.** **Disconnect this computer** (management
   `computer.disconnect`) tells the server, then deletes that computer's key,
   its link and what the server may use on it. A computer that joined is its
@@ -136,6 +151,15 @@ no memory of its own.
   could not tell your server. Disconnect anyway? Your server lists this
   computer until you remove it there." The link goes last, so a disconnect
   that fails part-way leaves the computer linked, and asking again finishes.
+- **When the home leaves the server.** A move back and Restore here drop
+  every computer's row, since a home off a server holds no computer yet; the
+  move back's confirm names each one it disconnects ("loft-linux is
+  disconnected from Fermix, and can join again once Fermix is on a
+  server."), and Restore here's confirm says that any other computer that
+  joined is disconnected. Such a computer next reaches the computer the home
+  went back to, which does not know it, so it shows it was removed, with
+  **Join again**, and joins with a new code once the home is on a server
+  again. Phones stay paired.
 - Adding, removing and disconnecting are the owner's decisions: the agent
   has no tool for them, and a command Fermix runs is refused.
 
@@ -256,12 +280,17 @@ server rings there, one request per connected computer, which no turn made
 
 - **The computer decides.** It refuses a request from an older copy of the
   home, anything while its master switch is off, and what its own switch
-  for that offer has off, before anything runs; switching the master off
-  also ends what is running ("The person at studio Mac stopped it."), and
-  switching one offer off (the browser, the screen, Messages, files or
-  commands) ends what runs or waits there for it, answered switched off with
-  the same sentence a new request gets, the browser's tabs for the server
-  included; other offers' work goes on. It runs at most 8 requests at once
+  for that offer has off, before anything runs. Switching the master off, or
+  one offer (the browser, the screen, Messages, files or commands), ends
+  what runs or waits there for it, the browser's tabs for the server
+  included; other offers' work goes on. What had started is told it ran and
+  was stopped partway, and that what it did stands ("The command ran for 5
+  seconds on studio Mac and was stopped partway when files and commands was
+  switched off there. What it did stands."; the screen's says "The person at
+  studio Mac stopped it."): never report such work as not run, and check
+  what it left before running it again. What only waited for its turn never
+  started and is answered switched off, with the same sentence a new request
+  gets. It runs at most 8 requests at once
   with 32 waiting, and refuses past that; when its request handler restarts,
   the waiting ones are answered at once as not run ("Fermix on this computer
   restarted before it ran this, so it did not run."), and it tells the
@@ -273,7 +302,9 @@ server rings there, one request per connected computer, which no turn made
 - **Every request ends one way:** done, failed (in the computer's words),
   refused (switched off, unavailable, outside its sandbox, only while the
   owner is in the conversation, stopped at the computer, busy, an older copy
-  of the home), timed out, cancelled, or not known. A tool that ran there
+  of the home), timed out, cancelled, or not known. A refusal means it never
+  ran, but for stopped at the computer: that ran partway, and what it did
+  stands. A tool that ran there
   and failed (a command that exited with an error, a file it could not
   read) is failed, never done: the journal says so, and the reply carries
   the tool's whole error.
@@ -406,14 +437,16 @@ shown) and then its own. Information only: no button, no notification.
 ## Files and commands on a computer
 
 - **Naming the computer.** On an owner's turn, each tool a computer can run
-  gains a `computer` argument whose values are the names of the computers
-  that offer it, an away one included: `file_read`, `file_write`,
-  `file_edit`, `glob_search`, `content_search`, `view_image` and
-  `send_attachment` under Files; `shell`, `git_read` and `git_write` under
-  Commands. A guest's turn, a worker a skill or a sub-agent runs (a plugin
-  skill's above all) and a home with no computer offering it never show it,
-  and such a turn naming one is refused as no such computer. The owner's
-  scheduled jobs and cues do see it.
+  gains a `computer` argument whose values are the names of every computer
+  `## Computers` lists, an away one and one that does not offer it
+  included: `file_read`, `file_write`, `file_edit`, `glob_search`,
+  `content_search`, `view_image` and `send_attachment` under Files;
+  `shell`, `git_read` and `git_write` under Commands. Naming a connected
+  one that does not offer it is refused with why ("… has commands switched
+  off. Only someone at … can switch it on."). A guest's turn, a worker a
+  skill or a sub-agent runs (a plugin skill's above all) and a home with no
+  computer never show it, and such a turn naming one is refused as no such
+  computer. The owner's scheduled jobs and cues do see it.
 - **Where a call runs, never silently:** with no `computer`, on the server
   (it has files and commands of its own); with a name, on that computer.
   A computer that is away is refused at once with when it was last seen
@@ -461,9 +494,10 @@ shown) and then its own. Information only: no button, no notification.
 
 ## `## Computers` on the owner's turn
 
-- On the server, an owner's turn carries a `## Computers` section right
-  after `## This Fermix`, where the home has at least one computer; a guest's
-  turn never does:
+- On the server, an owner's turn carries a `## Computers` section after the
+  runtime contract, where the home has at least one computer; a guest's turn
+  never does. It is read for each turn, and for a voice call as it starts, so
+  a computer that joins is in the next turn's list:
 
   ```
   ## Computers

@@ -1,0 +1,32 @@
+{
+  "name": "voicemail",
+  "number": "+12065550171",
+  "party": "Pinecrest Animal Clinic, a vet in Seattle. Its voicemail answers with a recorded greeting; the recording runs out a minute after the tone.",
+  "steps": [
+    {
+      "ring": true
+    },
+    {
+      "pause_ms": 800
+    },
+    {
+      "mark": "voicemail"
+    },
+    {
+      "pick_up": "Hi, you've reached Pinecrest Animal Clinic. We're closed right now. Please leave your name and number after the tone and we'll call you back."
+    },
+    {
+      "say": "Beep."
+    },
+    {
+      "delegate": true
+    },
+    {
+      "await": "hangup",
+      "timeout_ms": 50000
+    },
+    {
+      "hang_up": true
+    }
+  ]
+}

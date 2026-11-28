@@ -86,6 +86,9 @@ defmodule FermixCore.Home.Role do
     {FermixCore.OpenLoops.CheckInSupervisor, "runs an open loop's check-in turn"},
     {FermixCore.Harness.Supervisor,
      "reconciles coding runs and delivers a finished one as a continuation turn"},
+    {FermixCore.PhoneCalls.Supervisor,
+     "places the home's phone calls and settles their rows in memory.db; only the primary " <>
+       "dials, and a device opens no database"},
     {FermixCore.SkillCuration.Scheduler, "curates skills from conversations"},
     {FermixCore.Cues.Supervisor, "admits outside cues that start turns"},
     {FermixCore.Meetings.Supervisor,
@@ -309,6 +312,17 @@ defmodule FermixCore.Home.Role do
       {:ok, record} -> :persistent_term.put(@record_key, record)
       {:error, reason} -> raise error_sentence(reason)
     end
+  end
+
+  @doc """
+  Erases the record `remember!/2` made: for a process that booted no engine
+  and recorded a role for a run of its own (`mix fermix.bench`), which leaves
+  none behind. `booted/0` reads `nil` again afterwards.
+  """
+  @spec forget() :: :ok
+  def forget do
+    _erased? = :persistent_term.erase(@record_key)
+    :ok
   end
 
   @doc "The record this boot made. Raises in a process whose engine never booted."

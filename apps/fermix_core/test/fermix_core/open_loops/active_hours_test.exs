@@ -36,12 +36,26 @@ defmodule FermixCore.OpenLoops.ActiveHoursTest do
                ActiveHours.derive(at_hour(12, 40), @tz)
     end
 
-    test "widening never crosses midnight at either end" do
-      assert %{start: ~T[00:00:00], finish: ~T[06:00:00]} =
-               ActiveHours.derive(at_hour(1, 40), @tz)
+    test "widening never crosses the day's first hour or midnight" do
+      assert %{start: ~T[04:00:00], finish: ~T[10:00:00]} =
+               ActiveHours.derive(at_hour(4, 40), @tz)
 
       assert %{start: ~T[17:00:00], finish: ~T[23:00:00]} =
                ActiveHours.derive(at_hour(22, 40), @tz)
+    end
+
+    test "a message after midnight is the end of the evening before, never an early start" do
+      # About a fifth of the messages land just after midnight, the rest from
+      # 10:00 to 22:00. Read as hours 0 and 1 they would start the window at 01:00.
+      instants = at_hour(0, 5) ++ at_hour(1, 5) ++ Enum.flat_map(10..22, &at_hour(&1, 3))
+
+      assert %{start: ~T[12:00:00], finish: ~T[23:00:00], source: :derived, sample: 49} =
+               ActiveHours.derive(instants, @tz)
+    end
+
+    test "an owner who only writes after midnight gets the evening, not the small hours" do
+      assert %{start: ~T[17:00:00], finish: ~T[23:00:00]} =
+               ActiveHours.derive(at_hour(1, 40), @tz)
     end
 
     test "hours are read in the zone given, not in UTC" do

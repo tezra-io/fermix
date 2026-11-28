@@ -1,0 +1,50 @@
+{
+  "name": "confirms_after_readback",
+  "number": "+12125550147",
+  "party": "Copperleaf Grill, a restaurant in New York. The host reads the booking back and confirms it.",
+  "steps": [
+    {
+      "ring": true
+    },
+    {
+      "pause_ms": 600
+    },
+    {
+      "pick_up": "Good evening, Copperleaf Grill, this is Imani."
+    },
+    {
+      "voice": "Hi Imani, I'm an AI assistant calling for a customer. I'd like to book a table for four on Friday, February 5th, at 7:30 in the evening, under the name Rowan."
+    },
+    {
+      "pause_ms": 400
+    },
+    {
+      "say": "Let me look. Yes, I can do four people at 7:30 on Friday the 5th."
+    },
+    {
+      "say": "Just to read that back: a table for four, Friday February 5th at 7:30 pm, under Rowan. Is that right?"
+    },
+    {
+      "voice": "Yes, that's right."
+    },
+    {
+      "say": "Perfect, you're booked. We'll see you on the 5th."
+    },
+    {
+      "voice": "Thank you so much. Goodbye."
+    },
+    {
+      "say": "Bye now."
+    },
+    {
+      "delegate": true
+    },
+    {
+      "await": "hangup",
+      "timeout_ms": 50000
+    },
+    {
+      "hang_up": true
+    }
+  ]
+}

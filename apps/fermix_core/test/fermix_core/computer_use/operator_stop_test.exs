@@ -12,6 +12,9 @@ defmodule FermixCore.ComputerUse.OperatorStopTest do
 
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
+  alias FermixCore.ComputerUse.ComputerDriver
   alias FermixCore.ComputerUse.Config
   alias FermixCore.ComputerUse.OperatorStop
   alias FermixCore.ComputerUse.Session
@@ -19,9 +22,14 @@ defmodule FermixCore.ComputerUse.OperatorStopTest do
   alias FermixCore.ComputerUse.Supervisor, as: CuSupervisor
   alias FermixCore.Tools.ComputerUse
   alias FermixTestSupport.ComputerUseObservations
+  alias FermixTestSupport.ScreenHelperDouble
 
   @conversation {"cli", "stopped", :root}
   @turn "main-turn-1"
+  @next_turn "main-turn-2"
+
+  # How long an interrupted caller may take to be answered on a busy runner.
+  @reply_ms 10_000
 
   # Blocks inside the action, so a Stop can land while a caller is waiting on it.
   defmodule BlockingDriver do
@@ -282,5 +290,98 @@ defmodule FermixCore.ComputerUse.OperatorStopTest do
 
       assert {:error, :operator_stopped} = OperatorStop.check(@conversation, @turn)
     end
+  end
+
+  # A session outlives the turn that opened it: the person speaks again, and the
+  # next turn is handed the same session. A Stop pressed during THAT turn has to
+  # hold it, or its next call lifts the hold as "another turn" and opens a fresh,
+  # unbarred helper.
+  describe "the turn a stop holds" do
+    test "is the later turn that used the session, and a third turn lifts it", %{
+      config: config
+    } do
+      {spec, _knobs} = ScreenHelperDouble.driver(self())
+      {:ok, session} = SessionManager.ensure(config, context(@turn), driver: spec)
+      assert {:ok, ^session} = SessionManager.ensure(config, context(@next_turn), driver: spec)
+
+      {:ok, :auto, request} = Session.classify(session, %{"action" => "screenshot"})
+      assert {:ok, _look} = Session.execute(session, asked_by(request, context(@next_turn)))
+
+      stop(session)
+
+      assert {:error, :operator_stopped} = OperatorStop.check(@conversation, @next_turn)
+
+      assert {:error, :operator_stopped} =
+               SessionManager.ensure(config, context(@next_turn), driver: spec)
+
+      assert {:ok, _fresh} = SessionManager.ensure(config, context("main-turn-3"), driver: spec)
+      assert :ok = OperatorStop.check(@conversation, @next_turn)
+    end
+
+    test "while the later turn's action is pending, answers it and holds that turn", %{
+      config: config
+    } do
+      driver = {BlockingDriver, [test_pid: self()]}
+      {:ok, session} = SessionManager.ensure(config, context(@turn), driver: driver)
+      assert {:ok, ^session} = SessionManager.ensure(config, context(@next_turn), driver: driver)
+
+      {:ok, :auto, request} =
+        Session.classify(session, %{
+          "action" => "left_click",
+          "observation_id" => ComputerUseObservations.id(),
+          "x" => 1,
+          "y" => 2
+        })
+
+      asked = asked_by(request, context(@next_turn))
+      caller = Task.async(fn -> Session.execute(session, asked) end)
+      assert_receive {:driver_entered, %{"action" => "left_click"}}
+
+      ref = Process.monitor(session)
+      send(session, {:operator_control, :stop})
+
+      assert {:error, {:operator_stopped, :unknown}} = Task.await(caller, @reply_ms)
+      assert_receive {:DOWN, ^ref, :process, ^session, :normal}
+      assert {:error, :operator_stopped} = OperatorStop.check(@conversation, @next_turn)
+    end
+
+    test "is the opening turn while no other turn has used the session", %{config: config} do
+      {spec, _knobs} = ScreenHelperDouble.driver(self())
+      {:ok, session} = SessionManager.ensure(config, context(@turn), driver: spec)
+
+      {:ok, :auto, request} = Session.classify(session, %{"action" => "screenshot"})
+      assert {:ok, _look} = Session.execute(session, asked_by(request, context(@turn)))
+
+      stop(session)
+
+      assert {:error, :operator_stopped} = OperatorStop.check(@conversation, @turn)
+    end
+
+    # A request that names no turn leaves nothing to hold, and the opening turn
+    # is not held in its place: that turn may be long over.
+    test "is nobody's after a request that names no turn, and the log says so", %{
+      config: config
+    } do
+      {spec, _knobs} = ScreenHelperDouble.driver(self())
+      {:ok, session} = SessionManager.ensure(config, context(@turn), driver: spec)
+
+      {:ok, :auto, request} = Session.classify(session, %{"action" => "screenshot"})
+      nameless = Map.delete(context(@turn), :session_id)
+      assert {:ok, _look} = Session.execute(session, asked_by(request, nameless))
+
+      assert capture_log(fn -> stop(session) end) =~ "had no turn to record against"
+      assert :ok = OperatorStop.check(@conversation, @turn)
+    end
+  end
+
+  # The request as the tool sends it: naming the turn that asked.
+  defp asked_by(request, context), do: ComputerDriver.with_turn(request, context)
+
+  # Stop from the indicator, and wait until the session it ended is gone, which
+  # is after the hold was recorded.
+  defp stop(session) do
+    ref = Process.monitor(session)
+    send(session, {:operator_control, :stop})
+    assert_receive {:DOWN, ^ref, :process, ^session, :normal}
   end
 end

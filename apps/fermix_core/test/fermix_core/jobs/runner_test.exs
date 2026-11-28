@@ -9,11 +9,13 @@ defmodule FermixCore.Jobs.RunnerTest do
   alias FermixCore.Capabilities.Builtin, as: BuiltinCapability
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Jobs.Failure
   alias FermixCore.Jobs.Registry
   alias FermixCore.Jobs.Runner
   alias FermixCore.Jobs.RunnerSupervisor
   alias FermixCore.Memory.Repo
   alias FermixCore.Net.Egress
+  alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Tools.UpdateJob
 
   # How long to wait for a runner's own exit. It is an arrival bound, so a run
@@ -363,9 +365,9 @@ defmodule FermixCore.Jobs.RunnerTest do
     # First LLM call requests a tool; the post-tool `continue/3` then goes
     # silent well past the inactivity window. The watchdog suspends that window
     # only while a tool is in flight, so this run must still time out — which is
-    # false unless the `{:tool_finish, name, outcome}` event decrements the
-    # in-flight count (a mismatched arity would fall through to the generic
-    # activity clause and pin `active_tools` at 1 forever).
+    # false unless the `{:tool_finish, name, outcome}` event ends the call in
+    # flight (a mismatched shape would fall through to the generic activity
+    # clause and keep the call in flight forever).
     @behaviour FermixCore.Providers.Adapter
 
     @impl true
@@ -502,6 +504,96 @@ defmodule FermixCore.Jobs.RunnerTest do
         _ -> :ok
       end
     end
+  end
+
+  defmodule RetryThenToolAdapter do
+    @moduledoc false
+    # The first whole-loop attempt loses its connection before any tool, so the
+    # runner retries it; the second calls one tool, then answers.
+    @behaviour FermixCore.Providers.Adapter
+
+    alias FermixCore.Providers.Error, as: ProviderError
+
+    @impl true
+    def chat(_messages, _capabilities, opts) do
+      attempt = Agent.get_and_update(Keyword.fetch!(opts, :counter), &{&1 + 1, &1 + 1})
+
+      if attempt == 1 do
+        {:error, ProviderError.transport(:openai_codex, :codex, :connection_unavailable)}
+      else
+        {:ok,
+         %{
+           content: "",
+           tool_calls: [%{id: "fc_1", call_id: "call_1", name: "stage3_echo", arguments: "{}"}],
+           usage: %{prompt_tokens: 1, completion_tokens: 0, total_tokens: 1},
+           model: "mock",
+           provider_state: %{}
+         }}
+      end
+    end
+
+    @impl true
+    def continue(_provider_state, _tool_results, _opts) do
+      {:ok,
+       %{
+         content: "Tides fetched on the second try.",
+         tool_calls: [],
+         usage: %{prompt_tokens: 1, completion_tokens: 1, total_tokens: 2},
+         model: "mock",
+         provider_state: %{}
+       }}
+    end
+
+    @impl true
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl true
+    def parse_tool_calls(_response), do: []
+
+    @impl true
+    def parse_response(response), do: response
+
+    @impl true
+    def supports_streaming?, do: false
+  end
+
+  defmodule ToolThenRateLimitAdapter do
+    @moduledoc false
+    # The model asks for one tool; once it ran, the provider refuses the next
+    # call with a rate limit: a provider failure after a tool started.
+    @behaviour FermixCore.Providers.Adapter
+
+    alias FermixCore.Providers.Error, as: ProviderError
+
+    @impl true
+    def chat(_messages, _capabilities, _opts) do
+      {:ok,
+       %{
+         content: "",
+         tool_calls: [%{id: "fc_1", call_id: "call_1", name: "stage3_echo", arguments: "{}"}],
+         usage: %{prompt_tokens: 1, completion_tokens: 0, total_tokens: 1},
+         model: "mock",
+         provider_state: %{}
+       }}
+    end
+
+    @impl true
+    def continue(_provider_state, _tool_results, _opts),
+      do:
+        {:error,
+         ProviderError.api(:openai, :responses, 429, %{"error" => %{"message" => "Slow down."}})}
+
+    @impl true
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl true
+    def parse_tool_calls(_response), do: []
+
+    @impl true
+    def parse_response(response), do: response
+
+    @impl true
+    def supports_streaming?, do: false
   end
 
   setup do
@@ -685,6 +777,8 @@ defmodule FermixCore.Jobs.RunnerTest do
     assert {:ok, failed_run} = Repo.get_job_run(run.id, server: repo)
     assert failed_run.status == "error"
     assert failed_run.error =~ "Maximum iterations (1) reached"
+    # The iteration cap is still a sentence, and a sentence is never read.
+    assert failed_run.failure_kind == "other"
     assert failed_run.output_ref == "job_runs/#{run.id}/error.md"
 
     assert {:ok, updated_job} = Registry.get_job(job.id, repo: repo)
@@ -720,8 +814,12 @@ defmodule FermixCore.Jobs.RunnerTest do
 
     assert {:ok, timed_out_run} = Repo.get_job_run(run.id, server: repo)
     assert timed_out_run.status == "timeout"
-    assert timed_out_run.error =~ "inactivity timeout"
+    assert timed_out_run.error =~ "The run stopped after"
+    assert timed_out_run.error =~ "with nothing happening"
     assert timed_out_run.output_ref == "job_runs/#{run.id}/error.md"
+    assert timed_out_run.failure_kind == "idle_limit"
+    assert timed_out_run.tool_timeline == []
+    assert timed_out_run.tools_started_at == nil
 
     assert {:ok, []} = Repo.list_job_runs(%{job_id: job.id, status: "running"}, server: repo)
     assert {:ok, []} = Repo.list_job_runs(%{job_id: job.id, status: "queued"}, server: repo)
@@ -770,7 +868,15 @@ defmodule FermixCore.Jobs.RunnerTest do
 
     assert {:ok, timed_out_run} = Repo.get_job_run(run.id, server: repo)
     assert timed_out_run.status == "timeout"
-    assert timed_out_run.error =~ "inactivity timeout"
+    assert timed_out_run.error =~ "The run stopped after"
+    assert timed_out_run.error =~ "with nothing happening"
+    assert timed_out_run.failure_kind == "idle_limit"
+    assert %DateTime{} = timed_out_run.tools_started_at
+
+    assert [%{"name" => "stage3_echo", "status" => "ok", "duration_ms" => ms}] =
+             timed_out_run.tool_timeline
+
+    assert is_integer(ms) and ms >= 0
   end
 
   test "applies default wall-clock watchdog when no timeout is configured", %{
@@ -798,7 +904,8 @@ defmodule FermixCore.Jobs.RunnerTest do
 
     assert {:ok, timed_out_run} = Repo.get_job_run(run.id, server: repo)
     assert timed_out_run.status == "timeout"
-    assert timed_out_run.error =~ "wall-clock timeout after 20ms"
+    assert timed_out_run.error =~ "The run stopped at its 20-millisecond time limit"
+    assert timed_out_run.failure_kind == "time_limit"
   end
 
   test "job timeout_seconds is honored when the caller passes timeout_ms: nil", %{
@@ -827,7 +934,7 @@ defmodule FermixCore.Jobs.RunnerTest do
 
     assert {:ok, timed_out_run} = Repo.get_job_run(run.id, server: repo)
     assert timed_out_run.status == "timeout"
-    assert timed_out_run.error =~ "wall-clock timeout after 1000ms"
+    assert timed_out_run.error =~ "The run stopped at its 1-second time limit"
   end
 
   test "job inactivity_timeout_seconds is honored when the caller passes inactivity_timeout_ms: nil",
@@ -857,7 +964,7 @@ defmodule FermixCore.Jobs.RunnerTest do
 
     assert {:ok, timed_out_run} = Repo.get_job_run(run.id, server: repo)
     assert timed_out_run.status == "timeout"
-    assert timed_out_run.error =~ "inactivity timeout after 1000ms"
+    assert timed_out_run.error =~ "The run stopped after 1 second with nothing happening"
   end
 
   test "an explicit caller timeout_ms still overrides the job's timeout_seconds", %{
@@ -886,7 +993,7 @@ defmodule FermixCore.Jobs.RunnerTest do
 
     assert {:ok, timed_out_run} = Repo.get_job_run(run.id, server: repo)
     assert timed_out_run.status == "timeout"
-    assert timed_out_run.error =~ "wall-clock timeout after 20ms"
+    assert timed_out_run.error =~ "The run stopped at its 20-millisecond time limit"
   end
 
   # A guest job's own list naming these fails its run instead (below, "a job
@@ -1298,6 +1405,8 @@ defmodule FermixCore.Jobs.RunnerTest do
       assert {:ok, failed_run} = Repo.get_job_run(run.id, server: repo)
       assert {job_attrs, failed_run.status} == {job_attrs, "error"}
       assert failed_run.error =~ words
+      assert {job_attrs, failed_run.failure_kind} == {job_attrs, "tools_unavailable"}
+      assert failed_run.tool_timeline == []
 
       lead = output_base_dir |> Path.join(failed_run.output_ref) |> File.read!()
       assert lead =~ words
@@ -1404,6 +1513,7 @@ defmodule FermixCore.Jobs.RunnerTest do
     assert {:ok, failed_run} = Repo.get_job_run(run.id, server: repo)
     assert failed_run.status == "error"
     assert failed_run.error =~ "Skill plugin_runner asks only for capability classes"
+    assert failed_run.failure_kind == "skill_grants_nothing"
 
     lead = output_base_dir |> Path.join(failed_run.output_ref) |> File.read!()
     assert lead =~ "Skill plugin_runner asks only for capability classes this job does not grant"
@@ -1858,8 +1968,13 @@ defmodule FermixCore.Jobs.RunnerTest do
     assert log =~ "Scheduled job #{job.id} AgentLoop crashed"
     assert {:ok, failed} = Repo.get_job_run(run.id, server: repo)
     assert failed.status == "error"
-    assert failed.error =~ "agent_loop_exit"
-    assert failed.error =~ "adapter exploded"
+    # The row states the kind's sentence; the crash itself is the artifact's
+    # detail (stage S4, round two).
+    assert failed.error == "The run stopped before it finished: the process running it ended."
+    assert failed.failure_kind == "crashed"
+    artifact = File.read!(Path.join(output_base_dir, failed.output_ref))
+    assert artifact =~ "agent_loop_exit"
+    assert artifact =~ "adapter exploded"
   end
 
   # The `Keyword.get(opts, :timeout_ms)` shape below is load-bearing: it mirrors
@@ -1894,7 +2009,8 @@ defmodule FermixCore.Jobs.RunnerTest do
         inactivity_timeout_ms: Keyword.get(opts, :inactivity_timeout_ms),
         delivery_adapter: Keyword.get(opts, :delivery_adapter),
         delivery_opts: Keyword.get(opts, :delivery_opts, []),
-        delivery_timeout_ms: Keyword.get(opts, :delivery_timeout_ms)
+        delivery_timeout_ms: Keyword.get(opts, :delivery_timeout_ms),
+        heal_card_opts: Keyword.get(opts, :heal_card_opts, [])
       )
 
     assert_receive {:EXIT, ^pid, :normal}, Keyword.get(opts, :exit_timeout_ms, @runner_exit_ms)
@@ -2876,7 +2992,7 @@ defmodule FermixCore.Jobs.RunnerTest do
 
       assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
       assert stored_run.status == "error"
-      assert stored_run.error =~ "connection_unavailable"
+      assert stored_run.error =~ "Fermix could not reach"
     end
 
     test "does not retry a non-transient error", %{
@@ -2996,9 +3112,678 @@ defmodule FermixCore.Jobs.RunnerTest do
     end
   end
 
+  # M106 §5.1: every run's row carries its failure's kind, when its first tool
+  # started, and a timeline of its tool calls: names and numbers only.
+  describe "the run's facts" do
+    # The watchdog's clock is the test's, so the limit passes only when the test
+    # says. The loop that runs the fetch delivers the expiry itself, after its
+    # own tool start: one sender, so the runner has seen the start first.
+    test "a run the wall-clock limit stops keeps the tool still running as its last entry", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      :ok = CapabilityRegistry.register(capability_registry, test_capability("tide_lookup"))
+      :ok = CapabilityRegistry.register(capability_registry, held_capability("harbour_fetch"))
+      clock = start_supervised!({Agent, fn -> 0 end})
+
+      assert {:ok, {job, run}} =
+               create_claimed_job(repo,
+                 name: "Harbour tide table",
+                 task_prompt: "Fetch this morning's tides.",
+                 allowed_tools: ["tide_lookup", "harbour_fetch"]
+               )
+
+      Process.flag(:trap_exit, true)
+
+      {:ok, pid} =
+        Runner.start_link(
+          repo: repo,
+          job: job,
+          run: run,
+          notify: self(),
+          capability_registry: capability_registry,
+          adapter: RecordingAdapter,
+          adapter_opts: [
+            test_pid: self(),
+            script: [
+              %{
+                tool_calls: [
+                  scripted_call("call_1", "tide_lookup"),
+                  scripted_call("call_2", "harbour_fetch")
+                ]
+              }
+            ]
+          ],
+          output_base_dir: output_base_dir,
+          timeout_ms: 600_000,
+          network_readiness_enabled: false,
+          monotonic_ms: fn -> Agent.get(clock, & &1) end
+        )
+
+      assert_receive {:held_tool_running, loop}, @runner_exit_ms
+      :ok = Agent.update(clock, fn _now -> 600_000 end)
+      send(loop, {:deliver_expiry, pid})
+      assert_receive {:EXIT, ^pid, :normal}, @runner_exit_ms
+
+      assert {:ok, stopped} = Repo.get_job_run(run.id, server: repo)
+      assert stopped.status == "timeout"
+      # The row keeps Fermix's sentence for the kind (M106 S4), in minutes and
+      # naming the tool the limit stopped.
+      assert stopped.error ==
+               ~s(The run stopped at its 10-minute time limit while its tool "harbour_fetch" ) <>
+                 "was still running."
+
+      assert stopped.failure_kind == "time_limit"
+      assert %DateTime{} = stopped.tools_started_at
+      assert DateTime.compare(stopped.tools_started_at, stopped.started_at) != :lt
+
+      assert [
+               %{"name" => "tide_lookup", "status" => "ok"},
+               %{"name" => "harbour_fetch", "status" => "unfinished", "duration_ms" => held_ms}
+             ] = stopped.tool_timeline
+
+      assert is_integer(held_ms) and held_ms >= 0
+    end
+
+    test "an ok run stores each call's name, plugin, duration and outcome, and no kind", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      :ok = CapabilityRegistry.register(capability_registry, test_capability("stage3_echo"))
+      :ok = CapabilityRegistry.register(capability_registry, failing_capability("stage3_fail"))
+
+      :ok =
+        CapabilityRegistry.register(
+          capability_registry,
+          plugin_capability("tide_feed", "harbour")
+        )
+
+      assert {:ok, {job, run}} =
+               create_claimed_job(repo,
+                 name: "Harbour digest",
+                 task_prompt: "Read the feeds, then report.",
+                 allowed_tools: ["stage3_echo", "stage3_fail", "tide_feed"]
+               )
+
+      secret_args = Jason.encode!(%{"query" => "args-marker-7Q"})
+
+      assert_runner_exits_normally(job, run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir,
+        script: [
+          %{
+            tool_calls: [
+              %{scripted_call("call_1", "stage3_echo") | arguments: secret_args},
+              scripted_call("call_2", "stage3_fail"),
+              %{scripted_call("call_3", "tide_feed") | arguments: secret_args}
+            ]
+          },
+          %{content: "High water at 06:12, reply-marker-3K."}
+        ]
+      )
+
+      assert {:ok, stored} = Repo.get_job_run(run.id, server: repo)
+      assert stored.status == "ok"
+      assert stored.failure_kind == nil
+      assert %DateTime{} = stored.tools_started_at
+
+      assert [
+               %{"name" => "stage3_echo", "status" => "ok"} = echo,
+               %{"name" => "stage3_fail", "status" => "error"} = fail,
+               %{"name" => "tide_feed", "plugin" => "harbour", "status" => "ok"} = feed
+             ] = stored.tool_timeline
+
+      for entry <- [echo, fail, feed] do
+        assert is_integer(entry["duration_ms"]) and entry["duration_ms"] >= 0
+
+        assert entry
+               |> Map.keys()
+               |> Enum.all?(&(&1 in ["name", "plugin", "duration_ms", "status"]))
+      end
+
+      refute Map.has_key?(echo, "plugin")
+
+      # The echo's output quotes its arguments, and the failure has its own
+      # words: none of it, and nothing the model wrote, is on the timeline.
+      encoded = Jason.encode!(stored.tool_timeline)
+      refute encoded =~ "args-marker-7Q"
+      refute encoded =~ "tracker refused"
+      refute encoded =~ "reply-marker-3K"
+    end
+
+    test "the timeline keeps the newest 40 calls", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      :ok = CapabilityRegistry.register(capability_registry, test_capability("early_echo"))
+      :ok = CapabilityRegistry.register(capability_registry, test_capability("late_echo"))
+
+      assert {:ok, {job, run}} =
+               create_claimed_job(repo,
+                 name: "Busy digest",
+                 task_prompt: "Read everything.",
+                 allowed_tools: ["early_echo", "late_echo"]
+               )
+
+      # Arguments differ call to call, so the loop detector sees no repeat.
+      calls =
+        for {name, n} <-
+              Enum.map(1..5, &{"early_echo", &1}) ++ Enum.map(1..40, &{"late_echo", &1}) do
+          %{scripted_call("call_#{name}_#{n}", name) | arguments: Jason.encode!(%{"n" => n})}
+        end
+
+      assert_runner_exits_normally(job, run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir,
+        script: [%{tool_calls: calls}, %{content: "Read all of it."}]
+      )
+
+      assert {:ok, stored} = Repo.get_job_run(run.id, server: repo)
+      assert stored.status == "ok"
+      assert length(stored.tool_timeline) == 40
+      assert Enum.all?(stored.tool_timeline, &(&1["name"] == "late_echo"))
+    end
+
+    test "a skill that is gone stores unknown_skill and keeps the reason as its error", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      {:ok, skill_registry} = SkillRegistryStub.start_link(%{})
+
+      assert {:ok, {job, run}} =
+               create_claimed_job(repo,
+                 name: "Tide skill",
+                 task_prompt: "Run the tide skill.",
+                 skill_name: "harbour_tides"
+               )
+
+      assert_runner_exits_normally(job, run,
+        repo: repo,
+        capability_registry: capability_registry,
+        skill_registry: skill_registry,
+        output_base_dir: output_base_dir,
+        script: [%{content: "unreachable"}]
+      )
+
+      assert {:ok, failed} = Repo.get_job_run(run.id, server: repo)
+      assert failed.status == "error"
+
+      assert failed.error ==
+               ~s(The run could not start: the skill "harbour_tides" it is bound to does not exist.)
+
+      assert failed.failure_kind == "unknown_skill"
+      assert failed.tool_timeline == []
+    end
+
+    # A whole-loop retry starts only before any tool ran, so the retried
+    # attempt has no call to count: the timeline is the last attempt's.
+    test "a run retried after a lost connection stores only the last attempt's calls", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      :ok = CapabilityRegistry.register(capability_registry, test_capability("stage3_echo"))
+      {:ok, counter} = start_counter()
+
+      assert {:ok, {job, run}} =
+               create_claimed_job(repo,
+                 name: "Wakes and retries",
+                 task_prompt: "Use one tool.",
+                 allowed_tools: ["stage3_echo"]
+               )
+
+      Process.flag(:trap_exit, true)
+
+      {:ok, pid} =
+        Runner.start_link(
+          repo: repo,
+          job: job,
+          run: run,
+          notify: self(),
+          capability_registry: capability_registry,
+          adapter: RetryThenToolAdapter,
+          adapter_opts: [counter: counter],
+          output_base_dir: output_base_dir,
+          network_readiness_enabled: false,
+          delay_fn: fn _ms -> :ok end
+        )
+
+      assert_receive {:EXIT, ^pid, :normal}, @runner_exit_ms
+      assert Agent.get(counter, & &1) == 2
+
+      assert {:ok, stored} = Repo.get_job_run(run.id, server: repo)
+      assert stored.status == "ok"
+      assert [%{"name" => "stage3_echo", "status" => "ok"}] = stored.tool_timeline
+    end
+  end
+
+  # A tool that runs until the test delivers the watchdog's expiry through it,
+  # then until the watchdog's kill ends it.
+  defp held_capability(name) do
+    Capability.new(%{
+      name: name,
+      description: "Test capability #{name} that runs until it is killed",
+      parameters: %{"type" => "object", "properties" => %{}},
+      kind: :builtin,
+      executor: {__MODULE__, :execute_held_capability, [self()]},
+      policy_class: :read_only
+    })
+  end
+
+  def execute_held_capability(_args, _context, test_pid) do
+    send(test_pid, {:held_tool_running, self()})
+
+    receive do
+      {:deliver_expiry, runner} -> send(runner, :watchdog_timeout)
+    after
+      @adapter_hang_ms -> :ok
+    end
+
+    # The watchdog's kill ends the loop here.
+    receive do
+    after
+      @adapter_hang_ms -> {:ok, %{success: true, output: "too late"}}
+    end
+  end
+
+  # M106 §5.3: a run that failed before its first tool, on a failure waiting can
+  # clear (the provider's), is retried quietly. A failure of the owner's job
+  # that is not retried goes to a heal (§5.4), which tells the owner in their
+  # inbox: the run sends no line of its own. A guest's job keeps its line.
+  describe "a failed run's retry" do
+    test "a provider failure before any tool is retried 30 s on and sends nothing", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      {job, run} = claim_with_future_next_run!(repo, name: "Harbour tide table")
+      {:ok, counter} = start_counter()
+
+      run_transient_runner(job, run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir,
+        delivery_adapter: RecordingDelivery,
+        delivery_opts: [test_pid: self()],
+        adapter_opts: [counter: counter, fail_with: rate_limited()]
+      )
+
+      refute_received {:delivery_send, _target, _text, _opts}
+
+      assert {:ok, failed} = Repo.get_job_run(run.id, server: repo)
+      assert failed.status == "error"
+      assert failed.failure_kind == "provider_rate_limit"
+      assert failed.delivery_status == "skipped"
+
+      assert {:ok, %{attempts: 1, retry_at: retry_at}} = Repo.get_job_retry(job.id, server: repo)
+      assert DateTime.diff(retry_at, failed.completed_at, :millisecond) == 30_000
+
+      assert {:ok, %{last_status: "error"}} = Registry.get_job(job.id, repo: repo)
+
+      assert {:ok, %{last_status: nil}} =
+               Registry.get_memory_source(job.memory_source_id, repo: repo)
+    end
+
+    test "a provider failure after a tool started is not retried: its provider's heal takes it",
+         %{
+           repo: repo,
+           capability_registry: capability_registry,
+           output_base_dir: output_base_dir
+         } do
+      :ok = CapabilityRegistry.register(capability_registry, test_capability("stage3_echo"))
+
+      {job, run} =
+        claim_with_future_next_run!(repo, name: "Tide after tool", allowed_tools: ["stage3_echo"])
+
+      Process.flag(:trap_exit, true)
+
+      {:ok, pid} =
+        Runner.start_link(
+          repo: repo,
+          job: job,
+          run: run,
+          notify: self(),
+          capability_registry: capability_registry,
+          adapter: ToolThenRateLimitAdapter,
+          output_base_dir: output_base_dir,
+          network_readiness_enabled: false,
+          delivery_adapter: RecordingDelivery,
+          delivery_opts: [test_pid: self()]
+        )
+
+      assert_receive {:EXIT, ^pid, :normal}, @runner_exit_ms
+      refute_received {:delivery_send, _target, _text, _opts}
+
+      assert {:ok, %{tools_started_at: %DateTime{}, delivery_status: "skipped"}} =
+               Repo.get_job_run(run.id, server: repo)
+
+      assert {:ok, nil} = Repo.get_job_retry(job.id, server: repo)
+
+      assert [
+               %{
+                 subject_kind: "provider",
+                 subject_id: "openai",
+                 failure_kind: "provider_rate_limit"
+               } = heal
+             ] =
+               open_heals(repo)
+
+      assert heal.failure_text == Failure.sentence(rate_limited())
+
+      assert {:ok, %{last_status: "error"}} =
+               Registry.get_memory_source(job.memory_source_id, repo: repo)
+    end
+
+    test "a failure waiting cannot clear is not retried: a skill that is gone, the time limit", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      {:ok, skill_registry} = SkillRegistryStub.start_link(%{})
+
+      {gone, gone_run} =
+        claim_with_future_next_run!(repo, name: "Skill gone", skill_name: "harbour_tides")
+
+      assert_runner_exits_normally(gone, gone_run,
+        repo: repo,
+        capability_registry: capability_registry,
+        skill_registry: skill_registry,
+        output_base_dir: output_base_dir,
+        delivery_adapter: RecordingDelivery,
+        delivery_opts: [test_pid: self()],
+        script: [%{content: "unreachable"}]
+      )
+
+      {slow, slow_run} = claim_with_future_next_run!(repo, name: "Too slow")
+
+      assert_runner_exits_normally(slow, slow_run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir,
+        default_timeout_ms: 20,
+        adapter_opts: [sleep_ms: @adapter_hang_ms],
+        delivery_adapter: RecordingDelivery,
+        delivery_opts: [test_pid: self()],
+        script: [%{content: "too late"}]
+      )
+
+      refute_received {:delivery_send, _target, _text, _opts}
+
+      for job <- [gone, slow] do
+        assert {job.name, Repo.get_job_retry(job.id, server: repo)} == {job.name, {:ok, nil}}
+      end
+
+      heals = Map.new(open_heals(repo), &{&1.subject_id, &1})
+
+      assert %{failure_kind: "unknown_skill", subject_kind: "job", failure_text: gone_text} =
+               heals[gone.id]
+
+      assert gone_text =~ "The run could not start: the skill"
+
+      assert %{
+               failure_kind: "time_limit",
+               failure_text: "The run stopped at its 20-millisecond time limit."
+             } = heals[slow.id]
+
+      for run <- [gone_run, slow_run] do
+        assert {:ok, %{delivery_status: "skipped"}} = Repo.get_job_run(run.id, server: repo)
+      end
+    end
+
+    test "a guest's job keeps its failure line and opens no heal", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      {:ok, skill_registry} = SkillRegistryStub.start_link(%{})
+
+      {job, run} =
+        claim_with_future_next_run!(repo,
+          name: "Guest skill gone",
+          skill_name: "harbour_tides",
+          created_by_trust: "guest"
+        )
+
+      assert_runner_exits_normally(job, run,
+        repo: repo,
+        capability_registry: capability_registry,
+        skill_registry: skill_registry,
+        output_base_dir: output_base_dir,
+        delivery_adapter: RecordingDelivery,
+        delivery_opts: [test_pid: self()],
+        script: [%{content: "unreachable"}]
+      )
+
+      assert_receive {:delivery_send, "123", text, _opts}
+      assert text =~ ~s(Scheduled job "Guest skill gone" finished with error.)
+      assert {:ok, %{delivery_status: "sent"}} = Repo.get_job_run(run.id, server: repo)
+      assert open_heals(repo) == []
+    end
+
+    test "an ok run closes its job's heal and the heal of the provider it ran on", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      {job, first} = claim_with_future_next_run!(repo, name: "Tide healed")
+      job_heal = settle_failed!(repo, first, "time_limit", nil)
+
+      {_other, other_run} = claim_with_future_next_run!(repo, name: "Tide on mock")
+      provider_heal = settle_failed!(repo, other_run, "provider_quota", "mock")
+
+      assert {:ok, %{subject_kind: "provider"}} =
+               Repo.job_heals_call({:get, provider_heal}, server: repo)
+
+      {:ok, {_job, run}} =
+        Repo.claim_job_now(
+          job.id,
+          %{state: "running", updated_at: DateTime.utc_now()},
+          claim_run_attrs(job, DateTime.utc_now(), "manual"),
+          server: repo
+        )
+
+      assert_runner_exits_normally(job, run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir,
+        delivery_adapter: RecordingDelivery,
+        delivery_opts: [test_pid: self()],
+        script: [%{content: "Tides fetched."}]
+      )
+
+      for id <- [job_heal, provider_heal] do
+        assert {:ok, %{state: "closed", outcome: "healed"}} =
+                 Repo.job_heals_call({:get, id}, server: repo)
+      end
+    end
+
+    # M106 §8 (stage S6): a proposal's card in the Fermix app is told it
+    # expired when the job's next run is clean and closes its heal.
+    test "an ok run that closes a proposal's heal tells the app its card expired", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      test_pid = self()
+      app = %{platform: "companion", chat_id: "main", user_id: "app"}
+      %{job: job, heal: heal} = FermixTestSupport.HealCards.waiting_card!(repo, app)
+      now = DateTime.utc_now()
+
+      {:ok, {_job, run}} =
+        Repo.claim_job_now(
+          job.id,
+          %{state: "running", updated_at: now},
+          claim_run_attrs(job, now, "manual"),
+          server: repo
+        )
+
+      assert_runner_exits_normally(job, run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir,
+        delivery_adapter: RecordingDelivery,
+        delivery_opts: [test_pid: test_pid],
+        script: [%{content: "Tides fetched."}],
+        heal_card_opts: [
+          app_card_listener: fn profile, id, outcome ->
+            send(test_pid, {:card_ended, profile, id, outcome})
+          end
+        ]
+      )
+
+      assert {:ok, %{state: "closed", outcome: "healed"}} =
+               Repo.job_heals_call({:get, heal.id}, server: repo)
+
+      assert_received {:card_ended, "main", id, :expired}
+      assert id == heal.id
+    end
+
+    test "the fourth provider failure in a row is exhausted: a heal on its provider, no line", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      {job, first} = claim_with_future_next_run!(repo, name: "Tide exhausted")
+      run = retried_three_times!(repo, job, first)
+      assert run.trigger == "retry"
+      {:ok, counter} = start_counter()
+
+      run_transient_runner(job, run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir,
+        delivery_adapter: RecordingDelivery,
+        delivery_opts: [test_pid: self()],
+        adapter_opts: [counter: counter, fail_with: rate_limited()]
+      )
+
+      refute_received {:delivery_send, _target, _text, _opts}
+      assert {:ok, nil} = Repo.get_job_retry(job.id, server: repo)
+      assert {:ok, %{delivery_status: "skipped"}} = Repo.get_job_run(run.id, server: repo)
+      assert [%{subject_kind: "provider", subject_id: "openai", run_count: 1}] = open_heals(repo)
+
+      assert {:ok, %{last_status: "error"}} =
+               Registry.get_memory_source(job.memory_source_id, repo: repo)
+    end
+  end
+
+  defp rate_limited do
+    ProviderError.api(:openai, :responses, 429, %{
+      "error" => %{"message" => "Rate limit reached."}
+    })
+  end
+
+  # A claimed run of a job delivering to a chat, whose next scheduled run is a
+  # day away, so a retry 30 s on comes before it whatever the wall clock says.
+  defp claim_with_future_next_run!(repo, attrs) do
+    now = DateTime.utc_now()
+
+    {:ok, job} =
+      Registry.create_job(
+        Map.merge(
+          %{
+            schedule: "every 15 minutes",
+            task_prompt: "Fetch the tides.",
+            created_by_trust: "operator",
+            delivery_mode: "channel",
+            delivery_target: %{"platform" => "telegram", "chat_id" => "123"}
+          },
+          Map.new(attrs)
+        ),
+        repo: repo,
+        now: now,
+        scheduler: nil
+      )
+
+    patch = %{state: "running", next_run_at: DateTime.add(now, 86_400, :second), updated_at: now}
+
+    {:ok, {claimed, run}} =
+      Repo.claim_job_now(job.id, patch, claim_run_attrs(job, now, "manual"), server: repo)
+
+    {claimed, run}
+  end
+
+  # Three failures of `first`'s job on its provider, each before any tool, and
+  # its fourth run claimed from the retry the third set.
+  defp retried_three_times!(repo, job, first) do
+    Enum.reduce(1..3, first, fn _attempt, run ->
+      failed_at = Map.fetch!(run, :claimed_at)
+
+      attrs =
+        Map.merge(run, %{
+          status: "error",
+          error: "429",
+          failure_kind: "provider_rate_limit",
+          completed_at: failed_at,
+          updated_at: failed_at,
+          heal_facts: %{failure_text: "OpenAI rate-limited this request.", provider: "openai"}
+        })
+
+      {:ok, {_run, _job, %{disposition: :retry, retry_at: retry_at}}} =
+        Repo.settle_job_run(attrs, {:failed, :provider}, server: repo)
+
+      {:ok, {_job, next}} =
+        Repo.claim_retry_job(
+          job.id,
+          %{state: "running", updated_at: retry_at},
+          claim_run_attrs(job, retry_at, "retry"),
+          retry_at,
+          server: repo
+        )
+
+      next
+    end)
+  end
+
+  # A failure of `run` settled as the runner's would be, its heal opened.
+  defp settle_failed!(repo, run, kind, provider) do
+    now = DateTime.utc_now()
+
+    attrs =
+      Map.merge(run, %{
+        status: "error",
+        error: "the run failed",
+        failure_kind: kind,
+        completed_at: now,
+        updated_at: now,
+        heal_facts: %{failure_text: "The run failed.", provider: provider}
+      })
+
+    {:ok, {_run, _job, %{heal: {:opened, id}}}} =
+      Repo.settle_job_run(attrs, {:failed, :other}, server: repo)
+
+    id
+  end
+
+  defp open_heals(repo) do
+    {:ok, heals} = Repo.job_heals_call(:open_heals, server: repo)
+    heals
+  end
+
+  defp claim_run_attrs(job, now, trigger) do
+    %{
+      id: "run_#{System.unique_integer([:positive])}",
+      job_id: job.id,
+      session_id: "cron_#{job.id}_#{System.unique_integer([:positive])}",
+      trigger: trigger,
+      status: "queued",
+      claimed_at: now,
+      delivery_status: "none",
+      created_at: now,
+      updated_at: now
+    }
+  end
+
   # A failed run's delivered text leads with a sentence the owner can act on;
   # the raw reason follows as detail, and the ledger keeps the machine-readable
-  # reason exactly as before.
+  # reason exactly as before. Only a guest's job still gets the line (M106
+  # §5.4): the owner's go to a heal.
   describe "failure delivery text" do
     test "an error run leads with the job sentence and keeps the raw reason as detail", %{
       repo: repo,
@@ -3010,6 +3795,7 @@ defmodule FermixCore.Jobs.RunnerTest do
       assert {:ok, {job, run}} =
                create_claimed_job(repo,
                  name: "Overflow Check",
+                 created_by_trust: "guest",
                  task_prompt: "Read every log.",
                  delivery_mode: "channel",
                  delivery_target: %{"platform" => "telegram", "chat_id" => "123"}
@@ -3051,7 +3837,7 @@ defmodule FermixCore.Jobs.RunnerTest do
       assert artifact =~ "## Error\n\n#{sentence}\n\nDetail: :context_overflow_after_compaction\n"
     end
 
-    test "a timeout run's delivered text is unchanged", %{
+    test "a timeout run's delivered text states the limit as Fermix's sentence", %{
       repo: repo,
       capability_registry: capability_registry,
       output_base_dir: output_base_dir
@@ -3059,6 +3845,7 @@ defmodule FermixCore.Jobs.RunnerTest do
       assert {:ok, {job, run}} =
                create_claimed_job(repo,
                  name: "Timeout Delivery Check",
+                 created_by_trust: "guest",
                  task_prompt: "This adapter will stop responding.",
                  delivery_mode: "channel",
                  delivery_target: %{"platform" => "telegram", "chat_id" => "123"}
@@ -3084,16 +3871,18 @@ defmodule FermixCore.Jobs.RunnerTest do
                Scheduled job "Timeout Delivery Check" finished with timeout.
 
                Run ID: #{run.id}
-               Error: inactivity timeout after 20ms
+               Error: The run stopped after 20 milliseconds with nothing happening.
                """
                |> String.trim()
 
       assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
       assert stored_run.status == "timeout"
-      assert stored_run.error == "inactivity timeout after 20ms"
+      assert stored_run.error == "The run stopped after 20 milliseconds with nothing happening."
 
       artifact = File.read!(Path.join(output_base_dir, stored_run.output_ref))
-      assert artifact =~ "## Error\n\ninactivity timeout after 20ms\n"
+
+      assert artifact =~
+               "## Error\n\nThe run stopped after 20 milliseconds with nothing happening.\n"
     end
   end
 

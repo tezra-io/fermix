@@ -30,6 +30,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Home.Join, as: HomeJoin
   alias FermixCore.Home.Move, as: HomeMove
   alias FermixCore.Home.Moved
+  alias FermixCore.Home.ServerPrimary
   alias FermixCore.Home.ServerRestart
   alias FermixCore.Home.Snapshot
   alias FermixCore.Home.Snapshot.Recipient, as: SnapshotRecipient
@@ -58,14 +59,18 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Management.McpServers.Interchange
   alias FermixCore.Management.McpServers.PastedValues
   alias FermixCore.Management.McpServers.Row, as: McpRow
+  alias FermixCore.Management.PhoneCalls, as: ManagementPhoneCalls
   alias FermixCore.Management.Placement
   alias FermixCore.Management.Plugins.Row, as: PluginRow
   alias FermixCore.Management.Protocol
   alias FermixCore.Management.Router
+  alias FermixCore.Management.Secrets
   alias FermixCore.Management.Settings
   alias FermixCore.Management.Settings.Row
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesSql
+  alias FermixCore.Memory.Repo.PhoneCallsSql
+  alias FermixCore.PhoneCalls.Readiness, as: PhoneCallReadiness
   alias FermixCore.Readiness
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.RestartState
@@ -73,6 +78,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixTestSupport.CueFixtures
   alias FermixTestSupport.HomeSummaryGoldens
   alias FermixTestSupport.MandateFixtures
+  alias FermixTestSupport.PhoneCallGoldens
   alias FermixTestSupport.SafeRm
   alias FermixTestSupport.ScreenHelperDouble
 
@@ -95,6 +101,18 @@ defmodule FermixCore.Management.ProtocolContractTest do
                    computer_join_start computer_join_cancel computer_disconnect)
   @join_now ~U[2031-05-04 10:00:00Z]
   @joined_id "7e1f0c2a-3b4d-4e5f-8a6b-7c8d9e0f1a2b"
+  # M94 §12: each Phone calls golden, the world it is drawn from
+  # (`phone_world/1`) and the request that draws it.
+  @phone_call_goldens [
+    {"phone_calls_status", :in_progress, "phone_calls.status", %{}},
+    {"phone_calls_status_unresolved", :lost_off, "phone_calls.status", %{}},
+    {"phone_calls_list", :history, "phone_calls.list", %{}},
+    {"phone_calls_stop", :in_progress, "phone_calls.stop", %{"call_id" => "pc_0a1b2c3d4e5f"}},
+    {"phone_calls_recovery_get", :lost, "phone_calls.recovery.get", %{}},
+    {"phone_calls_recovery_get_unconfirmed", :history, "phone_calls.recovery.get", %{}},
+    {"phone_calls_recovery_confirm", :lost, "phone_calls.recovery.confirm",
+     %{"call_id" => "pc_3d4e5f607182"}}
+  ]
 
   @mcp_router_toml ~S"""
   [mcp.servers.filesystem]
@@ -428,21 +446,28 @@ defmodule FermixCore.Management.ProtocolContractTest do
   # green while the vendored macOS target validated against a shape the daemon
   # no longer produces. This drives the real router and compares key shapes.
   test "every golden success result carries the key shape the router returns", %{} do
-    for {method, params, opts} <- router_cases(), do: assert_router_shape(method, params, opts)
+    # The golden file is read once for every case below: read per case, its
+    # 134 reads went through the VM's one file server, which the runner's other
+    # tests share, and a loaded runner took them past the test's 60 s.
+    successes = fixtures(@successes)
+
+    for {method, params, opts} <- router_cases(),
+        do: assert_router_shape(successes, method, params, opts)
 
     # Minted only now, each just before it is read: a job left running holds
     # that state only for its kind's budget, and a loaded runner has taken
     # longer than a probe's 15 s to get through the cases above.
-    for {method, params, opts} <- job_view_cases(), do: assert_router_shape(method, params, opts)
+    for {method, params, opts} <- job_view_cases(),
+        do: assert_router_shape(successes, method, params, opts)
   end
 
-  defp assert_router_shape(method, params, opts) do
+  defp assert_router_shape(successes, method, params, opts) do
     {:ok, minimum} = Protocol.minimum_version(method)
     request = %{request_id: "req-1", protocol_version: minimum, method: method, params: params}
 
     assert {:ok, result} = Router.route(request, opts), "router refused #{method}"
 
-    assert shape(result) == shape(fixture_result(method, params)),
+    assert shape(result) == shape(fixture_result(successes, method, params)),
            "the golden #{method} fixture no longer matches the router's own result shape"
   end
 
@@ -579,8 +604,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
   #
   # Provider sections are the exception: there is one per descriptor, and which
   # providers exist is data every app reads from the daemon, not wire shape. The
-  # golden illustrates some of them, so a provider added to the engine moves no
-  # export an app vendors.
+  # inventory illustrates some of them, so a provider added to the engine need
+  # not join it; it still adds its own `settings.get` golden (the test below).
   test "the golden section inventory is the one the daemon publishes" do
     published = Enum.map(Settings.sections(macos?: true), & &1.id)
 
@@ -812,6 +837,151 @@ defmodule FermixCore.Management.ProtocolContractTest do
 
   defp golden_error_code(name) do
     @errors |> fixtures() |> Enum.find(&(&1["name"] == name)) |> Map.fetch!("code")
+  end
+
+  # M94 §12: every Phone calls golden is the engine's own answer to its case,
+  # value for value, drawn from `PhoneCallGoldens`' invented calls.
+  test "the golden phone calls answers are the engine's own" do
+    for {golden, world, method, params} <- @phone_call_goldens do
+      request = %{request_id: "req-1", protocol_version: 2, method: method, params: params}
+
+      assert {:ok, result} =
+               Router.route(request, operation_opts: [phone_calls: phone_world(world)])
+
+      assert named_fixture_result(golden) == json(result),
+             "the #{golden} golden no longer matches what the engine answers"
+    end
+  end
+
+  # The section's golden is what its home publishes: phone calls set up and
+  # on, both credentials stored, Talk to Fermix on Grok.
+  test "the golden Phone calls section is the one the daemon publishes" do
+    {:ok, view} =
+      Settings.get("phone_calls",
+        snapshot: PhoneCallGoldens.snapshot(),
+        phone_calls: PhoneCallGoldens.world(:empty)
+      )
+
+    assert named_fixture_result("settings_get_phone_calls") == json(view)
+  end
+
+  test "the golden phone calls refusals are the engine's own" do
+    in_progress = PhoneCallGoldens.world(:in_progress)
+    history = PhoneCallGoldens.world(:history)
+    stop = fn id, opts -> phone_route("phone_calls.stop", %{"call_id" => id}, opts) end
+
+    cases = [
+      {"unavailable_phone_calls_credential_in_use",
+       Router.route(
+         %{
+           request_id: "req-1",
+           protocol_version: 2,
+           method: "secret.set",
+           params: %{"id" => "openai_api_key", "value" => "sk-another-invented-key"}
+         },
+         secret_writer: &Secrets.set(&1, &2, phone_calls: in_progress)
+       )},
+      {"unavailable_phone_calls_call_ended", stop.(PhoneCallGoldens.ids().ended, history)},
+      {"unavailable_phone_calls_restart_held",
+       Router.route(
+         %{
+           request_id: "req-1",
+           protocol_version: 2,
+           method: "lifecycle.prepare_restart",
+           params: %{}
+         },
+         lifecycle_server: lifecycle_server(),
+         operation_opts: [phone_calls: in_progress]
+       )},
+      {"unavailable_phone_calls_owned_elsewhere_stop",
+       phone_route(
+         "phone_calls.stop",
+         %{"call_id" => PhoneCallGoldens.ids().in_progress},
+         PhoneCallGoldens.not_the_daemon(in_progress)
+       )},
+      {"unavailable_phone_calls_owned_elsewhere_confirm",
+       phone_route(
+         "phone_calls.recovery.confirm",
+         %{"call_id" => PhoneCallGoldens.ids().lost},
+         PhoneCallGoldens.not_the_daemon(PhoneCallGoldens.world(:lost))
+       )},
+      {"unavailable_phone_calls_confirm_in_progress",
+       phone_route(
+         "phone_calls.recovery.confirm",
+         %{"call_id" => PhoneCallGoldens.ids().in_progress},
+         in_progress
+       )},
+      {"invalid_params_phone_calls_call_id", stop.("pc_9f8e7d6c5b4a", history)},
+      {"invalid_params_phone_calls_caller_number",
+       Router.route(%{
+         request_id: "req-1",
+         protocol_version: 2,
+         method: "settings.apply",
+         params: %{
+           "section" => "phone_calls",
+           "values" => %{"phone_calls_caller_number" => "4155550142"}
+         }
+       })}
+    ]
+
+    for {name, answer} <- cases do
+      assert {:error, code, details} = answer, name
+      assert Atom.to_string(code) == golden_error_code(name), name
+      assert details == golden_error_details(name), name
+    end
+  end
+
+  # The closed words a phone call view, the status and the recovery view
+  # publish are the ones the modules that mint them use.
+  test "the schema's phone call vocabulary matches the modules that mint it", %{schema: schema} do
+    defs = schema["$defs"]
+
+    assert defs["phoneCallsSummary"]["properties"]["state"]["enum"] ==
+             ManagementPhoneCalls.summary_states()
+
+    requirement = defs["phoneCallsReadiness"]["properties"]["missing"]["items"]["properties"]
+
+    assert requirement["requirement"]["enum"] ==
+             Enum.map(PhoneCallReadiness.reasons(), &Atom.to_string/1)
+
+    call = defs["phoneCall"]["properties"]
+
+    assert call["state"]["enum"] ==
+             PhoneCallsSql.non_terminal_statuses() ++
+               ["stopping"] ++ PhoneCallsSql.terminal_statuses()
+
+    assert call["outcome"]["enum"] == ["pending" | PhoneCallsSql.terminal_outcomes()]
+    # A call hung up with nothing established reads `finished`, its label among
+    # the outcome's own words.
+    assert "finished" in call["outcome"]["enum"]
+    assert call["label"]["description"] =~ "Needs a decision, Finished)"
+    assert call["report"]["enum"] == PhoneCallsSql.report_statuses()
+
+    # A call never placed claims no voice time, so its state is null too.
+    assert defs["phoneCallUsage"]["properties"]["voice_state"]["enum"] ==
+             PhoneCallsSql.usage_states() ++ [nil]
+
+    assert call["placed"]["enum"] == ~w(yes no unknown)
+
+    assert defs["phoneCallRecovery"]["properties"]["state"]["enum"] ==
+             PhoneCallsSql.uncertain_statuses()
+  end
+
+  defp phone_route(method, params, opts) do
+    request = %{request_id: "req-1", protocol_version: 2, method: method, params: params}
+    Router.route(request, operation_opts: [phone_calls: opts])
+  end
+
+  # The goldens' worlds (`PhoneCallGoldens.world/1`); `:lost_off` is the lost
+  # dispatch with phone calls turned off.
+  defp phone_world(:lost_off),
+    do: :lost |> PhoneCallGoldens.world() |> Keyword.update!(:config, &%{&1 | enabled: false})
+
+  defp phone_world(world), do: PhoneCallGoldens.world(world)
+
+  defp phone_calls_cases do
+    for {_golden, world, method, params} <- @phone_call_goldens,
+        do: {method, params, [operation_opts: [phone_calls: phone_world(world)]]}
   end
 
   # Always On setup §3.4: `home.act`'s golden is the router's own answer to
@@ -1847,6 +2017,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
        ]},
       {"logs.query", %{}, [logs_opts: [log_file: log_file()]]},
       {"lifecycle.prepare", %{}, [lifecycle_server: lifecycle_server()]},
+      {"lifecycle.prepare_restart", %{}, [lifecycle_server: lifecycle_server()]},
       {"doctor.start", %{}, [doctor_server: doctor_server(), descriptors: []]},
       {"diagnostics.build", %{}, [diagnostics_opts: diagnostics_opts()]},
       # The two settings reads run against the daemon's own projection with no
@@ -1878,6 +2049,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
       cues_cases() ++
       home_cases() ++
       accessories_cases() ++
+      phone_calls_cases() ++
       [act_case(), computers_case(), restart_case()] ++
       join_cases()
   end
@@ -2366,6 +2538,10 @@ defmodule FermixCore.Management.ProtocolContractTest do
        %{"code" => join_code(:candidate)}, joiner(join_home())},
       {"unavailable_computer_join_home_of_its_own", :unavailable, "computer.join.start",
        %{"code" => join_code(:computer)}, joiner(linked_home())},
+      # M102 J2: a link that does not say revoked, whose relay has no session
+      # up with its server yet.
+      {"unavailable_computer_join_not_reached", :unavailable, "computer.join.start",
+       %{"code" => join_code(:computer)}, joiner(linked_home(), nil)},
       {"unavailable_computer_disconnect_not_told", :unavailable, "computer.disconnect", %{},
        leaver(out_of_reach)},
       {"invalid_params_home_enroll_approve_sas", :invalid_params, "home.enroll.approve",
@@ -2394,9 +2570,17 @@ defmodule FermixCore.Management.ProtocolContractTest do
     [actor: {:desktop, @desktop_id}, operation_opts: [home: seams]]
   end
 
-  defp joiner(home) do
-    # No relay runs here: letting go of a link stops none.
-    seams = [home: home, now: @join_now, restart: fn -> :ok end, release: fn _which -> :ok end]
+  # No relay runs here: letting go of a link stops none. `primary` is what
+  # the relay says of the link, a session up with its server unless said.
+  defp joiner(home, primary \\ %{name: @golden_server, connected: true, status: :connected}) do
+    seams = [
+      home: home,
+      now: @join_now,
+      restart: fn -> :ok end,
+      release: fn _which -> :ok end,
+      link_status: fn -> %{primary: primary, desktops: [], enrollment: nil} end
+    ]
+
     [operation_opts: [computer_link: seams]]
   end
 
@@ -2590,6 +2774,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
 
     summary =
       golden_summary(
+        host_os: :linux,
         link: %{primary: nil, desktops: desktops, enrollment: nil},
         snapshots: server["snapshots"],
         disk: server["disk"],
@@ -2690,6 +2875,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
 
     summary =
       golden_summary(
+        host_os: :linux,
         link: %{primary: nil, desktops: desktops, enrollment: nil},
         snapshots: server["snapshots"],
         disk: server["disk"],
@@ -2816,8 +3002,14 @@ defmodule FermixCore.Management.ProtocolContractTest do
       restarts_itself: true
     }
     |> Map.merge(Map.new(overrides))
+    |> served()
     |> HomeSummary.summary()
   end
+
+  # Whether the primary is an Always On server's, by the rule
+  # `HomeSummary.gather/5` sets it by (`ServerPrimary.of/2`).
+  defp served(facts),
+    do: Map.put(facts, :server, ServerPrimary.of(facts.host_os, facts.link.desktops) == :server)
 
   defp golden_row(name) do
     {^name, record} = List.keyfind(HomeSummaryGoldens.rows(), name, 0)
@@ -3624,9 +3816,10 @@ defmodule FermixCore.Management.ProtocolContractTest do
   # A method with more than one golden result is selected by the parameters that
   # produced it, so `settings.get` on one section is compared with the fixture
   # for that section rather than with whichever one comes first.
-  defp fixture_result(method, params) do
-    @successes
-    |> fixtures()
+  defp fixture_result(method, params), do: fixture_result(fixtures(@successes), method, params)
+
+  defp fixture_result(successes, method, params) do
+    successes
     |> Enum.filter(&(&1["method"] == method))
     |> Enum.find(&matching_result?(&1, params))
     |> get_in(["response", "result"])

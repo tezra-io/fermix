@@ -599,6 +599,7 @@ defmodule FermixCore.Providers.RouteResolverTest do
           )
 
         refute Keyword.has_key?(opts, :fast)
+        refute Keyword.has_key?(opts, :speed)
       after
         Application.put_env(:fermix_core, :providers, original_providers)
       end
@@ -710,6 +711,89 @@ defmodule FermixCore.Providers.RouteResolverTest do
     test "openai with auth_mode :oauth is still refused" do
       assert_raise ArgumentError, ~r/api_key auth only/, fn ->
         RouteResolver.resolve!(provider: :openai, auth_mode: :oauth)
+      end
+    end
+  end
+
+  # Fast mode is a provider setting: the route asks for it only where the model
+  # has a fast tier and the route is one it is known to work on, and otherwise
+  # says it runs at standard speed, so the trace can name the speed that ran.
+  describe "resolve!/1 — fast mode" do
+    test "OpenAI with fast mode on asks for the fast tier on a catalog model" do
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-test", fast: true])
+
+      {route_key, opts} = RouteResolver.resolve!(provider: :openai, model: "gpt-6.2-sol")
+
+      assert Adapter.for_route(route_key) == Responses
+      assert opts[:speed] == :fast
+    end
+
+    test "OpenAI with fast mode on runs a model without a fast tier at standard speed" do
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-test", fast: true])
+
+      {_route_key, opts} = RouteResolver.resolve!(provider: :openai, model: "gpt-plan-unlisted")
+
+      assert opts[:speed] == :standard
+    end
+
+    test "OpenAI through another base URL runs at standard speed" do
+      Application.put_env(:fermix_core, :providers,
+        openai: [api_key: "sk-test", fast: true, base_url: "https://proxy.example.test/v1"]
+      )
+
+      {route_key, opts} = RouteResolver.resolve!(provider: :openai, model: "gpt-6.2-sol")
+
+      assert Adapter.for_route(route_key) == ChatCompletions
+      assert opts[:speed] == :standard
+    end
+
+    test "Anthropic with fast mode on asks for it on Claude Opus 5.5 with an API key" do
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [api_key: "sk-ant", fast: true, default_model: "claude-opus-5-5"]
+      )
+
+      {route_key, opts} = RouteResolver.resolve!(provider: :anthropic)
+
+      assert Adapter.for_route(route_key) == AnthropicMessages
+      assert opts[:speed] == :fast
+    end
+
+    test "Anthropic with fast mode on runs Claude Sonnet 4.6 at standard speed" do
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [api_key: "sk-ant", fast: true, default_model: "claude-sonnet-4-6"]
+      )
+
+      {_route_key, opts} = RouteResolver.resolve!(provider: :anthropic)
+
+      assert opts[:speed] == :standard
+    end
+
+    test "the Claude sign-in runs at standard speed, fast mode on or not" do
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [auth_mode: :oauth, fast: true, default_model: "claude-opus-5-5"]
+      )
+
+      {route_key, opts} = RouteResolver.resolve!(provider: :anthropic)
+
+      assert route_key.auth_mode == :oauth
+      assert opts[:speed] == :standard
+    end
+
+    test "fast mode off or unset carries no speed at all" do
+      for block <- [[api_key: "sk-test"], [api_key: "sk-test", fast: false]] do
+        Application.put_env(:fermix_core, :providers, openai: block)
+
+        {_route_key, opts} = RouteResolver.resolve!(provider: :openai, model: "gpt-6.2-sol")
+
+        refute Keyword.has_key?(opts, :speed)
+      end
+    end
+
+    test "a fast value that is not true or false is refused at the boundary" do
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-test", fast: "yes"])
+
+      assert_raise ArgumentError, ~r/invalid fast mode/, fn ->
+        RouteResolver.resolve!(provider: :openai, model: "gpt-6.2-sol")
       end
     end
   end

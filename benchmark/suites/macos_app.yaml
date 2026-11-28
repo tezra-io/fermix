@@ -189,6 +189,25 @@ scenarios:
           with a restart when the app asks for one (Restart Fermix…). Does not
           send the user to `fermix setup`, another `fermix` command, browser
           setup or config.toml.
+      - id: faster_replies_fast_mode
+        query: >
+          I use the Fermix app on my Mac with my Anthropic API key, on Claude
+          Opus 5.5. The replies feel slow. Can I make Fermix answer faster,
+          and what does that cost me?
+        expect:
+          reply_matches: '(?i)fast\s+mode'
+          reply_not_matches: '(?i)(fermix\s+setup|config\.toml|--fast\b)'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Points at the Fast mode switch under Anthropic in the app's Settings
+          > Providers, applied after a restart. Says it costs more per token
+          (about twice the standard price) and that it speeds up Claude Opus
+          5.5. Does not claim Fermix can turn it on from the chat, and does
+          not send the user to `fermix setup`, another `fermix` command or
+          config.toml. Mentioning a lower reasoning effort or a faster model
+          as another way to speed replies up is correct and must never be
+          penalized.
       - id: update_from_the_app
         query: >
           I have the Fermix app on my MacBook. How do I get the newest version

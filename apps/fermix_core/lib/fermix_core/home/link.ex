@@ -122,13 +122,14 @@ defmodule FermixCore.Home.Link do
   @callback forget_candidate(String.t()) :: :ok | {:error, {:unavailable, String.t()}}
 
   @doc """
-  Any role: removes the desktop row whose Noise key is `noise_pk` from the
-  device list of the home at `root` (a staged home, never the running one's):
-  a return stages the server's home on the computer it left, whose own row
-  that list holds. A list with no such row, or no list, has nothing to drop;
-  a row of that key that is no desktop is refused by name.
+  Any role: removes every desktop row (each computer's, `kind: :desktop`)
+  from the device list of the home at `root` (a staged home, never the
+  running one's), in one write, and keeps every phone's: a move back and
+  Restore here stage the server's home on the computer it left, and a home
+  off a server holds no computer (M102 D6). A list with no desktop row, or
+  no list, has nothing to drop.
   """
-  @callback drop_desktop_row(Path.t(), <<_::256>>) :: :ok | {:error, term()}
+  @callback drop_desktop_rows(Path.t()) :: :ok | {:error, term()}
 
   @doc """
   Any role: the desktop rows in the device list of the home at `root`, read

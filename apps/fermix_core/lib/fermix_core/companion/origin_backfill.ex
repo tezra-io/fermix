@@ -126,10 +126,12 @@ defmodule FermixCore.Companion.OriginBackfill do
   end
 
   # The origin a run of each trigger gives its messages today (`Jobs.Runner`'s
-  # send options): a schedule's or Run now's run names its job, a cue run and
-  # a follow-up's run their watcher. Any other trigger, or no run, names none.
-  defp origin(%{trigger: trigger} = candidate) when trigger in ["schedule", "manual"],
-    do: named(:job, job_name(candidate))
+  # send options): a schedule's, Run now's or a retry's run names its job, a
+  # cue run and a follow-up's run their watcher. Any other trigger, or no run,
+  # names none.
+  defp origin(%{trigger: trigger} = candidate)
+       when trigger in ["schedule", "manual", "retry"],
+       do: named(:job, job_name(candidate))
 
   defp origin(%{trigger: trigger, watcher_name: name}) when trigger in ["cue", "watcher"],
     do: named(:cue, name)

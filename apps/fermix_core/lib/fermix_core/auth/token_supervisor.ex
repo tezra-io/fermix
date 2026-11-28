@@ -146,13 +146,12 @@ defmodule FermixCore.Auth.TokenSupervisor do
   the `auth_forget` request a tree-less CLI VM sends after its own
   (`fermix auth logout`, `fermix plugins auth logout`).
 
-  The caller deleted the stored entry (or, for ChatGPT, cleared its tokens);
-  this VM may still hold the tokens. The manager serving the profile drops
-  them, and deletes its plugin child's token file, through `forget/1`. The
-  child is then stopped, so its next use starts a fresh manager from auth.json
-  and serves a sign-in made after the logout instead of refusing it. Never
-  starts a manager, and a manager that stopped between its lookup and the call
-  held nothing, so that is `:ok` too.
+  The caller deleted the stored entry; this VM may still hold the tokens. The
+  manager serving the profile drops them, and deletes its plugin child's token
+  file, through `forget/1`. The child is then stopped, so its next use starts
+  a fresh manager from auth.json and serves a sign-in made after the logout
+  instead of refusing it. Never starts a manager, and a manager that stopped
+  between its lookup and the call held nothing, so that is `:ok` too.
 
   A `get_token` call queued on a child at the moment it is stopped exits in its
   caller instead of answering `{:error, :reauthorization_required}`: a window

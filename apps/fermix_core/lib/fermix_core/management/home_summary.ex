@@ -45,8 +45,9 @@ defmodule FermixCore.Management.HomeSummary do
       serving nothing names where Fermix moved back to, the marker's `to`);
       a computer that joined is `retired` too once its server forgot it,
       which says so and that a new code from Add a computer joins it again,
-      or while it restarts with no link, which says it is not connected; its
-      help is Add a computer's;
+      with Join again (`join`, needs `code`: the code, which `Home.Join`
+      takes as `computer.join.start` does), or while it restarts with no
+      link, which says it is not connected; its help is Add a computer's;
     * the server: `candidate` while it waits for its move, `primary` after;
     * `problem`, with its `kind` (`problems/0`) in `detail` and the one action
       that fixes it, or none where no step of the owner's does (its note says
@@ -178,11 +179,12 @@ defmodule FermixCore.Management.HomeSummary do
   they are read on the new computer and typed. On the computer that joins
   (`device/join.json`, `Home.Join`), the screen is `creating`, with Cancel
   beside it while it dials and while it waits for the owner (outcome
-  `running`, then `waiting`, the sentence carrying the digits to type), and
-  once it was not added, its sentence says why and Cancel is its action
-  (outcome `failed`). Move back and Restore here are offered only where the
-  home moved from this computer (its moved marker): a computer that joined
-  has neither.
+  `running`, then `waiting`, the sentence carrying the digits to type in
+  Always On on a computer already in the home, never on the server, which
+  has no screen), and once it was not added, its sentence says why and
+  Cancel is its action (outcome `failed`). Move back and Restore here are
+  offered only where the home moved from this computer (its moved marker): a
+  computer that joined has neither; once its server removed it, Join again.
 
   **What Fermix on the server may use** (M97 §7.3, D27). On the computer
   that sets Always On up, `ready` carries `keeps_on`, the block of what this
@@ -266,6 +268,7 @@ defmodule FermixCore.Management.HomeSummary do
   alias FermixCore.Home.MoveReadiness
   alias FermixCore.Home.Readable
   alias FermixCore.Home.Return
+  alias FermixCore.Home.ServerPrimary
   alias FermixCore.Home.ServerSandbox
   alias FermixCore.Home.Snapshot.Capture
   alias FermixCore.Home.UnreadableFiles
@@ -278,9 +281,9 @@ defmodule FermixCore.Management.HomeSummary do
   @problems ~w(cannot_reach not_set_up waited_too_long update server_older server_ahead
                disk_full backup_old backup_failed not_ready return_failed)
   @actions ~w(cancel move_now try_again update back_up_now check_again own_server move_back
-              restore_here review_offers add_computer approve_computer deny_computer
+              restore_here review_offers add_computer approve_computer deny_computer join
               change_passphrase restart_server)
-  @needs ~w(recovery_passphrase new_recovery_passphrase sas)
+  @needs ~w(recovery_passphrase new_recovery_passphrase sas code)
   @step_states ~w(done active yours pending)
   # What Always On does not do yet (M97) by where its fact lives: the home's
   # settings and the server's own, which the server's screen lists and its
@@ -330,6 +333,7 @@ defmodule FermixCore.Management.HomeSummary do
           required(:moved) => map() | nil,
           required(:move) => map() | nil,
           required(:link) => map(),
+          required(:server) => boolean(),
           required(:candidates) => [map()],
           required(:review) => map() | nil,
           required(:move_items) => [MoveReadiness.item()],
@@ -410,7 +414,7 @@ defmodule FermixCore.Management.HomeSummary do
   defp screen(%{role: :device} = facts), do: device(facts)
   defp screen(%{role: :primary} = facts), do: here(facts)
 
-  defp here(%{link: %{desktops: [_ | _]}} = facts), do: server(facts)
+  defp here(%{server: true} = facts), do: server(facts)
   defp here(facts), do: setup(facts)
 
   @doc """
@@ -516,7 +520,10 @@ defmodule FermixCore.Management.HomeSummary do
 
     * `key`: the summary's own (`key/1`), and on a server with desktops what
       their summaries read from its `home.status` (its newest backup), which
-      its own summary does not show.
+      its own summary does not show; on a server with desktops, and on a
+      linked computer from its server's, the window for a computer that joins
+      (its state and expiry, M102 J4), which no screen draws but the code
+      Add a computer showed lasts only while it is open.
     * `off`: whether the summary is `off` with no notice to raise. An `off`
       that carries one (Fermix back on this computer from a server of the
       owner's own) is told as any other summary, or an engine that took the
@@ -543,7 +550,10 @@ defmodule FermixCore.Management.HomeSummary do
   the seams `:now`, `:host_os`, `:personalization` (the owner's time zone,
   `FermixCore.Clock`'s seam) and `:unreadable_files`
   (`Home.UnreadableFiles`, or nil for a verb with no engine tree);
-  `MoveReadiness.summary_items/4` is given `opts` as they are. Reads the
+  `MoveReadiness.summary_items/4` is given `opts` as they are. Whether this
+  primary is an Always On server's (`server`) is `Home.ServerPrimary.of/2`
+  of the host's system and the rail's desktop rows, the one rule every
+  server's screen, notice, watch and deadline here is drawn by. Reads the
   last readiness review, on a desktop what this home's settings turn on that
   runs only on this computer, and so here again after a move back, and what
   of a move back's costs they turn on (`MoveReadiness.costs/2`, `opts`'
@@ -578,6 +588,7 @@ defmodule FermixCore.Management.HomeSummary do
     now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
     return = return_record(home, reads)
     {not_yet, zoom} = not_yet(home, role, host_os, {reads, opts})
+    server = ServerPrimary.of(host_os, link.desktops) == :server
 
     %{
       role: role,
@@ -588,6 +599,7 @@ defmodule FermixCore.Management.HomeSummary do
       moved: status.moved,
       move: status.move,
       link: link,
+      server: server,
       candidates: status.candidates,
       review: review(home, role, reads),
       move_items: move_items(home, role, host_os, {status, link}, opts),
@@ -609,7 +621,7 @@ defmodule FermixCore.Management.HomeSummary do
       standing: server_compared(status, &Versions.standing/2),
       readable: server_readable(status),
       restarts_itself: restarts_itself(role, opts),
-      keeps_on: keeps_on(home, {role, link}, host_os, opts),
+      keeps_on: keeps_on(home, {role, server}, host_os, opts),
       offers_review: offers_review(DesktopLink.linked?(record, home), opts),
       join: if(role == :device, do: Join.view(home)),
       screen: Map.get(status, :screen),
@@ -944,7 +956,8 @@ defmodule FermixCore.Management.HomeSummary do
     |> put_some("transfer", transfer(facts, :send, :sent))
   end
 
-  defp retired(facts), do: view("retired", retired_sentence(facts), nil, %{}) |> restorable(facts)
+  defp retired(facts),
+    do: view("retired", retired_sentence(facts), retired_action(facts), %{}) |> restorable(facts)
 
   # A server's own copy that a move back left serving nothing names where
   # Fermix moved back to; any other computer the home moved from, its
@@ -958,6 +971,12 @@ defmodule FermixCore.Management.HomeSummary do
   defp retired_sentence(%{moved: %{}} = facts), do: sentence(:retired, facts)
   defp retired_sentence(%{revoked: true} = facts), do: sentence(:removed, facts)
   defp retired_sentence(facts), do: sentence(:unlinked, facts)
+
+  # A computer that joined, which its server removed (its link says so, and
+  # it holds no moved marker): Join again takes a new code from Add a
+  # computer (M102 J1, D3).
+  defp retired_action(%{moved: nil, revoked: true}), do: action(:join)
+  defp retired_action(_facts), do: nil
 
   defp desktop(facts) do
     checks = [
@@ -1360,7 +1379,7 @@ defmodule FermixCore.Management.HomeSummary do
         })
 
       "awaiting_approval" ->
-        said = sentence(:join_waiting, facts, %{to: join["server"], sas: join["sas"]})
+        said = sentence(:join_waiting, facts, %{sas: join["sas"]})
         view("creating", said, nil, %{"alternatives" => [action(:cancel)]})
 
       "denied" ->
@@ -1744,6 +1763,7 @@ defmodule FermixCore.Management.HomeSummary do
 
   defp needs(:restore_here, _facts), do: ["recovery_passphrase"]
   defp needs(:approve_computer, _facts), do: ["sas"]
+  defp needs(:join, _facts), do: ["code"]
   defp needs(:change_passphrase, _facts), do: ["new_recovery_passphrase"]
   defp needs(act, facts) when act in [:move_now, :try_again], do: [passphrase_need(facts)]
   defp needs(_act, _facts), do: []
@@ -1772,14 +1792,15 @@ defmodule FermixCore.Management.HomeSummary do
   defp confirm(act, _values, facts) when act in [:move_now, :try_again], do: move_confirm(facts)
   defp confirm(_act, _values, _facts), do: nil
 
-  # A move back's confirm says what runs here again; otherwise each warning
-  # this home's settings give, after any other the last review of the same
-  # server gave.
+  # A move back's confirm says what runs here again, what it costs and each
+  # computer it disconnects; otherwise each warning this home's settings
+  # give, after any other the last review of the same server gave.
   defp move_confirm(%{role: :device} = facts),
     do:
       sentence(:confirm_return_move, facts, %{
         stays_here: facts.stays_here,
-        costs: facts.return_costs
+        costs: facts.return_costs,
+        leaving: leaving(facts)
       })
 
   defp move_confirm(facts) do
@@ -1797,6 +1818,14 @@ defmodule FermixCore.Management.HomeSummary do
       machine(facts.host_os)
     )
   end
+
+  # The computers a move back disconnects (M102 D6: a home off a server holds
+  # no computer yet): each one its server lists but this computer, which the
+  # server marks as the one asking.
+  defp leaving(%{primary_home: %{"computers" => computers}}) when is_list(computers),
+    do: for(%{"name" => name, "this_computer" => false} <- computers, do: name)
+
+  defp leaving(_facts), do: []
 
   defp target_of(act, _values, facts) when act in [:move_now, :try_again, :check_again],
     do: candidate_id(target(facts))
@@ -1933,7 +1962,7 @@ defmodule FermixCore.Management.HomeSummary do
     end
   end
 
-  defp occurrence(view, %{role: :primary, link: %{desktops: [_ | _]}} = facts),
+  defp occurrence(view, %{role: :primary, server: true} = facts),
     do:
       week_occurrence(facts, :notice_server_backup_week) || change_occurrence(view, facts) ||
         sandbox_occurrence(facts) || joined_occurrence(view, facts)
@@ -2097,19 +2126,38 @@ defmodule FermixCore.Management.HomeSummary do
   end
 
   # What a desktop's own summary reads from its server's `home.status`
-  # (`primary_home`): its newest backup, whether one runs, and each place's
-  # failed try; only a server with desktops has anyone to tell.
-  defp drawn(%{role: :primary, link: %{desktops: [_ | _]}} = facts) do
+  # (`primary_home`): its newest backup, whether one runs, each place's
+  # failed try, and its window for a computer; only a server with desktops
+  # has anyone to tell.
+  defp drawn(%{role: :primary, server: true} = facts) do
     snapshots = facts.snapshots
 
-    {newest_backup(snapshots), match?(%{"running" => true}, snapshots), failed_tries(snapshots)}
+    {newest_backup(snapshots), match?(%{"running" => true}, snapshots), failed_tries(snapshots),
+     computer_window(window(facts))}
   end
 
   # A linked computer's mark (M97 §7.4): the app draws it from `home.status`'s
-  # `screen`, so taking and letting go of the screen is a change it is told of.
-  defp drawn(%{role: :device, screen: screen}) when is_map(screen), do: screen
+  # `screen`, so taking and letting go of the screen is a change it is told
+  # of; and its server's window for a computer, below.
+  defp drawn(%{role: :device} = facts),
+    do: {screen_mark(facts), computer_window(get_in(facts, [:primary_home, "enrollment"]))}
 
   defp drawn(_facts), do: nil
+
+  defp screen_mark(%{screen: screen}) when is_map(screen), do: screen
+  defp screen_mark(_facts), do: nil
+
+  # The code Add a computer opened (M102 J4) works only while the server's
+  # window for a computer is open, and no screen draws that window: its
+  # state and expiry are told as they move, the server's own and a linked
+  # computer's from its server, so an app clears the code it shows once
+  # `primary_home.enrollment` says the window closed.
+  defp computer_window(%{purpose: :computer, state: state, expires_at: at}), do: {state, at}
+
+  defp computer_window(%{"purpose" => "computer", "state" => state} = window),
+    do: {state, window["expires_at"]}
+
+  defp computer_window(_window), do: nil
 
   # Whether the newest backup this place's summary counts from is a week old.
   defp backup_week?(facts) do
@@ -2125,7 +2173,7 @@ defmodule FermixCore.Management.HomeSummary do
   defp backup_since(%{role: :device, primary_home: %{"snapshots" => snapshots}} = facts),
     do: newest_backup(snapshots) || get_in(facts, [:moved, :moved_at])
 
-  defp backup_since(%{role: :primary, link: %{desktops: [_ | _]}} = facts),
+  defp backup_since(%{role: :primary, server: true} = facts),
     do: newest_backup(facts.snapshots)
 
   defp backup_since(_facts), do: nil
@@ -2151,7 +2199,7 @@ defmodule FermixCore.Management.HomeSummary do
     ]
   end
 
-  defp deadlines(%{role: :primary, link: %{desktops: [_ | _]}} = facts) do
+  defp deadlines(%{role: :primary, server: true} = facts) do
     since = backup_since(facts)
 
     [
@@ -2210,7 +2258,7 @@ defmodule FermixCore.Management.HomeSummary do
 
   # What this computer keeps on for its server after the move (M97 §7.3),
   # where a move from it is set up: never on a server, which has computers.
-  defp keeps_on(home, {:primary, %{desktops: []}}, host_os, opts) do
+  defp keeps_on(home, {:primary, false = _server}, host_os, opts) do
     snapshot = Keyword.get(opts, :settings_snapshot, &ConfigStore.current_snapshot/0).()
     Consent.view(Consent.keep_on_block(home, os: host_os, snapshot: snapshot))
   end

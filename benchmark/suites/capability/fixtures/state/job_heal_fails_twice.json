@@ -1,0 +1,27 @@
+{
+  "jobs": [
+    {
+      "key": "watering",
+      "name": "Brackwater allotment watering",
+      "description": "Whether plot 14 at Brackwater needs watering today",
+      "schedule": "10 6 * * *",
+      "task_prompt": "Check the Brackwater allotment rain gauge and tell me whether plot 14 needs watering today.",
+      "skill_name": "brackwater-watering-plan",
+      "timeout_seconds": 300,
+      "runs": [
+        {
+          "fires_ago": 2,
+          "duration_seconds": 2,
+          "status": "error",
+          "failure_kind": "unknown_skill"
+        },
+        {
+          "fires_ago": 1,
+          "duration_seconds": 2,
+          "status": "error",
+          "failure_kind": "unknown_skill"
+        }
+      ]
+    }
+  ]
+}

@@ -40,8 +40,6 @@ defmodule FermixCore.Harness.Continuation do
       of) the origin's own closing, on the completed and the failed path alike.
   """
 
-  require Logger
-
   alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Delivery.ChannelSend
   alias FermixCore.Harness.SignIn
@@ -127,20 +125,6 @@ defmodule FermixCore.Harness.Continuation do
   """
   @spec dispatch_timeout_ms() :: pos_integer()
   def dispatch_timeout_ms, do: @dispatch_timeout_ms
-
-  @doc """
-  Resolves the configured dispatcher module: `opts[:dispatcher]` (the test seam)
-  or `config :fermix_core, :harness_continuation_dispatcher`. `:none` when no
-  dispatcher is configured (continuation is off) or the configured module cannot
-  serve the behaviour — the latter logs loud.
-  """
-  @spec dispatcher(keyword()) :: {:ok, module()} | :none
-  def dispatcher(opts) when is_list(opts) do
-    case Keyword.get(opts, :dispatcher) || configured_dispatcher() do
-      nil -> :none
-      module -> validate_dispatcher(module)
-    end
-  end
 
   @doc """
   Dispatches `row`'s completion notice through `dispatcher`. `result_text` is the
@@ -381,23 +365,6 @@ defmodule FermixCore.Harness.Continuation do
   defp bound(text, max), do: binary_part(text, 0, max) <> "\n… [truncated]"
 
   # --- Dispatcher resolution ----------------------------------------------
-
-  defp configured_dispatcher do
-    Application.get_env(:fermix_core, :harness_continuation_dispatcher)
-  end
-
-  defp validate_dispatcher(module) do
-    if Code.ensure_loaded?(module) and function_exported?(module, :dispatch, 1) do
-      {:ok, module}
-    else
-      Logger.error(
-        "harness continuation dispatcher #{inspect(module)} does not export dispatch/1; " <>
-          "run outcomes are delivered as text instead of continuing the conversation"
-      )
-
-      :none
-    end
-  end
 
   defp chat_origin?(row), do: Map.get(row, :origin_kind) == "chat"
 

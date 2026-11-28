@@ -548,15 +548,20 @@ defmodule FermixChannels.Mobile.AttestationTest do
              ]
     end
 
-    test "the signers are the app's package and its development key" do
+    test "the signers are the app's package, its development key and its release key" do
       assert %{package: "io.tezra.fermix", signers: signers} = Attestation.signers()
 
-      digest =
+      development =
         Base.decode16!("d56b2c45e652da4e9c9970879fdc49cb38a59609a4908053fcb51265dfa12da9",
           case: :lower
         )
 
-      assert signers == %{digest => :development}
+      release =
+        Base.decode16!("072b4fd311e635cacb752a0136025672335646f9ec01cf6ccf2bfe371db12182",
+          case: :lower
+        )
+
+      assert signers == %{development => :development, release => :release}
     end
   end
 

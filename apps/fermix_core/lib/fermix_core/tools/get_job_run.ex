@@ -1,11 +1,19 @@
 defmodule FermixCore.Tools.GetJobRun do
   @moduledoc """
   Fetch the full record of a single scheduled-job run.
+
+  A run a heal took carries the heal's note as `heal_note`, inside the
+  outside-content frame (source `job_heal_note`, M106 §9): a model wrote it
+  after reading the failure's words, so it reaches the main agent only here,
+  a tool whose every call counts as an outside source for its turn
+  (`Capabilities.UntrustedContent.outside_source/1`). `list_jobs` says only
+  that a note exists.
   """
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Jobs.CueRun
   alias FermixCore.Memory.Repo
   alias FermixCore.Tools.JobRegistrySupport, as: Support
@@ -63,11 +71,19 @@ defmodule FermixCore.Tools.GetJobRun do
   defp do_execute(args, context) do
     with {:ok, run_id} <- Support.required_string(args, "run_id") do
       case Repo.get_job_run(run_id, server: Support.repo(context)) do
-        {:ok, run} -> present(run, context)
+        {:ok, run} -> present_own(run, context)
         {:error, reason} -> Support.error(reason)
       end
     else
       {:error, reason} -> {:ok, Tool.error(reason)}
+    end
+  end
+
+  # Inside a heal run, only a run of the heal's own job (M106 §5.5).
+  defp present_own(run, context) do
+    case Support.check_heal_job(run.job_id, context) do
+      :ok -> present(run, context)
+      {:error, sentence} -> {:ok, Tool.error(sentence)}
     end
   end
 
@@ -76,9 +92,17 @@ defmodule FermixCore.Tools.GetJobRun do
   defp present(run, context) do
     pairs = [{Support.job_run_payload(run), run}]
 
-    case CueRun.present_runs(pairs, context, repo: Support.repo(context)) do
-      {:ok, [payload]} -> Support.success_json(payload)
+    with {:ok, [payload]} <- CueRun.present_runs(pairs, context, repo: Support.repo(context)),
+         {:ok, note} <-
+           Repo.job_heals_call({:note_for_run, run.id}, server: Support.repo(context)) do
+      payload |> put_heal_note(note) |> Support.success_json()
+    else
       {:error, reason} -> Support.error(reason)
     end
   end
+
+  defp put_heal_note(payload, nil), do: payload
+
+  defp put_heal_note(payload, note),
+    do: Map.put(payload, :heal_note, UntrustedContent.frame("job_heal_note", note))
 end

@@ -85,7 +85,7 @@ if it was sent, is already in the Repo's mailbox ahead of the reset.
   under weak fairness that timer fires, so the delay is not modelled. A stale
   settle wakes the scheduler (`filters.ex:376-377`): admission is fair here
   anyway. Admission is gated on `cues_running?` (the cue tree alive,
-  `scheduler.ex:213`), always true here, and no longer reads
+  `scheduler.ex:221`), always true here, and no longer reads
   `cue_watchers.enabled` (a paused watcher's passed items still run); watchers
   are always enabled and keep every source. The daily budget read and spent
   inside the accept transaction, the gap marking at a settle, the cap notices
@@ -298,15 +298,15 @@ reconcile scan errors), `LifetimesCanEnd`, `Proposals`, `OwnerCanMistap`,
 | `CueSlotCap` | `free = min(max_active − active, 3 − active_cue)` (`cue_admission.ex:83`) |
 | `AtomicCueSettle` | the run row, the job's release and the delivery's move are one transaction (`repo.ex` `settle_cue_run_in_tx`) |
 | `RunSettleFenced` | a run settle needs the run active (`ensure_job_run_active`) and the delivery claimed by it (`settle_held/5`, `cues_runs_sql.ex:366`) |
-| `ReapsOnlyDeadRuns` | reconciliation reaps a run only when the runner supervisor no longer holds its runner (`scheduler.ex:504`, `:516`) |
-| `ReconcilesRuns` | init and the 60 s tick reconcile unsettled runs (`scheduler.ex:228`, `:268`, `:488`) |
+| `ReapsOnlyDeadRuns` | reconciliation reaps a run only when the runner supervisor no longer holds its runner (`scheduler.ex:515`, `:527`) |
+| `ReconcilesRuns` | init and the 60 s tick reconcile unsettled runs (`scheduler.ex:236`, `:279`, `:499`) |
 | `ExhaustsAfterAction` | a failure once `tools_started_at` is set ends the delivery `exhausted` (`cues_runs_sql.ex:388`) |
 | `ToolsMarkWriteOnce` | the run upsert never clears `tools_started_at` (`repo.ex` `upsert_job_run_row`, `coalesce`) |
 | `ConfirmFenced` | the confirm is one `UPDATE` fenced on state, token, chat and expiry (`cues_mandate_sql.ex` `decide_waiting`) |
 | `AppDecideFenced` | a device's answer is one `UPDATE` fenced on id, state and expiry (`cues_mandate_sql.ex` `decide_by_id`) |
 | `ReclaimsOrphans` | every sweep puts back a `filtering` row whose call the dispatcher does not hold, fence cleared, attempts unchanged, its call finished `aborted` (R3, CUE-1: `reclaim_orphans/1`, `filters.ex:193-216`; `{:reclaim_orphans, …}`, `cues_filter_sql.ex:132`, `reclaim_in_tx/4` `:675`) |
-| `AdmitsAfterScan` | no cue run is admitted while the last reconcile scan failed, since the monitors may then miss runners that survived a restart (R3, CUE-2: `free_cue_slots/1`, `scheduler.ex:363`; `runs_known?` set by `reconcile_active_runs/1`, `:492`, `:500`) |
-| `TaskLessSettlesAtPass` | a watcher with no task settles its delivery `acked`, outcome `follow_up`, in the transaction that passes it (`CuesFollowUpSql.on_pass` → `settle_taskless`, `cues_follow_up_sql.ex:349-356`, `:460-463`) |
+| `AdmitsAfterScan` | no cue run is admitted while the last reconcile scan failed, since the monitors may then miss runners that survived a restart (R3, CUE-2: `free_cue_slots/1`, `scheduler.ex:374`; `runs_known?` set by `reconcile_active_runs/1`, `:503`, `:511`) |
+| `TaskLessSettlesAtPass` | a watcher with no task settles its delivery `acked`, outcome `follow_up`, in the transaction that passes it (`CuesFollowUpSql.on_pass` → `settle_taskless`, `cues_follow_up_sql.ex:340-347`, `:451-454`) |
 
 ## Checks
 
@@ -662,3 +662,163 @@ On: the boot drops the release gate's alias, and `Home.ReleaseTable` fetches
 on an Always On server's primary with no build check, its child comment
 reworded in place. No child moved or changed order. The cue tree is still last.
 Nothing the spec models changed, and it cites no `application.ex` line.
+
+## Re-read for outbound phone calls (2026-11-17)
+
+`16727975` staled the `application.ex` pin. `supervision_children` gains the
+phone-call subtree (`PhoneCalls.Supervisor`, M94) right after
+`Harness.Supervisor`, primary-only, after `Jobs.Scheduler` and before the cue
+tree, which is still last: a crash of it restarts the children after it, the
+cue tree among them, which the model takes as `FiltersRestart`, and leaves
+`Jobs.Scheduler` and its runners alone. The application also gains
+`prep_stop/1`, which on an orderly stop asks a phone call in progress to end,
+for at most twelve seconds, before the tree stops; the cue tree stops with
+the tree after it, as before. Nothing the spec models changed, and it cites
+no `application.ex` line.
+
+## Re-read for M106 retries and heals (2026-11-24)
+
+M106's quiet retry (§5.3) and heal (§5.4) staled the `scheduler.ex` and
+`runner.ex` pins: `init`, `handle_info`, `mark_run_error` and the runner's
+`mark_failed`. Each was re-read for what this spec models:
+- **A cue run's settle is unchanged.** The cue clauses of `mark_failed`
+  (`runner.ex:502-531`) and `mark_run_error` (`scheduler.ex:1134-1152`) still
+  settle through `CueAdmission.settle/3` → `Repo.settle_cue_run`, which never
+  calls `JobRetriesSql` or `JobHealsSql`; only the clauses for every other
+  run gained the retry and the heal. `settle_cue_run` and the delivery's move
+  are untouched, and a cue run is still never stamped by the runner
+  (`tools_started_stamp/1`), so `acted` is still the mandate gate's alone.
+- **The Scheduler's new steps touch nothing modelled.** Both DOWN clauses
+  now re-arm the due timer (a Repo read) and may start a heal run, a heal
+  run's own DOWN clause comes first, `init` and the reconcile tick expire
+  waiting heals, and the due and reconcile ticks start a heal run after their
+  due scan: Repo calls on `job_heals`, the due timer (cron runs, `job_runs`'
+  scope) and a process that writes no delivery or run row. `live_runner_pids`
+  skips a heal run (`Runner.run_id/1` reads nil for it), so reconciliation
+  adopts and reaps runners as before.
+- **A heal run is no run.** A live heal run is a child of the runner
+  supervisor, which `active_run_count/1` used to count, so while one lived
+  the code's free cue slots could be one fewer than `FreeSlots` says, and a
+  cron run and the heal run competed for the slot the share leaves
+  (`cue_admission.ex`'s "so a cron run always keeps one"). Fixed in the same
+  stage: `active_run_count/1` (`scheduler.ex:713-717`) now counts the
+  children that published a run id, as the reconcile pass tells runners
+  apart, so a heal run takes neither a run slot nor the cue share, and
+  `FreeSlots` is again what the code computes. Heal runs keep their own
+  bound, one at a time.
+
+No step, variable or check changed.
+
+## Re-read for the heal's diagnosis and moves (M106, 2026-11-24)
+
+M106's diagnosis, with its fixes (`job_runs`' JOB-10), staled the
+Scheduler's `init`, the only function of the `scheduler.ex` pin that
+changed. It now also stores the name the Scheduler is registered under
+(`state.name`, `scheduler.ex:195`), which the Scheduler gives to heal runs
+so that their "run now" and `:job_changed` casts reach whichever Scheduler
+runs. Every step `init` takes is as before: the reconcile pass, the expiry
+of waiting heals, the due and reconcile timers and the admission request.
+A heal run may now pause a watcher's task (`Registry.pause_job`, the
+owner's pause, `job_runs`' scope), and its rerun of one is refused before
+the Scheduler, as the owner's is (`Registry.check_run_now`). It still
+writes no delivery and no run row. The `scheduler.ex` citations above
+"Findings" and in the M106 re-read moved with the stage's other lines
+and were updated; the findings cite the code as it was then.
+
+No step, variable or check changed.
+
+## Re-read for runs that end ok without working (M106, 2026-11-24)
+
+M106's §6 (S5) changed none of this spec's pinned functions, so it was not
+stale. It was re-read for what it models:
+- A cue run's settle (`settle_cue_run`) still calls neither
+  `JobRetriesSql` nor `JobHealsSql`. So an ok cue run never reads tallies
+  or opens a heal, and the trigger's read of a job's earlier runs skips
+  trigger `cue`.
+- The runner asks for no error words for a cue run, so a cue run's tally
+  counts its calls with no words.
+- `Jobs.CueRun.present_runs/3` now frames every other run's reply, error
+  and prompt inside a heal run's tools. That changes what a model reads,
+  not a delivery or a run row.
+
+No step, variable or check changed.
+
+## Re-read for the owner's answer and a heal's one write (M106, 2026-11-25)
+
+M106's §5.7 (S4) staled `runner.ex#mark_failed`. Its cue clause now stores
+Fermix's sentence for the failure's kind as the run's `error`. The cue
+settle (`CueAdmission.settle/3`) still decides from `CueRun.outcome/3` on
+the reason term, and `settle_cue_run` reads no error text.
+
+A heal's one write writes the job as an owner's edit or pause does, which
+is `job_runs`' scope, and so does the owner-write mark that guards it. The
+owner's answer to a proposal (`Jobs.HealAnswer`) has no caller yet. A job
+a watcher wakes never gets a proposal to answer
+(`HealDecision.proposal_scope/2`).
+
+No step, variable or check changed.
+
+## Re-read for a heal's proposal answered on its card (M106 S4b, 2026-11-25)
+
+M106's stage S4b staled `cues/proposals.ex`, pinned whole: the answer
+rail now asks the `Cues.CardHolder` holders in turn. A mandate's
+proposal is asked first, then a follow-up's card, then a heal's proposal.
+Read for what this spec models:
+- **A mandate's and a follow-up's answers take the steps they took.**
+  - Token lookup:
+    - before, one `UNION` read (`{:token_kind, _}`) said whose a token
+      was;
+    - now each holder's store is asked in turn (`token_holder`,
+      `proposals.ex:362-370`; `{:token_held, _}` for a mandate's), the
+      first that holds it answers, and none means `:unknown`, refused
+      with no write, as before.
+  - Either way the lookup is a read before the answer, never part of it.
+    The answer itself is the same call as before: `confirm_mandate` and
+    `deny_mandate` for a mandate (the token's decide in one transaction),
+    and the follow-up's own decide for a follow-up. That is the atomic
+    `OwnerConfirm` / `OwnerDeny` (or the app's) step the spec has.
+  - Two answers racing for one token both pass the lookup, and the decide
+    transaction lets only the first change the row, as before.
+  - Always allow is refused for every holder but a follow-up's card, as
+    before.
+- **Changed, but not a step here.** A bare `/confirm` lists every holder's
+  cards waiting in that chat (`holders_waiting`), a heal's delivered
+  proposals now among them. When a heal's card also waits in the chat, a
+  bare `/confirm` that named one mandate proposal before may now be
+  ambiguous and answer none. The owner's answers get no fairness here, so
+  no step changes.
+- The mandate SQL functions this spec pins (`cues_mandate_sql.ex`) and the
+  follow-up pass functions (`cues_follow_up_sql.ex#on_pass,trigger_pass,
+  settle_taskless`) are unchanged; their citations moved with the file and
+  were updated.
+
+No step, variable or check changed.
+
+## Re-read for the app inbox (M106 S6, 2026-11-26)
+
+M106's stage S6 staled `cues/proposals.ex` (pinned whole) and the
+Scheduler's `init`.
+- `Proposals.owner_dm/1` now asks `OwnerInbox.for_approval(:proposal_card,
+  _)`. That is the ladder it asked before, with no app rung: a watcher's
+  mandate card is never sent to the app's chat, and a paired phone changes
+  nothing for it. `Mandates.owner_inbox/1` asks the same.
+- The rail still answers a card id only while its card waits in the
+  answering chat. No mandate card waits in the app's chat, so an id sent
+  from there finds none, as before.
+- `init` keeps the new `heal_card_opts`, which only `expire_waiting_heals`
+  reads. Admission, the cue share and the monitors are as they were.
+
+No step, variable or check changed. The `scheduler.ex` citations in the
+spec and above Findings moved with the code and were updated.
+
+## Re-read for the home's lock taken first (0705a4fc0, 2026-11-26)
+
+`0705a4fc0` staled the `application.ex` pin. `start_supervision_tree/0` now
+starts the tree through `start_holding_home_lock/3`: a daemon boot takes the
+lock beside its control socket before the role is read, the home prepared or
+any child started, and what the function did before is `start_tree/0`.
+`supervision_children/2` gained comments and no child, so the cue tree is
+still last, and `maybe_cues_supervisor/1` is as it was. The boot reset and
+the orphan reclaim this spec models are the one engine's: a second daemon is
+refused before any child starts, which `engine_boot` checks. No step,
+variable or check changed; the spec cites no `application.ex` line.

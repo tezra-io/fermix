@@ -38,8 +38,9 @@ defmodule FermixCore.Cues.FollowUps do
 
   The owner answers Run, Skip or Always allow: by token from that chat
   (`confirm/3`, `deny/3`, `always_allow/3`, which `Cues.Proposals` dispatches
-  to), by id from an app (`decide/4`), or with a bare command resolved
-  through `waiting_in_chat/2`. Run moves the trigger to `starting` and wakes
+  to, this module being the rail's holder of follow-up cards,
+  `Cues.CardHolder`), by id from an app (`decide/4`), or with a bare command
+  resolved through `waiting_in_chat/2`. Run moves the trigger to `starting` and wakes
   the scheduler, and a chat's card becomes the one line saying it is starting
   (`Cues.Card.starting/2`). Always allow does the same and, in that one write,
   allows the follow-up for what the card showed, so later items run it with
@@ -68,6 +69,7 @@ defmodule FermixCore.Cues.FollowUps do
   alias FermixCore.Clock
   alias FermixCore.Cues
   alias FermixCore.Cues.Card
+  alias FermixCore.Cues.CardHolder
   alias FermixCore.Cues.Config
   alias FermixCore.Cues.FollowUpCards
   alias FermixCore.Cues.FollowUpReadiness
@@ -78,6 +80,9 @@ defmodule FermixCore.Cues.FollowUps do
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.CuesFollowUpSql
+  alias FermixCore.Memory.Repo.CuesSql
+
+  @behaviour CardHolder
 
   @switch_off "Watchers may not act: \"Let watchers act\" is off in settings."
   @unreachable "Fermix could not reach you, so the card was not sent."
@@ -424,6 +429,55 @@ defmodule FermixCore.Cues.FollowUps do
   @spec waiting_in_chat(map(), keyword()) :: {:ok, [trigger()]} | {:error, term()}
   def waiting_in_chat(origin, opts \\ []) when is_map(origin) and is_list(opts),
     do: repo_call({:waiting_in_chat, origin, FollowUpCards.now(opts)}, opts)
+
+  # --- the rail's holder of follow-up cards (`Cues.CardHolder`) ----------------------
+
+  @impl CardHolder
+  def card_kind, do: :follow_up
+
+  @impl CardHolder
+  def card_id_prefix, do: "cft_"
+
+  @impl CardHolder
+  def offers_always_allow?, do: true
+
+  @impl CardHolder
+  def holds_token?(digest, opts) when is_binary(digest) and is_list(opts),
+    do: repo_call({:token_held, digest}, opts)
+
+  @impl CardHolder
+  def answer_card({:token, token}, :confirm, origin, opts), do: confirm(token, origin, opts)
+  def answer_card({:token, token}, :deny, origin, opts), do: deny(token, origin, opts)
+
+  def answer_card({:token, token}, :always_allow, origin, opts),
+    do: always_allow(token, origin, opts)
+
+  # A chat's answer by id is recorded with the chat's own label, as a token's.
+  def answer_card({:id, id}, decision, origin, opts) do
+    with {:ok, trigger} <- decide(id, decision, CuesSql.origin_text(origin), opts),
+         do: answered(trigger, opts)
+  end
+
+  @impl CardHolder
+  def waiting_in_chat_cards(origin, opts) do
+    with {:ok, triggers} <- waiting_in_chat(origin, opts) do
+      {:ok, Enum.map(triggers, &waiting_card(&1, opts))}
+    end
+  end
+
+  defp waiting_card(trigger, opts) do
+    title =
+      case card(trigger.id, opts) do
+        {:ok, card} ->
+          ~s(Run "#{card.follow_up.name || card.follow_up.job_id}"?)
+
+        {:error, reason} ->
+          Logger.warning("Follow-up card #{trigger.id} not read for a list: #{inspect(reason)}")
+          "A follow-up's card"
+      end
+
+    %{kind: :follow_up, id: trigger.id, title: title}
+  end
 
   @doc """
   The card of every follow-up still waiting that went out, oldest first, as an

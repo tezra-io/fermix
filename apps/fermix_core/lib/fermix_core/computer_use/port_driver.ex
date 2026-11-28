@@ -14,6 +14,10 @@ defmodule FermixCore.ComputerUse.PortDriver do
   poison-resets on. compux itself stays policy-free and only reports
   `{:error, {:timeout, ms}}`.
 
+  A request also names the turn that asked (`ComputerDriver.with_turn/2`),
+  which the session has already read and which is no action's field, so it is
+  left off the wire: the helper would refuse it as `unknown_field`.
+
   `control/2` passes straight through: the transport admits a control whatever is
   in flight, which is what lets `Session` confirm a Pause while its `ActionWorker`
   is blocked inside an action.
@@ -27,6 +31,7 @@ defmodule FermixCore.ComputerUse.PortDriver do
 
   @behaviour Compux.Driver
 
+  alias FermixCore.ComputerUse.ComputerDriver
   alias FermixCore.Timeouts
 
   @impl true
@@ -48,6 +53,8 @@ defmodule FermixCore.ComputerUse.PortDriver do
 
   @impl true
   def execute(state, request) when is_map(request) do
+    request = Map.delete(request, ComputerDriver.turn_key())
+
     case Compux.PortDriver.execute(state, request) do
       {:error, {:timeout, ms}} ->
         Timeouts.expired(:cu_sidecar_action, ms, %{session_id: state.session_id})

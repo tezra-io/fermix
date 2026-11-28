@@ -20,7 +20,12 @@ Code.require_file("support/accessory_case_helper.exs", __DIR__)
 Code.require_file("support/accessory_engine_helper.exs", __DIR__)
 Code.require_file("support/accessory_pty_helper.exs", __DIR__)
 Code.require_file("support/web_push_decrypt_helper.exs", __DIR__)
+Code.require_file("support/album_buffer_helper.exs", __DIR__)
 
 # `iroh_end_to_end` runs the real fermix-iroh helper and needs it built: opt in
 # with `--only iroh_end_to_end` (see `Mobile.Iroh.EndToEndTest`).
 ExUnit.start(capture_log: true, assert_receive_timeout: 2_000, exclude: [:iroh_end_to_end])
+
+# Every database a test opens on a new path starts as a copy of one migrated
+# template: see FermixTestSupport.RepoTemplate.
+FermixTestSupport.RepoTemplate.install!()

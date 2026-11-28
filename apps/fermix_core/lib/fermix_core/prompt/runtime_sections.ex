@@ -9,7 +9,6 @@ defmodule FermixCore.Prompt.RuntimeSections do
   alias FermixCore.Agents.AgentDefinition
   alias FermixCore.Capabilities.Deferral
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
-  alias FermixCore.Computers
   alias FermixCore.ComputerUse.Reach
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.HostFacts
@@ -79,7 +78,6 @@ defmodule FermixCore.Prompt.RuntimeSections do
 
     [
       this_fermix(trust),
-      computers(trust),
       runtime_contract(trust),
       sub_agent_orchestration(opts),
       capability_summary_from_opts(opts),
@@ -90,6 +88,21 @@ defmodule FermixCore.Prompt.RuntimeSections do
     |> Enum.join("\n\n")
   end
 
+  @doc """
+  The runtime section of a turn that may only write its reply
+  (`Agents.RuntimeContext.reply_only_profile/1`): it has no tools, and says so
+  where every other turn's section says how to use them.
+  """
+  @spec reply_only() :: String.t()
+  def reply_only do
+    """
+    ## Runtime Contract
+    - This turn has no tools: it can only write its reply. Nothing can be looked up, sent, changed or started from it.
+    - When something should happen next, say what it is and ask. Doing it is the owner's own new request, which their next message makes.
+    """
+    |> String.trim()
+  end
+
   # Which Fermix this is and the machine it runs on (M76 §4.2), read once at
   # boot. It leads the Runtime Contract, whose rules name the OS they hold on
   # (`open -a`, AppleScript on macOS), so the model reads the machine first.
@@ -97,11 +110,6 @@ defmodule FermixCore.Prompt.RuntimeSections do
   # profile carries none, as a guest turn carries none of the owner's memory.
   defp this_fermix(:operator), do: HostFacts.prompt_section()
   defp this_fermix(:guest), do: nil
-
-  # The home's computers (M97 §6.5), right after the machine this Fermix runs
-  # on, on an owner's turn only, as `## This Fermix` is: names, state and
-  # offers, never an address or an id.
-  defp computers(trust), do: Computers.prompt_section(trust: trust)
 
   defp capability_summary_from_opts(opts) do
     case Keyword.fetch(opts, :capabilities) do
@@ -415,7 +423,9 @@ defmodule FermixCore.Prompt.RuntimeSections do
       |> Enum.reject(&screen_out_of_reach?/1)
       |> Enum.reject(&credential_gated_when_unready?/1)
       |> Enum.reject(&call_scoped?/1)
+      |> Enum.reject(&phone_call_unlisted?/1)
       |> Enum.reject(&open_loop_unlisted?/1)
+      |> Enum.reject(&heal_run_unlisted?/1)
       |> Enum.reject(&kept_unlisted?/1)
       |> Enum.group_by(&(&1.metadata[:category] || :system))
       |> Enum.sort_by(fn {category, _caps} -> category_index(category) end)
@@ -481,6 +491,14 @@ defmodule FermixCore.Prompt.RuntimeSections do
   defp call_scoped?(%{metadata: %{tool_module: VoiceCallContext}}), do: true
   defp call_scoped?(_capability), do: false
 
+  # The phone-call family (M94 §06, §07), whose one registered member is
+  # `phone_call`: it is offered per turn by a switch that is live both ways,
+  # which a catalog cached per profile cannot follow, so the catalog never
+  # names it, and the wire carries its schema on the turns that are offered
+  # it. Keyed on the family's category, which every member declares.
+  defp phone_call_unlisted?(%{kind: :builtin, metadata: %{category: :phone_call}}), do: true
+  defp phone_call_unlisted?(_capability), do: false
+
   @doc """
   Whether a capability is an open-loop tool no prompt may name right now (M78
   §10): the whole surface follows the wire, as the harness does above. Disabled,
@@ -498,6 +516,16 @@ defmodule FermixCore.Prompt.RuntimeSections do
     do: not OpenLoopsConfig.enabled?()
 
   def open_loop_unlisted?(_capability), do: false
+
+  @doc """
+  Whether a capability is a job's heal run's own decision tool (M106 §5.5),
+  which no prompt may name: it is offered only inside a heal run, which
+  renders no catalog. Public so the Live voice frontend's catalog
+  (`Realtime.LivePrompt`) asks the same question.
+  """
+  @spec heal_run_unlisted?(map()) :: boolean()
+  def heal_run_unlisted?(%{kind: :builtin, name: "job_heal_respond"}), do: true
+  def heal_run_unlisted?(_capability), do: false
 
   # The coding-harness category carries a section-level PREAMBLE line (design
   # §7.4) before its tool list — a new touchpoint, rendered only when the bucket

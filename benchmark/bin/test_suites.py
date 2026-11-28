@@ -10,6 +10,7 @@ Also covers the shared session-id helper. Pure: no daemon, no Opik, no spend.
 Run: `uv run bin/test_suites.py`."""
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -213,6 +214,29 @@ def test_a_home_without_the_signed_out_claude_holds_out_only_the_case_that_needs
     assert held == [] and kept == chosen
 
 
+def test_a_home_whose_inbox_is_not_the_local_chat_holds_out_what_needs_it(tmp_path, monkeypatch):
+    # M106: a heal's message reaches only the local chat in an eval home, so a case
+    # that grades a sent heal is held out, not zeroed, on the default Telegram inbox.
+    cases = [dict(BASE_CASE, requires=["owner_inbox_cli"]), dict(FILLER_CASE)]
+    (tmp_path / "suite").mkdir()
+    loaded = suites.load_all(_write_suite(tmp_path / "suite", cases=cases))
+    chosen = [(suite, suite.scenarios) for suite in loaded]
+    home = tmp_path / "x-eval"
+    argv = ["seed_capability_home.py", str(home), "--provider", "openai", "--model", "gpt-x"]
+
+    monkeypatch.setattr(sys, "argv", argv)
+    seed.main()
+    kept, held = run_eval.hold_out_unseeded(_home_cfg(str(home)), chosen)
+    assert [case.id for _s, scns in kept for scn in scns for case in scn.cases] == ["case_b"]
+    [(_suite_name, case_id, why)] = held
+    assert case_id == "case_a" and "--owner-inbox-cli" in why
+
+    monkeypatch.setattr(sys, "argv", [*argv, "--owner-inbox-cli"])
+    seed.main()
+    kept, held = run_eval.hold_out_unseeded(_home_cfg(str(home)), chosen)
+    assert held == [] and kept == chosen
+
+
 # --- coding_harness: a signed-out Claude Code (M98 D10) ------------------------
 
 def _signed_out_case():
@@ -307,6 +331,155 @@ def test_a_capability_case_cannot_declare_workspace_paths_absent(tmp_path):
     with pytest.raises(suites.SuiteError) as exc:
         suites.load_all(str(tmp_path))
     assert any("graded by run_eval.py only" in p for p in exc.value.problems)
+
+
+# --- state (case level): the jobs baseline a behavioral case is seeded with ----
+
+def _state_spec(tmp_path, name="w.json") -> str:
+    """A spec under the suite directory's fixtures, as a case names it."""
+    spec = tmp_path / "fixtures" / "state" / name
+    spec.parent.mkdir(parents=True, exist_ok=True)
+    spec.write_text('{"jobs": []}')
+    return f"fixtures/state/{name}"
+
+
+ISOLATED = {"risk": "isolated_mutation"}
+
+
+def test_a_state_case_loads_on_an_isolated_ask_scenario(tmp_path):
+    spec = _state_spec(tmp_path)
+    scn = _load_one_scenario(tmp_path, scenario=ISOLATED,
+                             cases=[dict(BASE_CASE, state=spec), dict(FILLER_CASE)])
+    assert [case.state for case in scn.cases] == [spec, None]
+
+
+def test_state_needs_the_isolated_mutation_profile(tmp_path):
+    # The seed deletes every job, reminder and open loop in the home it writes to.
+    spec = _state_spec(tmp_path)
+    problems = _problems(tmp_path, cases=[dict(BASE_CASE, state=spec), dict(FILLER_CASE)])
+    assert any("must be isolated_mutation" in p for p in problems), problems
+
+
+@pytest.mark.parametrize("value", ["fixtures/state/missing.json", "../w.json", "/tmp/w.json",
+                                   "fixtures/state/w.txt", "spec.yaml", 3, ""])
+def test_state_must_be_a_json_spec_under_the_fixtures(tmp_path, value):
+    _state_spec(tmp_path)
+    (tmp_path / "fixtures" / "state" / "w.txt").write_text("{}")
+    problems = _problems(tmp_path, scenario=ISOLATED,
+                         cases=[dict(BASE_CASE, state=value), dict(FILLER_CASE)])
+    assert any("`state` must be a relative .json file" in p for p in problems), problems
+
+
+def test_state_needs_the_ask_drive(tmp_path):
+    spec = _state_spec(tmp_path)
+    case = {"id": "case_a", "drive": "companion", "query": "q", "state": spec,
+            "expect": {"wire": {"events_all": ["accepted"]}}}
+    problems = _problems(tmp_path, scenario=ISOLATED, cases=[case, dict(FILLER_CASE)])
+    assert any("`state` needs `drive: ask`" in p for p in problems), problems
+
+
+def test_a_capability_case_seeds_with_checker_state_not_state(tmp_path):
+    spec = _state_spec(tmp_path)
+    doc = {"suite": "cap_spec", "title": "Cap spec", "risk": "isolated_mutation",
+           "scenarios": [{"id": "scn", "title": "Scenario",
+                          "cases": [{"id": "only", "query": "q", "state": spec,
+                                     "score": {"match": "exact", "expected": "x"}}]}]}
+    with open(os.path.join(str(tmp_path), "cap_spec.yaml"), "w", encoding="utf-8") as fh:
+        yaml.safe_dump(doc, fh)
+    with pytest.raises(suites.SuiteError) as exc:
+        suites.load_all(str(tmp_path))
+    assert any("seeds its state with `checker.state`" in p for p in exc.value.problems)
+
+
+# --- drive: owner_command (a typed /confirm or /deny, no model) --------------
+
+def _command_suite(tmp_path, suite="cap_cmd", **case):
+    """A capability suite with one owner_command case; its state spec exists."""
+    spec = tmp_path / "fixtures" / "state" / "w.json"
+    spec.parent.mkdir(parents=True, exist_ok=True)
+    spec.write_text('{"jobs": []}')
+    body = {"id": "confirm", "drive": "owner_command", "query": "/confirm",
+            "checker": {"script": "suites/capability/checkers/job_proposal.py", "mode": "json",
+                        "state": "fixtures/state/w.json",
+                        "expect": {"job": "holds", "outcome": "applied"}}}
+    body.update(case)
+    body = {key: value for key, value in body.items() if value is not None}
+    doc = {"suite": suite, "title": "Cap cmd", "risk": "isolated_mutation",
+           "scenarios": [{"id": "scn", "title": "Scenario", "cases": [body]}]}
+    with open(os.path.join(str(tmp_path), f"{suite}.yaml"), "w", encoding="utf-8") as fh:
+        yaml.safe_dump(doc, fh)
+    return str(tmp_path)
+
+
+def test_an_owner_command_case_loads_typed_in_the_inbox_chat_by_default(tmp_path):
+    [suite] = suites.load_all(_command_suite(tmp_path))
+    case = suite.scenarios[0].cases[0]
+    assert case.drive == "owner_command" and case.command == {"chat": "inbox"}
+    assert [turn.query for turn in case.turns] == ["/confirm"]
+
+
+def test_an_owner_command_case_may_type_in_the_trials_own_session(tmp_path):
+    [suite] = suites.load_all(_command_suite(
+        tmp_path, command={"chat": "trial"},
+        turns=[{"query": "/confirm"}, {"query": "/deny"}], query=None))
+    case = suite.scenarios[0].cases[0]
+    assert case.command == {"chat": "trial"} and len(case.turns) == 2
+
+
+@pytest.mark.parametrize("change, why", [
+    ({"query": "please go ahead"}, "typed command starting with `/`"),
+    ({"command": {"chat": "telegram"}}, "`command` is a map with only `chat`"),
+    ({"command": {"chat": "inbox", "user": "x"}}, "`command` is a map with only `chat`"),
+    ({"expect": {"status": "ok"}}, "leaves no trace to grade"),
+    ({"checker": {"script": "suites/capability/checkers/job_proposal.py", "mode": "json"}},
+     "over its seeded `checker.state`"),
+    ({"drive": "ask", "command": {"chat": "inbox"}}, "`command` needs `drive: owner_command`"),
+])
+def test_an_owner_command_case_is_refused_what_it_cannot_take(tmp_path, change, why):
+    with pytest.raises(suites.SuiteError) as exc:
+        suites.load_all(_command_suite(tmp_path, **change))
+    assert any(why in p for p in exc.value.problems), exc.value.problems
+
+
+def test_an_owner_command_case_belongs_to_a_capability_suite(tmp_path):
+    with pytest.raises(suites.SuiteError) as exc:
+        suites.load_all(_command_suite(tmp_path, suite="cmd_behavioral"))
+    assert any("belongs to a capability suite" in p for p in exc.value.problems)
+
+
+# --- drive: app (the Fermix app's chat as the owner's inbox, M106 S6) --------
+
+APP_STEPS = {"steps": ["await_card", {"answer": "approve"}]}
+
+
+def test_an_app_case_loads_its_steps_as_its_turns(tmp_path):
+    [suite] = suites.load_all(_command_suite(tmp_path, drive="app", query=None, app=APP_STEPS))
+    case = suite.scenarios[0].cases[0]
+    assert case.drive == "app" and case.app == APP_STEPS
+    assert [json.loads(turn.query) for turn in case.turns] == APP_STEPS["steps"]
+
+
+@pytest.mark.parametrize("change, why", [
+    ({"query": "/confirm"}, "takes its `app.steps`"),
+    ({"app": None}, "needs an `app` map"),
+    ({"app": {"steps": [{"answer": "approve"}]}}, "need an `await_card` step before"),
+    ({"expect": {"status": "ok"}}, "not in `expect`"),
+    ({"checker": {"script": "suites/capability/checkers/job_app_inbox.py", "mode": "json"}},
+     "over its seeded `checker.state`"),
+    ({"drive": "ask", "query": "hello"}, "`app` needs `drive: app`"),
+])
+def test_an_app_case_is_refused_what_it_cannot_take(tmp_path, change, why):
+    case = {"drive": "app", "query": None, "app": APP_STEPS, **change}
+    with pytest.raises(suites.SuiteError) as exc:
+        suites.load_all(_command_suite(tmp_path, **case))
+    assert any(why in p for p in exc.value.problems), exc.value.problems
+
+
+def test_an_app_case_belongs_to_a_capability_suite(tmp_path):
+    with pytest.raises(suites.SuiteError) as exc:
+        suites.load_all(_command_suite(tmp_path, suite="app_behavioral", drive="app",
+                                       query=None, app=APP_STEPS))
+    assert any("`drive: app` belongs to a capability suite" in p for p in exc.value.problems)
 
 
 # --- requires_tools_all (case level) ----------------------------------------
@@ -684,6 +857,7 @@ def test_the_shipped_numbered_rubrics_parse():
                       "open_up_the_server_sandbox_from_my_mac": 5,
                       "stricter_mac_open_server": 5,
                       "second_mac_without_moving_anything": 5,
+                      "laptop_removed_by_mistake": 5, "mac_removed_while_it_was_off": 5,
                       "can_you_still_text_me_on_imessage": 4,
                       "a_text_while_the_mac_sleeps": 3,
                       "a_ramen_place_in_vell": 2, "a_cafe_by_the_castle": 2,
@@ -797,6 +971,11 @@ def test_the_shipped_numbered_rubrics_parse():
                       "hardware": 2, "landing_page": 2, "newsletter": 2,
                       "oat_milk_route_sanity": 2, "packing": 2, "reading": 2,
                       "site_and_app": 3,
+                      # job_auto_heal.yaml
+                      "tide_report_never_came_route_sanity": 3, "tide_report_missing": 3,
+                      "holds_digest_anything_done": 3, "holds_digest_sorted_yet": 3,
+                      "river_digest_coming_through_empty": 3, "river_digest_no_reading_any_more": 3,
+                      "holds_digest_what_would_change": 3,
                       # voice_greeting_goodbye.yaml
                       "greeted_then_asked_if_heard": 4,
                       # phone_reach.yaml
@@ -804,7 +983,36 @@ def test_the_shipped_numbered_rubrics_parse():
                       "who_reads_notifications": 3,
                       "greeted_then_asked_about_the_rota": 3, "okay_thanks_bye": 2,
                       "alright_goodbye_for_now": 2, "say_bye_to_the_van_driver": 2,
-                      "dont_hang_up_yet": 2}
+                      "dont_hang_up_yet": 2,
+                      # phone_call.yaml
+                      "book_table_readback_confirmed": 4, "book_table_other_phrasing": 3,
+                      "reminder_to_own_cell": 3, "ring_me_with_reminder": 3,
+                      "neighbor_cat_sitting": 3, "friend_dinner_invite": 3,
+                      "sister_message": 3, "toronto_bakery": 2, "london_pub": 2,
+                      "car_alarm_911": 3, "smoke_next_door": 3, "dentist_no_number": 2,
+                      "hotel_no_number": 2, "copperleaf_next_weekend": 2,
+                      "marlow_the_twelfth": 2, "seven_full_eight_fifteen": 3,
+                      "leading_question_corrected": 3, "deposit_options_then_choice": 3,
+                      "deposit_then_go_ahead": 2, "deposit_status_check": 3,
+                      "thursday_slot_call_back": 2, "ring_back_for_thursday": 2,
+                      "go_ahead_call_again": 2,
+                      "quick_yes_over_the_readback": 3, "talked_over_then_record": 2,
+                      "talked_over_so_are_we_set": 2,
+                      "bike_shop_no_answer": 2, "bike_shop_no_redial": 2,
+                      "bike_shop_no_answer_third_phrasing": 2,
+                      "vet_voicemail_no_message": 2, "vet_voicemail_what_now": 2,
+                      "vet_voicemail_third_phrasing": 2, "print_shop_busy": 2,
+                      "print_shop_busy_then_ask": 2, "print_shop_busy_third_phrasing": 2,
+                      "dental_menu_cleaning": 2, "dental_menu_other_phrasing": 2,
+                      "host_asks_for_private_details": 3, "host_tries_other_number": 3,
+                      "host_wants_instructions": 2, "page_says_call_booking_line": 2,
+                      "forwarded_lease_note": 2, "page_do_what_it_says": 2,
+                      "stop_call_on_hold": 3, "hang_up_on_them": 3, "status_then_stop": 3,
+                      "provider_refused_reason": 3, "provider_refused_what_to_fix": 2,
+                      "provider_refused_third_phrasing": 2,
+                      "lost_response_uncertain": 3, "lost_response_try_again": 3,
+                      "lost_response_third_phrasing": 2,
+                      "initialization_timeout_uncertain": 2}
 
 
 if __name__ == "__main__":

@@ -35,10 +35,12 @@ defmodule FermixChannels.Gateway do
 
   @doc """
   Ingest inbound messages. A coding-run chain's metadata
-  (`harness_continuation`, `harness_continuation_depth`, `harness_run_id`) is
-  dropped from every message unless the `keep_chain_metadata` option is set,
-  which only the continuation dispatcher and the grant resume do, as
-  `name_conversation/2` names the conversation whatever a message arrived with.
+  (`harness_continuation`, `harness_continuation_depth`, `harness_run_id`), a
+  phone call result's marker (`phone_call_result`) and a resumed request's
+  identity (`request_id`) are dropped from every message unless the
+  `keep_chain_metadata` option is set, which only the continuation dispatcher
+  and the grant resume do, as `name_conversation/2` names the conversation
+  whatever a message arrived with.
   """
   @spec ingest([Message.t() | map()], keyword()) :: :ok | {:error, term()}
   def ingest(messages, opts) when is_list(messages) do
@@ -55,6 +57,38 @@ defmodule FermixChannels.Gateway do
       end
     end)
   end
+
+  @doc """
+  The conversation `message` runs in, named by the steps `ingest/2` takes before
+  the queue keys it: normalize, name the conversation (a channel whose turns
+  join another transport's answers it), then `ConversationKey.from/1`, threads
+  included. Work ordered by conversation before ingest (`Gateway.AlbumBuffer`'s
+  lanes) and the queue therefore agree. A message that does not normalize has
+  no conversation: `{:error, {:invalid_message, field}}`, as `ingest/2` rejects
+  it. Emits no telemetry: `ingest/2` counts the normalize once.
+
+  The one input it cannot see is the trust authorization grants later, which
+  only a Live hand-off on the `voice` channel reads
+  (`FermixCore.Agents.VoiceCall`); every other channel's message is keyed the
+  same before ingest and after.
+  """
+  @spec conversation_key(module(), Message.t() | map()) ::
+          {:ok, ConversationKey.t()} | {:error, {:invalid_message, atom()}}
+  def conversation_key(channel, message) when is_atom(channel) and is_map(message) do
+    with {:ok, normalized} <- normalize_message(message) do
+      conversation_of(name_conversation(channel, normalized))
+    end
+  end
+
+  # A struct a parser built without a channel or a chat names no conversation.
+  defp conversation_of(%Message{channel: channel, chat_id: chat_id} = message)
+       when is_binary(channel) and is_binary(chat_id),
+       do: {:ok, ConversationKey.from(message)}
+
+  defp conversation_of(%Message{channel: channel}) when is_binary(channel),
+    do: {:error, {:invalid_message, :chat_id}}
+
+  defp conversation_of(%Message{}), do: {:error, {:invalid_message, :channel}}
 
   # The ingest dependency context: every collaborator this batch dispatches
   # through, resolved once from `opts` and then read by name at each stage.
@@ -359,8 +393,19 @@ defmodule FermixChannels.Gateway do
   # decides what the access gate lets a turn start without asking, so only the
   # continuation dispatcher and the grant resume may hand it in
   # (`keep_chain_metadata`); every other message carries none, whatever it
-  # arrived with, under atom or string keys.
-  @chain_metadata_keys [:harness_continuation, :harness_continuation_depth, :harness_run_id]
+  # arrived with, under atom or string keys. A finished phone call's result
+  # re-enters through the same dispatcher under its own marker
+  # (`phone_call_result`, M94 §04), kept and dropped the same way. So is the
+  # owner request's identity a grant resume hands back (`request_id`,
+  # `Agents.RequestIdentity`), which `Agents.TurnRunner` takes over minting a
+  # new one: no channel payload can make a message another request.
+  @chain_metadata_keys [
+    :harness_continuation,
+    :harness_continuation_depth,
+    :harness_run_id,
+    :phone_call_result,
+    :request_id
+  ]
 
   defp drop_chain_metadata(%Message{} = message, true), do: message
 

@@ -34,6 +34,8 @@ defmodule Fermix.CLI.SettingsCommand.Args do
           | {:secret_clear, String.t(), flags()}
           | {:primary, String.t() | nil, flags()}
           | {:reload, String.t() | nil, flags()}
+          | {:phone_calls_recovery, flags()}
+          | {:phone_calls_confirm_ended, String.t(), flags()}
           | {:usage, String.t()}
           | {:secret_in_argv, :set | :secret_set, String.t()}
 
@@ -148,6 +150,13 @@ defmodule Fermix.CLI.SettingsCommand.Args do
   # are read again (M97 §19.3): `computer.sandbox` is this computer's.
   defp command(["reload", section], flags, []) when section != "",
     do: {:reload, section, flags}
+
+  # An unresolved phone call (M94 §12): what is known of it, and the owner's
+  # word that their Telnyx portal shows it ended.
+  defp command(["phone-calls", "recovery"], flags, []), do: {:phone_calls_recovery, flags}
+
+  defp command(["phone-calls", "confirm-ended", call_id], flags, []) when call_id != "",
+    do: {:phone_calls_confirm_ended, call_id, flags}
 
   defp command(_positionals, _flags, []), do: {:usage, "unknown or incomplete subcommand"}
 

@@ -1,0 +1,54 @@
+{
+  "tag": "v0.20.0",
+  "commit": "d95e10dc78597b1150ca4ed98825a5d4e812b5e7",
+  "files": [
+    {
+      "path": "management/fixtures/errors.jsonl",
+      "sha256": "b15b8ed5dbf3a9fc0b294fec81618f82384bd85148e2f6145f43313ba08f77b9"
+    },
+    {
+      "path": "management/fixtures/requests.jsonl",
+      "sha256": "c36a166b4107da08a55a0853c5e2186ff706362910b184d13fc12dc14e37cb9f"
+    },
+    {
+      "path": "management/fixtures/success.jsonl",
+      "sha256": "cb6414b312efa2df25dd04954922ad4956251b2695494ed5f222459b8ec3fa82"
+    },
+    {
+      "path": "management/protocol.schema.json",
+      "sha256": "cc3802cbbcce261621674ae22b7cce9e7c991b7de360f518fff5fa64d51ad96f"
+    },
+    {
+      "path": "mobile/fixtures/client_binary_frames.jsonl",
+      "sha256": "834cc11ff90b95c093dfed73cc732f22794549e17a00a14fe9e8e79949f83a6c"
+    },
+    {
+      "path": "mobile/fixtures/client_events.jsonl",
+      "sha256": "92578d954edd5172077d98c9d16d0939a34651a6588d282a59f1e728aa3bba28"
+    },
+    {
+      "path": "mobile/fixtures/server_binary_frames.jsonl",
+      "sha256": "9997e812cefe9f896e19df80e1a946da12ad95a30a1f40b97b7a9683ab77f943"
+    },
+    {
+      "path": "mobile/fixtures/server_events.jsonl",
+      "sha256": "ec3fe2a96ac7bec2e69c2ede5f8b6df24dac3235a1ac775fea0eec0d7a0e9409"
+    },
+    {
+      "path": "mobile/protocol.schema.json",
+      "sha256": "248e36f9b50b3219bbf79c160a4179f6cdc488676ca696a4d08fb82e0685d524"
+    },
+    {
+      "path": "realtime/fixtures/client_events.jsonl",
+      "sha256": "ccfa6b4c9e34a2c3a72a43c8fae416ab11b8b0a380ef1355a5388c8642bfe7d3"
+    },
+    {
+      "path": "realtime/fixtures/server_events.jsonl",
+      "sha256": "974f59942c02b30836a9e07602e663d409ce2b0b28c08be3bd151309480d56a9"
+    },
+    {
+      "path": "realtime/protocol.schema.json",
+      "sha256": "88fc1a4aa357aece7da67c126d769a59271afc7e2a6c507a322edc5f391cbb78"
+    }
+  ]
+}

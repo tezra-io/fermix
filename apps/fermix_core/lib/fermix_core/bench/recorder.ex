@@ -3,7 +3,9 @@ defmodule FermixCore.Bench.Recorder do
   Telemetry recorder for benchmark scenarios.
 
   The handler writes only integer durations into a private ETS table. It does
-  no disk or network work on the measured path.
+  no disk or network work on the measured path. The `:telemetry` application
+  must be running: a booted engine runs it, and a benchmark's Mix task starts
+  it for the run (`FermixChannels.Bench.Boot`).
   """
 
   @type event_spec :: {[atom()], String.t()}
@@ -17,8 +19,6 @@ defmodule FermixCore.Bench.Recorder do
 
   @spec start(keyword()) :: {:ok, t()} | {:error, term()}
   def start(opts) when is_list(opts) do
-    {:ok, _apps} = Application.ensure_all_started(:telemetry)
-
     events = Keyword.fetch!(opts, :events)
 
     table =

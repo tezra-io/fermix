@@ -77,7 +77,8 @@ defmodule FermixCore.Tools.ListJobRuns do
   end
 
   defp do_execute(args, context) do
-    with {:ok, job_id} <- Support.required_string(args, "job_id") do
+    with {:ok, job_id} <- Support.required_string(args, "job_id"),
+         :ok <- Support.check_heal_job(job_id, context) do
       selector = build_selector(job_id, args)
 
       case Repo.list_job_runs(selector, server: Support.repo(context), limit: limit(args)) do

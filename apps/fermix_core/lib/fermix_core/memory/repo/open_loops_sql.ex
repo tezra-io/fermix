@@ -1214,6 +1214,53 @@ defmodule FermixCore.Memory.Repo.OpenLoopsSql do
   end
 
   @doc """
+  The DDL of migration 75: the owner's own chat messages by agent, owner and
+  time, the rows `owner_message_hours/4` asks for. The query reads them as one
+  range, backwards for its newest-first order, and stops at its limit. Without
+  the index, SQLite finds every message of the agent and owner through
+  `idx_messages_review_tail` and sorts them all before the limit applies.
+
+  The key ascends, so a new message extends the end of its owner's range and
+  index pages fill, where a descending key puts each one at the front and
+  leaves pages half full. The rowid is the key's implicit last column, so a
+  backward read also yields `created_at DESC, id DESC`, the order of the
+  memory store's range read (`Repo.get_messages_in_range/5`), which uses this
+  index when it asks for the owner's chat messages.
+  """
+  @spec owner_hours_index_schema_sql() :: String.t()
+  def owner_hours_index_schema_sql do
+    """
+    CREATE INDEX IF NOT EXISTS idx_messages_owner_hours
+      ON messages(agent_id, owner_id, created_at)
+      WHERE role = 'user' AND kind = 'chat_message';
+    """
+  end
+
+  # The owner's own chat messages since `?`, newest first: a backward read of
+  # `idx_messages_owner_hours` (migration 75, `owner_hours_index_schema_sql/0`).
+  # Its `role` and `kind` terms are that index's WHERE: SQLite reads a partial
+  # index only for a query whose WHERE implies the index's, so the two change
+  # together. The query never names the index, so a daemon that loads this
+  # code before a restart runs the migration still answers, by the slower plan.
+  @owner_message_hours_sql """
+  SELECT created_at FROM messages
+  WHERE agent_id = ? AND owner_id = ? AND role = 'user' AND kind = 'chat_message'
+    AND created_at >= ?
+    AND COALESCE(
+          CASE WHEN json_valid(metadata_json)
+               THEN json_extract(metadata_json, '$.guest') END,
+          0
+        ) != 1
+  ORDER BY created_at DESC
+  LIMIT ?
+  """
+
+  @doc false
+  # The active-hours SQL, for the test that holds its query plan.
+  @spec owner_message_hours_sql() :: String.t()
+  def owner_message_hours_sql, do: @owner_message_hours_sql
+
+  @doc """
   When the owner's own chat messages were written since `since`, newest first
   and bounded. A message a guest sent carries `"guest": true` in its metadata
   and is never selected, exactly as the memory review's input excludes it.
@@ -1224,18 +1271,7 @@ defmodule FermixCore.Memory.Repo.OpenLoopsSql do
     with {:ok, rows} <-
            query_all(
              conn,
-             """
-             SELECT created_at FROM messages
-             WHERE agent_id = ? AND owner_id = ? AND role = 'user' AND kind = 'chat_message'
-               AND created_at >= ?
-               AND COALESCE(
-                     CASE WHEN json_valid(metadata_json)
-                          THEN json_extract(metadata_json, '$.guest') END,
-                     0
-                   ) != 1
-             ORDER BY created_at DESC
-             LIMIT ?
-             """,
+             @owner_message_hours_sql,
              [agent_id, owner_id, since, @message_hours_max]
            ) do
       {:ok, Enum.map(rows, fn [created_at] -> parse_timestamp!(created_at) end)}

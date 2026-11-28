@@ -30,7 +30,8 @@ defmodule FermixChannels.Mobile.CallTest do
 
   # A voice session in place of an engine's: it takes the home's call in
   # `init/1` as every engine does, tells the test each verb, and pushes to its
-  # companion whatever the test hands it (`{:push, frame}`).
+  # companion whatever the test hands it (`{:push, frame}`). `linger_ms` opens
+  # the gap an engine closes at once, between answering its stop and exiting.
   defmodule Voice do
     use GenServer
 
@@ -48,12 +49,16 @@ defmodule FermixChannels.Mobile.CallTest do
     def call_stop(pid), do: GenServer.call(pid, :call_stop)
 
     @impl true
-    def init(%{observer: observer, opts: opts, lease: lease, engine: engine}) do
+    def init(%{observer: observer, opts: opts, lease: lease, engine: engine} = spec) do
       Process.monitor(observer)
 
       case CallLease.acquire(lease, Keyword.fetch!(opts, :endpoint), engine) do
-        :ok -> {:ok, %{observer: observer, companion: Keyword.fetch!(opts, :companion)}}
-        {:error, reason} -> {:stop, reason}
+        :ok ->
+          companion = Keyword.fetch!(opts, :companion)
+          {:ok, %{observer: observer, companion: companion, linger_ms: spec[:linger_ms]}}
+
+        {:error, reason} ->
+          {:stop, reason}
       end
     end
 
@@ -61,6 +66,14 @@ defmodule FermixChannels.Mobile.CallTest do
     def handle_call(:call_start, _from, state) do
       send(state.companion, {:realtime, %{type: "state", state: "listening"}})
       {:reply, :ok, state}
+    end
+
+    def handle_call(:call_stop, from, %{linger_ms: ms} = state) when is_integer(ms) do
+      send(state.observer, {:voice, self(), :call_stop})
+      GenServer.reply(from, :ok)
+      # sleep: the gap between the answer and the exit, held open
+      Process.sleep(ms)
+      {:stop, {:shutdown, :call_stop}, state}
     end
 
     def handle_call(:call_stop, _from, state) do
@@ -138,7 +151,9 @@ defmodule FermixChannels.Mobile.CallTest do
 
   describe "a whole call" do
     test "opens, carries audio both ways and a control, detaches and resumes reconciled", ctx do
-      {driver, client} = ready_phone!(ctx)
+      # The silence watch is out of reach here: only the closed session's
+      # :DOWN detaches the call below.
+      {driver, client} = ready_phone!(ctx, quiet_ms: 60_000)
       {client, voice} = call_up!(driver, client, 2)
 
       # Up: raw PCM reaches the session as the bytes it is.
@@ -448,6 +463,37 @@ defmodule FermixChannels.Mobile.CallTest do
       call_opts = [calls: ctx.calls, call_supervisor: ctx.call_supervisor, call_options: opts]
       assert Call.open({:phone, @phone_id}, relay, @call, false, call_opts) == :ok
       assert_receive {:from_call, :control, %{"t" => "call_attached", "resumed" => false}}
+      :ok = :sys.resume(partition)
+    end
+
+    # The registry forgets an exited call a moment later, and an engine exits a
+    # moment after it answers its stop. Both moments are held open here (the
+    # registry's partition kept from reading the exit, the session lingering),
+    # so a close sent before the call gave up its name, or at the session's
+    # answer, is seen.
+    test "a hang-up's close comes once the call holds nothing: the next call_open opens",
+         ctx do
+      %{voice: voice, relay: relay} = call_alone!(ctx, "openai_live", voice_linger_ms: 50)
+      partition = Module.concat(ctx.calls, "PIDPartition0")
+      :ok = :sys.suspend(partition)
+
+      assert Call.deliver(@phone_id, relay, "call_close", %{"call_id" => @call}, <<>>,
+               calls: ctx.calls
+             ) == :ok
+
+      assert_receive {:voice, ^voice, :call_stop}
+      assert %{"t" => "call_close", "reason" => "ended"} = List.last(controls_until_close())
+      refute Process.alive?(voice)
+      assert CallLease.holder(ctx.lease) == :none
+      assert Registry.lookup(ctx.calls, @phone_id) == []
+
+      opts = call_options(ctx, [])
+      call_opts = [calls: ctx.calls, call_supervisor: ctx.call_supervisor, call_options: opts]
+      assert Call.open({:phone, @phone_id}, relay, "c-2", false, call_opts) == :ok
+
+      assert_receive {:from_call, :control,
+                      %{"t" => "call_attached", "call_id" => "c-2", "resumed" => false}}
+
       :ok = :sys.resume(partition)
     end
 
@@ -772,9 +818,14 @@ defmodule FermixChannels.Mobile.CallTest do
       assert_receive {:voice, ^voice, {:interrupt, nil}}
 
       await(call, &(&1.audio.queued == 1))
-      Agent.update(clock, &(&1 + 300))
+      now = Agent.get_and_update(clock, &{&1 + 300, &1 + 300})
       send(voice, {:push, %{type: "audio_delta", audio: Base.encode64(@pcm), playback_id: "p1"}})
-      _ = :sys.get_state(call)
+      # This push's frame heads the queue only once the call has taken the
+      # push and aged the second one's out, the take that would interrupt
+      # again; the voice answers the test only after what the call asked of
+      # it, so an interrupt for this push would be here by then.
+      await(call, &match?({:value, {^now, _id, _pcm}}, :queue.peek(&1.audio.queue)))
+      _ = :sys.get_state(voice)
       refute_received {:voice, ^voice, {:interrupt, nil}}
     end
 
@@ -1367,13 +1418,31 @@ defmodule FermixChannels.Mobile.CallTest do
     call
   end
 
-  # Bounded round trips through the call's mailbox, never a sleep.
-  defp await(call, ready?, rounds \\ 200)
-  defp await(_call, _ready?, 0), do: flunk("the call never reached the state awaited")
+  # Round trips through the call's mailbox, never a sleep, until the call is
+  # in the state awaited, within assert_receive's bound. What is awaited
+  # reaches the call from another process (the voice's push, a killed
+  # relay's :DOWN), which no round trip of the test's is ordered with, so a
+  # count of rounds bounds only the time the rounds take: 200 were over
+  # before the voice had passed its push on, on a runner running this test
+  # alone as well as under the whole suite.
+  defp await(call, ready?) do
+    bound_ms = ExUnit.configuration()[:assert_receive_timeout]
+    await_until(call, ready?, System.monotonic_time(:millisecond) + bound_ms)
+  end
 
-  defp await(call, ready?, rounds) do
+  defp await_until(call, ready?, deadline) do
     state = :sys.get_state(call)
-    if ready?.(state), do: state, else: await(call, ready?, rounds - 1)
+
+    cond do
+      ready?.(state) ->
+        state
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        flunk("the call never reached the state awaited")
+
+      true ->
+        await_until(call, ready?, deadline)
+    end
   end
 
   defp ready_phone!(ctx, call_options \\ []),
@@ -1383,9 +1452,16 @@ defmodule FermixChannels.Mobile.CallTest do
     test = self()
     lease = ctx.lease
     engine = ctx.engine
+    {linger_ms, overrides} = Keyword.pop(overrides, :voice_linger_ms)
 
     starter = fn session_opts ->
-      spec = %{observer: test, opts: session_opts, lease: lease, engine: engine}
+      spec = %{
+        observer: test,
+        opts: session_opts,
+        lease: lease,
+        engine: engine,
+        linger_ms: linger_ms
+      }
 
       with {:ok, voice} <- GenServer.start(Voice, spec) do
         send(test, {:voice_started, voice, session_opts})

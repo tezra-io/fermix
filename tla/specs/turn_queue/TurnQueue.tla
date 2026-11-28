@@ -12,7 +12,7 @@
 (*  - the LLM and tools (one "loop" step), streaming drafts, typing;       *)
 (*  - the access gate's parked confirmation: run_message_loop hands        *)
 (*    AgentLoop the owner-inbox closure and the Live call id               *)
-(*    (turn_runner.ex:611, :611); a parked call is a held tool result      *)
+(*    (turn_runner.ex:673, :677); a parked call is a held tool result      *)
 (*    inside the one loop step, and the owner's confirm later runs it on   *)
 (*    a task outside the Queue, not as a new turn;                         *)
 (*  - what a turn tells its channel's stream (a hand-off's word, before   *)
@@ -21,7 +21,7 @@
 (*  - a turn's attachments (M67): run_message_loop composes their          *)
 (*    manifest into the user text persist_user_message stores and, on      *)
 (*    the owner's chat turn, first saves them to the workspace             *)
-(*    (turn_runner.ex:483): file writes while the task is at "start",      *)
+(*    (turn_runner.ex:506): file writes while the task is at "start",      *)
 (*    no Queue state, and nothing in history until PersistUser;            *)
 (*  - the empty-completion path (queue.ex:541-544, :724-733): it delivers *)
 (*    a canned retry and commits nothing, leaving the user message        *)
@@ -33,10 +33,20 @@
 (*    hand-off keys into the one its trusted voice_call names, the chat's  *)
 (*    unless the call is private, and is then one more message of that     *)
 (*    FIFO;                                                                *)
+(*  - a phone call's backend turn (M94), on a conversation and lane of     *)
+(*    its own ({"phone_call", call_id, :root}, which no other message      *)
+(*    keys into): the Queue runs it as any turn, but run/5 hands it to     *)
+(*    PhoneCallTurn.run/2 before run_message_loop (turn_runner.ex:         *)
+(*    106-118), so it persists no user message, and commit/4 writes        *)
+(*    nothing for it (:199-206). That conversation's history stays empty,  *)
+(*    a stop's marker finds no user message to close, and its Queue steps  *)
+(*    are the ones here;                                                   *)
 (*  - consumers other than Acp.Peer: Companion.Turns, which settles the    *)
 (*    turns of the companion socket and the phone alike, answers the       *)
-(*    Queue's :DOWN the Peer's way (a turn_error, interrupted); voice      *)
-(*    watches no Queue.                                                    *)
+(*    Queue's :DOWN the Peer's way (a turn_error, interrupted); a phone    *)
+(*    call's delegation watcher (PhoneCalls.Bridge) answers once, on the   *)
+(*    turn's reply or end, its deadline (a named stop) or the Queue's      *)
+(*    :DOWN; voice watches no Queue.                                       *)
 (*                                                                         *)
 (* One step = one indivisible thing in the code: one Queue callback, or   *)
 (* one step of the turn task between two calls into another process.     *)
@@ -46,12 +56,12 @@
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/stopper.ex @ 3f42aedf7399
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/typing.ex#with_indicator,stop_typing_loop @ 4e91ea3d2f7d
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/draft_stream.ex#start_link @ c185d3d497b1
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/application.ex @ c16f49cc504b
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/application.ex @ 32450a336777
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/acp/peer.ex#@moduledoc,handle_info,start_prompt,hand_off,watch_queue,ingest,handle_ingest,apply_turn_result,cancel_turn,cancel_prompt_request,stop_turn,settle_queue_down,close_turn,demonitor_queue,apply_if_open @ 37fc57942bd1
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/acp/session.ex#start_turn,clear_turn,turn_open?,put_queue_ref,queue_ref,queue @ ad21422f117f
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway.ex#ingest,do_deliver_to_agent @ a988106fa5ca
-\* SOURCE: apps/fermix_core/lib/fermix_core/agents/turn_runner.ex#run_message_loop,persist_user_message,commit @ 3116f46a6ffd
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/conversation_store.ex @ a81b127db387
+\* SOURCE: apps/fermix_core/lib/fermix_core/agents/turn_runner.ex#run,run_message_loop,persist_user_message,commit,commit_turn @ 7b53d5a3feb1
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/conversation_store.ex @ f79d64a2dd23
 EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS
@@ -79,7 +89,7 @@ CONSTANTS
     CrashFiresOutcome,  \* a crashed turn's held closure fires {:failed, _} (queue.ex:920-928)
     TurnsShareQueueFate,    \* turn tasks run under a Task.Supervisor that QueueSupervisor
                             \* (:one_for_all) terminates before it restarts the Queue
-                            \* (queue_supervisor.ex:46-51, application.ex:212)
+                            \* (queue_supervisor.ex:46-51, application.ex:232)
     CrashClosesUserMessage, \* a crashed turn's DOWN writes the stopped marker before the
                             \* next message starts (queue.ex:879, :893-899)
     StopSparesClaimedTurn,  \* a stop leaves a turn that claimed its outcome running
@@ -116,6 +126,10 @@ VARIABLES
     outcomes,   \* channel-visible: turn results fired for m
     shown,      \* user-visible: what the user saw for m, "reply" and/or "error"
     history,    \* ConversationStore (SQLite): Seq of <<kind, msg>>
+                \* (the store loads a conversation before any write to it and
+                \* writes its rows one at a time in call order, so a read gives
+                \* this sequence even for a conversation nobody had read since
+                \* the store started)
     dropped,    \* bookkeeping: messages discarded without a turn
     watch       \* consumer (Acp.Peer): watch[m] is "down" while the :DOWN of the
                 \* Queue m was handed to waits in its mailbox, ahead of any
@@ -169,7 +183,7 @@ InHistory(e) == e \in Range(history)
 LastKind == IF history = <<>> THEN "none" ELSE history[Len(history)][1]
 
 \* ConversationStore handle_call({:append_stopped_marker, ...})
-\* (conversation_store.ex:173): appends only when the last message is the user's.
+\* (conversation_store.ex:176): appends only when the last message is the user's.
 AppendMarker(h) ==
     IF h /= <<>> /\ h[Len(h)][1] = "user"
     THEN Append(h, <<"marker", h[Len(h)][2]>>)
@@ -375,7 +389,7 @@ CheckoutFail(m) ==
     /\ Show(m, "error")
     /\ QueueUnchanged /\ UNCHANGED <<holding, outcomes, history>>
 
-\* TurnRunner persist_user_message (turn_runner.ex:1406), before AgentLoop.
+\* TurnRunner persist_user_message (turn_runner.ex:1554), before AgentLoop.
 PersistUser(m) ==
     /\ pc[m] = "start"
     /\ MoveTo(m, "loop")
@@ -405,8 +419,12 @@ MarkDelivered(m) ==
     /\ UNCHANGED <<unsent, pending, active, held, claimed, restarting, dropped, holding,
                    outcomes, shown, history>>
 
-\* runner.commit/4 (queue.ex:551 -> turn_runner.ex:163): persist the reply,
-\* then synchronous auto-compaction; the claim comes only after it returns.
+\* runner.commit/4 (queue.ex:551 -> turn_runner.ex:199, commit_turn/4
+\* :208-257): persist the reply, then synchronous auto-compaction; the
+\* claim comes only after it returns.
+\* The compaction replaces only the history it read (a message written
+\* meanwhile drops it; the next reply's check compacts again), which is
+\* no step here: compaction is not modelled.
 \* An orphan that passed fresh? before its Queue died still commits here,
 \* until QueueRestart kills it.
 Commit(m) ==
@@ -595,8 +613,9 @@ OnlyNamedTurnCancelled ==
 SingleFlight == Cardinality({m \in Msgs : pc[m] \in Alive}) <= 1
 
 \* TurnRunner.commit assumes the conversation is single-flight
-\* (turn_runner.ex:170-172). Read as: no turn commits its reply while
-\* another turn of the same conversation is starting or running its loop.
+\* (commit_turn/4, turn_runner.ex:215-217). Read as: no turn commits its
+\* reply while another turn of the same conversation is starting or running
+\* its loop.
 NoOrphanCommitBesideNewTurn ==
     ~(\E a, b \in Msgs :
         /\ a /= b

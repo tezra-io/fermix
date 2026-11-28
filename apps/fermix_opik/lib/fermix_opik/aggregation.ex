@@ -316,8 +316,9 @@ defmodule FermixOpik.Aggregation do
               run_id: Map.get(meta, :run_id),
               schedule_kind: Map.get(meta, :schedule_kind),
               schedule_expr: Map.get(meta, :schedule_expr),
-              # What started the run: "schedule", "manual", "cue" (a watcher's
-              # task) or "watcher" (a watcher's follow-up).
+              # What started the run: "schedule", "manual", "retry" (a failed
+              # run's retry), "cue" (a watcher's task) or "watcher" (a watcher's
+              # follow-up).
               trigger: Map.get(meta, :trigger),
               # A cue run's watcher and the delivery it held (M60 §9.6); a
               # follow-up run's watcher, the cue that set it off and its
@@ -348,8 +349,67 @@ defmodule FermixOpik.Aggregation do
           job_id: Map.get(meta, :job_id),
           run_id: Map.get(meta, :run_id),
           watcher_id: Map.get(meta, :watcher_id),
-          delivery_id: Map.get(meta, :delivery_id)
+          delivery_id: Map.get(meta, :delivery_id),
+          # A scheduled run's failure: whether it runs again (M106 §5.3).
+          retry_disposition: Map.get(meta, :retry_disposition),
+          retry_attempts: Map.get(meta, :retry_attempts),
+          retry_at: Map.get(meta, :retry_at),
+          # And what a heal made of it, and which heal (§5.4).
+          heal: Map.get(meta, :heal),
+          heal_id: Map.get(meta, :heal_id)
         })
+    })
+  end
+
+  # A heal (M106 §5.4) has no run of its own: each phase (opened, joined,
+  # delivered, delivery_failed, answered, closed) is a point event that becomes its own
+  # self-closing trace, built inline and never tracked in state. Correlation
+  # is by `heal_id`, and by `job_id` and `run_id` when a run moved it; nesting
+  # under the run would resurrect a trace that has already shipped.
+  def apply_event(state, [:fermix, :job, :heal], _meas, meta, at) do
+    {state, [%{trace: job_heal_trace(state, meta, at), spans: []}]}
+  end
+
+  # A job's heal run (M106 §5.5) is a run kind of its own: its diagnosis drives
+  # the loop under its own `heal_<job>_<ts>_<hex>` session, so it opens a ROOT
+  # trace its tool and provider spans nest under. Its `parent_session`, the
+  # failed run's, rides as correlation metadata only (hard-coded nil below):
+  # that run's trace has shipped, and nesting would resurrect it. Bounded by
+  # the run's watchdog (`max_duration_ms`), threaded by its job.
+  def apply_event(state, [:fermix, :job, :heal_run_start], _meas, meta, at) do
+    case Map.get(meta, :session_id) do
+      nil ->
+        {state, []}
+
+      session_id ->
+        ctx = %{
+          parent_session: nil,
+          kind: :job_heal_run,
+          name: Map.get(meta, :agent),
+          input: nil,
+          thread_id: Map.get(meta, :job_id),
+          max_duration_ms: Map.get(meta, :max_duration_ms),
+          trace_metadata: heal_run_metadata(meta),
+          at: at.at,
+          mono: at.mono
+        }
+
+        {state, ref} = ensure_session(state, session_id, ctx)
+        {adopt_opener(state, session_id, ref, ctx), []}
+    end
+  end
+
+  # `complete` is a run whose loop finished, with or without a decision (its
+  # `decision` says which, `none` for none); `error` one the watchdog stopped
+  # or that failed, with its own status word and its error as the output.
+  def apply_event(state, [:fermix, :job, run], _meas, meta, at)
+      when run in [:heal_run_complete, :heal_run_error] do
+    status = if run == :heal_run_error, do: Map.get(meta, :status, "error"), else: "ok"
+
+    close_root(state, meta, at, %{
+      output: Map.get(meta, :error),
+      status: status,
+      metadata: heal_run_metadata(meta)
     })
   end
 
@@ -1238,6 +1298,52 @@ defmodule FermixOpik.Aggregation do
     add_child_span(state, meta, at, &Mapper.meeting_phase_span(meta, meas, &1))
   end
 
+  # A phone call (M94 §11) is the meeting's shape: a detached run that outlives
+  # the turn which asked for it, so it is its OWN root and the requesting
+  # turn's session rides as `parent_session` correlation metadata only.
+  # run_start opens the root, bounded by the call's own `max_duration_ms`; the
+  # call's backend turns and provider spans nest via the shared
+  # `phone_call_<id>` session; run_complete/run_error close it. No number,
+  # mandate or transcript reaches these events, so the root carries none.
+  def apply_event(state, [:fermix, :phone_call, :run_start], _meas, meta, at) do
+    case Map.get(meta, :session_id) do
+      nil ->
+        {state, []}
+
+      session_id ->
+        ctx = %{
+          parent_session: nil,
+          kind: :phone_call,
+          name: Map.get(meta, :agent),
+          input: nil,
+          max_duration_ms: Map.get(meta, :max_duration_ms),
+          trace_metadata: phone_call_metadata(meta),
+          at: at.at,
+          mono: at.mono
+        }
+
+        {state, _ref} = ensure_session(state, session_id, ctx)
+        {state, []}
+    end
+  end
+
+  # `run_error` carries the terminal status word (`failed`, `dispatch_unknown`,
+  # `closure_unconfirmed`) and the vendor's own words, which are the diagnosis.
+  def apply_event(state, [:fermix, :phone_call, run], meas, meta, at)
+      when run in [:run_complete, :run_error] do
+    status =
+      if run == :run_error,
+        do: Map.get(meta, :status, "error"),
+        else: Map.get(meta, :status, "ok")
+
+    close_root(state, meta, at, %{
+      output: Map.get(meta, :vendor_message) || Map.get(meta, :error),
+      status: status,
+      error_info: phone_call_error_info(run, meta),
+      metadata: compact(Map.merge(phone_call_metadata(meta), phone_call_end(meta, meas)))
+    })
+  end
+
   # A management Doctor run (M34 §5) is a bounded background run minted with its
   # own `doctor:<rand>` session before any check executes. It is always a root:
   # the app asks the daemon directly, so there is no originating turn to nest
@@ -1874,7 +1980,15 @@ defmodule FermixOpik.Aggregation do
   defp infer_kind("memory_review:" <> _), do: :memory_review
   # An open-loop check-in, minted in `OpenLoops.Telemetry.correlation/2`.
   defp infer_kind("open_loop_" <> _), do: :open_loop_checkin
+  # A job's heal run, minted in `Jobs.HealDiagnosis.session_id/2`; keep the two
+  # in lockstep, or a closer whose opener was missed reads as a `:subagent`
+  # phantom root.
+  defp infer_kind("heal_" <> _), do: :job_heal_run
   defp infer_kind("meeting_" <> _), do: :meeting
+  # A phone call, minted in `PhoneCalls.Telemetry.session_id/1`; keep the two
+  # in lockstep, or a closer whose opener was missed reads as a `:subagent`
+  # phantom root.
+  defp infer_kind("phone_call_" <> _), do: :phone_call
   # A Live voice call and the backend turns it delegates to. Both prefixes are
   # minted outside this app (LocalVoiceSocket / LiveSessionServer); keep them in
   # lockstep with those, or a call_stop arriving without its opener reads as a
@@ -1920,10 +2034,14 @@ defmodule FermixOpik.Aggregation do
   # session id ("open_loop_<id>_<touch>") is its own fallback — the generic
   # "<kind>:<name>" shape would only say "open_loop" twice.
   defp wrapper_name(:open_loop_checkin, name, session), do: name || session
+  # "job_heal:<job_id>" already says what it is and for which job.
+  defp wrapper_name(:job_heal_run, name, session), do: name || session
   # Same shape: the run's agent name is already "meeting:<id>", and its session
   # id ("meeting_<id>_<ts>") is its own fallback — the generic "<kind>:<name>"
   # would only say "meeting" twice.
   defp wrapper_name(:meeting, name, session), do: name || session
+  # "phone_call:<id>" already says what it is and which call.
+  defp wrapper_name(:phone_call, name, session), do: name || session
   # Both voice ids already carry their kind ("voice_live:1",
   # "voice_delegation_7"), and a delegation's `agent` is the turn's own name
   # ("main"), which says nothing about which delegation it was — so the session
@@ -2137,6 +2255,58 @@ defmodule FermixOpik.Aggregation do
   # carries no duration: a fabricated zero would read as a measurement. The
   # metadata is exactly the four emitters' fixed keys (a reaction's delay is
   # merged in from its measurements).
+  defp job_heal_trace(state, metadata, at) do
+    Mapper.drop_nil(%{
+      id: Mapper.new_id(at.at),
+      project_name: state.project,
+      name: "job_heal:#{stringify(Map.get(metadata, :phase))}",
+      start_time: Mapper.iso(at.at),
+      end_time: Mapper.iso(at.at),
+      metadata:
+        compact(%{
+          heal_id: Map.get(metadata, :heal_id),
+          job_id: Map.get(metadata, :job_id),
+          run_id: Map.get(metadata, :run_id),
+          subject_kind: Map.get(metadata, :subject_kind),
+          subject_id: Map.get(metadata, :subject_id),
+          failure_kind: Map.get(metadata, :failure_kind),
+          outcome: Map.get(metadata, :outcome),
+          attempts: Map.get(metadata, :attempts),
+          dead_letter: Map.get(metadata, :dead_letter),
+          platform: Map.get(metadata, :platform),
+          error: Map.get(metadata, :error),
+          # A diagnosed heal (M106 §5.5): which conclusion, what code carried
+          # out, what the heal run asked, why a check refused it, and whether
+          # the run read outside content.
+          conclusion: Map.get(metadata, :conclusion),
+          decision: Map.get(metadata, :decision),
+          requested: Map.get(metadata, :requested),
+          refusal: Map.get(metadata, :refusal),
+          read_outside: Map.get(metadata, :read_outside),
+          rerun_outcome: Map.get(metadata, :rerun_outcome),
+          # The owner's answer to a proposal (M106 §5.7, D5), and whether the
+          # change was applied.
+          answer: Map.get(metadata, :answer),
+          applied: Map.get(metadata, :applied)
+        }),
+      tags: ["job_heal"]
+    })
+  end
+
+  # The heal run bookends' allowlist, shared by the opener and the closers so
+  # a run whose opener never arrived still carries its ids. The failed run's
+  # session is correlation, never a parent.
+  defp heal_run_metadata(metadata) do
+    compact(%{
+      heal_id: Map.get(metadata, :heal_id),
+      job_id: Map.get(metadata, :job_id),
+      run_id: Map.get(metadata, :run_id),
+      parent_session: Map.get(metadata, :parent_session),
+      failure_kind: Map.get(metadata, :failure_kind),
+      decision: Map.get(metadata, :decision)
+    })
+  end
+
   defp open_loop_point_trace(state, name, metadata, at) do
     Mapper.drop_nil(%{
       id: Mapper.new_id(at.at),
@@ -2210,6 +2380,37 @@ defmodule FermixOpik.Aggregation do
     do: error_info("MeetingError", stringify(Map.get(metadata, :error)))
 
   defp meeting_error_info(_run, _metadata), do: nil
+
+  # The phone-call bookends' correlation allowlist, shared by the opener and the
+  # closer so a call whose opener never arrived still carries its ids.
+  defp phone_call_metadata(metadata) do
+    compact(%{
+      call_id: Map.get(metadata, :call_id),
+      origin_kind: stringify(Map.get(metadata, :origin_kind)),
+      model: stringify(Map.get(metadata, :model)),
+      carrier_profile: stringify(Map.get(metadata, :carrier_profile)),
+      authorization: stringify(Map.get(metadata, :authorization)),
+      parent_session: Map.get(metadata, :parent_session)
+    })
+  end
+
+  # What the closer adds: the call's terminal words and its counters, usage
+  # labelled by its own state.
+  defp phone_call_end(metadata, measurements) do
+    %{
+      outcome: stringify(Map.get(metadata, :outcome)),
+      usage_state: stringify(Map.get(metadata, :usage_state)),
+      failure_reason: Map.get(metadata, :failure_reason),
+      duration_ms: Map.get(measurements, :duration_ms),
+      voice_seconds: Map.get(measurements, :voice_seconds),
+      core_turns: Map.get(measurements, :core_turns)
+    }
+  end
+
+  defp phone_call_error_info(:run_error, metadata),
+    do: error_info("PhoneCallError", stringify(Map.get(metadata, :error)))
+
+  defp phone_call_error_info(_run, _metadata), do: nil
 
   defp voice_gist_metadata(metadata) do
     compact(%{

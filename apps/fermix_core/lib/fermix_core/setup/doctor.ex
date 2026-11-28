@@ -57,6 +57,7 @@ defmodule FermixCore.Setup.Doctor do
           | :ollama
           | :mistral
           | :venice
+          | :vercel
   @type probe_ok :: %{provider: provider(), model: String.t(), latency_ms: non_neg_integer()}
   @type channel_probe :: %{
           required(:channel) => atom(),
@@ -162,6 +163,7 @@ defmodule FermixCore.Setup.Doctor do
   @openrouter_default_base_url "https://openrouter.ai/api/v1"
   @mistral_default_base_url "https://api.mistral.ai/v1"
   @venice_default_base_url "https://api.venice.ai/api/v1"
+  @vercel_default_base_url "https://ai-gateway.vercel.sh/v1"
   @command_channels [:telegram, :whatsapp, :discord, :slack, :signal, :imessage, :mobile]
   @web_search_probe_query "fermix web search health check"
   # A landmark, not a category: the place probe is never anchored (it must not
@@ -220,6 +222,7 @@ defmodule FermixCore.Setup.Doctor do
   def probe_provider(:ollama, opts), do: probe_ollama(opts)
   def probe_provider(:mistral, opts), do: probe_mistral(opts)
   def probe_provider(:venice, opts), do: probe_venice(opts)
+  def probe_provider(:vercel, opts), do: probe_vercel(opts)
 
   def probe_provider(other, _opts) do
     raise ArgumentError,
@@ -630,7 +633,8 @@ defmodule FermixCore.Setup.Doctor do
   failure kind keeps its own tag, and no probe ever switches backend. A Mac of
   the home is never asked (M89 D13): nothing is added for it.
   `host:` names the build and `apple_maps:` the helper's options for a test;
-  `req_options`/`net_resolver` stub the Brave probe.
+  `req_options`/`net_resolver` stub the Brave probe, and `place_search_sleep`
+  and `place_search_now_ms` stand in for its waits and its pacer's clock.
 
   Readiness and advertisement are asked of the tool itself so a doctor row and
   the runtime surface cannot drift; the probe never reads the owner's saved
@@ -667,7 +671,7 @@ defmodule FermixCore.Setup.Doctor do
   # turn, and once more after a 429), which stops with the probe.
   defp place_search_probe(:brave, config, opts) do
     context = probe_context(opts)
-    {:ok, pacer} = PlacePacer.start_link(name: nil)
+    {:ok, pacer} = PlacePacer.start_link(probe_pacer_opts(opts))
     probe_opts = Keyword.put(config, :context, Map.put(context, :place_search_pacer, pacer))
 
     try do
@@ -682,6 +686,14 @@ defmodule FermixCore.Setup.Doctor do
 
   # A health check sends nothing to the owner's Mac.
   defp place_search_probe(:computer, _config, _opts), do: %{}
+
+  # The probe pacer runs on the monotonic clock unless a test names its own.
+  defp probe_pacer_opts(opts) do
+    case Keyword.get(opts, :place_search_now_ms) do
+      nil -> [name: nil]
+      now_ms when is_function(now_ms, 0) -> [name: nil, now_ms: now_ms]
+    end
+  end
 
   defp place_probe(backend, backend_opts) do
     request = %{query: @place_probe_query, count: 1}
@@ -1250,6 +1262,40 @@ defmodule FermixCore.Setup.Doctor do
     end
   end
 
+  # Mirrors the runtime adapter shape, attribution headers included, as the
+  # OpenRouter probe does (M105 §3.4). The gateway's `/models` is public, so
+  # only a request on the key proves it; this one-token chat completion calls
+  # the endpoint a turn calls, so 200 proves the key and the model id and that
+  # the account may spend, 401 rejects the key, and 402 means no credit is left
+  # or a budget set on the key is spent.
+  defp probe_vercel(opts) do
+    config = provider_config(:vercel)
+
+    case chat_completions_bearer(config, :vercel) do
+      {:error, _} = err ->
+        err
+
+      {:ok, bearer} ->
+        url = "#{base_url(config, :vercel, @vercel_default_base_url)}/chat/completions"
+        model = ModelCatalog.effective_model(:vercel, config)
+
+        body = %{
+          model: model,
+          messages: [%{role: "user", content: "."}],
+          max_tokens: 1
+        }
+
+        headers = [
+          {"authorization", "Bearer #{bearer}"},
+          {"http-referer", "https://fermix.sh"},
+          {"x-title", "Fermix"},
+          {"content-type", "application/json"}
+        ]
+
+        do_post(:vercel, url, body, headers, model, "ai-gateway.vercel.sh API key", opts)
+    end
+  end
+
   # Keyless local provider: 1-token chat completion through the same /v1
   # path the adapter uses, then a native /api/show check that the SERVED
   # context window is not silently below the catalog window (Ollama
@@ -1578,6 +1624,10 @@ defmodule FermixCore.Setup.Doctor do
     {"openrouter.ai", "OpenRouter API key rejected — verify it at openrouter.ai/settings/keys"},
     {"mistral.ai", "Mistral API key rejected — verify it at console.mistral.ai/api-keys"},
     {"venice.ai", "Venice API key rejected — verify it at venice.ai/settings/api"},
+    {"vercel.sh",
+     "Vercel AI Gateway API key rejected — verify it in the Vercel dashboard under " <>
+       "AI Gateway, API Keys (Vercel also refuses a team that has to add a payment method " <>
+       "before it can spend)"},
     {"Ollama", "the Ollama server rejected the request — check its auth/proxy configuration"}
   ]
 

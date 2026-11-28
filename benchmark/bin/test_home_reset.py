@@ -54,7 +54,8 @@ seen = open(db).read() if os.path.exists(db) else None
 with open(os.path.join(home, "fake-daemon.log"), "a") as log:
     log.write(json.dumps({"pid": os.getpid(), "memory_db": seen,
                           "path": os.environ.get("PATH", ""),
-                          "fixture_origin": os.environ.get("FERMIX_EVAL_FIXTURE_ORIGIN")}) + "\n")
+                          "fixture_origin": os.environ.get("FERMIX_EVAL_FIXTURE_ORIGIN"),
+                          "openai_key_set": "OPENAI_API_KEY" in os.environ}) + "\n")
 with open(db, "a") as fh:
     fh.write("+written-by-the-daemon")
 path = os.path.join(home, "daemon.sock")
@@ -364,6 +365,68 @@ def test_a_fixture_manifest_it_cannot_read_stops_the_start(scratch, fake_mix, st
         _down(home, stray_daemons)
 
 
+@pytest.mark.parametrize("flag, keeps_key", [("--phone-calls", False), ("", True)])
+def test_a_phone_calls_home_starts_its_daemon_without_the_callers_openai_key(
+        scratch, fake_mix, stray_daemons, flag, keeps_key):
+    # M94: the phone engine reuses the openai provider's key, which the seed made
+    # an invented one; a real key in the caller's environment would overlay it at
+    # boot. Every other home keeps the caller's environment as it was.
+    home = scratch / "cap-eval"
+    up = _script("up", home, FERMIX_CAP_SEED_ARGS=f"--provider ollama --model brindle-7b {flag}",
+                 OPENAI_API_KEY="sk-from-the-callers-shell-invented")
+    try:
+        assert up.returncode == 0, up.stderr
+        [start] = _starts(home)
+        assert start["openai_key_set"] is keeps_key
+        port = json.loads((home / seed.FIXTURE_MANIFEST).read_text())["port"]
+        assert start["fixture_origin"] == f"http://127.0.0.1:{port}"
+    finally:
+        _down(home, stray_daemons)
+
+
+def test_a_phone_calls_home_without_its_fixture_manifest_does_not_start(
+        scratch, fake_mix, stray_daemons):
+    # Its calls would not reach the simulated endpoint; nothing may start.
+    home = _seeded_home(scratch)
+    _write_tree(home, {seed.PHONE_CALLS_MANIFEST: "{}"})
+    assert _script("snapshot", home).returncode == 0
+    try:
+        reset = _script("reset", home)
+        assert reset.returncode != 0
+        assert "phone calls are on" in reset.stderr
+        assert _starts(home) == []
+    finally:
+        _down(home, stray_daemons)
+
+
+def test_every_reset_of_a_phone_calls_home_boots_its_daemon_with_the_simulators_origin(
+        scratch, fake_mix, stray_daemons):
+    # M94: a development build fixes where its calls go once, at boot, from the
+    # variable and the home's manifest, so every start must find both in place. The
+    # restore leaves eval-fixtures/ alone, and each reset's start (what --reset-home
+    # runs before every attempt) gets the origin the seed recorded, never the
+    # caller's, and never the caller's OpenAI key.
+    home = scratch / "cap-eval"
+    callers = {"OPENAI_API_KEY": "sk-from-the-callers-shell-invented",
+               "FERMIX_EVAL_FIXTURE_ORIGIN": "http://127.0.0.1:1"}
+    up = _script("up", home,
+                 FERMIX_CAP_SEED_ARGS="--provider ollama --model brindle-7b --phone-calls",
+                 **callers)
+    try:
+        assert up.returncode == 0, up.stderr
+        for _attempt in range(2):
+            reset = _script("reset", home, **callers)
+            assert reset.returncode == 0, reset.stderr
+        port = json.loads((home / seed.FIXTURE_MANIFEST).read_text())["port"]
+        starts = _starts(home)
+        assert len(starts) == 3
+        assert {start["fixture_origin"] for start in starts} == {f"http://127.0.0.1:{port}"}
+        assert not any(start["openai_key_set"] for start in starts)
+        assert (home / seed.PHONE_CALLS_MANIFEST).is_file()
+    finally:
+        _down(home, stray_daemons)
+
+
 def test_reset_restores_the_snapshot_and_restarts_the_daemon(
         scratch, fake_mix, stray_daemons):
     home = _seeded_home(scratch)
@@ -563,6 +626,157 @@ def test_reset_home_is_refused_without_the_isolated_mutation_profile(capsys):
     code = run_eval.main(["--suite", "cues", "--judge", "--dry-run", "--reset-home"])
     assert code == 2
     assert "--reset-home" in capsys.readouterr().err
+
+
+# --- a behavioral case's `state:`: seeded before every attempt (M106) -------------
+
+def _state_suite(tmp_path):
+    """An isolated scenario whose first case seeds a jobs baseline and whose second
+    does not."""
+    spec = tmp_path / "fixtures" / "state" / "tides.json"
+    spec.parent.mkdir(parents=True)
+    spec.write_text('{"jobs": []}')
+    path = tmp_path / "tides.yaml"
+    path.write_text(
+        "suite: tides\ntitle: Tides\nrisk: isolated_mutation\nscenarios:\n"
+        "  - id: asked_why\n    title: Asked why\n    cases:\n"
+        "      - id: seeded\n        state: fixtures/state/tides.json\n        query: why\n"
+        "      - id: bare\n        query: why\n")
+    return suites.load_all(str(tmp_path))[0]
+
+
+def _seeding(events: list[str], error: str | None = None, unsent: str | None = None):
+    def seed(cfg, suite, case):
+        events.append(f"seed:{case.id}:{os.path.basename(suite.path)}:{case.state}")
+        return (None, error) if error else ({"jobs": {"tides": {"id": "tides_1"}}}, None)
+
+    def await_heals(home, manifest):
+        events.append(f"await:{home}:{sorted(manifest['jobs'])}")
+        return unsent
+
+    return seed, await_heals
+
+
+def _run_state_suite(tmp_path, monkeypatch, events, outcomes, fail_retries=0, **seeding):
+    suite = _state_suite(tmp_path)
+    jobs = run_eval.case_jobs([(suite, suite.scenarios)], repeat=1)
+    _scripted(monkeypatch, events, outcomes)
+    seed, await_heals = _seeding(events, **seeding)
+    monkeypatch.setattr(run_eval, "seed_case_state", seed)
+    monkeypatch.setattr(run_eval, "await_seeded_heals", await_heals)
+    cfg = SimpleNamespace(daemon=SimpleNamespace(fermix_home="/h/x-eval"))
+    return run_eval._execute_jobs(cfg, object(), jobs, "20261124T150000Z01234567", False, False,
+                                  fail_retries=fail_retries)
+
+
+def test_every_attempt_of_a_state_case_is_seeded_and_its_heals_awaited_first(
+        tmp_path, monkeypatch):
+    events: list[str] = []
+    _results, _skipped, aborted = _run_state_suite(
+        tmp_path, monkeypatch, events, {"seeded": ["fail", "pass"]}, fail_retries=1)
+    assert aborted is None
+    seeded = ["seed:seeded:tides.yaml:fixtures/state/tides.json",
+              "await:/h/x-eval:['tides']", "seeded"]
+    # The retry starts from the seed too; a case without `state:` is never seeded.
+    assert events == [*seeded, *seeded, "bare"]
+
+
+def test_a_failed_state_seed_stops_the_run_before_the_case_is_driven(tmp_path, monkeypatch):
+    events: list[str] = []
+    results, _skipped, aborted = _run_state_suite(
+        tmp_path, monkeypatch, events, {}, error="seed_state.exs exited 1: a job run in flight")
+    assert events == ["seed:seeded:tides.yaml:fixtures/state/tides.json"]
+    [case] = results[0]["scenarios"][0]["cases"]
+    assert case["id"] == "seeded" and case["outcome"] == "incomplete"
+    assert aborted["unrun"] == 1 and aborted["tool"] == "seed_state.exs"
+    banner = report._abort_text(run_eval._persistable_abort(dict(aborted)))
+    assert "the harness, not a product failure" in banner
+
+
+def test_a_seeded_heal_never_sent_leaves_only_that_attempt_incomplete(tmp_path, monkeypatch):
+    events: list[str] = []
+    results, _skipped, aborted = _run_state_suite(
+        tmp_path, monkeypatch, events, {}, unsent="the daemon did not send jhl_1 within 150 s")
+    assert aborted is None
+    cases = {case["id"]: case for case in results[0]["scenarios"][0]["cases"]}
+    assert cases["seeded"]["outcome"] == "incomplete"
+    assert "jhl_1" in cases["seeded"]["turns"][0]["drive_error"]
+    assert "seeded" not in events and "bare" in events      # never driven; the next one is
+
+
+def _heals_db(home, rows, links=()):
+    import sqlite3
+    conn = sqlite3.connect(str(home / "memory.db"))
+    conn.execute("CREATE TABLE job_heals (id, job_id, state)")
+    conn.execute("CREATE TABLE job_heal_runs (run_id, heal_id, job_id)")
+    conn.executemany("INSERT INTO job_heals VALUES (?,?,?)", rows)
+    conn.executemany("INSERT INTO job_heal_runs VALUES (?,?,?)", links)
+    conn.commit()
+    conn.close()
+
+
+class _Clock:
+    """A clock the test moves: each sleep advances it, so no test waits."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+MANIFEST = {"jobs": {"tides": {"id": "tides_1"}}}
+
+
+def test_a_seeded_heal_that_was_sent_lets_the_turn_start_at_once(tmp_path):
+    _heals_db(tmp_path, [("jhl_1", "tides_1", "waiting"),
+                         ("jhl_2", "other_job", "open")])     # not a seeded job's
+    clock = _Clock()
+    assert run_eval.await_seeded_heals(str(tmp_path), MANIFEST, 150, clock, clock.sleep) is None
+    assert clock.sleeps == []
+
+
+def test_the_turn_waits_for_a_seeded_heal_and_gives_up_naming_it(tmp_path):
+    _heals_db(tmp_path, [("jhl_1", "tides_1", "open")])
+    clock = _Clock()
+    why = run_eval.await_seeded_heals(str(tmp_path), MANIFEST, 3, clock, clock.sleep)
+    assert "jhl_1" in why and "within 3 s" in why
+    assert sum(clock.sleeps) == 3
+
+
+def test_the_turn_waits_for_a_plugins_heal_a_seeded_run_opened(tmp_path):
+    # A plugin's heal (M106 §6) has no job of its own: it is found by the run it took.
+    _heals_db(tmp_path, [("jhl_1", None, "open"), ("jhl_2", None, "open")],
+              links=[("run_1", "jhl_1", "tides_1"), ("run_2", "jhl_2", "other_job")])
+    clock = _Clock()
+    why = run_eval.await_seeded_heals(str(tmp_path), MANIFEST, 3, clock, clock.sleep)
+    assert "jhl_1" in why and "jhl_2" not in why
+
+
+def test_a_seed_with_no_jobs_waits_for_nothing(tmp_path):
+    clock = _Clock()
+    assert run_eval.await_seeded_heals(str(tmp_path), {"jobs": {}}, 150, clock,
+                                       clock.sleep) is None
+
+
+def test_a_store_without_the_heals_table_is_a_reason_not_a_crash(tmp_path):
+    import sqlite3
+    sqlite3.connect(str(tmp_path / "memory.db")).close()
+    clock = _Clock()
+    why = run_eval.await_seeded_heals(str(tmp_path), MANIFEST, 150, clock, clock.sleep)
+    assert "could not be read" in why and "job_heals" in why
+
+
+def test_dry_run_counts_the_attempts_seeded_with_state(capsys):
+    code = run_eval.main(["--suite", "job_auto_heal", "--profile", "isolated_mutation",
+                          "--judge", "--dry-run"])
+    assert code == 0
+    assert "state: 7 case trial(s) would each seed" in capsys.readouterr().out
 
 
 def test_dry_run_counts_the_attempts_that_start_from_the_snapshot(capsys):

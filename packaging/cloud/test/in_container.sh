@@ -3,11 +3,17 @@
 # first_boot_test.sh, with packaging/cloud mounted read-only at /cloud, the
 # package's systemd units at /linux-systemd, the regular installer
 # (scripts/install.sh) at /install.sh, /run on a tmpfs and NET_ADMIN, so
-# nft loads the real ruleset. useradd, runuser, nft and apt-config are real;
-# systemctl, loginctl, curl, apt-get, dpkg-query, perl, swapon, fallocate,
-# mkswap, tailscale and fermix are the stand-ins in stubs/ (in the chromium
-# scenario apt-get, dpkg-query and perl are the real ones, so first boot asks
-# the kernel Docker runs on for its Landlock ABI). One scenario per container:
+# nft loads the real ruleset. useradd, runuser, nft, apt-config and dpkg are
+# real; systemctl, loginctl, curl, apt-get, dpkg-query, perl, swapon,
+# fallocate, mkswap, tailscale, fermix and cosign are the stand-ins in stubs/
+# (in the chromium scenario apt-get, dpkg-query and perl are the real ones,
+# so first boot asks the kernel Docker runs on for its Landlock ABI, and the
+# real apt-get installs the package). Every release here is invented and
+# served by the curl stand-in: a package built with dpkg-deb that installs
+# the stand-in fermix, the package's own user unit and the stand-in cosign,
+# and this first-boot.sh as its Always On server script, each signed for the
+# stand-in cosign as the release workflow on that release's tag, and a
+# table that lists them. One scenario per container:
 #
 #   existing-host  refusals (a kernel below Landlock ABI 3 among them), then
 #                  the code typed at a terminal, the wait for
@@ -29,10 +35,13 @@
 #   updates        the nightly update, which installs the newest release
 #                  eligible for the server: that release already installed,
 #                  a newer one, then the update script that release
-#                  publishes, checked against the table (a marked copy
-#                  proves it replaced the script), a failed installer, a
-#                  reboot asked for, an installer that cannot be downloaded,
-#                  a failed status read, three nights under a move, an ended
+#                  publishes, checked against the table and its signature
+#                  (a marked copy proves it replaced the script), a failed
+#                  apt-get, a reboot asked for, a table that cannot be read,
+#                  a package the release workflow did not sign and a
+#                  Sigstore cache that is not a folder (each refused before
+#                  apt runs, the reboot all the same), a failed status
+#                  read, three nights under a move, an ended
 #                  move, a failed restart, an older one never installed back
 #                  down, none eligible, no home; then the follow run: no
 #                  home, a newer release and the restart but never a reboot,
@@ -72,6 +81,12 @@ INSTALLER=/install.sh
 INSTALLER_TMP=/tmp/installer-tmp
 LOG=/var/log/fermix-test
 FIXTURES=/etc/fermix-test
+# Where every release's files are, and the identity and issuer the stand-in
+# cosign takes for a release the workflow signed (v<release> after it).
+ORIGIN=https://github.com/tezra-io/fermix/releases/download/
+WORKFLOW=https://github.com/tezra-io/fermix/.github/workflows/release.yml@refs/tags/v
+ISSUER=https://token.actions.githubusercontent.com
+ARCH=$(dpkg --print-architecture)
 OUT=/tmp/first-boot.out
 ERR=/tmp/first-boot.err
 FAILURES=0
@@ -134,6 +149,89 @@ setup_tools() {
   install_stubs
   install -m 0755 /cloud/test/stubs/apt-get /usr/local/sbin/apt-get
   for stub in dpkg-query perl; do install -m 0755 "/cloud/test/stubs/$stub" "/usr/local/bin/$stub"; done
+}
+
+# -- the releases the curl stand-in serves ------------------------------------
+
+# The .pem and .sig the stand-in cosign checks for file $2 of release $1,
+# served already: the certificate names the release workflow on that
+# release's tag (or the identity $3) and GitHub's issuer, and the signature
+# covers the file's bytes.
+sign_file() {
+  dir=$FIXTURES/release/v$1
+  signer=${3:-$WORKFLOW$1}
+  printf 'identity %s\nissuer %s\n' "$signer" "$ISSUER" >"$dir/$2.pem"
+  printf '%s %s\n' "$(sha256sum "$dir/$2" | cut -d' ' -f1)" "$signer" >"$dir/$2.sig"
+}
+
+# The file $3 served as file $2 of release $1's GitHub release, signed.
+publish_file() {
+  install -D -m 0644 "$3" "$FIXTURES/release/v$1/$2"
+  sign_file "$1" "$2"
+}
+
+# Release $1's package, built with dpkg-deb: the stand-in fermix where the
+# package puts the real one, the package's own user unit, the stand-in
+# cosign at /usr/lib/fermix/cosign, and a postinst that records the release
+# where the stand-ins read it.
+publish_package() {
+  stage=/tmp/package-$1
+  rm -rf "$stage"
+  install -D -m 0755 /cloud/test/stubs/fermix "$stage/usr/bin/fermix"
+  install -D -m 0644 /linux-systemd/fermix.service "$stage/usr/lib/systemd/user/fermix.service"
+  install -D -m 0755 /cloud/test/stubs/cosign "$stage/usr/lib/fermix/cosign"
+  mkdir -p "$stage/DEBIAN"
+  printf 'Package: fermix\nVersion: %s\nArchitecture: %s\nMaintainer: Invented Maintainer <maintainer@example.invalid>\nDescription: Stand-in Fermix package for the first boot test\n' \
+    "$1" "$ARCH" >"$stage/DEBIAN/control"
+  cat >"$stage/DEBIAN/postinst" <<EOF
+#!/bin/sh
+set -e
+install -d -m 1777 /var/lib/fermix-test
+printf '%s\n' '$1' >/var/lib/fermix-test/installed-version
+chmod 0644 /var/lib/fermix-test/installed-version
+EOF
+  chmod 0755 "$stage/DEBIAN/postinst"
+  dpkg-deb --root-owner-group --build "$stage" "/tmp/fermix_$1_$ARCH.deb" >/dev/null
+  publish_file "$1" "fermix_$1_$ARCH.deb" "/tmp/fermix_$1_$ARCH.deb"
+}
+
+# Release $1: its package and, as its Always On server script, $2 (this
+# first-boot.sh unless given).
+publish_release() {
+  publish_package "$1"
+  publish_file "$1" fermix_always_on.sh "${2:-$FIRST_BOOT}"
+}
+
+# The table fermix.ai serves: latest $1, and every file of every release
+# published, at its own sha256.
+serve_table() {
+  {
+    printf 'format 1\nlatest %s\n' "$1"
+    for dir in "$FIXTURES"/release/v*; do
+      for file in "$dir"/*; do
+        case "$file" in *.sig | *.pem) continue ;; esac
+        printf '%s %s %s\n' "${dir##*/v}" "$(sha256sum "$file" | cut -d' ' -f1)" "${file##*/}"
+      done
+    done
+  } >"$FIXTURES/releases"
+}
+
+# The calls that fetch file $2 of release $1 and check its signature.
+checked_calls() {
+  printf "'curl GET %sv%s/%s' 'curl GET %sv%s/%s.sig' 'curl GET %sv%s/%s.pem' 'cosign verify-blob %s as %s%s by %s'" \
+    "$ORIGIN" "$1" "$2" "$ORIGIN" "$1" "$2" "$ORIGIN" "$1" "$2" "$2" "$WORKFLOW" "$1" "$ISSUER"
+}
+
+# The calls that install release $1 on an update: the table, its package and
+# both checks, then apt.
+install_calls() {
+  printf "'curl GET https://fermix.ai/install/releases' %s 'apt-get -qq install -y --no-remove WORK/fermix_%s_%s.deb'" \
+    "$(checked_calls "$1" "fermix_$1_$ARCH.deb")" "$1" "$ARCH"
+}
+
+# The calls that make the update script release $1's own.
+refresh_calls() {
+  printf "'curl GET https://fermix.ai/install/releases' %s" "$(checked_calls "$1" fermix_always_on.sh)"
 }
 
 # Runs first-boot.sh with no terminal; $OUT gets stdout and stderr, $STATUS
@@ -442,8 +540,9 @@ fallocate -l 2G /swapfile.incoming
 mkswap /swapfile.incoming
 swapon /swapfile
 apt-get -qq -y install --no-install-recommends ca-certificates curl
-curl GET https://fermix.ai/install
-installer --no-setup
+curl GET https://fermix.ai/install/releases
+curl GET ${ORIGIN}v1.2.3/fermix_1.2.3_$ARCH.deb
+apt-get -qq install -y --no-remove WORK/fermix_1.2.3_$ARCH.deb
 apt-get -qq -y install --no-install-recommends unattended-upgrades
 systemctl daemon-reload
 systemctl --quiet enable --now fermix-update.timer
@@ -465,8 +564,7 @@ EOF
 Writing the enrollment
 Blocking the instance
 Giving this server
-Installing Fermix with
-(test) installed the
+Installing Fermix 1.2.3,
 Turning on updates:
 Creating the account
 Enrolling this server
@@ -556,8 +654,9 @@ systemctl daemon-reload
 systemctl --quiet enable fermix-metadata-block.service
 systemctl restart fermix-metadata-block.service
 apt-get -qq -y install --no-install-recommends ca-certificates curl
-curl GET https://fermix.ai/install
-installer --no-setup --version 1.2.3
+curl GET https://fermix.ai/install/releases
+curl GET ${ORIGIN}v1.2.3/fermix_1.2.3_$ARCH.deb
+apt-get -qq install -y --no-remove WORK/fermix_1.2.3_$ARCH.deb
 apt-get -qq -y install --no-install-recommends unattended-upgrades
 systemctl daemon-reload
 systemctl --quiet enable --now fermix-update.timer
@@ -572,21 +671,23 @@ fermix home status --json [as fermix]
 EOF
   check "cmp -s $LOG/calls.log /tmp/calls.expected" \
     "the steps run in order, with the bucket, the release, Chromium and the wait"
-  check "contains $OUT '==> Installing Fermix 1.2.3, the release your computer runs, with https://fermix.ai/install'" \
-    "and it names the release it installs"
+  check "contains $OUT '==> Installing Fermix 1.2.3, the release your computer runs, checked against https://fermix.ai/install/releases'" \
+    "and it names the release it installs and the table it checks the package against"
   cmp -s "$LOG/calls.log" /tmp/calls.expected || diff /tmp/calls.expected "$LOG/calls.log" | sed 's/^/    /' || true
   # What through_the_installer expects the same run to do after its downloads.
   cp "$LOG/calls.log" /tmp/calls.direct
 }
 
-# Serves release $1 as fermix.ai and GitHub would for the curl stand-in: a
-# table whose latest is $1 and whose one row lists the sha256 of $3 (of $2
-# unless given) as its Always On server script, and $2 as that script.
+# Serves release $1 as fermix.ai and GitHub would for the curl stand-in: its
+# package, $2 as its Always On server script, and a table whose latest is $1
+# and which lists the sha256 of $3 (of $2 unless given) for that script.
 serve_release() {
-  listed=${3:-$2}
-  printf 'format 1\nlatest %s\n%s %s fermix_always_on.sh\n' "$1" "$1" "$(sha256sum "$listed" | cut -d' ' -f1)" \
-    >"$FIXTURES/releases"
-  install -D -m 0644 "$2" "$FIXTURES/release/v$1/fermix_always_on.sh"
+  publish_release "$1" "$2"
+  serve_table "$1"
+  if [ -n "${3-}" ]; then
+    sed -i "s/^$1 [0-9a-f]* fermix_always_on.sh\$/$1 $(sha256sum "$3" | cut -d' ' -f1) fermix_always_on.sh/" \
+      "$FIXTURES/releases"
+  fi
 }
 
 # Runs the regular installer with --always-on as run_apart runs first-boot.sh.
@@ -776,8 +877,8 @@ EOF
     "and nothing is formatted, turned on or added to /etc/fstab"
 }
 
-# The run failed, and the last line on stderr is its one sentence (the
-# installer's or fermix's own message comes before it).
+# The run failed, and the last line on stderr is its one sentence (apt-get's,
+# cosign's or fermix's own message comes before it).
 ended_with() {
   if [ "$STATUS" -ne 0 ] && [ "$(tail -n 1 "$ERR")" = "fermix update: $1" ]; then
     pass "$2"
@@ -804,39 +905,30 @@ rebooted() {
   rm -f /run/reboot-required
 }
 
-# The table every release of these scenarios is pinned in, each with this
-# first boot as its Always On server script, which the update runs with
+# Every release of these scenarios, each with its package and this first
+# boot as its Always On server script, which the update runs with
 # --update-script-only after it installs that release; release 1.2.4's copy
 # is marked, so its run is seen to replace the update script.
 serve_releases() {
-  digest=$(sha256sum "$FIRST_BOOT" | cut -d' ' -f1)
-  {
-    printf 'format 1\nlatest 1.2.11\n'
-    for release in 1.2.3 1.2.4 1.2.5 1.2.6 1.2.7 1.2.8 1.2.9 1.2.10 1.2.11; do
-      if [ "$release" = 1.2.4 ]; then
-        sed 's/^REBOOT_FLAG=\/run\/reboot-required$/&\n# invented mark of release 1.2.4/' "$FIRST_BOOT" >/tmp/marked-first-boot.sh
-        install -D -m 0644 /tmp/marked-first-boot.sh "$FIXTURES/release/v$release/fermix_always_on.sh"
-        printf '%s %s fermix_always_on.sh\n' "$release" "$(sha256sum /tmp/marked-first-boot.sh | cut -d' ' -f1)"
-      else
-        install -D -m 0644 "$FIRST_BOOT" "$FIXTURES/release/v$release/fermix_always_on.sh"
-        printf '%s %s fermix_always_on.sh\n' "$release" "$digest"
-      fi
-    done
-  } >"$FIXTURES/releases"
-}
-
-# The two calls that make the update script release $1's own.
-refresh_calls() {
-  printf "'curl GET https://fermix.ai/install/releases' 'curl GET https://github.com/tezra-io/fermix/releases/download/v%s/fermix_always_on.sh'" "$1"
+  sed 's/^REBOOT_FLAG=\/run\/reboot-required$/&\n# invented mark of release 1.2.4/' "$FIRST_BOOT" >/tmp/marked-first-boot.sh
+  for release in 1.2.4 1.2.5 1.2.6 1.2.7 1.2.8 1.2.9 1.2.10 1.2.11; do
+    if [ "$release" = 1.2.4 ]; then
+      publish_release "$release" /tmp/marked-first-boot.sh
+    else
+      publish_release "$release"
+    fi
+  done
+  serve_table 1.2.11
 }
 
 # The nightly update, run by hand as fermix-update.service runs it, one night
 # per case, on a host first boot enrolled. Releases are invented versions: the
 # newest release eligible for the server is the stand-in fermix's
-# update_ceiling ($FIXTURES/ceiling, 1.2.3 without it), the fake installer
-# installs the one it is asked for, each install then runs that release's
-# update script from the table (serve_releases), and the stand-in fermix runs
-# the release its last start installed.
+# update_ceiling ($FIXTURES/ceiling, 1.2.3 without it), the update installs
+# that release's package once the table's digest and the stand-in cosign
+# both vouch for it, each install then runs that release's update script
+# under the same checks (serve_releases), and the stand-in fermix runs the
+# release its last start installed.
 updates() {
   run_first_boot env FERMIX_ENROLL_CODE="$CODE" sh "$FIRST_BOOT"
   check "[ $STATUS -eq 0 ]" "a host enrolls (exit $STATUS)"
@@ -848,7 +940,6 @@ updates() {
   home='fermix home status --json [as fermix]'
   restart='fermix restart [as fermix]'
   reboot='systemctl reboot'
-  install='curl GET https://fermix.ai/install'
   table='curl GET https://fermix.ai/install/releases'
 
   run_apart "$update"
@@ -859,8 +950,10 @@ updates() {
 
   printf '1.2.4\n' >"$FIXTURES/ceiling"
   run_apart "$update"
-  check "[ $STATUS -eq 0 ] && night_calls '$home' '$install' 'installer --no-setup --version 1.2.4' $(refresh_calls 1.2.4) '$status' '$home' '$restart'" \
-    "a newer eligible release is installed exactly, its update script replaces this one, and with no move under way the engine restarts as its own account"
+  check "[ $STATUS -eq 0 ] && night_calls '$home' $(install_calls 1.2.4) $(refresh_calls 1.2.4) '$status' '$home' '$restart'" \
+    "a newer eligible release is installed exactly, once the table's digest and the release workflow's signature agree, its update script replaces this one, and with no move under way the engine restarts as its own account"
+  check "! grep -q 'fermix.ai/install\$' $LOG/calls.log && [ \"\$(mode_owner /var/lib/fermix-update/sigstore)\" = '700 root:root' ]" \
+    "it never fetches the site's installer, and cosign's Sigstore cache is a folder of root's alone"
   check "contains $OUT '==> Fermix went from 1.2.3 to 1.2.4'" "and names both versions"
   check "grep -qxF '# invented mark of release 1.2.4' $update && [ \"\$(mode_owner $update)\" = '755 root:root' ]" \
     "the update script is now the one release 1.2.4 publishes, root's alone"
@@ -872,30 +965,52 @@ updates() {
   engine_call_is_clean restart "the update's fermix restart"
 
   printf '1.2.5\n' >"$FIXTURES/ceiling"
-  : >"$FIXTURES/installer-fails"
+  printf 'fermix\n' >"$FIXTURES/apt-fails"
   : >/run/reboot-required
   run_apart "$update"
-  ended_with "The Fermix installer stopped, so the engine keeps running; its message above says why." \
-    "a failed installer ends the night with its sentence"
-  check "night_calls '$home' '$install' 'installer --no-setup --version 1.2.5'" \
+  ended_with "apt-get could not install the package for Fermix 1.2.5; its message above says why." \
+    "a failed apt-get ends the night with its sentence"
+  check "contains $ERR 'E: Unable to locate package fermix'" "after apt-get's own message"
+  check "night_calls '$home' $(install_calls 1.2.5)" \
     "and neither restarts the engine nor reboots, though a reboot is asked for"
 
-  rm -f "$FIXTURES/installer-fails"
+  rm -f "$FIXTURES/apt-fails"
   run_apart "$update"
-  check "[ $STATUS -eq 0 ] && night_calls '$home' '$install' 'installer --no-setup --version 1.2.5' $(refresh_calls 1.2.5) '$status' '$home' '$restart' '$reboot'" \
+  check "[ $STATUS -eq 0 ] && night_calls '$home' $(install_calls 1.2.5) $(refresh_calls 1.2.5) '$status' '$home' '$restart' '$reboot'" \
     "the next night updates, restarts the engine, then reboots as asked"
   check "! grep -qF 'invented mark' $update" "and the update script is release 1.2.5's own again"
   rebooted
 
   printf '1.2.6\n' >"$FIXTURES/ceiling"
-  : >"$FIXTURES/install-unreachable"
+  : >"$FIXTURES/offline"
   : >/run/reboot-required
   run_apart "$update"
-  ended_with "Could not download the Fermix installer from https://fermix.ai/install, so Fermix is not updated tonight; nothing was installed, so the restart and the reboot are still decided." \
-    "an installer that cannot be downloaded says so in one line and ends the night non-zero"
-  check "night_calls '$home' '$install' '$status' '$home' '$reboot'" \
+  ended_with "Fermix is not updated tonight: the release table could not be read from https://fermix.ai/install/releases. Nothing was installed, so the restart and the reboot are still decided." \
+    "a table that cannot be read says so in one line and ends the night non-zero"
+  check "night_calls '$home' '$table' '$status' '$home' '$reboot'" \
     "and, nothing installed, the server still reboots as asked"
-  rm -f "$FIXTURES/install-unreachable"
+  rm -f "$FIXTURES/offline"
+  rebooted
+
+  sign_file 1.2.6 "fermix_1.2.6_$ARCH.deb" "https://github.com/invented-fork/fermix/.github/workflows/release.yml@refs/tags/v1.2.6"
+  : >/run/reboot-required
+  run_apart "$update"
+  ended_with "Fermix is not updated tonight: the package for Fermix 1.2.6 is not signed by the Fermix release workflow (cosign's message above says why). Nothing was installed, so the restart and the reboot are still decided." \
+    "a package the table lists but the release workflow did not sign is refused, in one line"
+  check "contains $ERR 'Error: (test) none of the expected identities matched' && night_calls '$home' '$table' $(checked_calls 1.2.6 "fermix_1.2.6_$ARCH.deb") '$status' '$home' '$reboot'" \
+    "after cosign's own words, before apt runs, and the server still reboots as asked"
+  sign_file 1.2.6 "fermix_1.2.6_$ARCH.deb"
+  rebooted
+
+  rm -rf /var/lib/fermix-update/sigstore
+  : >/var/lib/fermix-update/sigstore
+  : >/run/reboot-required
+  run_apart "$update"
+  ended_with "Fermix is not updated tonight: cosign's Sigstore cache, /var/lib/fermix-update/sigstore, is not a folder root can read and write, so the signature of the package for Fermix 1.2.6 could not be checked. Nothing was installed, so the restart and the reboot are still decided." \
+    "a Sigstore cache that is not a folder fails closed, in one line"
+  check "night_calls '$home' '$table' 'curl GET ${ORIGIN}v1.2.6/fermix_1.2.6_$ARCH.deb' '$status' '$home' '$reboot'" \
+    "before cosign or apt runs, and the server still reboots as asked"
+  rm -f /var/lib/fermix-update/sigstore
   rebooted
 
   : >"$FIXTURES/service-status-fails"
@@ -903,7 +1018,7 @@ updates() {
   run_apart "$update"
   ended_with "fermix service status stopped, so the engine is not restarted tonight; its message above says why." \
     "when fermix service status fails, the night says so in one line and ends non-zero"
-  check "night_calls '$home' '$install' 'installer --no-setup --version 1.2.6' $(refresh_calls 1.2.6) '$status' '$home' '$reboot'" \
+  check "night_calls '$home' $(install_calls 1.2.6) $(refresh_calls 1.2.6) '$status' '$home' '$reboot'" \
     "and skips the restart but still reboots"
   rm -f "$FIXTURES/service-status-fails"
   rebooted
@@ -923,7 +1038,7 @@ updates() {
   printf 'receiving|Receiving the home from Invented Mac.\n' >"$FIXTURES/phases"
   : >/run/reboot-required
   run_apart "$update"
-  check "[ $STATUS -eq 0 ] && night_calls '$home' '$install' 'installer --no-setup --version 1.2.7' $(refresh_calls 1.2.7) '$status' '$home'" \
+  check "[ $STATUS -eq 0 ] && night_calls '$home' $(install_calls 1.2.7) $(refresh_calls 1.2.7) '$status' '$home'" \
     "the first night this candidate receives a move, nothing restarts or reboots"
   check "contains $OUT '==> A move is under way on this server (receiving), so the engine restarts at the first follow run after it ends'" \
     "and the restart says why in one line"
@@ -964,7 +1079,7 @@ updates() {
   run_apart "$update"
   ended_with "Fermix is updated, but fermix restart stopped; its message above says why." \
     "a restart that fails says so in one line and ends the night non-zero"
-  check "night_calls '$home' '$install' 'installer --no-setup --version 1.2.8' $(refresh_calls 1.2.8) '$status' '$home' '$restart' '$reboot'" \
+  check "night_calls '$home' $(install_calls 1.2.8) $(refresh_calls 1.2.8) '$status' '$home' '$restart' '$reboot'" \
     "and the server still reboots"
   rm -f "$FIXTURES/restart-fails"
   rebooted
@@ -1012,7 +1127,7 @@ follow_runs() {
   count=$(deferral_count)
   : >/run/reboot-required
   run_apart "$update" --follow
-  check "[ $STATUS -eq 0 ] && night_calls '$home' '$install' 'installer --no-setup --version 1.2.9' $(refresh_calls 1.2.9) '$status' '$home' '$restart'" \
+  check "[ $STATUS -eq 0 ] && night_calls '$home' $(install_calls 1.2.9) $(refresh_calls 1.2.9) '$status' '$home' '$restart'" \
     "a follow run installs the newer eligible release, then restarts the engine as its own account"
   check "contains $OUT '==> Fermix went from 1.2.8 to 1.2.9'" "and names both versions"
   check "[ -e /run/reboot-required ] && [ \"\$(deferral_count)\" = '$count' ]" \
@@ -1021,7 +1136,7 @@ follow_runs() {
   printf '1.2.10\n' >"$FIXTURES/ceiling"
   printf 'receiving|Receiving the home from Invented Mac.\n' >"$FIXTURES/phases"
   run_apart "$update" --follow
-  check "[ $STATUS -eq 0 ] && night_calls '$home' '$install' 'installer --no-setup --version 1.2.10' $(refresh_calls 1.2.10) '$status' '$home'" \
+  check "[ $STATUS -eq 0 ] && night_calls '$home' $(install_calls 1.2.10) $(refresh_calls 1.2.10) '$status' '$home'" \
     "a follow run while a move is under way installs, and holds the restart"
   check "contains $OUT '==> A move is under way on this server (receiving), so the engine restarts at the first follow run after it ends'" \
     "and says the restart waits until the move ends"
@@ -1064,7 +1179,7 @@ hand_updates() {
   check "night_calls '$table' '$home'" "having read only the table and the eligible release"
 
   run_apart "$update" --release 1.2.11 --ahead-of-apps
-  check "[ $STATUS -eq 0 ] && night_calls '$table' '$home' '$install' 'installer --no-setup --version 1.2.11' $(refresh_calls 1.2.11) '$status' '$home' '$restart'" \
+  check "[ $STATUS -eq 0 ] && night_calls '$table' '$home' $(install_calls 1.2.11) $(refresh_calls 1.2.11) '$status' '$home' '$restart'" \
     "--ahead-of-apps installs it, takes its update script and restarts the engine, and never reboots"
   check "contains $OUT '==> Installing Fermix 1.2.11 ahead of the apps, as asked'" "and says it goes ahead of the apps"
 }
@@ -1154,8 +1269,9 @@ fallocate -l 2G /swapfile.incoming
 mkswap /swapfile.incoming
 swapon /swapfile
 apt-get -qq -y install --no-install-recommends ca-certificates curl
-curl GET https://fermix.ai/install
-installer --no-setup --version 1.2.3
+curl GET https://fermix.ai/install/releases
+curl GET ${ORIGIN}v1.2.3/fermix_1.2.3_$ARCH.deb
+apt-get -qq install -y --no-remove WORK/fermix_1.2.3_$ARCH.deb
 apt-get -qq -y install --no-install-recommends unattended-upgrades
 systemctl daemon-reload
 systemctl --quiet enable --now fermix-update.timer
@@ -1494,6 +1610,9 @@ TAILSCALE_FPR=2596A99EAAB33821893C0A79458CA832957F5868
 dash -n "$FIRST_BOOT"
 pass "dash parses first-boot.sh"
 mkdir -p "$FIXTURES"
+# Every scenario's first boot installs release 1.2.3, the table's latest.
+publish_release 1.2.3
+serve_table 1.2.3
 case "$SCENARIO" in
   existing-host) setup_tools; existing_host; through_the_installer ;;
   restore) setup_tools; restore ;;

@@ -25,7 +25,10 @@ defmodule FermixCore.Capabilities.Builtin.Tool do
           required(:error) => String.t() | nil,
           optional(:images) => [image_part()],
           # Set only by `Capabilities.AccessGate` on a call it parked for the owner.
-          optional(:access_waiting) => true
+          optional(:access_waiting) => true,
+          # Set only by a `Capabilities.ExternalEffect` tool on a result that made
+          # its effect: the facts `confirmed/1` reads, so nothing parses `output`.
+          optional(:effect) => map()
         }
 
   @type context :: %{

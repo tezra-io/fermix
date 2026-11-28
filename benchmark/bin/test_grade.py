@@ -366,6 +366,14 @@ def test_llm_usage_captures_the_prompt_completion_split_per_span():
     assert usage.errored is False and usage.under_subagent is False
 
 
+def test_llm_usage_carries_the_speed_a_fast_mode_call_ran_at():
+    fast = _one([_llm_span(metadata={"status": "ok", "adapter": "responses", "speed": "fast"},
+                           usage={"prompt_tokens": 10, "completion_tokens": 2})])
+    plain = _one([_llm_span(usage={"prompt_tokens": 10, "completion_tokens": 2})])
+    assert fast.speed == "fast"
+    assert plain.speed is None
+
+
 def test_llm_usage_reads_cache_counts_when_the_vendor_reports_them():
     usage = _one([_llm_span(usage={"prompt_tokens": 9000, "completion_tokens": 120,
                                    "total_tokens": 9120,

@@ -224,7 +224,8 @@ defmodule FermixCore.ComputerHistory.Summarizer.SchedulerTest do
       start_scheduler(ctx,
         report: fn report -> send(test_pid, {:report, self(), report}) && :ok end,
         run_sittings_fun: fn _opts -> send(test_pid, {:sittings, self()}) && {:ok, empty()} end,
-        status_fun: fn -> %{mode: :capturing, reason: nil, lock_holder: nil} end
+        status_fun: fn -> %{mode: :capturing, reason: nil, lock_holder: nil} end,
+        apps_fun: fn -> ["com.apple.Safari", "com.microsoft.VSCode"] end
       )
 
     tick(pid)
@@ -232,6 +233,11 @@ defmodule FermixCore.ComputerHistory.Summarizer.SchedulerTest do
     assert_receive {:report, ^cycle, report}
     assert %{"recorder" => "running", "events" => 0, "unsent" => 0} = report
     assert Report.validate(report) == :ok
+
+    # M102 N15: how many apps are chosen there, taken as the report is built,
+    # and never which.
+    assert %{"v" => 2, "apps" => 2} = report
+    refute Jason.encode!(report) =~ "com.apple"
   end
 
   defp empty, do: %{sittings: 0, sent: 0, notes: 0, events: 0}

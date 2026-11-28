@@ -215,7 +215,8 @@ defmodule FermixWebWeb.SetupLive.AlwaysOnPane do
         open: open,
         passphrase?: passphrase?,
         again?: "new_recovery_passphrase" in open["needs"],
-        digits?: "sas" in open["needs"]
+        digits?: "sas" in open["needs"],
+        code?: "code" in open["needs"]
       )
 
     ~H"""
@@ -243,6 +244,7 @@ defmodule FermixWebWeb.SetupLive.AlwaysOnPane do
         >
           <.passphrase :if={@passphrase?} again?={@again?} />
           <.digits :if={@digits?} />
+          <.code_field :if={@code?} />
           <.step_end always_on={@always_on} />
         </form>
       </div>
@@ -289,6 +291,24 @@ defmodule FermixWebWeb.SetupLive.AlwaysOnPane do
         name="always_on_step[sas]"
         value=""
         inputmode="numeric"
+        autocomplete="off"
+        class="input input-sm input-bordered mt-1 w-full"
+      />
+    </label>
+    """
+  end
+
+  # The code Add a computer opened (M102 J1, Join again): it carries a
+  # one-time secret, so it is typed masked and drawn empty.
+  defp code_field(assigns) do
+    ~H"""
+    <label class="block">
+      <span class="text-sm font-medium">Code from Add a computer</span>
+      <input
+        id="always-on-step-code"
+        type="password"
+        name="always_on_step[code]"
+        value=""
         autocomplete="off"
         class="input input-sm input-bordered mt-1 w-full"
       />

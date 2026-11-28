@@ -339,6 +339,156 @@ defmodule FermixChannels.Mobile.ManagementTest do
     refute File.exists?(Path.join(root, "mobile"))
   end
 
+  # M106 §8, D3: the Fermix app is the owner's first inbox while a phone is
+  # paired: the phones' channel on, and a phone whose pairing completed (it
+  # said hello). The home's computers are no phones. One answer for the
+  # daemon (the running store) and a tree-less CLI (the file).
+  describe "phone_paired?/1" do
+    test "a phone that said hello counts; one still pairing, or a computer, does not" do
+      phone = %{
+        device_attrs("11111111-1111-4111-8111-111111111111")
+        | last_seen: ~U[2026-09-02 08:00:00Z]
+      }
+
+      pairing = device_attrs("22222222-2222-4222-8222-222222222222")
+
+      computer = %{
+        computer_attrs("33333333-3333-4333-8333-333333333333", "studio", true)
+        | last_seen: ~U[2026-09-02 08:00:00Z]
+      }
+
+      running = fn devices ->
+        [
+          config: [enabled: true],
+          device_store: :store,
+          whereis: fn _name -> self() end,
+          list_devices: fn :store -> {:ok, devices} end
+        ]
+      end
+
+      assert Management.phone_paired?(running.([phone, computer]))
+      refute Management.phone_paired?(running.([pairing, computer]))
+      refute Management.phone_paired?(running.([]))
+    end
+
+    test "the phones' channel off counts no phone, and the store is not read" do
+      off = [
+        config: [enabled: false],
+        whereis: fn _name -> self() end,
+        list_devices: fn _store -> flunk("the channel is off: nothing is read") end
+      ]
+
+      refute Management.phone_paired?(off)
+    end
+
+    test "a tree-less process reads the stored file, as the daemon reads its store" do
+      phone = %{
+        device_attrs("44444444-4444-4444-8444-444444444444")
+        | last_seen: ~U[2026-09-03 07:00:00Z]
+      }
+
+      root = stored_root([phone])
+
+      assert Management.phone_paired?(
+               config: [enabled: true],
+               root: root,
+               whereis: fn _name -> nil end
+             )
+
+      refute Management.phone_paired?(
+               config: [enabled: true],
+               root: stored_root([]),
+               whereis: fn _name -> nil end
+             )
+    end
+
+    test "a store that cannot be read counts no phone, and says so" do
+      unreadable = [
+        config: [enabled: true],
+        device_store: :store,
+        whereis: fn _name -> self() end,
+        list_devices: fn :store -> {:error, :disk_full} end
+      ]
+
+      log = capture_log(fn -> refute Management.phone_paired?(unreadable) end)
+      assert log =~ "whether a phone is paired could not be read"
+    end
+  end
+
+  # M106 §8, D9: on an Always On server the owner's Mac reaches the chat
+  # through its computer's link, so a computer of the home makes the Mac chat
+  # an inbox: the phones' channel on, and a desktop row, connected or not.
+  # One answer for the daemon (the running store) and a tree-less CLI (the
+  # file), from the same rows.
+  describe "computer_linked?/1" do
+    test "a computer of the home counts, connected or not; a phone alone does not" do
+      computer = computer_attrs("55555555-5555-4555-8555-555555555555", "studio", true)
+
+      phone = %{
+        device_attrs("66666666-6666-4666-8666-666666666666")
+        | last_seen: ~U[2026-09-02 08:00:00Z]
+      }
+
+      running = fn devices ->
+        [
+          config: [enabled: true],
+          device_store: :store,
+          whereis: fn _name -> self() end,
+          list_devices: fn :store -> {:ok, devices} end
+        ]
+      end
+
+      assert Management.computer_linked?(running.([computer]))
+      refute Management.computer_linked?(running.([phone]))
+      refute Management.computer_linked?(running.([]))
+
+      refute Management.computer_linked?(
+               config: [enabled: false],
+               whereis: fn _name -> self() end,
+               list_devices: fn _store -> flunk("the channel is off: nothing is read") end
+             )
+    end
+
+    test "the daemon's running store and a tree-less read of the file agree" do
+      computer = computer_attrs("77777777-7777-4777-8777-777777777777", "studio", true)
+      {:ok, stored} = DeviceStore.list(root: stored_root([computer]))
+
+      daemon = [
+        config: [enabled: true],
+        device_store: :store,
+        whereis: fn _name -> self() end,
+        list_devices: fn :store -> {:ok, stored} end
+      ]
+
+      treeless = [
+        config: [enabled: true],
+        root: stored_root([computer]),
+        whereis: fn _ -> nil end
+      ]
+
+      assert Management.computer_linked?(daemon)
+      assert Management.computer_linked?(treeless)
+
+      refute Management.computer_linked?(
+               config: [enabled: true],
+               root: stored_root([]),
+               whereis: fn _name -> nil end
+             )
+    end
+
+    test "a store that cannot be read counts no computer, and says so" do
+      unreadable = [
+        config: [enabled: true],
+        device_store: :store,
+        whereis: fn _name -> self() end,
+        list_devices: fn :store -> {:error, :disk_full} end
+      ]
+
+      log = capture_log(fn -> refute Management.computer_linked?(unreadable) end)
+      assert log =~ "whether a computer is linked could not be read"
+    end
+  end
+
   test "health surfaces missing or invalid identity and device-store failures" do
     base = [
       config: [enabled: true],
@@ -425,6 +575,52 @@ defmodule FermixChannels.Mobile.ManagementTest do
       assert Base.decode64!(query["secret"]) == <<3::256>>
 
       assert {:error, :pairing_active} = Management.pair_start(ctx.opts)
+    end
+
+    # The app turns the phone on and opens its first window in one step, and
+    # that window is what starts the remote rail: a link made before the rail
+    # was ready carried no route, and a phone on another network had nothing
+    # to dial. The link waits for a rail still starting, within a bound under
+    # the 10 s a client gives the call, and reads the route after it.
+    test "start waits for a rail still starting, so the link carries its route", ctx do
+      opts =
+        [
+          iroh_helper: :rail,
+          iroh_await_ready: fn :rail, wait_ms ->
+            send(self(), {:rail_awaited, wait_ms})
+            Process.put(:rail_ready, true)
+            %{state: :ready}
+          end,
+          iroh_candidate: fn :rail ->
+            if Process.get(:rail_ready), do: {:ok, iroh_candidate()}, else: :none
+          end
+        ] ++ ctx.opts
+
+      assert {:ok, %{uri: uri}} = Management.pair_start(opts)
+      query = uri |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+
+      assert query["iroh"] == @endpoint_id
+      assert query["relays"] == "us1.relay.fermix.ai:7842"
+      assert_received {:rail_awaited, wait_ms}
+      assert wait_ms in 1..5_000
+    end
+
+    test "a rail still starting past the wait leaves the link to this network, and says so",
+         ctx do
+      opts =
+        [
+          iroh_helper: :rail,
+          iroh_await_ready: fn :rail, _wait_ms -> :timeout end,
+          iroh_candidate: fn :rail -> :none end
+        ] ++ ctx.opts
+
+      {result, log} = with_log(fn -> Management.pair_start(opts) end)
+      assert {:ok, %{uri: uri}} = result
+      query = uri |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+
+      assert Jason.decode!(query["candidates"]) == ["192.168.1.8"]
+      refute Enum.any?(~w(iroh relays relays_rev), &Map.has_key?(query, &1))
+      assert log =~ "remote reach was still starting"
     end
 
     test "get counts the window down and shows the phone that asked", ctx do
@@ -1579,6 +1775,15 @@ defmodule FermixChannels.Mobile.ManagementTest do
                },
                socket_pid: socket
              })
+  end
+
+  defp iroh_candidate do
+    %{
+      "kind" => "iroh",
+      "node_id" => @endpoint_id,
+      "relays" => [%{"url" => "https://us1.relay.fermix.ai/", "quic_port" => 7842}],
+      "relays_rev" => "0123456789abcdef"
+    }
   end
 
   defp start_opts(overrides) do

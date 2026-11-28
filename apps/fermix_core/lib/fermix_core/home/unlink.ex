@@ -12,12 +12,12 @@ defmodule FermixCore.Home.Unlink do
   holds its server's word that it no longer knows this computer
   (`:revoked`): one whose session came up since, its server knowing this
   computer again, keeps its link (`:known`). A disconnect asks it whatever
-  the link says (`:any`). No relay running (a terminal, Fermix stopped) has
-  nothing to stop.
+  the link says (`:any`). No relay running has nothing to stop.
 
-  Then it lets go of everything that linked this computer: its key, from the
-  store the link names, and only while the item holds that key (another
-  home's under the same profile stays, `ComputerKey`); what Fermix on the
+  Then it lets go of everything that linked this computer: its key, the item
+  in the store the link names, whatever key that item holds (`forget_key/3`
+  reads the item and hands its own public key to `ComputerKey.delete/3`, so
+  the check there that keeps another home's key always matches); what Fermix on the
   server may use here (`[fermix_core.computer]` in `machine.toml`,
   `Computers.Switches`); its role (`role_after/1`); and last the link
   (`device/desktop.json`). Then the computer history mark that home left is
@@ -148,8 +148,12 @@ defmodule FermixCore.Home.Unlink do
     end
   end
 
-  # Only this computer's own key: read first, so an item that holds another
-  # home's key under the same profile stays.
+  # The item in the store the link names goes, whatever key it holds: the
+  # public key handed to `ComputerKey.delete/3` is the one just read from
+  # that same item, so its check (`public:`) always matches and nothing is
+  # kept, another home's key under the same profile included. A link with no
+  # store recorded (`:not_moved`), or an item already gone, deletes only the
+  # file an older Fermix kept the key in.
   defp forget_key(home, link, key_opts) do
     case ComputerKey.read(home, key_opts) do
       {:ok, %{public: public}} ->

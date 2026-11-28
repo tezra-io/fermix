@@ -514,3 +514,34 @@ context gains `consent_opts`, the system the keep block's lines are drawn for
 so a move's switches are written as before on every computer. It is one more
 key in a context no step reads, and no modelled step changed. The comments'
 line numbers into `move_worker.ex` point at the committed code.
+
+## Re-read for a move back's computers (M102 D6, 2026-11-17)
+
+Re-read for M102 D6, which stales the `activation.ex` and `candidate.ex`
+pins: a return's staging drops every computer's row of the staged device
+list, where it dropped the returning computer's own, so `@return_opts`
+names the seam `:drop_desktop_rows`, and the candidate's moduledoc says a
+return stages without any computer's row. A move's staging (`stage/5`),
+the activation and the candidate's steps are as before, and a return is
+`home_return`'s: no modelled step changed, and no line the spec cites moved.
+
+## Re-read for outbound phone calls (M94, 2026-11-17)
+
+`16727975` committed the `application.ex` and `home/role.ex` changes beside
+this spec's pinned functions, so the pins M102 D6 staled can be taken again.
+`supervision_children` gains the phone-call subtree, which `Home.Role` lists
+among the primary-only children: a device, the engine a move's worker runs in,
+never starts it, and a candidate keeps only its own list. The application
+gains `prep_stop/1`: on every orderly stop, the restarts of a move's source
+and of its candidate included, it asks a phone call in progress to end, for at
+most twelve seconds, before the tree stops, and with no phone-call manager
+running (a device, a candidate) it returns at once. It reads and writes no
+role, marker, move phase or candidate file, and `prepare_home`,
+`finish_activation`, `finish_move` and `left_to_status` are as they were. No
+modelled step changed. `Restart`'s citation into `application.ex`, which had
+drifted, now points at `prepare_home` and `finish_activation`.
+
+`f2a874b8` (M94, 2026-11-17) changed `prep_stop/1` to drain through
+`PhoneCalls.Manager.drain_for_stop/0`, from whichever application an orderly
+stop stops first, and shortened its comment; no pinned function changed. The
+`application.ex` citation moved up by two with the code.

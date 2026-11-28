@@ -12,6 +12,7 @@ defmodule FermixChannels.Desktop.TwoEnginesInvokeTest do
   alias FermixChannels.Test.TwoEngines.Hold
   alias FermixChannels.Test.TwoEngines.Touch
   alias FermixChannels.Test.TwoEngines.Wait
+  alias FermixCore.Computers.Capabilities.Shell
   alias FermixCore.Computers.Capabilities.System, as: SystemCapability
   alias FermixCore.Computers.Journal
   alias FermixCore.Computers.Outcome
@@ -277,6 +278,54 @@ defmodule FermixChannels.Desktop.TwoEnginesInvokeTest do
              Task.await(task, 15_000)
   end
 
+  # M102 N7: files and commands go off at the computer while a command runs
+  # there. It had started, so the server hears that it ran, for how long, and
+  # was stopped partway, what it did standing; a command that only waited for
+  # a slot never started, and is answered as one arriving now would be.
+  test "a switch off under a command says it ran and was stopped; one that waited never ran",
+       %{engines: e} do
+    ws = e.sandbox.workspace_root
+    waits = for n <- 1..7, do: TwoEngines.call(e, Wait, "wait", %{"name" => "busy #{n}"})
+    for n <- 1..7, do: TwoEngines.running("busy #{n}")
+    command = "echo ran >> ran.txt; sleep 30"
+    ran = TwoEngines.call(e, Shell, "shell.run", %{"command" => command, "working_dir" => ws})
+    await_file(Path.join(ws, "ran.txt"))
+    later = "echo ran >> later.txt"
+    waited = TwoEngines.call(e, Shell, "shell.run", %{"command" => later, "working_dir" => ws})
+    await_waiting(e, 1)
+
+    Agent.update(e.switch_agent, &Keyword.put(&1, :files_and_shell, false))
+    :ok = Admission.switches_changed(e.admission)
+
+    assert {:error, %Outcome{status: :refused, refusal: :stopped_here} = stopped} =
+             Task.await(ran, 15_000)
+
+    sentence = Outcome.sentence(stopped, "studio Mac")
+    assert sentence =~ ~r/\AThe command ran for \S/
+
+    assert String.ends_with?(
+             sentence,
+             " on studio Mac and was stopped partway when files and commands was switched off " <>
+               "there. What it did stands."
+           )
+
+    assert File.read!(Path.join(ws, "ran.txt")) == "ran\n"
+
+    for task <- waits,
+        do: assert({:error, %Outcome{refusal: :stopped_here}} = Task.await(task, 15_000))
+
+    assert {:error, %Outcome{status: :refused, refusal: :off} = off} = Task.await(waited, 15_000)
+
+    assert Outcome.sentence(off, "studio Mac") ==
+             "studio Mac has commands switched off. Only someone at studio Mac can switch it on."
+
+    refute File.exists?(Path.join(ws, "later.txt"))
+    assert {:ok, %{entries: entries}} = Journal.list(Journal.dir(e.root))
+
+    assert [%{status: "refused", refusal: "off"}, %{status: "refused", refusal: "stopped_here"}] =
+             for(entry <- entries, entry.capability == "shell", do: entry)
+  end
+
   test "the master switch off at the computer refuses the server", %{engines: e} do
     Agent.update(e.switch_agent, &Keyword.put(&1, :enabled, false))
     task = TwoEngines.call(e, SystemCapability, "echo", %{"text" => "hello"})
@@ -350,6 +399,21 @@ defmodule FermixChannels.Desktop.TwoEnginesInvokeTest do
         # sleep: polls the request handler's state, which announces a wait to nobody
         Process.sleep(10)
         await_waiting(e, count, attempts - 1)
+    end
+  end
+
+  defp await_file(path, attempts \\ 1_000) do
+    cond do
+      File.exists?(path) ->
+        :ok
+
+      attempts == 0 ->
+        flunk("the command never started")
+
+      true ->
+        # sleep: polls the file the command writes as it starts, which tells nobody
+        Process.sleep(10)
+        await_file(path, attempts - 1)
     end
   end
 

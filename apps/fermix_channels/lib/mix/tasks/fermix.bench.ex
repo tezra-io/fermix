@@ -14,10 +14,16 @@ defmodule Mix.Tasks.Fermix.Bench do
   single run shows on the parallel-contention scenarios. The gate
   (`mix fermix.bench.diff`) compares the p50 median with absolute floors, so
   microsecond jitter never reads as a regression.
+
+  `FERMIX_HOME` is never read: the run makes a home of its own before the
+  configuration is read, boots what a turn needs from an engine, and removes
+  both when it ends (`FermixChannels.Bench.Boot`). A turn that does not end
+  with its scenario's reply fails the run, and the task exits non-zero.
   """
 
   use Mix.Task
 
+  alias FermixChannels.Bench.Boot
   alias FermixChannels.Bench.Runner
   alias FermixCore.Bench.Reporter
 
@@ -36,7 +42,6 @@ defmodule Mix.Tasks.Fermix.Bench do
   @impl true
   def run(argv) do
     Mix.Task.run("loadpaths")
-    Mix.Task.run("app.config")
 
     {opts, _args, invalid} = OptionParser.parse(argv, strict: @switches)
     raise_on_invalid_options(invalid)
@@ -44,8 +49,16 @@ defmodule Mix.Tasks.Fermix.Bench do
     if Keyword.get(opts, :list, false) do
       print_scenarios()
     else
-      run_bench(opts)
+      run_in_own_home(opts)
     end
+  end
+
+  defp run_in_own_home(opts) do
+    Boot.with_home(fn ->
+      # `:noop` would mean the configuration was read before this home existed.
+      :ok = Mix.Task.run("app.config")
+      Boot.with_engine(fn -> run_bench(opts) end)
+    end)
   end
 
   defp run_bench(opts) do

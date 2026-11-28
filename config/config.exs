@@ -136,6 +136,11 @@ config :fermix_core,
        :harness_continuation_dispatcher,
        FermixChannels.Harness.ContinuationDispatcher
 
+# A phone call's backend turns (M94 §07): the channels-side module that runs
+# one scoped turn on the call's own conversation and queue lane. Injected by
+# module for the same reason as the dispatcher above (`PhoneCalls.Delegate`).
+config :fermix_core, :phone_calls_delegate, FermixChannels.PhoneCalls.Bridge
+
 # The rail-side half of the home (M75): forwarding a desktop's management calls
 # to its primary, the rail's facts for `home.status`, the enrollment window.
 # Injected by module for the same reason as the dispatcher above

@@ -719,7 +719,7 @@ defmodule FermixCore.Memory.RepoCueRunsTest do
       id = delivery(conn, w, %{source: "src-a"})
       %{run: run} = claim!(repo, w, @now)
 
-      assert {:error, :cue_run} = Repo.settle_job_run(finish(run, "ok", @now), server: repo)
+      assert {:error, :cue_run} = Repo.settle_job_run(finish(run, "ok", @now), :ok, server: repo)
       assert delivery_row(conn, id).state == "claimed"
       assert job_row(conn, w.job_id).state == "running"
     end

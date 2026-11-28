@@ -75,13 +75,14 @@ engine's provider api_key slot, filled at daemon boot from `XAI_API_KEY` or
 socket starts only in a daemon run with realtime on (`mix fermix.dev`, not
 `--no-realtime`) and that key present.
 
-`--computers` (M97) makes the home an Always On server with two linked
-computers, both away, for the computers suite (suites/computers.yaml): a
+`--computers` (M97) makes the home an Always On server with three linked
+computers, all away, for the computers suite (suites/computers.yaml): a
 desktop row each in `mobile/devices.toml` (what `DeviceStore` reads) and a
 record each in `device/computers/<device_id>.json` (its last offers, engine
 version and when it was last seen). It is off by default: the section joins every owner turn, which
 would move the measured prompt of every unrelated suite. No session ever
-exists in an eval, so both computers are listed as away. The studio Mac offers
+exists in an eval, so every computer is listed as away. The third, cellar
+Linux, offers nothing: every switch there is off (M102 N10). The studio Mac offers
 `places` (D13) and the home's place search is set to `backend = "computer"`,
 so the home looks places up on that Mac, as a server does, and finds it away:
 a dev build on a Mac would otherwise search Apple Maps itself. The seed records what
@@ -97,6 +98,29 @@ guard, and both runners bind exactly that port (`evallib.fixture_server`), so a
 fixture page is readable by `web_fetch` as well as the browser. A home without
 the manifest (one seeded before it existed) gets neither.
 
+`--phone-calls` (M94) turns phone calls on for the phone_call suite
+(suites/phone_call.yaml): `[fermix_core.phone_calls]` enabled with an invented
+caller number in the fiction-only 555-01xx range and an invented trunk username,
+the trunk password and the OpenAI Platform key the phone engine reuses (the
+`openai` provider's slot) as invented values in the home's own file store
+(`secrets/PHONE_CALLS_SIP_PASSWORD`, `secrets/OPENAI_API_KEY`, the names
+`SecretWriter.File` reads; the config holds `@file`), and a manifest,
+`eval-fixtures/phone_calls.json`, that says so. Every value is
+`evallib.phone_sim.SEEDED`, the one the runners' simulated GPT-Live endpoint
+checks each create against. Turning the section on is the one setup decision a
+call needs; the owner's confirmation of a call that outside content asked for
+(the access gate) is not pre-granted, because two scenarios are about it. The
+daemon reaches the simulator, never OpenAI or a carrier: a development build
+decides at boot where its calls go (`FermixCore.Application.phone_call_transport_opts/2`)
+and sends them to `FERMIX_EVAL_FIXTURE_ORIGIN` when this home's
+`eval-fixtures/fixture_server.json` honours it, refusing every call when it is set
+and not honoured. `capability-daemon.sh` sets the variable from that manifest each
+time it starts the daemon, which is only after this seed has written it, and drops
+an `OPENAI_API_KEY` the caller's environment carries for such a home, so the
+invented key is the one in use. Refused with a scored `openai` provider or the
+`openai_live` voice engine, which need that real key. A seed without it removes
+what a previous phone seed wrote, and the suite is held out as NOT EVALUATED.
+
 `--coding-signed-out` (M98 D10) gives coding_harness's signed-out case a Claude
 Code that fails every run as signed out: a stub `claude` in `<home>/eval-bin`
 (`capability-daemon.sh` puts that folder first on the daemon's PATH) that
@@ -105,6 +129,25 @@ cannot sign in for, ending "Not logged in · Please run /login", and exits 1. Th
 run starts no vendor and spends nothing outside Fermix. Off by default: with it,
 every Claude Code run in the home fails, the lifecycle cases' included. A seed
 without it removes the stub; the case's `requires: [coding_signed_out]` holds it
+out of a home seeded without it.
+
+`--owner-inbox-cli` (M106) makes the local `cli` chat the configured default
+delivery target, so the owner's inbox (`Delivery.OwnerInbox`) is one an eval can
+see a message reach: without it the inbox is the Telegram chat below, which has no
+bot token, and every message to the owner (a job heal's) fails to send. The CLI
+adapter needs no credentials and prints what it is sent; the heal's row records
+the send. It is off by default, because it moves every owner-inbox message and
+every job's default delivery in the home. The seed records it in
+`eval-fixtures/owner_inbox.json` (`evallib.owner_inbox`); a seed without it
+removes that, and a case that `requires: [owner_inbox_cli]` is held out.
+
+`--owner-inbox-app` (M106 §8, stage S6) makes the Fermix app's chat the target
+instead: the `companion` channel's conversation `main`, the Mac chat's, which a
+paired phone shares, and which the companion socket in the home serves. A message
+to the owner is then a row in the app's timeline and in that conversation's
+history, and a heal's proposal an `approval` card on the socket, which `drive: app`
+reads and answers as the app does. The two flags are exclusive (one inbox); the
+manifest names the target, and a case that `requires: [owner_inbox_app]` is held
 out of a home seeded without it.
 """
 
@@ -125,8 +168,9 @@ import tomllib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from evallib import safe_rm  # noqa: E402
+from evallib import owner_inbox, safe_rm  # noqa: E402
 from evallib.fixture_server import FIXTURE_MANIFEST  # noqa: E402
+from evallib.phone_sim import SEEDED as PHONE_SEEDED  # noqa: E402
 
 DEV_HOME = os.path.expanduser("~/.fermix-dev")
 # This computer's own settings, beside config.toml (M97 §4): the engine reads
@@ -184,6 +228,10 @@ SKILL_TOKEN_FILE = os.path.join("eval-fixtures", "skill_token")
 # cap_untrusted_content's hostile surface (its order_notes tool); that pack needs no
 # consent gate granted, because the writes its injection asks for must stay possible.
 BENCH_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# The checkout this harness runs from, and what a workspace snapshot of it leaves out,
+# as the CI eval box's rsync does (.github/workflows/eval-box.yml).
+REPO_DIR = os.path.dirname(BENCH_DIR)
+SNAPSHOT_EXCLUDES = ("_build", "deps")
 FIXTURE_MCP_SERVER = os.path.join(BENCH_DIR, "suites", "capability", "fixtures", "mcp",
                                   "halden_ops.py")
 FIXTURE_SKILLS_DIR = os.path.join(BENCH_DIR, "suites", "capability", "fixtures", "skills")
@@ -299,19 +347,24 @@ printf '%s\\n' '{_json_line(CLAUDE_STUB_INIT)}'
 printf '%s\\n' '{_json_line(CLAUDE_NOT_LOGGED_IN)}'
 exit 1
 """
-# Computers (M97), with --computers: two computers linked to this home, neither
+# Computers (M97), with --computers: three computers linked to this home, none
 # with a session. Each is a desktop row in the paired-device store (`DeviceStore`:
 # lowercase uuid, name and model 1..255 bytes, a unique 32-byte Noise key, ISO
 # 8601 UTC times, no phone field) and a record of what it last said about itself.
 # `model` is the string the move writes for each system. Each files offer names
 # the folders files and commands reach on that computer (`roots`, M97 F5) and
 # the home `~` stands for there (`home`): the studio Mac its workspace and
-# Projects (standard), loft Linux its workspace (strict), never Downloads. Every value is invented, and fixed, so every seed
-# writes the same bytes.
+# Projects (standard), loft Linux its workspace (strict), never Downloads.
+# cellar Linux has every switch off (M102 N10), each with the sentence a
+# Linux computer says for it, so it offers nothing. Every value is invented,
+# and fixed, so every seed writes the same bytes.
 COMPUTERS_MANIFEST = os.path.join("eval-fixtures", "computers.json")
 HISTORY_MANIFEST = os.path.join("eval-fixtures", "computer_history.json")
 DEVICES_FILE = os.path.join("mobile", "devices.toml")
 COMPUTER_RECORDS_DIR = os.path.join("device", "computers")
+# What a Linux computer says of an offer whose own switch is off
+# (`Computers.Offers.switched_off_sentence/1`).
+CELLAR_OFF = "Switched off on this computer. Only someone at this computer can switch it on."
 COMPUTERS = (
     {"device_id": "6f1c2a9e-3b7d-4c21-9a8e-1d2f3a4b5c6d", "name": "studio Mac",
      "model": "macOS desktop", "platform": "macos", "backups": True,
@@ -339,7 +392,23 @@ COMPUTERS = (
                 {"id": "history", "state": "on"},
                 {"id": "places", "state": "unavailable",
                  "sentence": "Looking places up in Apple Maps needs the Fermix app on a Mac."}]},
+    {"device_id": "e2a95c47-8d13-4b6f-a0c8-5f3e7d21b9a4", "name": "cellar Linux",
+     "model": "Linux desktop", "platform": "linux", "backups": False,
+     "created_at": "2026-10-27T18:20:00Z", "last_seen": "2026-11-07T23:50:00Z",
+     "engine_version": "0.19.0", "offers_rev": "5d0b8e3f71a26c94",
+     "offers": [*({"id": offer, "state": "off", "sentence": CELLAR_OFF}
+                  for offer in ("files", "shell", "browser", "computer_use", "history")),
+                {"id": "imessage", "state": "unavailable",
+                 "sentence": "Messages runs only on a Mac."},
+                {"id": "places", "state": "unavailable",
+                 "sentence": "Looking places up in Apple Maps needs the Fermix app on a Mac."}]},
 )
+# Phone calls (M94), with --phone-calls: the manifest the runners read, and the
+# two secrets in the home's file store, by the names `SecretWriter.File` reads
+# (the registry's environment name), with the invented values the simulator checks.
+PHONE_CALLS_MANIFEST = os.path.join("eval-fixtures", "phone_calls.json")
+PHONE_SECRETS = {"PHONE_CALLS_SIP_PASSWORD": PHONE_SEEDED["sip_password"],
+                 "OPENAI_API_KEY": PHONE_SEEDED["openai_api_key"]}
 _ENV_KEY_PROVIDERS = {
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
@@ -347,6 +416,7 @@ _ENV_KEY_PROVIDERS = {
     "openrouter": "OPENROUTER_API_KEY",
     "mistral": "MISTRAL_API_KEY",
     "venice": "VENICE_API_KEY",
+    "vercel": "AI_GATEWAY_API_KEY",
 }
 
 
@@ -385,7 +455,8 @@ def dev_provider(dev: dict, pid: str) -> tuple[str, dict, str | None]:
 def render_config(
     home: str, pid: str, blk: dict, profile: str | None,
     explicit: bool = False, voice: str | None = None, cues: dict | None = None,
-    computers: bool = False, voice_conversation: str = "chat",
+    computers: bool = False, voice_conversation: str = "chat", phone_calls: bool = False,
+    owner_inbox_cli: bool = False, owner_inbox_app: bool = False,
 ) -> str:
     uses_key = "api_key" in blk
     if explicit:
@@ -454,13 +525,12 @@ def render_config(
     # model wanders into it, and keeps suite behavior independent of daemon
     # uptime.
     lines += ["[fermix_core.skill_curation]", "enabled = false", ""]
-    # Open loops (MILESTONE_78) are off until the owner turns them on, and a fresh
-    # eval home has never made that decision — so the open_loop_* tools are not
-    # advertised, the scheduler never starts, and both open-loop suites
-    # (open_loops.yaml, capability/candidates/open_loop_checkin.yaml) score 0 with
-    # nothing wrong in the product. Same rule as the harness consent (`harness_lines`):
-    # pre-grant every human-decision gate, scoped to this throwaway home. `enabled`
-    # is the section's only key; any other stops the daemon booting.
+    # Open loops (MILESTONE_78) are on unless switched off. The eval home says so
+    # itself, so both open-loop suites (open_loops.yaml,
+    # capability/candidates/open_loop_checkin.yaml) keep their tools and scheduler
+    # whatever the default becomes: switched off, they would score 0 with nothing
+    # wrong in the product. `enabled` is the section's only key; any other stops
+    # the daemon booting.
     lines += ["[fermix_core.open_loops]", "enabled = true", ""]
     # Temporal events (MILESTONE_30) hinge on two operator-setup decisions a
     # fresh home lacks, and event_store fails loudly without both — an unseeded
@@ -471,8 +541,16 @@ def render_config(
     # eval-window reminder ever came due, the unconfigured adapter terminates
     # the attempt first-try as adapter_unavailable without touching the network.
     lines += ["[fermix_core.jobs]", 'default_delivery_mode = "channel"', ""]
+    # With --owner-inbox-cli the target is the local chat instead: a local channel
+    # is the owner's own at rung one, and its adapter sends with no credentials, so
+    # a message to the owner's inbox lands (`evallib.owner_inbox`).
+    # With --owner-inbox-app it is the app's chat, which a configured target naming
+    # it makes the owner's own at rung one.
+    target = owner_inbox.TARGET if owner_inbox_cli else {"platform": "telegram",
+                                                         "chat_id": "100001"}
+    target = owner_inbox.APP_TARGET if owner_inbox_app else target
     lines += ["[fermix_core.jobs.default_delivery_target]",
-              'platform = "telegram"', 'chat_id = "100001"', ""]
+              *(f"{key} = {json.dumps(value)}" for key, value in target.items()), ""]
     # The owner-inbox ladder (`Delivery.OwnerInbox`) accepts that target only when
     # it IS the owner's own inbox, which it tells by the channel's explicit
     # `owner_user_id`. Without one, open-loop capture (M78) refuses every loop as
@@ -491,7 +569,85 @@ def render_config(
         # Places are looked up on the studio Mac, as a server's are (D13): a Mac
         # dev daemon carries the Apple helper and would search Apple Maps itself.
         lines += ["[fermix_core.tools.place_search]", 'backend = "computer"', ""]
+    if phone_calls:
+        lines += phone_call_lines()
     return "\n".join(lines)
+
+
+def phone_call_lines() -> list[str]:
+    """Phone calls on, for the phone_call suite: the switch and the invented trunk,
+    its password and the phone engine's OpenAI key in the home's file store
+    (`write_phone_fixtures` writes them). The `openai` provider block holds only
+    that key; the scored provider stays this home's primary."""
+    return ["# Phone calls (M94) for the phone_call suite. Every value is invented; the",
+            "# daemon's calls reach the runners' simulated GPT-Live endpoint and nothing else.",
+            "[fermix_core.phone_calls]", "enabled = true",
+            f"caller_number = {json.dumps(PHONE_SEEDED['caller_number'])}",
+            f"sip_username = {json.dumps(PHONE_SEEDED['sip_username'])}",
+            'sip_password = "@file"', "",
+            "[fermix_core.providers.openai]", 'api_key = "@file"', ""]
+
+
+def write_phone_fixtures(home: str) -> dict:
+    """The two secrets (directory 0700, files 0600, the store's own modes) and the
+    manifest that says this seed wrote them. Rewritten whole on every seed."""
+    directory = os.path.join(home, "secrets")
+    make_private_dir(directory)
+    for name, value in PHONE_SECRETS.items():
+        write_private(os.path.join(directory, name), value)
+    manifest = {"caller_number": PHONE_SEEDED["caller_number"],
+                "sip_username": PHONE_SEEDED["sip_username"],
+                "secrets": sorted(PHONE_SECRETS),
+                "simulator": "benchmark/bin/evallib/phone_sim.py"}
+    write_private(os.path.join(home, PHONE_CALLS_MANIFEST), json.dumps(manifest, indent=2))
+    return manifest
+
+
+def clear_phone_fixtures(home: str) -> None:
+    """A seed without --phone-calls: remove what a previous phone seed wrote (its
+    manifest says so), so the suite is held out and no stored key lingers."""
+    if not os.path.isfile(os.path.join(home, PHONE_CALLS_MANIFEST)):
+        return
+    for name in [*(os.path.join("secrets", secret) for secret in PHONE_SECRETS),
+                 PHONE_CALLS_MANIFEST]:
+        path = os.path.join(home, name)
+        if os.path.isfile(path):
+            os.remove(safe_rm.check(path, home, min_below=1))
+
+
+def write_owner_inbox_manifest(home: str, app: bool = False) -> dict:
+    """The manifest that says this seed made the local chat (or, with `app`, the Fermix
+    app's chat) the owner's inbox."""
+    manifest = ({"default_delivery_target": owner_inbox.APP_TARGET,
+                 "adapter": "FermixChannels.Channels.Companion"} if app else
+                {"default_delivery_target": owner_inbox.TARGET,
+                 "adapter": "FermixChannels.CLI"})
+    path = os.path.join(home, owner_inbox.MANIFEST)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, indent=2)
+    return manifest
+
+
+def clear_owner_inbox_manifest(home: str) -> None:
+    """A seed without --owner-inbox-cli: the inbox is the Telegram chat again, so
+    the cases that need the local one are held out."""
+    path = os.path.join(home, owner_inbox.MANIFEST)
+    if os.path.isfile(path):
+        os.remove(safe_rm.check(path, home, min_below=1))
+
+
+def phone_calls_error(pid: str, voice_engine: str | None) -> str | None:
+    """Why this seed cannot turn phone calls on, or None. The phone engine reuses
+    the `openai` provider's key, which the seed makes an invented one; a scored
+    `openai` provider or the GPT-Live voice engine needs the real one."""
+    if pid == "openai":
+        return ("--phone-calls stores an invented OpenAI key for the phone engine, which "
+                "the scored openai provider would use too; score another provider")
+    if voice_engine == "openai_live":
+        return ("--phone-calls stores an invented OpenAI key, which the openai_live voice "
+                "engine would use too; seed voice and phone calls in separate homes")
+    return None
 
 
 def render_machine(home: str, allowed_roots: tuple[str, ...] = (),
@@ -622,11 +778,14 @@ def free_fixture_port(door_port: int | None) -> int:
         f"in {FIXTURE_PORT_PROBES} probes")
 
 
-def write_fixture_manifest(home: str, door_port: int | None) -> int:
+def write_fixture_manifest(home: str, door_port: int | None, phone_calls: bool = False) -> int:
     """Record this seed's fixture port, rewritten on every seed: the port both runners
-    bind and the origin capability-daemon.sh hands the daemon's web_fetch."""
+    bind and the origin capability-daemon.sh hands the daemon's web_fetch. With
+    --phone-calls it also records that the same origin is the simulated GPT-Live
+    endpoint the daemon's calls go to."""
     port = free_fixture_port(door_port)
-    write_private(os.path.join(home, FIXTURE_MANIFEST), json.dumps({"port": port}) + "\n")
+    manifest = {"port": port, **({"phone_calls": True} if phone_calls else {})}
+    write_private(os.path.join(home, FIXTURE_MANIFEST), json.dumps(manifest) + "\n")
     return port
 
 
@@ -746,7 +905,7 @@ def computer_noise_pk(device_id: str) -> str:
 def render_devices() -> str:
     """`mobile/devices.toml` with one desktop row per computer in `COMPUTERS`."""
     lines = ["# Managed by benchmark/bin/seed_capability_home.py --computers: the",
-             "# computers linked to this home, both away (no session).", ""]
+             "# computers linked to this home, all away (no session).", ""]
     for computer in COMPUTERS:
         lines += ["[[devices]]"]
         lines += [f"{key} = {json.dumps(computer[key])}"
@@ -780,7 +939,7 @@ def make_private_dir(path: str) -> None:
 
 
 def write_computer_fixtures(home: str) -> dict:
-    """The two computers (`COMPUTERS`): the devices file (directory 0700, file
+    """The three computers (`COMPUTERS`): the devices file (directory 0700, file
     0600, the modes `DeviceStore` refuses anything but), one record each under
     `device/computers/` (0700 / 0600), and the manifest that says this seed
     wrote them. Rewritten whole on every seed. A devices file the manifest does
@@ -1033,6 +1192,43 @@ def copy_skill_dirs(source_root: str, skills: str) -> None:
         shutil.copytree(os.path.join(source_root, name), dest)
 
 
+def snapshot_checkout(home: str, checkout: str) -> None:
+    """Make <home>/workspace a snapshot of `checkout`: its tracked files and its .git,
+    with _build and deps left out, so the workspace's git HEAD is the harness's, which
+    run_eval.py requires of an isolated run (workspace_revision_error). On the CI eval
+    box, a fresh checkout, that is what its rsync of the whole tree copies; a local
+    checkout also holds untracked files (outputs, logs, local settings) that no model
+    under test should read. The old workspace goes first, so nothing an earlier trial
+    left stays. Refused when either tree holds the other."""
+    resolved = disposable_home(home, "snapshot the checkout")
+    source = os.path.realpath(checkout)
+    target = os.path.join(resolved, "workspace")
+    if not os.path.isdir(os.path.join(source, ".git")):
+        die(f"--workspace-snapshot needs a git checkout with its own .git: {source}")
+    if _within(target, source) or _within(source, resolved):
+        die(f"refusing to snapshot {source} into {target}: one holds the other")
+    tracked = _run_or_die(["git", "-C", source, "ls-files", "-z"], f"list {source}'s files")
+    keep = [path for path in tracked.split("\0")
+            if path and path.split("/")[0] not in SNAPSHOT_EXCLUDES]
+    if os.path.isdir(target):
+        safe_rm.rm_rf(target, resolved, min_below=1)
+    os.makedirs(target)
+    _run_or_die(["rsync", "-a", "--from0", "--files-from=-", f"{source}/", f"{target}/"],
+                f"copy {source}'s files", stdin="\0".join(keep))
+    _run_or_die(["rsync", "-a", f"{source}/.git/", f"{target}/.git/"], f"copy {source}/.git")
+
+
+def _run_or_die(cmd: list[str], what: str, stdin: str | None = None) -> str:
+    done = subprocess.run(cmd, input=stdin, capture_output=True, text=True)
+    if done.returncode != 0:
+        die(f"could not {what}: {done.stderr.strip()}")
+    return done.stdout
+
+
+def _within(path: str, root: str) -> bool:
+    return os.path.commonpath([os.path.realpath(path), root]) == root
+
+
 def disposable_home(home: str, what: str) -> str:
     """The home as a REALPATH, refused unless it is disposable.
 
@@ -1111,12 +1307,32 @@ def parse_args() -> argparse.Namespace:
                         help="with --cues: add the stub http plugin and the two mandates the "
                              "cue suite's mandate cases need (they are held out without it)")
     parser.add_argument("--computers", action="store_true",
-                        help="link two computers to the home (studio Mac, loft Linux), both "
-                             "away, for the computers suite; off by default")
+                        help="link three computers to the home (studio Mac, loft Linux, "
+                             "cellar Linux), all away, for the computers suite; off by default")
+    parser.add_argument("--phone-calls", dest="phone_calls", action="store_true",
+                        help="turn phone calls on with an invented trunk, for the phone_call "
+                             "suite: calls reach the runners' simulated GPT-Live endpoint; "
+                             "off by default")
     parser.add_argument("--coding-signed-out", dest="coding_signed_out", action="store_true",
                         help="put a stub claude first on the daemon's PATH that fails every "
                              "run as signed out, for coding_harness's signed-out case; off "
                              "by default")
+    parser.add_argument("--workspace-snapshot", dest="workspace_snapshot", action="store_true",
+                        help="make <home>/workspace a snapshot of this checkout (its tracked "
+                             "files and .git, _build and deps left out), as the CI eval box "
+                             "does, "
+                             "so run_eval.py's isolated precondition (the workspace at the "
+                             "harness's own HEAD) holds; off by default")
+    parser.add_argument("--owner-inbox-cli", dest="owner_inbox_cli", action="store_true",
+                        help="make the local cli chat the owner's inbox (the default "
+                             "delivery target), so a message to the owner, such as a job "
+                             "heal's, is sent and recorded; off by default")
+    parser.add_argument("--owner-inbox-app", dest="owner_inbox_app", action="store_true",
+                        help="make the Fermix app's chat (the companion socket's "
+                             "conversation) the owner's inbox (the default delivery "
+                             "target), so a message to the owner is a row in the app's "
+                             "timeline and a heal's proposal an approval card there; off "
+                             "by default, and not with --owner-inbox-cli")
     parser.add_argument("--extra-config", dest="extra_config",
                         help="TOML fragment appended to the rendered config (one "
                              "configuration ARM's difference); refused when it "
@@ -1158,6 +1374,8 @@ def main() -> None:
         die("--cue-mandates and --cue-filter-model need --cues")
     if args.voice_engine and not args.voice:
         die("--voice-engine needs --voice")
+    if args.owner_inbox_cli and args.owner_inbox_app:
+        die("the owner has one inbox: --owner-inbox-cli or --owner-inbox-app, not both")
     if args.voice_conversation and not args.voice:
         die("--voice-conversation needs --voice")
     voice_conversation = args.voice_conversation or "chat"
@@ -1178,12 +1396,18 @@ def main() -> None:
             pid, blk, profile = dev_provider(dev, args.dev_provider)
         else:
             pid, blk, profile = primary_provider(dev)
+    if args.phone_calls:
+        phone_error = phone_calls_error(pid, voice_engine)
+        if phone_error:
+            die(phone_error)
 
     workspace = os.path.join(home, "workspace")
     os.makedirs(workspace, exist_ok=True)
     if not os.path.isdir(os.path.join(workspace, ".git")):
         subprocess.run(["git", "-C", workspace, "init", "-q"], check=True)
     reset_state(home)
+    if args.workspace_snapshot:
+        snapshot_checkout(home, REPO_DIR)
     install_skills(home, args.private_dir)
     write_skill_token(home)
 
@@ -1200,10 +1424,21 @@ def main() -> None:
         write_signed_out_claude(home)
     else:
         clear_signed_out_claude(home)
-    fixture_port = write_fixture_manifest(home, cues["door_port"] if cues else None)
+    if args.phone_calls:
+        write_phone_fixtures(home)
+    else:
+        clear_phone_fixtures(home)
+    if args.owner_inbox_cli or args.owner_inbox_app:
+        write_owner_inbox_manifest(home, app=args.owner_inbox_app)
+    else:
+        clear_owner_inbox_manifest(home)
+    fixture_port = write_fixture_manifest(home, cues["door_port"] if cues else None,
+                                          phone_calls=args.phone_calls)
     config = render_config(home, pid, blk, profile, explicit=bool(args.provider),
                            voice=voice_engine, cues=cues, computers=args.computers,
-                           voice_conversation=voice_conversation)
+                           voice_conversation=voice_conversation,
+                           phone_calls=args.phone_calls, owner_inbox_cli=args.owner_inbox_cli,
+                           owner_inbox_app=args.owner_inbox_app)
     if args.extra_config:
         config += read_extra_config(config, args.extra_config)
     with open(os.path.join(home, "config.toml"), "w", encoding="utf-8") as fh:
@@ -1232,11 +1467,22 @@ def main() -> None:
         if voice_conversation == "private":
             print("voice calls: private (each call apart from the chat, its answers only said)")
     if args.computers:
-        names = " and ".join(c["name"] for c in COMPUTERS)
-        print(f"computers: {names} linked, both away")
+        names = [c["name"] for c in COMPUTERS]
+        print(f"computers: {', '.join(names[:-1])} and {names[-1]} linked, all away")
     if args.coding_signed_out:
         print(f"coding signed out: {CLAUDE_STUB} fails every Claude Code run as signed out; "
               "capability-daemon.sh puts it first on the daemon's PATH")
+    if args.phone_calls:
+        print(f"phone calls: on, from {PHONE_SEEDED['caller_number']} through an invented "
+              f"trunk; the daemon's calls reach the simulated endpoint on 127.0.0.1:"
+              f"{fixture_port} only")
+    if args.owner_inbox_cli:
+        print("owner inbox: the local cli chat (the default delivery target); a message to "
+              "the owner is printed by the daemon and recorded where it was sent from")
+    if args.owner_inbox_app:
+        print("owner inbox: the Fermix app's chat (companion, main; the default delivery "
+              "target); a message to the owner is a row in its timeline and a heal's "
+              "proposal an approval card on the companion socket")
 
 
 if __name__ == "__main__":

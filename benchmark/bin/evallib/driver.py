@@ -37,13 +37,15 @@ _RESET_HINT_RE = re.compile(r"try again in ~\s*(\d+)\s*min", re.IGNORECASE)
 
 # Fermix's auth-failure replies are likewise purpose-built stable wordings
 # (`auth_reply/1` in fermix_core `agents/turn_runner.ex`): OAuth reconnect,
-# api-key advice, the generic fallback, and the xAI 403 entitlement denial —
+# api-key advice, the generic fallback, the xAI 403 entitlement denial —
 # which is worded as an ACCESS denial rather than an authentication failure,
-# because re-login cannot fix a plan that does not include API access. Each
-# anchors on its verb PLUS the remedy clause, so a task answer that merely
-# discusses auth can't match. All four are PERMANENT for the run — a plan does
-# not acquire API access mid-sweep, and TokenManager emits the rest only after
-# a refresh permanently failed — so every later trial refuses before any model
+# because re-login cannot fix a plan that does not include API access — and
+# the Vercel AI Gateway 403, worded as a refusal for a missing payment method
+# because the key is fine. Each anchors on its verb PLUS the remedy clause, so
+# a task answer that merely discusses auth can't match. All five are PERMANENT
+# for the run — a plan does not acquire API access, nor a Vercel team a
+# payment method, mid-sweep, and TokenManager emits the rest only after a
+# refresh permanently failed — so every later trial refuses before any model
 # call. `test_auth_invalidated_covers_every_reply_clause` pins this set to the
 # live source — it ASSEMBLES each clause's reply out of turn_runner.ex and
 # requires a match, so a reworded clause fails there rather than silently here.
@@ -52,7 +54,9 @@ _AUTH_INVALIDATED_RE = re.compile(
     r"|check the .{0,80}API key in Fermix's Providers settings)"
     r"|authentication failed with the API key from .{0,80} in the daemon's environment"
     r"|subscription access denied — the .{0,40}plan may not include API access\."
-    r" Switch to an API key in Fermix's Providers settings)",
+    r" Switch to an API key in Fermix's Providers settings"
+    r"|refused this request \(HTTP 403\), which it does when the .{0,40}team"
+    r" has to add a payment method)",
     re.IGNORECASE | re.DOTALL,
 )
 

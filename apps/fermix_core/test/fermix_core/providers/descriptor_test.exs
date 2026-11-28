@@ -3,6 +3,7 @@ defmodule FermixCore.Providers.DescriptorTest do
 
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Providers.OpenAI.ChatCompletions
   alias FermixCore.Providers.OpenAI.ChatGPTPlan
   alias FermixCore.Providers.ReasoningEffort
   alias FermixCore.Setup.SecretPaths
@@ -17,6 +18,7 @@ defmodule FermixCore.Providers.DescriptorTest do
              :openrouter,
              :mistral,
              :venice,
+             :vercel,
              :ollama
            ]
   end
@@ -62,6 +64,30 @@ defmodule FermixCore.Providers.DescriptorTest do
     assert descriptor.config_keys == [:default_model, :reasoning_effort, :primary]
     assert descriptor.retired_config_keys == [:fast]
     assert descriptor.effort?
+  end
+
+  # M105 §3.1: the gateway speaks Chat Completions with one bearer key, so it is
+  # an API-key provider on the existing adapter. It takes no effort field and no
+  # Fast mode, and declares no model explanation.
+  test "vercel is an API-key Chat Completions provider labelled Vercel AI Gateway" do
+    descriptor = Descriptor.fetch!(:vercel)
+
+    assert descriptor.label == "Vercel AI Gateway"
+    assert descriptor.adapter == ChatCompletions
+    assert descriptor.default_base_url == "https://ai-gateway.vercel.sh/v1"
+    assert descriptor.locality == :remote
+    assert descriptor.auth_modes == [:api_key]
+    assert descriptor.secrets == [:vercel_api_key]
+    assert descriptor.config_keys == [:api_key, :base_url, :default_model, :primary]
+
+    assert [%{key: :vercel_api_key, config_key: :api_key, secret?: true} = field] =
+             descriptor.setup_fields
+
+    assert field.label == "Vercel AI Gateway API key"
+    refute descriptor.effort?
+    assert descriptor.documents?
+    assert descriptor.image_formats == :any
+    assert descriptor.model_info == nil
   end
 
   test "no descriptor both reads and retires a key" do
@@ -128,9 +154,9 @@ defmodule FermixCore.Providers.DescriptorTest do
   end
 
   describe "what a route takes inline (M67)" do
-    test "a PDF goes inline on Anthropic, OpenAI, OpenAI Codex, OpenRouter and Venice only" do
+    test "a PDF goes inline on Anthropic, OpenAI, OpenAI Codex, OpenRouter, Venice and Vercel only" do
       inline = for id <- Descriptor.ids(), Descriptor.documents?(id), do: id
-      assert inline == [:openai_codex, :openai, :anthropic, :openrouter, :venice]
+      assert inline == [:openai_codex, :openai, :anthropic, :openrouter, :venice, :vercel]
     end
 
     test "SpaceXAI takes JPEG and PNG only; the OpenAI wires and Anthropic add WebP and GIF" do

@@ -48,7 +48,7 @@ defmodule FermixCore.Tools.CloudRunToolsTest do
 
   # A `Memory.Repo` stub answering only `{:get_scheduled_job, id}` so a scheduled
   # origin resolves a delivery snapshot without a real memory repo (used by the
-  # consent scheduled-block test via `Delivery.resolve_snapshot`).
+  # consent scheduled-block test via `Delivery.FrozenOrigin.resolve/2`).
   defmodule MemoryRepoStub do
     use GenServer
 

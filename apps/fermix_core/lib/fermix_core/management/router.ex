@@ -35,6 +35,7 @@ defmodule FermixCore.Management.Router do
   alias FermixCore.Management.McpServers
   alias FermixCore.Management.Meetings
   alias FermixCore.Management.Mobile
+  alias FermixCore.Management.PhoneCalls
   alias FermixCore.Management.Placement
   alias FermixCore.Management.Plugins
   alias FermixCore.Management.Protocol
@@ -51,7 +52,8 @@ defmodule FermixCore.Management.Router do
   # Operations whose contract is "no input at all". Every other method declares
   # its own parameter set, so an unexpected key is refused rather than ignored.
   @no_param_methods ~w(
-    hello overview.get setup.session.create lifecycle.prepare diagnostics.build setup.state.get
+    hello overview.get setup.session.create lifecycle.prepare lifecycle.prepare_restart
+    diagnostics.build setup.state.get
     settings.sections job.list plugins.list meetings.signin.start
     computer_use.grant.start computer_use.permissions.get mobile.status mobile.pair.start
     mobile.devices.list browser.install.start imessage.permissions.get imessage.policy.confirm
@@ -197,6 +199,15 @@ defmodule FermixCore.Management.Router do
   defp route_known("setup.session.create", %{}, opts), do: setup_session(opts)
   defp route_known("diagnostics.build", %{}, opts), do: diagnostics(opts)
   defp route_known("lifecycle.prepare", %{}, opts), do: lifecycle_prepare(opts)
+
+  # The owner's own restart (M94 §12): the same drain window, refused while a
+  # phone call is in progress. An update, a move or a disable takes
+  # `lifecycle.prepare`, which no call holds.
+  defp route_known("lifecycle.prepare_restart", %{}, opts) do
+    phone_calls = opts |> operation_opts() |> Keyword.get(:phone_calls, [])
+    with :ok <- PhoneCalls.check_restart(phone_calls), do: lifecycle_prepare(opts)
+  end
+
   defp route_known("lifecycle.commit", params, opts), do: lifecycle_release(:commit, params, opts)
   defp route_known("lifecycle.cancel", params, opts), do: lifecycle_release(:cancel, params, opts)
   defp route_known("doctor.start", params, opts), do: doctor_start(params, opts)
@@ -316,6 +327,12 @@ defmodule FermixCore.Management.Router do
   # The accessory family validates its own params (`Management.Accessories`).
   defp route_known("accessories." <> _rest = method, params, opts),
     do: Accessories.route(method, params, accessories_opts(opts))
+
+  # Phone calls (M94 §12): the home's, so a linked computer forwards them
+  # (`Management.Placement`). The family validates its own params.
+  defp route_known("phone_calls." <> _rest = method, params, opts),
+    do:
+      PhoneCalls.route(method, params, opts |> operation_opts() |> Keyword.get(:phone_calls, []))
 
   # Names a computer of the home (M97 §3.2), on the primary; a linked
   # computer forwards it (`Management.Placement`).

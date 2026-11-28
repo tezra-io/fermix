@@ -35,8 +35,8 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
   alias FermixCore.Agents.TurnRunner
   alias FermixCore.Agents.VoiceCall
   alias FermixCore.Companion.Timeline
+  alias FermixCore.Delivery.FrozenOrigin
   alias FermixCore.Harness.Continuation
-  alias FermixCore.Harness.Delivery, as: HarnessDelivery
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
   alias FermixCore.Realtime.CallLease
@@ -777,7 +777,7 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
 
       # The snapshot the run tool freezes at launch, from the hand-off's key.
       assert {:ok, snapshot} =
-               HarnessDelivery.resolve_snapshot(%{
+               FrozenOrigin.resolve(%{
                  conversation_key: ConversationKey.from(hand_off)
                })
 

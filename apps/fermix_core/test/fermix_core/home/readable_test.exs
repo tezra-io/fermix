@@ -98,7 +98,63 @@ defmodule FermixCore.Home.ReadableTest do
     # trip by cascade. An engine at this format that changes a near leaves
     # the old words' row behind, which no near then matches and the next
     # newer engine's edit clears: the format stays.
-    @migrations Enum.to_list(1..39) ++ [41, 42, 43] ++ Enum.to_list(45..66)
+    # 67 (M94 §09, the phone-call ledger) adds one table an engine at this
+    # format never reads or writes, and changes nothing it does: the format
+    # stays.
+    # 68 (M94 §09, §12, the call ledger as it stands) rebuilds that table with
+    # four nullable columns, a wider unique key and one more release reason,
+    # every row kept, and an engine at this format never reads it: the format
+    # stays.
+    # 69 (M106 §5.1, a run's failure kind and tool timeline) adds one table an
+    # engine at this format never reads; its rows go with their run by
+    # cascade. `job_runs`, which that engine reads with `SELECT *`, is left as
+    # it was, so every run row keeps the width it reads: the format stays.
+    # 70 (M106 §5.3, a job's retry) adds one table an engine at this format
+    # never reads; its rows go with their job by cascade. `scheduled_jobs`,
+    # which that engine reads with `SELECT *`, is left as it was. A retry a
+    # newer engine left is never run by that engine, which reads only a job's
+    # next run, so the job waits for it: the format stays.
+    # 71 (M106 §5.4, a job's heal) adds two tables an engine at this format
+    # never reads; a heal goes with its job, and a heal's run with its run, by
+    # cascade. `job_runs` and `scheduled_jobs` are left as they were. A heal a
+    # newer engine opened is never sent by that engine, and its runs end in
+    # their failure line as they always did: the format stays.
+    # 72 (M106 §5.5, §5.9, a heal's diagnosis and verdict) adds columns to
+    # `job_heals` only, a table an engine at this format never reads; every
+    # heal row is kept as it was. `job_runs` and `scheduled_jobs` keep their
+    # widths. A newer engine's raised limit or pause is a value in a column
+    # that engine already reads, and a rerun is an ordinary manual run: the
+    # format stays.
+    # 73 (M106 §6, a run's tool tally and the tool a heal is about) adds a
+    # column to `job_run_facts` and one to `job_heals`, tables that engine
+    # reads by column name or not at all: its run read names the two facts it
+    # knows, so it reads past the tally. `job_runs` and `scheduled_jobs` keep
+    # their widths, and a run it writes has no tally, which only breaks a
+    # newer engine's streak: the format stays.
+    # 74 (M106 §5.7, D5, a proposal's version, the owner's answer to it and
+    # the surface it came from, and the mark of an owner's write while a heal
+    # run diagnoses, JOB-12) adds columns to `job_heals` only, a table an
+    # engine at this format never reads; every heal row is kept as it was. `job_runs` and `scheduled_jobs`
+    # keep their widths. A change the owner approved is a value in a column
+    # that engine already reads, written as an owner's edit is: the format
+    # stays.
+    # 75 (M107, the active-hours index) adds a partial index on `messages`, a
+    # table that engine reads and writes. SQLite keeps the index on every
+    # write whichever engine makes it, and every read that engine runs returns
+    # the rows it did: the format stays.
+    # 76 (M106 §5.7, D5, stage S4b, a proposal's card: its token's digest, the
+    # chat it went to, and the token while its send is pending) adds columns
+    # and a unique index to `job_heals` only, a table an engine at this
+    # format never reads; every heal row is kept as it was. `job_runs` and
+    # `scheduled_jobs` keep their widths. A card that engine never sent is no
+    # card it answers, and an answer a newer engine applied is a value in a
+    # column it already reads: the format stays.
+    # 77 (M94, a call hung up with nothing established reads `finished`) rebuilds `phone_calls`
+    # with one more word in its outcome CHECK, every row and column kept. An
+    # engine at this format either never reads that table or says a word its
+    # view does not know as an unknown outcome, and every word it writes the
+    # wider CHECK takes: the format stays.
+    @migrations Enum.to_list(1..39) ++ [41, 42, 43] ++ Enum.to_list(45..77)
     @manifest_keys ~w(created_at engine_version files format home_format home_root host links
                       primary_epoch)
     @entry_keys ~w(bytes mode path sha256)

@@ -48,19 +48,33 @@ Run everything from the umbrella **root** (per-app runs break on `runtime.exs`);
 with paths:
 
 ```bash
+scripts/dev/gate.py                                   # the gate before a push: the tree checks CI runs that one machine can, once, on the final tree
+scripts/dev/gate.py --force                           # the same, even if this tree already passed
 mix test                                              # full umbrella (hermetic — config/test.exs pins FERMIX_HOME)
 mix test apps/fermix_core/test/fermix_core/management # one area
 mix compile --warnings-as-errors && mix credo --strict && mix format --check-formatted
 for t in scripts/release/test_*.py; do uv run "$t" || break; done  # release-script suite
 for t in scripts/ci/test_*.py; do uv run "$t" || break; done  # CI-script suite
+for t in scripts/dev/test_*.py; do uv run "$t" || break; done  # dev-script suite
+make -C tla check                                     # TLA+ specs (Java 11+), reusing saved passes
 uv run scripts/ci/stress_changed_tests.py --base origin/dev --log-dir /tmp/stress  # CI's stress step
 uv run scripts/ci/flaky_report.py                    # tests CI flagged flaky, most often first
 ```
 
-All four Elixir gates plus the release-script suite must be green before calling any
-change done. CI reruns up to five failed tests once and flags the ones that then pass
-("Flaky test"); fix anything flagged twice, and never by raising a bound. Write tests for a
-loaded runner from the start: AGENTS.md, *Tests under load*.
+While working, run the tests you touched. Before a push, run `scripts/dev/gate.py` once on
+the final tree: format, compile, credo, the release, CI and dev script suites and the TLA+
+runner's tests, the benchmark harness tests and dry run, the whole suite, then the TLA+
+specs. CI still owns the rest: the other platforms, the stress run, the suite's time
+budget, the macOS Apple Maps helper check and the Linux Landlock proof, published-artifact
+checksums and the release cross-compiles. A pass is remembered by the tree's content and
+the toolchain, so a second run on the
+same tree (after committing it, say) skips straight to the specs; never rerun the whole
+suite to reconfirm it. Each test database starts as a copy of one migrated template
+(`test/support/repo_template.ex`), so a broken migration fails before any test. The suite
+runs through `scripts/ci/mix_test_retry.py`, as in CI: up to five failed tests rerun once by
+exact name, and any that then pass are flagged ("Flaky test"). A flag is a bug to fix, never
+a bound to raise. Write tests for a loaded runner from the start: AGENTS.md, *Tests under
+load*.
 
 ## The packaged app engine (occasional — not the dev loop)
 

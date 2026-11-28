@@ -27,7 +27,8 @@
 # The seed records the runners' fixture-server port in
 # eval-fixtures/fixture_server.json, and the daemon starts with
 # FERMIX_EVAL_FIXTURE_ORIGIN=http://127.0.0.1:<that port>, the one origin a dev
-# build's web_fetch reads past its private-address guard. A home without that
+# build's web_fetch reads past its private-address guard, and where a dev build's
+# phone calls go (the runners' simulated GPT-Live endpoint). A home without that
 # manifest starts the daemon with the variable removed, inherited or not, so its
 # web_fetch refuses loopback as every other Fermix does.
 set -euo pipefail
@@ -124,7 +125,20 @@ start_daemon() {
   if [ -x "$HOME_DIR/eval-bin/codex" ] || [ -x "$HOME_DIR/eval-bin/claude" ]; then
     daemon_path="$HOME_DIR/eval-bin:$PATH"
   fi
-  ( cd "$REPO_ROOT" && exec env -u FERMIX_EVAL_FIXTURE_ORIGIN \
+  # With --phone-calls the phone engine's OpenAI key is the invented one the seed
+  # stored; an OPENAI_API_KEY the caller's environment carries would overlay it at
+  # boot (config/runtime.exs), so that home's daemon starts without it.
+  local -a drop_env=(-u FERMIX_EVAL_FIXTURE_ORIGIN)
+  if [ -f "$HOME_DIR/eval-fixtures/phone_calls.json" ]; then
+    if [ ! -f "$FIXTURE_MANIFEST" ]; then
+      log "refusing to start: phone calls are on but $FIXTURE_MANIFEST is missing, so the"
+      log "daemon's calls would not reach the simulated endpoint; reseed the home"
+      return 1
+    fi
+    drop_env+=(-u OPENAI_API_KEY)
+    log "phone calls on: the daemon's OpenAI key is the seed's invented one, and its calls reach the fixture origin only"
+  fi
+  ( cd "$REPO_ROOT" && exec env "${drop_env[@]}" \
       PATH="$daemon_path" \
       FERMIX_HOME="$HOME_DIR" \
       ${opik_env[@]+"${opik_env[@]}"} \

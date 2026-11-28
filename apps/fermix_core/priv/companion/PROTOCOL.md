@@ -487,7 +487,7 @@ in a fixed order:
 | `turn_done` | `turn_id` | Version 2. The turn completed and wrote no reply: it ends the turn, and nothing of its draft is kept. Sent only to a connection on version 2 or later; see *Version 2*. |
 | `row` | `profile_id`, `server_seq`, `role`, `text`, `ts`, `media_refs[]`; `client_msg_id?`, `kind?`, `metadata?`, `link_previews[]?`, `blocks[]?` | A timeline row this socket did not stream, announced to every connection as it is written: the sender's own message (with its `client_msg_id`, to match the outbox), a slash command's answer, a scheduled delivery, a message from a phone, the reply to a phone's turn, and a Live call's row. `kind`, `metadata`, `media_refs`, `link_previews` and `blocks` are the history message's, as a `history_page` carries them (see *Timeline shapes*); a Live call's row carries `metadata.call` (see *A Live call's rows*), and a message a scheduled job's or a cue's run sent carries `metadata.origin` (see *Where a message came from*). |
 | `row_updated` | `profile_id`, `server_seq` | Version 3. A row already written changed: its text, its media refs or its link previews. Carries no content; see *When a row changes*. Sent only to a connection on version 3 or later. |
-| `approval` | `approval_id`, `kind`, `text`, `token`, `ttl_s`, `approve_command`, `deny_command`; `detail?` | An owner-approval card raised by a turn on this socket. The token is submitted, never rendered. Routes are nonempty and at most 1,024 characters. Sent again after `server_hello` while it waits; see *Approvals*. |
+| `approval` | `approval_id`, `kind`, `text`, `token`, `ttl_s`, `approve_command`, `deny_command`; `detail?` | An owner-approval card raised by a turn on this socket, or asked in the Fermix app with no turn. The token is submitted, never rendered. Routes are nonempty and at most 1,024 characters. Sent again after `server_hello` while it waits; see *Approvals*. |
 | `approval_resolved` | `approval_id`, `outcome` | `approved` or `denied` when the owner answered, `expired` when its `ttl_s` ran out. |
 | `read_state` | `profile_id`, `read_up_to_seq` | The read frontier, sent to every connection, whichever client (the Mac or a phone) moved it. |
 | `history_page` | `profile_id`, `messages[]`, `history_head_seq`; `next_after_seq?`, `next_before_seq?` | Messages oldest first, at most `limit` and about 60 KiB of them. |
@@ -985,8 +985,9 @@ a turn started here reaches them as a `row` too, since they never saw that
 turn start. What crosses the two transports is the timeline and the read
 frontier. A turn's stream and its ending (`turn_started`, `text_delta`,
 `tool_event`, `text_done`, `turn_error`, `turn_done`) stay with the transport
-that ran the turn, and so do approvals, whose token resolves only there (see
-*Approvals*).
+that ran the turn, and so do the approvals a turn raised, whose token
+resolves only there; an approval Fermix asks in the app with no turn reaches
+both (see *Approvals*).
 
 `server_seq` is assigned inside the write that stores the row, from a
 per-profile counter that never goes back, whoever writes (a turn, a job, the
@@ -1006,7 +1007,10 @@ announced after a later reply's), and a page and a live event can carry the
 same row. So a client keeps a cursor, the last `server_seq` it shows, and:
 
 - pulls `history_pull{after_seq: cursor}` after every `server_hello`, and again
-  while a page's `next_after_seq` is below its `history_head_seq`;
+  while a page's `next_after_seq` is below its `history_head_seq`; a pull, here
+  or on a gap, may start below the cursor, so one page brings held rows again
+  together with the rows after it, and the pull after a page that says more
+  starts no lower than that page's `next_after_seq`;
 - applies a live row (a `row`, or a `text_done` at its `server_seq`) when its
   seq is `cursor + 1`, drops one at or below the cursor, and on a gap pulls
   from the cursor (unless a pull is already out) instead of showing it;
@@ -1080,6 +1084,19 @@ model's summary of each step of its reasoning as it completes (see *Version
 6*). Both say what the turn is doing; neither is part of its reply, and
 neither is kept once the turn ends.
 
+A turn need not answer a request a client sent: a request the owner's
+approval resumed begins one, on the transport that confirmed it. Its
+`turn_started` names in `in_reply_to` an id no client sent and no row carries.
+It streams and ends as any other turn does, every event of it under the one
+`turn_id` its `turn_started` gave. A `cancel` names a request, so it stops no
+such turn.
+
+A report Fermix starts in the chat itself, when a phone call or a coding run
+started there finishes, is no turn on this wire: no client started it, so
+nothing of it is streamed and nothing ends. Its reply arrives as a `row` once
+it is written, as a job's message does. A report that could not be written
+arrives as a `row` that says so, and one that was stopped sends nothing.
+
 A turn ends on the wire exactly once, and only from its outcome in the
 daemon's turn queue:
 
@@ -1115,39 +1132,59 @@ daemon is not running under exactly those ids is refused with
 
 ## Approvals
 
-When a tool needs the owner's approval, the daemon sends `approval`. The
-companion answers by sending one of the routes as a `command`: drop the
-leading `/`, the first word is `name` and the rest is `args`. `/confirm TOKEN`
-is `command{name: "confirm", args: "TOKEN"}`, and `/soul apply TOKEN` is
+When the owner's approval is needed, the daemon sends `approval`: for a tool
+a turn is waiting on, or for something Fermix asks the owner in the app with
+no turn (below). Its `kind` is `sandbox`, `soul` or `job_change`; a client
+draws a kind it does not know as it draws any other card. The companion
+answers by sending one of the routes as a `command`: drop the leading `/`, the
+first word is `name` and the rest is `args`. `/confirm TOKEN` is
+`command{name: "confirm", args: "TOKEN"}`, and `/soul apply TOKEN` is
 `command{name: "soul", args: "apply TOKEN"}`.
 
-- A card belongs to the transport whose turn raised it, the only one its token
-  resolves from: this socket gets the cards its own turns raise, and never a
-  phone's. Its re-send, expiry and resolution go to this socket's connections
-  alone.
+- A card a turn raised belongs to the transport whose turn raised it, the only
+  one its token resolves from: this socket gets the cards its own turns raise,
+  and never a phone's. Its re-send, expiry and resolution go to this socket's
+  connections alone.
+- A card Fermix asks in the app with no turn, while the app is the owner's
+  inbox (a paired phone makes it so, or this Mac's chat alone when the owner
+  has no other), goes to this socket and the phones alike, is answered from
+  either, and its re-send and resolution go to both: an access confirmation
+  that had no chat of its own, and a change a heal proposes for a scheduled
+  job (`kind` `job_change`, whose `text` is the job and each changed field,
+  and whose `detail` holds every changed field whole).
 - `approval_resolved` reports the outcome to every connection of this socket:
   `approved` or `denied` when the owner answered, `expired` when the card's
-  `ttl_s` ran out.
+  `ttl_s` ran out or it can no longer be answered.
 - Right after `server_hello`, the daemon sends again every card of the profile
-  still waiting that this socket's turns raised, oldest first, each with
-  `ttl_s` set to the seconds it has left, rounded up. A client keys cards by
-  `approval_id`, so a card it already shows is replaced, not doubled.
+  still waiting that this socket's turns raised or that was asked in the app,
+  oldest first, a `job_change` card after the rest, each with `ttl_s` set to
+  the seconds it has left, rounded up. A client keys cards by `approval_id`,
+  so a card it already shows is replaced, not doubled.
 - When `server_hello` arrives, a client drops every card it shows and keeps
   only the ones the daemon sends after it. `approval_resolved` goes only to the
   connections open when a card is answered or expires, so a card that ended
   while the client was away is never withdrawn: it is simply not sent again.
-- Waiting cards live in the daemon's memory, as their tokens do: a restart
-  forgets them without resolving them, so a client also drops a card when its
-  own `ttl_s` runs out. The daemon keeps at most 64; past that a card still
-  goes out live but is not sent again, so a reconnect drops it.
+- A `job_change` card is kept in the home's record, not in memory, and lives
+  up to seven days: its `ttl_s` is what is left of them, up to 604,800. It is
+  sent again after every `server_hello` while it waits, after a restart too,
+  and `approval_resolved` ends it however it ends: `approved` (the change was
+  made), `denied` (the job was left as it is), or `expired` (the seven days
+  passed, the owner edited, paused or resumed the job so the proposal no
+  longer applies, the job ran cleanly, or the job was removed). Its `token`
+  and its routes name the proposal, and `/confirm` or `/deny` with it is
+  answered from the app and nowhere else.
+- Every other card lives in the daemon's memory, as its token does: a restart
+  forgets it without resolving it, so a client also drops a card when its own
+  `ttl_s` runs out. The daemon keeps at most 64 of these; past that a card
+  still goes out live but is not sent again, so a reconnect drops it.
 
 ## Proposals
 
 A cue's task running under a mandate in approve mode does not act on its own:
 Fermix stores what it wants to run as a proposal and waits, for the proposal's
 lifetime, for the owner. Version 4 brings it to this socket. The proposal is
-durable (it lives in `memory.db`, not in daemon memory, unlike an approval), so
-it survives a restart.
+durable (it lives in `memory.db`, not in daemon memory, unlike a turn's
+approval), so it survives a restart.
 
 - **Who.** Proposal events go only to connections the daemon placed as the
   owner's: a process it did not start, with a terminal or launched by the

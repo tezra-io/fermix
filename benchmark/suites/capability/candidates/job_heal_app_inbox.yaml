@@ -1,0 +1,174 @@
+suite: cap_job_heal_app_inbox
+risk: isolated_mutation
+requires: [owner_inbox_app]
+title: "Capability — a job's heal told and asked in the Fermix app, the owner's inbox (memory.db and the companion socket's events)"
+description: >
+  Auto Heal (MILESTONE_106) stage S6: the Fermix app as the owner's inbox (§8, D3, D9,
+  D12). The home is seeded with --owner-inbox-app, so its configured default target
+  is the app's chat (`companion`, `main`), which `Delivery.OwnerInbox` takes as the
+  owner's own. Each task's `checker.state` seeds the owner's job with a failed run and
+  its heal's conclusion recorded but NOT sent (`decided_minutes_after`,
+  bin/seed_state.exs), as a heal run that stopped after its decision leaves it: the
+  daemon's next pass claims it, resolves the owner's inbox itself, and sends it, with
+  no model. A told heal is a row in the app's timeline (its job as the row's origin,
+  keyed by its send key) and a row in that conversation's history; a proposal is that
+  row and an `approval` card of kind `job_change`, routed by the heal's id
+  (`/confirm jhl_…`, `/deny jhl_…`), offered again after every hello while it waits
+  and resolved in the app (`approval_resolved`) however it ends.
+
+  Each trial is driven as the Mac app lives with it (`drive: app`,
+  evallib/app_drive.py): the runner opens the companion socket and starts a fresh
+  conversation, seeds the state while it is open, and takes the case's steps: wait
+  for the heal's row or card, answer the card by sending its route as a command,
+  reconnect (a new hello), type a command in the owner's terminal chat, or say
+  something in the app. `checkers/job_app_inbox.py` grades memory.db, the home's trace
+  and every event the socket received, never wording.
+
+  told_heal_reaches_the_app: one timeline row with its job as origin, one history row
+  in the app's conversation, nothing to any other chat, no card. approve_on_the_app_card
+  and deny_on_the_app_card: the row and one live `job_change` card naming the heal;
+  Approve applies exactly the recorded change (the heal watching, decided from the
+  app's chat) and the card resolves approved; Deny leaves the job and resolves denied.
+  card_offered_again_until_answered: a reconnect while the card waits offers it again,
+  and one after the answer does not. answer_typed_in_the_terminal_refused: the card's
+  own `/confirm jhl_…` typed in the terminal chat is refused (the card answers from
+  the app alone): nothing changes, the card does not resolve, and a reconnect still
+  offers it. owner_edit_ends_the_card is the one model turn: the owner asks, in the
+  app, to move the job to another time; that edit (`update_job`) closes the proposal
+  superseded and the card resolves expired. A trial whose turn made no edit measured
+  nothing and is invalid.
+
+  NOT here: a watcher's card (a mandate's proposal, a follow-up's card) reaching where
+  it went before the app was an inbox. No eval fixture makes one: an approve-mode
+  mandate needs an owner DM the eval home does not have (candidates/cues.yaml), so it
+  stays covered in ExUnit.
+
+  PRECONDITIONS: a home seeded with --owner-inbox-app (`requires: [owner_inbox_app]`;
+  the runner holds these tasks out as NOT EVALUATED without it), the companion socket
+  served in the home, and the Scheduler picking up a heal another process wrote within
+  its 60 s reconcile. A heal the daemon never claimed is an invalid measurement, never
+  a 0. Parked under candidates/ until the owner promotes it; run it with
+  `--candidates --suite cap_job_heal_app_inbox`.
+
+  COST: no task runs a diagnosis (each conclusion is seeded); owner_edit_ends_the_card
+  runs one turn on the home's main model, and every other task runs no model at all.
+  The app drive reads no trace, so a trial's cost is reported unknown, never $0.
+
+  DETERMINISM: what reaches the app, the card and each answer are code with no model;
+  they vary only with the Scheduler's pickup inside the case's timeout. The edit task
+  varies with whether its turn makes the edit.
+
+  SAFETY: the checker's own observation: the job changed beyond what the outcome
+  leaves (any change where none is made), removed, or a job added; an answer or an
+  applied change where none was given.
+defaults:
+  judge: false
+  timeout_ms: 240000
+
+scenarios:
+  - id: told_in_the_app
+    title: "A failed job's heal is told in the app: one row with its job as origin, kept in the app's conversation, nowhere else"
+    severity: normal
+    risk: isolated_mutation
+    tags: [capability, jobs, auto_heal, app_inbox]
+    cases:
+      - id: told_heal_reaches_the_app
+        drive: app
+        app:
+          steps:
+            - await_row
+        checker:
+          script: "suites/capability/checkers/job_app_inbox.py"
+          mode: json
+          state: "suites/capability/fixtures/state/job_heal_app_told.json"
+          timeout_ms: 60000
+          expect:
+            job: ferry
+            outcome: told
+
+  - id: asked_in_the_app
+    title: "A heal's proposal is the app's own approval card: offered once, answered from the app alone, offered again while it waits, and resolved however it ends"
+    severity: normal
+    risk: isolated_mutation
+    tags: [capability, jobs, auto_heal, app_inbox]
+    cases:
+      - id: approve_on_the_app_card
+        drive: app
+        app:
+          steps:
+            - await_card
+            - answer: approve
+        checker:
+          script: "suites/capability/checkers/job_app_inbox.py"
+          mode: json
+          state: "suites/capability/fixtures/state/job_heal_app_proposal.json"
+          timeout_ms: 60000
+          expect:
+            job: holds
+            outcome: applied
+
+      - id: deny_on_the_app_card
+        drive: app
+        app:
+          steps:
+            - await_card
+            - answer: deny
+        checker:
+          script: "suites/capability/checkers/job_app_inbox.py"
+          mode: json
+          state: "suites/capability/fixtures/state/job_heal_app_proposal.json"
+          timeout_ms: 60000
+          expect:
+            job: holds
+            outcome: left
+
+      - id: card_offered_again_until_answered
+        drive: app
+        app:
+          steps:
+            - await_card
+            - reconnect
+            - answer: approve
+            - reconnect
+        checker:
+          script: "suites/capability/checkers/job_app_inbox.py"
+          mode: json
+          state: "suites/capability/fixtures/state/job_heal_app_proposal.json"
+          timeout_ms: 60000
+          expect:
+            job: holds
+            outcome: applied
+
+      - id: answer_typed_in_the_terminal_refused
+        drive: app
+        app:
+          steps:
+            - await_card
+            - type_cli: "/confirm {card}"
+            - reconnect
+        checker:
+          script: "suites/capability/checkers/job_app_inbox.py"
+          mode: json
+          state: "suites/capability/fixtures/state/job_heal_app_proposal.json"
+          timeout_ms: 60000
+          expect:
+            job: holds
+            outcome: waiting
+
+      # The one model turn: the owner moves the job themselves while its card waits.
+      - id: owner_edit_ends_the_card
+        drive: app
+        app:
+          steps:
+            - await_card
+            - say: >-
+                Can you move my Marrowfield library holds digest to 6:45 every morning
+                instead of 7:20? I'd like it before I leave for the bus.
+        checker:
+          script: "suites/capability/checkers/job_app_inbox.py"
+          mode: json
+          state: "suites/capability/fixtures/state/job_heal_app_proposal.json"
+          timeout_ms: 60000
+          expect:
+            job: holds
+            outcome: superseded

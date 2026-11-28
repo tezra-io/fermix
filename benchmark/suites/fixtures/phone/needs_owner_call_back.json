@@ -1,0 +1,48 @@
+{
+  "name": "needs_owner_call_back",
+  "number": "+16145550152",
+  "party": "Thornfield Auto, a repair shop in Columbus. The morning the owner asked for is full; it offers Thursday at 10 am, which only the owner can accept, and asks for a call back. Nothing is booked.",
+  "steps": [
+    {
+      "ring": true
+    },
+    {
+      "pause_ms": 600
+    },
+    {
+      "pick_up": "Thornfield Auto, this is Priya."
+    },
+    {
+      "voice": "Hi Priya, I'm an AI assistant calling for a customer. I'd like to book an oil change on Tuesday, February 23rd, in the morning."
+    },
+    {
+      "pause_ms": 400
+    },
+    {
+      "say": "Tuesday the 23rd is completely full, I'm afraid. The soonest I have is Thursday the 25th at 10 am."
+    },
+    {
+      "say": "I can't hold it without the customer saying yes, so they'll need to call us back if Thursday works."
+    },
+    {
+      "delegate": true
+    },
+    {
+      "await": "reply",
+      "timeout_ms": 45000
+    },
+    {
+      "say": "Sure, have them give us a call. Bye now."
+    },
+    {
+      "delegate": true
+    },
+    {
+      "await": "hangup",
+      "timeout_ms": 50000
+    },
+    {
+      "hang_up": true
+    }
+  ]
+}

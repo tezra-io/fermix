@@ -14,6 +14,7 @@ defmodule FermixChannels.Channels.IMessageTest do
   alias FermixChannels.Test.IMessageFakeHelper, as: FakeHelper
   alias FermixCore.Delivery.Error, as: DeliveryError
   alias FermixCore.IMessage.Control
+  alias FermixCore.Jobs.HealMessage
   alias FermixTestSupport.SafeRm
 
   @owner "+15551234567"
@@ -300,6 +301,40 @@ defmodule FermixChannels.Channels.IMessageTest do
       assert first["idempotency_key"] =~ "temporal:r-7"
     end
 
+    # M106 §5.9: the helper's ledger answers a repeated key without sending,
+    # so a heal's verdict carries a key of its own, never its first message's.
+    test "a heal's first message and its verdict are keyed apart; a retry keeps its own", ctx do
+      first = HealMessage.send_key(%{id: "jhl_5e2a", conclusion: "first"})
+      verdict = HealMessage.send_key(%{id: "jhl_5e2a", conclusion: "verdict"})
+
+      assert :ok =
+               IMessage.send_message(
+                 @owner,
+                 "The tides job failed.",
+                 ctx.opts ++ [proactive_key: first]
+               )
+
+      assert :ok =
+               IMessage.send_message(
+                 @owner,
+                 "It is still failing.",
+                 ctx.opts ++ [proactive_key: verdict]
+               )
+
+      assert :ok =
+               IMessage.send_message(
+                 @owner,
+                 "It is still failing.",
+                 ctx.opts ++ [proactive_key: verdict]
+               )
+
+      [first_key, verdict_key, retry_key] =
+        Enum.map(FakeHelper.calls(ctx.server, "send.text"), & &1["idempotency_key"])
+
+      assert first_key != verdict_key
+      assert retry_key == verdict_key
+    end
+
     test "a turn reply is keyed by turn and attempt; an unkeyed send gets a fresh key", ctx do
       assert :ok = IMessage.send_message(@owner, "hi", ctx.opts ++ [turn_id: "t-42", attempt: 2])
       assert :ok = IMessage.send_message(@owner, "hi", ctx.opts)
@@ -472,6 +507,32 @@ defmodule FermixChannels.Channels.IMessageTest do
 
       assert [%{"to" => @owner, "text" => "reply"}] = FakeHelper.calls(ctx.server, "send.text")
       assert [%{"to" => @owner}] = FakeHelper.calls(ctx.server, "send.file")
+    end
+  end
+
+  # M106 §5.7: a heal's card reaches an iMessage owner through the gateway's
+  # approval delivery, on a message that carries the heal's send key, so a
+  # retried send of the card is answered by the helper's ledger, not sent twice.
+  describe "a reply closure on a message carrying a send key" do
+    test "keys every send of it identically; a message without one keys each afresh", ctx do
+      {:ok, message} =
+        IMessage.parse_row(row(), @dedicated, %{helper: FakeHelper, server: ctx.server})
+
+      keyed = %{
+        message
+        | metadata: Map.put(message.metadata, :proactive_key, "job_heal:jhl_tides")
+      }
+
+      assert :ok = IMessage.build_text_reply(keyed).("the card")
+      assert :ok = IMessage.build_text_reply(keyed).("the card")
+      assert :ok = IMessage.build_text_reply(message).("a reply")
+
+      [first, second, reply] =
+        Enum.map(FakeHelper.calls(ctx.server, "send.text"), & &1["idempotency_key"])
+
+      assert first == second
+      assert first =~ "proactive:job_heal:jhl_tides"
+      refute reply =~ "proactive:"
     end
   end
 

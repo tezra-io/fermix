@@ -198,12 +198,15 @@ defmodule FermixCore.Tools.JoinMeeting do
     end
   end
 
+  # The context's `:meetings_opts` `:always_on_server` stands for that fact in
+  # a test (`Meetings.meet_here/1`); a turn carries none.
   defp join(url, args, context) do
-    opts = [
-      title: title(args),
-      context: context,
-      store_opts: [server: Map.get(context, :memory_repo, Repo)]
-    ]
+    opts =
+      [
+        title: title(args),
+        context: context,
+        store_opts: [server: Map.get(context, :memory_repo, Repo)]
+      ] ++ Keyword.take(Map.get(context, :meetings_opts, []), [:always_on_server])
 
     case Meetings.join(url, opts) do
       {:ok, joining} -> {:ok, Tool.success(Jason.encode!(view(joining)))}

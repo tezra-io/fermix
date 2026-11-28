@@ -126,6 +126,29 @@ opens no copy is refused before anything is written.
 Fermix never deletes the server, which is the owner's own: nothing the
 computer can check would prove it is down.
 
+An Always On server updates itself as root, unattended, and root runs only
+code of the release it has installed, never an installer fermix.ai serves.
+It installs a release's package, and takes that release's update script,
+only when two independent roots agree: the file's sha256 is the one
+fermix.ai's release table lists, and the cosign the installed package ships
+verifies its signature as the release workflow's (`release.yml` on that
+release's own `v*` tag of `tezra-io/fermix`, issued by GitHub's OIDC), an
+identity the update script carries as constants the release wrote. cosign
+keeps its Sigstore trust state in a folder of root's own, so the engine
+account cannot seed or replace it, and that account only names which
+eligible release to install, so it can at most choose among signed
+releases. A check that fails, or no cosign to check with, installs nothing
+and says which check it was. So neither the site alone nor GitHub alone can
+put code on a server: that takes both the site and a run of the release
+workflow on a tag only the release-owners team can create. Two runs trust
+the site alone, and the owner sees both: the first install
+(`curl -fsSL https://fermix.ai/install | sudo sh -s -- --always-on`, whose
+installer checks the server script and then its first boot checks the
+package against the site's table, since no cosign exists before the package
+does), and the Linux desktop installer, run by hand. A server set up from
+0.20.0 takes the first release with these checks through its old update
+script, which runs the site's installer, one last time.
+
 What this deliberately does not cover:
 
 - Only the turn that read the content waits. Replayed history on a later turn,
@@ -136,11 +159,16 @@ What this deliberately does not cover:
   them freely. With the coding runs set up this holds on macOS too: such a job
   could start one. A request that runs again after the owner's `/confirm` (a
   directory grant, a coding-agent config acknowledgment) is the same request
-  and keeps what it had read. Two things carry it further: an open loop noted
+  and keeps what it had read. Three things carry it further: an open loop noted
   in such a turn is marked, and the later turn its due note rides, or that
-  lists, settles or notes it again, counts as having read outside content; and
-  on a GPT-Live or Grok voice call, once one task has read it, every later task
-  of that call has.
+  lists, settles or notes it again, counts as having read outside content; the
+  owner's message that answers a phone call's report counts as having read the
+  call when the report came into the conversation that asked for it as a
+  follow-up turn (that message only: once the owner has sent another, the
+  report is only replayed; a report sent as a plain message carries nothing: a
+  voice-asked call's, to the inbox, that of a call the owner stopped, and one
+  whose follow-up turn could not be started); and on a GPT-Live or Grok voice
+  call, once one task has read it, every later task of that call has.
 - A finished coding run reports back as a follow-up turn, which may start the
   next run of the chain without asking (the owner's choice): with the same
   coding agent and the same starting folder as the run that finished, once per

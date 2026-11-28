@@ -8,6 +8,7 @@ defmodule Fermix.CLI.SettingsCommandTest do
   import ExUnit.CaptureIO
 
   alias Fermix.CLI.SettingsCommand
+  alias FermixCore.Management.Settings
   alias FermixTestSupport.PipedTerminal
   alias FermixTestSupport.TtyTerminal
 
@@ -169,6 +170,26 @@ defmodule Fermix.CLI.SettingsCommandTest do
       assert stdout =~ "Review memory every: 24 hours"
       assert [{"settings.get", %{"section" => "memory"}, opts}] = calls()
       assert opts[:timeout] == 10_000
+    end
+
+    # M94 §12: the Phone calls section renders from its descriptor like every
+    # other, so the command shows the daemon's own rows with no code of its own:
+    # each label, the password and the OpenAI key as presence only, and how
+    # each secret is set.
+    test "shows the Phone calls section the daemon publishes" do
+      {:ok, section} = Settings.get("phone_calls")
+
+      {status, stdout, _stderr} =
+        run(["show", "phone_calls"], client(%{"settings.get" => {:ok, section}}))
+
+      assert status == 0
+      assert stdout =~ "Phone calls  (phone_calls)\n"
+
+      for row <- section["rows"], do: assert(stdout =~ row["label"], row["key"])
+
+      assert stdout =~ "Connection password: not set"
+      assert stdout =~ "fermix settings secret set phone_calls_sip_password"
+      assert stdout =~ "GPT-Live · gpt-live-1"
     end
 
     test "an unknown section prints the CLI's own sentence" do

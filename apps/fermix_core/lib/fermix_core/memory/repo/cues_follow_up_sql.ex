@@ -49,9 +49,9 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
   runs or what sets it off is no longer what the card showed, so nothing was
   allowed. Migration 58 added both columns to the table 54 made.
 
-  A `cp_` token answers a mandate's proposal or a follow-up's card:
-  `{:token_kind, digest}` says which table holds it, so `Cues.Proposals`
-  dispatches each answer from one place.
+  A `cp_` token answers a card of one of the answer rail's holders
+  (`Cues.CardHolder`): `{:token_held, digest}` says whether this table holds
+  it, so `Cues.Proposals` dispatches each answer from one place.
   """
 
   alias FermixCore.Cues
@@ -233,8 +233,8 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
     digest of what it shows now (`CuesFollowUpAllowSql.card_digest/3`).
   - `{:waiting_cards, now, limit}` → `{:ok, [card_row]}`: every card still
     waiting that went out, oldest first, for an app that connects.
-  - `{:token_kind, digest}` → `{:ok, :mandate | :follow_up | nil}`: which
-    table holds a `cp_` token's digest.
+  - `{:token_held, digest}` → `{:ok, boolean}`: whether a card here holds a
+    `cp_` token's digest.
   - `{:expire, now, limit}` → `{:ok, [trigger]}`: waiting past the expiry →
     `expired`.
   - `{:run_trigger, run_id}` → `{:ok, %{trigger: trigger, watcher_name:
@@ -306,18 +306,9 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
          do: collect(rows, &card_row(conn, &1))
   end
 
-  def handle(conn, {:token_kind, digest}) when is_binary(digest) do
-    sql = """
-    SELECT 'mandate' FROM cue_proposals WHERE token_digest = ?
-    UNION ALL SELECT 'follow_up' FROM cue_follow_up_triggers WHERE token_digest = ?
-    LIMIT 1
-    """
-
-    case CuesSql.query_all(conn, sql, [digest, digest]) do
-      {:ok, []} -> {:ok, nil}
-      {:ok, [[kind]]} -> {:ok, token_kind(kind)}
-      {:error, reason} -> {:error, reason}
-    end
+  def handle(conn, {:token_held, digest}) when is_binary(digest) do
+    sql = "SELECT 1 FROM cue_follow_up_triggers WHERE token_digest = ? LIMIT 1"
+    with {:ok, rows} <- CuesSql.query_all(conn, sql, [digest]), do: {:ok, rows != []}
   end
 
   def handle(conn, {:expire, %DateTime{} = now, limit}) when is_integer(limit) and limit > 0 do
@@ -667,11 +658,6 @@ defmodule FermixCore.Memory.Repo.CuesFollowUpSql do
       {:error, reason} -> {:error, reason}
     end
   end
-
-  # --- tokens ----------------------------------------------------------------------
-
-  defp token_kind("mandate"), do: :mandate
-  defp token_kind("follow_up"), do: :follow_up
 
   # --- reads -----------------------------------------------------------------------
 

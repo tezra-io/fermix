@@ -172,7 +172,7 @@ defmodule FermixCore.Providers.OpenAI.ChatGPTPlan do
   defp sentence_for(:plan_not_eligible, _error),
     do:
       "This ChatGPT account or workspace can't use its plan in Fermix. " <>
-        "ChatGPT Plus and Pro plans can."
+        "Check your ChatGPT plan, or ask your workspace admin to let apps use the ChatGPT plan."
 
   defp sentence_for(
          :invalid_request,

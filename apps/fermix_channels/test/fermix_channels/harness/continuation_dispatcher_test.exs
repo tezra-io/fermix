@@ -131,6 +131,34 @@ defmodule FermixChannels.Harness.ContinuationDispatcherTest do
       refute_receive {:ingested, _messages, _opts}, 100
     end
 
+    # The Mac app's chat hands its turns to `Companion.Turns`, which ends each
+    # one on its wire: a report re-ingested around it starts a turn there that
+    # nothing ends.
+    test "hands the notice to the agent the channel's own transport uses", ctx do
+      opts = ctx |> opts() |> Keyword.delete(:agent)
+
+      assert :ok = ContinuationDispatcher.dispatch(notice(), opts)
+      assert_receive {:ingested, [_telegram], telegram_opts}
+      assert telegram_opts[:agent] == FermixChannels.Gateway.Queue
+
+      chat = notice(%{platform: "companion", destination: "main"})
+      assert :ok = ContinuationDispatcher.dispatch(chat, opts)
+      assert_receive {:ingested, [message], chat_opts}
+      assert message.channel == "companion"
+      assert chat_opts[:agent] == FermixChannels.Companion.Turns
+    end
+
+    # `Companion.Turns` shows a report as no turn on the Mac's wire alone: the
+    # phone's channel has no owner id to re-enter as, so no report runs there.
+    test "refuses the phone's channel, which has no owner to re-enter as", ctx do
+      phone = notice(%{platform: "mobile", destination: "main"})
+
+      assert {:error, {:no_owner_configured, "mobile"}} =
+               ContinuationDispatcher.dispatch(phone, opts(ctx))
+
+      refute_received {:ingested, _messages, _opts}
+    end
+
     test "refuses a notice with no delivery target", ctx do
       assert {:error, {:invalid_continuation_target, _}} =
                ContinuationDispatcher.dispatch(notice(%{destination: nil}), opts(ctx))

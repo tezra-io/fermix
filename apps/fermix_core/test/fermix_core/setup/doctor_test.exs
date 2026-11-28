@@ -695,6 +695,75 @@ defmodule FermixCore.Setup.DoctorTest do
     end
   end
 
+  # M105 §3.4: the gateway's /models is public, so the probe is a one-token
+  # chat completion on the endpoint a turn calls, with the attribution headers
+  # the adapter sends: 200 proves the key and the model id and that the account
+  # may spend, 401 rejects the key, and 402 means no credit is left or a budget
+  # set on the key is spent.
+  describe "probe_provider/2 — :vercel" do
+    test "sends a 1-token chat completion with attribution headers (mirrors the adapter)" do
+      put_provider(:vercel, api_key: "vck-key", default_model: "spacexai/grok-4.7")
+
+      plug = fn conn ->
+        assert conn.method == "POST"
+        assert conn.request_path == "/v1/chat/completions"
+        assert ["Bearer vck-key"] = Plug.Conn.get_req_header(conn, "authorization")
+        assert ["https://fermix.sh"] = Plug.Conn.get_req_header(conn, "http-referer")
+        assert ["Fermix"] = Plug.Conn.get_req_header(conn, "x-title")
+
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        assert %{"model" => "spacexai/grok-4.7", "max_tokens" => 1} = Jason.decode!(raw)
+        Plug.Conn.send_resp(conn, 200, ~s({"id":"gen-1"}))
+      end
+
+      assert {:ok, %{provider: :vercel, model: "spacexai/grok-4.7"}} =
+               Doctor.probe_provider(:vercel, req_options: [plug: plug])
+    end
+
+    test "probes the catalog default when no model is chosen" do
+      put_provider(:vercel, api_key: "vck-key")
+
+      plug = fn conn -> Plug.Conn.send_resp(conn, 200, ~s({"id":"gen-1"})) end
+
+      assert {:ok, %{provider: :vercel, model: "anthropic/claude-sonnet-4.6"}} =
+               Doctor.probe_provider(:vercel, req_options: [plug: plug])
+    end
+
+    test "classifies a 401 as auth_scope_mismatch with a Vercel AI Gateway hint" do
+      put_provider(:vercel, api_key: "vck-bad")
+
+      plug = fn conn ->
+        Plug.Conn.send_resp(conn, 401, ~s({"error":{"type":"authentication_error"}}))
+      end
+
+      assert {:error, {:auth_scope_mismatch, "ai-gateway.vercel.sh API key", hint}} =
+               Doctor.probe_provider(:vercel, req_options: [plug: plug])
+
+      assert hint =~ "Vercel AI Gateway API key rejected"
+
+      assert hint =~
+               "(Vercel also refuses a team that has to add a payment method before it can spend)"
+    end
+
+    # No credit left answers 402. It keeps the generic server_error kind every
+    # provider's non-auth status takes, as Venice's does.
+    test "reports a 402 out-of-credit account as a server error carrying the status" do
+      put_provider(:vercel, api_key: "vck-broke")
+
+      plug = fn conn -> Plug.Conn.send_resp(conn, 402, "{}") end
+
+      assert {:error, {:server_error, 402, _message}} =
+               Doctor.probe_provider(:vercel, req_options: [plug: plug])
+    end
+
+    test "reports missing api_key as misconfigured" do
+      put_provider(:vercel, [])
+
+      assert {:error, {:misconfigured, message}} = Doctor.probe_provider(:vercel)
+      assert message =~ "vercel provider has no api_key"
+    end
+  end
+
   describe "probe_provider/2 — :ollama" do
     test "probes /v1 keyless and accepts when /api/show reports a healthy num_ctx" do
       put_provider(:ollama, base_url: "http://localhost:11434/v1", default_model: "qwen3:32b")
@@ -2111,17 +2180,21 @@ defmodule FermixCore.Setup.DoctorTest do
     end
   end
 
-  # A 429's one retry waits out Brave's window: the probe's waits are told to
-  # the test, never slept.
+  # A 429's one retry waits out Brave's window: the probe's pacer runs on a
+  # clock only its waits move, and each wait is told to the test, never slept,
+  # so the window it waits out is the one the 429 set, whatever the runner's load.
   defp full_place_report(id) do
     test_pid = self()
+    clock = start_supervised!(Supervisor.child_spec({Agent, fn -> 0 end}, id: make_ref()))
 
     Doctor.place_search_report(
       full: true,
       host: @linux,
       req_options: [plug: {Req.Test, id}],
       net_resolver: place_resolver(),
+      place_search_now_ms: fn -> Agent.get(clock, & &1) end,
       place_search_sleep: fn ms ->
+        Agent.update(clock, &(&1 + ms))
         send(test_pid, {:probe_slept, ms})
         :ok
       end

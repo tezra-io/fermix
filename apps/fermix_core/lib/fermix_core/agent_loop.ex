@@ -76,6 +76,9 @@ defmodule FermixCore.AgentLoop do
   # replays, so it breaks the prompt cache, and a batch breaks it rarely.
   @superseded_look_bytes 32_000
 
+  # The tag a refused `before_tool` gate throws to `run/1`.
+  @before_tool_refused :agent_loop_before_tool_refused
+
   @typedoc """
   Channel-streaming events emitted through `stream_callback` (see
   docs/design/CHANNEL_STREAMING.md §5.1). The loop emits `:session_started`
@@ -101,14 +104,29 @@ defmodule FermixCore.AgentLoop do
   brackets a running tool, and the ACP session renders the tool pair as
   `tool_call` / `tool_call_update` frames
   (docs/design/MILESTONE_29_ACP_AGENT_SURFACE.md §8.4) — which is why
-  `:tool_finish` carries the execution outcome.
+  `:tool_finish` carries the execution outcome. A failed call's finish also
+  carries `error`, the call's error as the tool gave it (never the frame the
+  model reads it in), cut to `activity_error_chars` characters, only for a
+  caller that sets that bound: a scheduled job's run, a cue run's aside, keeps
+  each tool's last error (M106 §6), and every other consumer sees the status
+  alone.
   """
   @type activity_event ::
           :provider_start
           | :provider_response
           | {:tool_start, String.t()}
-          | {:tool_finish, String.t(), %{status: :ok | :error}}
+          | {:tool_finish, String.t(),
+             %{required(:status) => :ok | :error, optional(:error) => String.t()}}
   @type activity_callback :: (activity_event() -> any())
+
+  @typedoc """
+  A caller's gate, run in the loop's process before each tool call the loop
+  would run, ahead of its `:tool_start` activity: `:ok` lets the call go on;
+  `{:error, reason}` runs nothing (the call is traced as an unexecuted call,
+  with no activity) and ends the run with `{:error, reason}`. A scheduled job
+  stores its first tool start here, before the tool can act (M106 §5.1).
+  """
+  @type before_tool :: (String.t() -> :ok | {:error, term()})
 
   @typedoc """
   Route input is ONE shape: `routes` — an ordered `[{route_key, adapter_opts}]`
@@ -141,6 +159,8 @@ defmodule FermixCore.AgentLoop do
           loop_detection_warn_threshold: pos_integer(),
           loop_detection_kill_threshold: pos_integer(),
           activity_callback: activity_callback() | nil,
+          activity_error_chars: pos_integer() | nil,
+          before_tool: before_tool() | nil,
           stream_callback: stream_callback() | nil,
           context: map(),
           capability_registry: GenServer.server(),
@@ -161,7 +181,8 @@ defmodule FermixCore.AgentLoop do
           total_tokens: non_neg_integer(),
           context_tokens: non_neg_integer(),
           tool_failures: non_neg_integer(),
-          outside_sources: MapSet.t()
+          outside_sources: MapSet.t(),
+          provider: atom()
         }
 
   @spec run(loop_opts()) :: {:ok, loop_result()} | {:error, term()}
@@ -170,6 +191,8 @@ defmodule FermixCore.AgentLoop do
 
     try do
       run_with_store(opts, store)
+    catch
+      :throw, {@before_tool_refused, reason} -> {:error, reason}
     after
       ToolResultStore.delete(store)
     end
@@ -261,6 +284,8 @@ defmodule FermixCore.AgentLoop do
       task: task_excerpt(Keyword.fetch!(opts, :messages)),
       loop_detector: loop_detector_state(opts),
       activity_callback: Keyword.get(opts, :activity_callback),
+      activity_error_chars: activity_error_chars(opts),
+      before_tool: Keyword.get(opts, :before_tool),
       stream_callback: Keyword.get(opts, :stream_callback),
       retry_delay_fn: Keyword.get(opts, :retry_delay_fn, &Process.sleep/1)
     }
@@ -505,7 +530,8 @@ defmodule FermixCore.AgentLoop do
 
   # A picture needs a vision model, in a format the provider takes; a PDF needs a
   # vision model on a provider that reads one inline (OpenAI reads PDFs on its
-  # vision models only). `nil` admits the part.
+  # vision models only), and a model that does (`ModelCatalog.documents?/2`).
+  # `nil` admits the part.
   defp part_refusal(%{type: :image, mime_type: mime}, provider, model) do
     cond do
       not ModelCatalog.vision?(provider, model) ->
@@ -520,9 +546,12 @@ defmodule FermixCore.AgentLoop do
   end
 
   defp part_refusal(%{type: :document}, provider, model) do
-    if Descriptor.documents?(provider) and ModelCatalog.vision?(provider, model),
-      do: nil,
-      else: {:error, {:attachment_unsupported, :document, provider, model}}
+    if Descriptor.documents?(provider) and ModelCatalog.vision?(provider, model) and
+         ModelCatalog.documents?(provider, model) do
+      nil
+    else
+      {:error, {:attachment_unsupported, :document, provider, model}}
+    end
   end
 
   defp initial_attempt(state) do
@@ -689,7 +718,9 @@ defmodule FermixCore.AgentLoop do
       total_tokens: state.total_tokens,
       context_tokens: state.context_tokens,
       tool_failures: state.tool_failures,
-      outside_sources: state.context.outside_sources
+      outside_sources: state.context.outside_sources,
+      # The route that answered, which failover may have moved off the first.
+      provider: state.route_key.provider
     }
   end
 
@@ -1367,6 +1398,7 @@ defmodule FermixCore.AgentLoop do
   defp terminal_capability?(_capability), do: false
 
   defp run_tool_call(%{name: name, arguments: arguments_raw}, state) do
+    :ok = gate_tool(name, arguments_raw, state)
     emit_activity(state, {:tool_start, name})
 
     result =
@@ -1375,8 +1407,57 @@ defmodule FermixCore.AgentLoop do
         {:error, reason} -> trace_unexecuted(name, arguments_raw, reason, state)
       end
 
-    emit_activity(state, {:tool_finish, name, %{status: result.status}})
+    emit_activity(state, {:tool_finish, name, finish_detail(result, state)})
     result
+  end
+
+  # The bound a caller set on a failed call's error in its `:tool_finish`
+  # activity, or nil: a bad value fails the run's start loudly.
+  defp activity_error_chars(opts) do
+    case Keyword.get(opts, :activity_error_chars) do
+      nil -> nil
+      chars when is_integer(chars) and chars > 0 -> chars
+    end
+  end
+
+  # A failed call's error rides its finish only for a caller that bounded it;
+  # every other consumer sees the status alone, as before. A copy, so the
+  # cut never keeps a large error alive in the caller's mailbox.
+  defp finish_detail(%{status: :error} = result, %{activity_error_chars: chars})
+       when is_integer(chars) do
+    error = result |> error_text() |> String.slice(0, chars) |> :binary.copy()
+    %{status: :error, error: error}
+  end
+
+  defp finish_detail(result, _state), do: %{status: result.status}
+
+  # The call's error as the tool gave it, before any frame: a tool's own words
+  # (`error_result/3`), or for a call that never reached a tool the loop's own
+  # message, which is its whole output.
+  defp error_text(%{error_text: text}), do: text
+  defp error_text(%{output: output}), do: output
+
+  # The caller's `before_tool` gate, ahead of the call's start. A refusal runs
+  # nothing: the call is the model's one unexecuted call (`trace_unexecuted/4`)
+  # and the run ends with the gate's reason, thrown to `run/1` so no later call
+  # of the batch runs either.
+  defp gate_tool(_name, _arguments, %{before_tool: nil}), do: :ok
+
+  defp gate_tool(name, arguments, %{before_tool: gate} = state) when is_function(gate, 1) do
+    case gate.(name) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        trace_unexecuted(
+          name,
+          arguments,
+          "Error: Tool '#{name}' was not run: #{inspect(reason)}",
+          state
+        )
+
+        throw({@before_tool_refused, reason})
+    end
   end
 
   # The dispatch chain returns a uniform `%{output, images}` so an image-producing
@@ -1461,13 +1542,10 @@ defmodule FermixCore.AgentLoop do
 
       # Parked for the owner (`Capabilities.AccessGate`): the run waits.
       {:ok, %{success: false, error: error, access_waiting: true}} ->
-        %{
-          text_result("Error: #{wrap_untrusted_content(error, capability)}", :error)
-          | access_waiting: true
-        }
+        %{error_result("Error: ", error, capability) | access_waiting: true}
 
       {:ok, %{success: false, error: error}} ->
-        text_result("Error: #{wrap_untrusted_content(error, capability)}", :error)
+        error_result("Error: ", error, capability)
 
       {:ok, other} when is_binary(other) ->
         text_result(wrap_untrusted_content(other, capability), :ok)
@@ -1476,10 +1554,7 @@ defmodule FermixCore.AgentLoop do
         text_result(wrap_untrusted_content(inspect(other), capability), :ok)
 
       {:error, reason} ->
-        text_result(
-          "Error executing tool: #{wrap_untrusted_content(inspect(reason), capability)}",
-          :error
-        )
+        error_result("Error executing tool: ", inspect(reason), capability)
     end
   rescue
     e ->
@@ -1488,10 +1563,17 @@ defmodule FermixCore.AgentLoop do
           Exception.format_stacktrace(__STACKTRACE__)
       )
 
-      text_result(
-        "Error: tool raised #{wrap_untrusted_content(Exception.message(e), capability)}",
-        :error
-      )
+      error_result("Error: tool raised ", Exception.message(e), capability)
+  end
+
+  # A tool's error as the model reads it (the prefix, then the words, framed
+  # when the tool is external), keeping the words themselves as `error_text`
+  # for a failed call's finish (`finish_detail/2`). Loop metadata, never sent
+  # to the provider.
+  defp error_result(prefix, words, capability) do
+    "#{prefix}#{wrap_untrusted_content(words, capability)}"
+    |> text_result(:error)
+    |> Map.put(:error_text, "#{words}")
   end
 
   # Provenance as architecture (M10 P2): results from tools that return EXTERNAL

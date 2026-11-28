@@ -323,11 +323,13 @@ defmodule FermixCore.Providers.Anthropic.Messages do
       |> maybe_put(:temperature, resolve_temperature(model, opts))
       |> maybe_put(:thinking, thinking_config(model, opts))
       |> maybe_put(:output_config, output_config(Keyword.get(opts, :reasoning_effort)))
+      |> maybe_put(:speed, wire_speed(Keyword.get(opts, :speed)))
 
     turn_state = %{
       model: model,
       auth_mode: mode,
       reasoning_effort: Keyword.get(opts, :reasoning_effort),
+      speed: Keyword.get(opts, :speed),
       system: system,
       messages: messages,
       tools: tools,
@@ -729,6 +731,7 @@ defmodule FermixCore.Providers.Anthropic.Messages do
          stop_reason: stop_reason
        },
        usage: parse_usage(body),
+       reported_speed: get_in(body, ["usage", "speed"]),
        model: Map.get(body, "model") || turn_state.model
      }}
   end
@@ -858,6 +861,7 @@ defmodule FermixCore.Providers.Anthropic.Messages do
       |> maybe_put(:stop_reason, stop_reason)
       |> maybe_put(:request_id, request_id)
       |> maybe_put(:agent, turn_state.agent)
+      |> maybe_put(:speed, speed_ran(turn_state.speed, result))
 
     ProviderTelemetry.emit_call(metadata, duration_ms,
       session_id: turn_state.session_id,
@@ -893,6 +897,21 @@ defmodule FermixCore.Providers.Anthropic.Messages do
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, _key, []), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  # Fast mode: the route asks for it with `speed: :fast` (`RouteResolver`);
+  # `:standard` and no speed send no field.
+  defp wire_speed(:fast), do: "fast"
+  defp wire_speed(speed) when speed in [:standard, nil], do: nil
+
+  # The speed a call ran at, for its trace: what Anthropic reports in
+  # `usage.speed` when the route asked for fast mode (a reply without it ran at
+  # standard speed), `standard` for a route at standard speed, and nothing for
+  # a route without fast mode or a call that did not complete.
+  defp speed_ran(nil, _result), do: nil
+  defp speed_ran(:standard, {:ok, _turn}), do: "standard"
+  defp speed_ran(:fast, {:ok, %{reported_speed: "fast"}}), do: "fast"
+  defp speed_ran(:fast, {:ok, _turn}), do: "standard"
+  defp speed_ran(_speed, {:error, _reason}), do: nil
 
   # The token map the shared provider emitter carries into the Opik llm span.
   # `:cached`/`:cache_write` are present only when Anthropic reported them, so a

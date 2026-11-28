@@ -1,0 +1,22 @@
+{
+  "name": "busy_line",
+  "number": "+14045550177",
+  "party": "Peachtree Print Shop in Atlanta. The carrier fails the call as busy after it starts ringing; nobody is reached.",
+  "steps": [
+    {
+      "ring": true
+    },
+    {
+      "pause_ms": 800
+    },
+    {
+      "fail": {
+        "code": "busy",
+        "message": "The called number is busy."
+      }
+    },
+    {
+      "hold_ms": 30000
+    }
+  ]
+}

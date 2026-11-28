@@ -9,15 +9,16 @@ defmodule FermixCore.Home.ServerPrimary do
   :desktop`) into the home's device list before it captures, and the row
   travels to the server: a home holding one is a server's, a home that never
   moved holds none. It is the fact `HomeSummary` already draws the server's
-  `primary` by, read here from the file (`Home.Link.home_desktops/1`) so it
-  holds before the channels' store starts. A move back drops the computer's
-  own row (`Candidate.Return`), and a desktop row is never revoked
-  (`devices.revoke` refuses one), so a server keeps its fact for as long as
-  it is the primary.
+  `primary` by (`of/2`, the one decision, which `HomeSummary.gather/5` gives
+  the rail's rows), read here from the file (`Home.Link.home_desktops/1`) so
+  it holds before the channels' store starts. A move back and Restore here
+  drop every desktop row (`Candidate.Return`, M102 D6), and a desktop row is
+  never revoked (`devices.revoke` refuses one), so a server keeps its fact
+  for as long as it is the primary.
 
   **macOS is refused outright**, whatever the list holds: an Always On server
-  is Linux, and a Mac that took the home back beside a second linked desktop
-  would otherwise still hold that desktop's row.
+  is Linux, and a Mac that took the home back before a move back dropped
+  every computer's row can still hold one (M102 N2).
 
   `opts` (the tests' seams): `:macos?` and `:desktop_rows` (a 1-arity reader
   of a home's rows, `Home.Link`'s in its place).
@@ -27,14 +28,24 @@ defmodule FermixCore.Home.ServerPrimary do
 
   require Logger
 
+  @type os :: :macos | :linux
   @type reason :: :macos | :no_desktop | {:device_list, term()}
   @type answer :: :server | {:not_server, reason()}
 
   @doc "Whether the primary serving `home` is an Always On server's."
   @spec check(Path.t(), keyword()) :: answer()
   def check(home, opts \\ []) when is_binary(home) and is_list(opts) do
-    if macos?(opts), do: {:not_server, :macos}, else: rows(home, opts)
+    if macos?(opts), do: of(:macos, []), else: rows(home, opts)
   end
+
+  @doc """
+  The decision itself, by the host's system `os` and the home's desktop
+  `rows`: a server only off macOS and with a row.
+  """
+  @spec of(os(), [map()]) :: answer()
+  def of(:macos, rows) when is_list(rows), do: {:not_server, :macos}
+  def of(:linux, [_ | _]), do: :server
+  def of(:linux, []), do: {:not_server, :no_desktop}
 
   @doc "The sentence a primary that is no Always On server's is told, by why."
   @spec sentence(reason()) :: String.t()
@@ -58,11 +69,8 @@ defmodule FermixCore.Home.ServerPrimary do
     reader = Keyword.get(opts, :desktop_rows, &link_rows/1)
 
     case reader.(home) do
-      {:ok, [_ | _]} ->
-        :server
-
-      {:ok, []} ->
-        {:not_server, :no_desktop}
+      {:ok, rows} ->
+        of(:linux, rows)
 
       {:error, reason} ->
         Logger.error("server primary: the device list could not be read: #{inspect(reason)}")

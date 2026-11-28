@@ -12,8 +12,10 @@ defmodule FermixCore.OpenLoops.Registry do
     * **provenance** — a loop noted on a turn that had read outside content
       (`OpenLoops.Access.read_outside?/1`) is stamped
       `noted_after_outside_content`, so its words are framed wherever they come
-      back; on such a turn an answer's `owner_words` must be the owner's own,
-      found in what they typed (`:owner_text`);
+      back, unless they and the loop's date are found in what the owner typed
+      on that turn (`:owner_text`): those are the owner's, whatever else the
+      turn read. On such a turn an answer's `owner_words` must be found there
+      too;
     * **the clock and the zone** — the tagged date form is resolved as
       `Temporal.Registry` resolves an event's `when`, in the owner-named zone or
       `[fermix_core.personalization] timezone`; a loop is dated, so the timer
@@ -26,10 +28,13 @@ defmodule FermixCore.OpenLoops.Registry do
       now), and the `reach` the loop may be raised by;
     * **the dedupe key** — the intention lowercased, punctuation stripped,
       whitespace collapsed and bounded, never model-authored;
-    * **the delivery snapshot** — the owner inbox ladder
-      (`Delivery.OwnerInbox.resolve/1`) resolved once at capture; no inbox, or
-      only this computer's notifications, is no target, because a check-in
-      needs somewhere to be answered;
+    * **the delivery snapshot** — resolved once at capture: the conversation
+      the loop came from, when it is the owner's own inbox on its platform
+      (`Delivery.OwnerInbox.on_platform/2`: the app's chat, or the owner's
+      DM), so a check-in arrives where the owner said it; otherwise the owner
+      inbox ladder (`Delivery.OwnerInbox.resolve/1`). No inbox, or only this
+      computer's notifications, is no target, because a check-in needs
+      somewhere to be answered;
     * **the post-commit scheduler signal** — a cast of `:loop_changed` to the
       scheduler `opts[:scheduler]` names, never a compile dependency on it.
 
@@ -56,6 +61,8 @@ defmodule FermixCore.OpenLoops.Registry do
   alias FermixCore.OpenLoops.Telemetry
   alias FermixCore.Temporal.Planner
 
+  @month_names ~w(january february march april may june july august september october
+                  november december)
   @notification_platform Notifications.platform()
   @note_keys [
     :intention,
@@ -132,7 +139,7 @@ defmodule FermixCore.OpenLoops.Registry do
          {:ok, hours} <-
            active_hours(agent_id(context), owner_id(context), base.timezone, now, opts),
          {:ok, anchor} <- capture_anchor(base.timing, params, base.timezone, {hours, now}),
-         {:ok, target} <- delivery_target(opts),
+         {:ok, target} <- delivery_target(source, opts),
          {:ok, how} <- capture_how(base.timing, params),
          spec = base |> Map.merge(anchor) |> Map.merge(how),
          {:ok, attrs} <- capture_attrs(spec, source, target, context, {hours, now}),
@@ -235,7 +242,7 @@ defmodule FermixCore.OpenLoops.Registry do
          owner_id: owner_id(context),
          dedupe_key: spec.dedupe_key,
          intention: spec.intention,
-         noted_after_outside_content: Access.read_outside?(context),
+         noted_after_outside_content: words_may_be_others?(spec, context),
          why_it_matters: spec.why_it_matters,
          matters_by_kind: spec.kind,
          matters_by_time: spec.time,
@@ -253,6 +260,47 @@ defmodule FermixCore.OpenLoops.Registry do
        })}
     end
   end
+
+  # A loop noted on a turn that read outside content may carry someone else's
+  # words or date. What is found in what the owner typed on that turn is the
+  # owner's, the rule an answer's words are held to (`owners_own_words/3`), so
+  # a loop is not stamped when every word field and its date are found there.
+  # A voice call types nothing, and a turn that carries no typed text has
+  # nothing to check against.
+  defp words_may_be_others?(spec, context) do
+    Access.read_outside?(context) and not owner_typed?(spec, context)
+  end
+
+  defp owner_typed?(spec, %{owner_text: owner_text} = context) when is_binary(owner_text) do
+    not Access.voice_call?(context) and
+      Enum.all?(word_fields(spec), &typed?(&1, owner_text)) and
+      date_typed?(spec.date, owner_text)
+  end
+
+  defp owner_typed?(_spec, _context), do: false
+
+  defp word_fields(%{intention: intention, why_it_matters: nil}), do: [intention]
+  defp word_fields(%{intention: intention, why_it_matters: why}), do: [intention, why]
+
+  # The loop's calendar day as the owner typed it: its month, by name or by the
+  # name's short form, beside its day of the month, in either order ("november
+  # 9", "9th of nov"). The date the model resolved is otherwise unchecked, and
+  # a page read on that turn could have supplied it. A relative date
+  # ("tomorrow", "Friday") names no calendar day, so it cannot be checked here
+  # and such a loop stays stamped.
+  defp date_typed?(%Date{month: month, day: day}, owner_text) do
+    months = month |> month_name() |> month_words()
+    day_words = "#{day}(?:st|nd|rd|th)?"
+
+    "\\b(?:(?:#{months}) (?:the )?#{day_words}|#{day_words} (?:of )?(?:#{months}))\\b"
+    |> Regex.compile!()
+    |> Regex.match?(normalized(owner_text))
+  end
+
+  defp month_name(month), do: Enum.at(@month_names, month - 1)
+
+  defp month_words("september"), do: "september|sept|sep"
+  defp month_words(name), do: "#{name}|#{String.slice(name, 0, 3)}"
 
   defp new_id, do: "loop_" <> Base.url_encode64(:crypto.strong_rand_bytes(8), padding: false)
 
@@ -717,11 +765,29 @@ defmodule FermixCore.OpenLoops.Registry do
 
   # --- delivery target -------------------------------------------------------
 
-  # One rung decides, once: the owner inbox ladder. A notification-only target
-  # cannot hold an answer, so it is no target; a chat target's adapter must
-  # resolve now, as the send path will resolve it.
-  defp delivery_target(opts) do
-    case OwnerInbox.resolve(Keyword.take(opts, [:jobs_config, :configured_owners])) do
+  # Decided once, at capture. A check-in arrives where the owner said it: the
+  # owner's inbox on the platform the loop came from, when that inbox is the
+  # conversation it came from (the app's chat, or the owner's own DM), which
+  # `on_platform/2` answers only for a channel that can deliver. A loop said
+  # anywhere else (the terminal, a Slack or Discord DM) takes the owner inbox
+  # ladder.
+  defp delivery_target({channel, chat_id, _scope}, opts) do
+    inbox_opts = Keyword.take(opts, [:jobs_config, :configured_owners])
+
+    case OwnerInbox.on_platform(channel, inbox_opts) do
+      {:ok, %{platform: platform, destination: ^chat_id} = inbox}
+      when platform != @notification_platform ->
+        {:ok, inbox}
+
+      _another_chat_or_none ->
+        ladder_target(inbox_opts, opts)
+    end
+  end
+
+  # A notification-only target cannot hold an answer, so it is no target; a
+  # chat target's adapter must resolve now, as the send path will resolve it.
+  defp ladder_target(inbox_opts, opts) do
+    case OwnerInbox.resolve(inbox_opts) do
       :no_delivery_target ->
         {:error, :no_target}
 

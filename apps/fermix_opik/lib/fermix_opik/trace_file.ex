@@ -11,6 +11,9 @@ defmodule FermixOpik.TraceFile do
   are skipped.
   """
 
+  # What every heal run bookend carries to correlate it (M106 §5.5).
+  @heal_run_keys [:agent, :session_id, :parent_session, :heal_id, :job_id, :run_id]
+
   @doc """
   All replayable events under `dir`, sorted by timestamp.
 
@@ -71,6 +74,7 @@ defmodule FermixOpik.TraceFile do
        :input,
        :output,
        :reasoning_effort,
+       :speed,
        :adapter
      ])
      |> put_tokens(row)}
@@ -262,7 +266,64 @@ defmodule FermixOpik.TraceFile do
 
   defp normalize_agent_event("job_run_error", row) do
     {[:fermix, :job, :run_error], %{count: 1, duration_ms: int(row["duration_ms"])},
-     meta(row, [:agent, :job_id, :run_id, :session_id, :status, :error, :watcher_id, :delivery_id])}
+     meta(row, [
+       :agent,
+       :job_id,
+       :run_id,
+       :session_id,
+       :status,
+       :error,
+       :watcher_id,
+       :delivery_id,
+       :retry_disposition,
+       :retry_attempts,
+       :retry_at,
+       :heal,
+       :heal_id
+     ])}
+  end
+
+  defp normalize_agent_event("job_heal", row) do
+    {[:fermix, :job, :heal], %{count: 1},
+     meta(row, [
+       :agent,
+       :phase,
+       :heal_id,
+       :job_id,
+       :run_id,
+       :subject_kind,
+       :subject_id,
+       :failure_kind,
+       :outcome,
+       :attempts,
+       :dead_letter,
+       :platform,
+       :error,
+       :conclusion,
+       :decision,
+       :requested,
+       :refusal,
+       :read_outside,
+       :rerun_outcome,
+       :answer,
+       :applied
+     ])}
+  end
+
+  # A job's heal run (M106 §5.5), a run kind of its own.
+  defp normalize_agent_event("job_heal_run_start", row) do
+    {[:fermix, :job, :heal_run_start], %{count: 1},
+     meta(row, @heal_run_keys ++ [:failure_kind, :max_duration_ms])}
+  end
+
+  defp normalize_agent_event("job_heal_run_complete", row) do
+    {[:fermix, :job, :heal_run_complete], %{duration_ms: int(row["duration_ms"])},
+     meta(row, @heal_run_keys ++ [:failure_kind, :decision])}
+  end
+
+  defp normalize_agent_event("job_heal_run_error", row) do
+    {[:fermix, :job, :heal_run_error], %{count: 1, duration_ms: int(row["duration_ms"])},
+     meta(row, @heal_run_keys ++ [:failure_kind, :status, :error])}
   end
 
   defp normalize_agent_event("realtime_call_start", row) do

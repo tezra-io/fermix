@@ -23,11 +23,13 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   What a turn's first model call carries has a provenance too:
   `message_sources/1` (a forwarded message and its attachments),
   `recent_activity_source/0` and `open_loop_source/0` are what
-  `Agents.TurnRunner` seeds the turn with, a provenance only: the content itself
-  is not framed here (a due open loop's words are framed by `OpenLoops.DueNote`),
-  so an owner's own checklist still reads as theirs.
+  `Agents.TurnRunner` seeds the turn with, and `phone_call_source/0` the
+  owner's message that answers a phone call's report, a provenance only: the
+  content itself is not framed here (a due open loop's words are framed by
+  `OpenLoops.DueNote`), so an owner's own checklist still reads as theirs.
   """
 
+  alias FermixCore.Agents.RequestIdentity
   alias FermixCore.Attachments
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Checklists.Render, as: ChecklistRender
@@ -40,6 +42,7 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   alias FermixCore.Tools.OpenLoopList
   alias FermixCore.Tools.OpenLoopNote
   alias FermixCore.Tools.OpenLoopUpdate
+  alias FermixCore.Tools.PhoneCall
   alias FermixCore.Tools.RecallActivity
   alias FermixCore.Tools.SkillRun
 
@@ -59,7 +62,7 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   @typedoc """
   Where outside content came from: a plugin, one named tool, a cue source (its
   `source_ref`), an attachment of the turn's message (by kind), the Recent
-  Activity note, a coding run's report, the turn's message itself when the
+  Activity note, a coding run's report, a phone call, the turn's message itself when the
   channel marked it forwarded, or a due open loop noted on a turn that had read
   outside content. `outside_source/1` returns the first two from a
   tool's result; a cue run's context arrives seeded with the third (M60 S2), and
@@ -74,9 +77,11 @@ defmodule FermixCore.Capabilities.UntrustedContent do
           | {:attachment, String.t()}
           | {:activity, String.t()}
           | {:harness, String.t()}
+          | {:phone_call, String.t()}
           | {:message, String.t()}
           | {:open_loop, String.t()}
           | {:checklist, String.t()}
+          | {:job_failure, String.t()}
 
   # Tool categories whose result relays what a worker read.
   @relaying_categories [:delegation]
@@ -87,8 +92,10 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   # Fermix's own fields), a scheduled run's final response, and what the cue
   # sources sent and the watchers' tasks wrote (`list_cues`, M60 C16; its views
   # of what is set up relay none, `outside_source/2`). `manage_watcher` is not
-  # one: it returns no outside text (M60 S13).
-  @relaying_modules [SkillRun, GetCodingRun, GetJobRun, ListJobRuns, ListCues]
+  # one: it returns no outside text (M60 S13). `phone_call`'s status relays what
+  # the person called said (M94 §11); starting or stopping a call returns
+  # Fermix's own fields (`outside_source/2`).
+  @relaying_modules [SkillRun, GetCodingRun, GetJobRun, ListJobRuns, ListCues, PhoneCall]
 
   # Tools whose result is text captured from the owner's screen: Computer
   # History's summaries of the pages and documents the owner had open, which
@@ -177,6 +184,11 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   def outside_source(%Capability{metadata: %{tool_module: ListCues}} = capability, arguments)
       when is_map(arguments) do
     if ListCues.relays_outside_text?(arguments), do: outside_source(capability), else: nil
+  end
+
+  def outside_source(%Capability{metadata: %{tool_module: PhoneCall}} = capability, arguments)
+      when is_map(arguments) do
+    if PhoneCall.relays_outside_text?(arguments), do: outside_source(capability), else: nil
   end
 
   def outside_source(%Capability{} = capability, arguments) when is_map(arguments),
@@ -291,6 +303,14 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   def checklist_source, do: {:checklist, "a list row added after outside content"}
 
   @doc """
+  The outside source a job's heal run starts with (M106 §9): the failure's
+  own sentence and words, which its prompt carries framed, may hold text
+  from a page or a post the failed run read.
+  """
+  @spec job_failure_source() :: outside_source()
+  def job_failure_source, do: {:job_failure, "a failed job run's error"}
+
+  @doc """
   The outside source a coding-run continuation turn carries: a finished run
   re-enters the conversation as a message whose content is the vendor CLI's own
   text, derived from the repo, issue and web content the run read. Seeded by
@@ -303,19 +323,43 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   def harness_continuation_source, do: {:harness, "a coding run"}
 
   @doc """
+  The outside source a phone call brings into a turn (M94 §11): what the
+  person called said. A call's backend turn starts with it, since it reads
+  the call's transcript, and so does the turn its result starts in the
+  owner's conversation, whose message frames the person's words
+  (`Agents.TurnRunner`, from the result's own marker). Never a coding run's,
+  so a confirmation the backend turn raises names the call; the result's turn
+  has no tools and raises none (M94 D23). The owner's message that answers
+  that report starts with it too, the one replayed text that taints a turn
+  (`Agents.TurnRunner`, from the flag the report is stored with): what it asks
+  for is the owner's own new request, and a risky action in it waits for their
+  confirmation, which names the call.
+  """
+  @spec phone_call_source() :: outside_source()
+  def phone_call_source, do: {:phone_call, "a phone call"}
+
+  @doc """
   What a turn hands a request it parks for the owner and re-runs after their
   `/confirm` (a directory grant, a coding run's vendor-config acknowledgment),
   so the re-run is the same request rather than a clean one: the outside
   sources the turn had read and, on a finished coding run's follow-up turn, its
-  chain depth and that run's id. The gateway keeps it with the resume intent
-  and `Agents.TurnRunner` seeds it on the resumed turn. A context the loop never
-  stamped hands on a source of its own, so the re-run is never read as clean.
+  chain depth and that run's id, and the owner request's identity
+  (`request_id`, `Agents.RequestIdentity`), so a tool whose effect outlives the
+  turn (a phone call) finds what the parked request already started. The
+  gateway keeps it with the resume intent and `Agents.TurnRunner` seeds it on
+  the resumed turn. A context the loop never stamped hands on a source of its
+  own, so the re-run is never read as clean.
   """
   @spec resume_provenance(map()) :: map()
   def resume_provenance(context) when is_map(context) do
     %{outside_sources: provenance_sources(context)}
     |> put_positive(:harness_continuation_depth, Map.get(context, :harness_continuation_depth))
     |> put_binary(:harness_run_id, Map.get(context, :harness_run_id))
+    |> put_request(Map.get(context, :request_id))
+  end
+
+  defp put_request(map, request_id) do
+    if RequestIdentity.valid?(request_id), do: Map.put(map, :request_id, request_id), else: map
   end
 
   defp provenance_sources(context) do
@@ -430,10 +474,13 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   # content cannot close the boundary early and escape the "DATA, not
   # instructions" frame. Inserting a space after the angle bracket leaves the
   # text readable while ensuring the only real `</untrusted_tool_result>` in
-  # the final string is the one `framed/2` appends.
+  # the final string is the one `framed/2` appends. A model reads a tag by its
+  # name, not byte for byte, so every case and spacing of it is defanged
+  # (`</UNTRUSTED_TOOL_RESULT>`, `< /untrusted_tool_result >`), and a tag
+  # already defanged stays as it is.
+  @wrapper_tag ~r/<\s*(\/?)\s*(untrusted_tool_result)/iu
+
   defp neutralize_delimiters(output) do
-    output
-    |> String.replace("</untrusted_tool_result>", "</ untrusted_tool_result>")
-    |> String.replace("<untrusted_tool_result", "< untrusted_tool_result")
+    Regex.replace(@wrapper_tag, output, fn _tag, slash, name -> "<" <> slash <> " " <> name end)
   end
 end

@@ -54,6 +54,36 @@ defmodule FermixCore.Home.Snapshot.SchedulerTest do
     def sentence(:asleep), do: "The stand-in is asleep; the snapshot waits for the next run."
   end
 
+  # A second target, as the desktops are: on only once the section says
+  # `late: true`, which stands for a desktop row the primary did not have at
+  # boot.
+  defmodule LateTarget do
+    @moduledoc false
+    @behaviour FermixCore.Home.Snapshot.Target
+
+    @impl true
+    def id, do: "late"
+    @impl true
+    def label, do: "the late one"
+
+    @impl true
+    def configured(config) do
+      if Keyword.get(config, :late) == true, do: {:ok, %{}}, else: :not_configured
+    end
+
+    @impl true
+    def destination(_settings, _opts), do: "late://"
+
+    @impl true
+    def store(snapshot, _settings, opts) do
+      send(Keyword.fetch!(opts, :test), {:stored_late, snapshot.name})
+      {:ok, %{location: "late://#{snapshot.name}"}}
+    end
+
+    @impl true
+    def sentence(reason), do: "The late one could not take it: #{inspect(reason)}."
+  end
+
   setup_all do
     %{pair: Recipient.generate()}
   end
@@ -245,6 +275,92 @@ defmodule FermixCore.Home.Snapshot.SchedulerTest do
     :ok = Scheduler.targets_changed(scheduler)
 
     assert_receive {:planned, {:tick, _token}, 300_000}
+  end
+
+  # M102 N11: the server's boot run went to S3 alone, its desktop not yet a
+  # target; a desktop that connects after it is owed its first copy, so the
+  # next run is due at once, never sooner than the boot delay.
+  test "a target that comes after the boot run with no attempt of its own is planned at once",
+       %{config: config, home: home} = context do
+    :ok = Status.write(home, Status.record(Status.empty(), "fake", verified(@boot)))
+    scheduler = start!(context, targets: [FakeTarget, LateTarget])
+    assert_receive {:planned, {:tick, _first}, 21_600_000}
+
+    Agent.update(config, &Keyword.put(&1, :late, true))
+    :ok = Scheduler.targets_changed(scheduler)
+
+    assert_receive {:planned, {:tick, _token}, 300_000}
+  end
+
+  # A desktop's last copy waited (it was not connected): once it connects,
+  # that copy is owed, at once past the boot delay.
+  test "a target whose last attempt waited is planned at once when it comes",
+       %{config: config, pair: pair, home: home} = context do
+    waited = %{verified(~U[2026-10-27 07:00:00Z]) | result: :waiting, location: nil}
+
+    status =
+      Status.empty()
+      |> Status.record("fake", verified(~U[2026-10-27 07:00:00Z]))
+      |> Status.record("late", waited)
+
+    :ok = Status.write(home, status)
+    Agent.update(config, fn _ -> Keyword.put(configured(pair, "kept"), :late, true) end)
+    scheduler = start!(context, targets: [FakeTarget, LateTarget])
+    assert_receive {:planned, {:tick, _first}, 14_400_000}
+
+    advance(context, 600)
+    :ok = Scheduler.targets_changed(scheduler)
+
+    assert_receive {:planned, {:tick, _token}, 0}
+  end
+
+  # A desktop that connects while a run is going is held for that run's end,
+  # which plans what it is owed (the server's boot run, its Mac 1.7 s behind).
+  test "a target that comes during a run is planned at the run's end, not dropped",
+       %{config: config, home: home} = context do
+    :ok = Status.write(home, %{Status.empty() | run_at_boot: true})
+    gate = self()
+
+    run = fn root, section, targets, opts ->
+      send(gate, {:running, self()})
+
+      receive do
+        :go -> Run.run(root, section, targets, opts)
+      after
+        30_000 -> :not_configured
+      end
+    end
+
+    scheduler = start!(context, targets: [FakeTarget, LateTarget], run: run)
+    assert_receive {:planned, {:tick, token}, 0}
+    send(scheduler, {:tick, token})
+    assert_receive {:running, task}, @wait
+
+    Agent.update(config, &Keyword.put(&1, :late, true))
+    :ok = Scheduler.targets_changed(scheduler)
+    assert %{running: true} = Scheduler.info(scheduler)
+    send(task, :go)
+
+    assert_receive {:stored, _snapshot, _bytes}, @wait
+    refute_received {:stored_late, _name}
+    assert_receive {:planned, {:tick, _next}, 300_000}, @wait
+    assert {:ok, %{targets: targets}} = Status.read(home)
+    assert Map.keys(targets) == ["fake"]
+  end
+
+  # The owed plan follows a target that came, never a change of the section:
+  # that still plans from the last attempt, so a computer that is away (and
+  # sends no connect) cannot loop the runs.
+  test "a change of the section still plans from the last attempt, whatever is owed",
+       %{config: config, home: home} = context do
+    :ok = Status.write(home, Status.record(Status.empty(), "fake", verified(@boot)))
+    scheduler = start!(context, targets: [FakeTarget, LateTarget])
+    assert_receive {:planned, {:tick, _first}, 21_600_000}
+
+    Agent.update(config, &Keyword.put(&1, :late, true))
+    :ok = Scheduler.config_changed(scheduler)
+
+    assert_receive {:planned, {:tick, _token}, 21_600_000}
   end
 
   test "a restart plans from the last attempt, never sooner than the boot delay",

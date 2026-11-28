@@ -141,6 +141,10 @@
       "name": "get_job_run",
       "family": "F14"
     },
+    "JobHealRespond": {
+      "name": "job_heal_respond",
+      "family": "F14"
+    },
     "MemorySourcesList": {
       "name": "memory_sources_list",
       "family": "F10"
@@ -276,6 +280,18 @@
     "ListMeetings": {
       "name": "list_meetings",
       "family": "F24"
+    },
+    "PhoneCall": {
+      "name": "phone_call",
+      "family": "F19"
+    },
+    "PhoneCallPressKeys": {
+      "name": "phone_call_press_keys",
+      "family": "F23"
+    },
+    "PhoneCallEnd": {
+      "name": "phone_call_end",
+      "family": "F23"
     },
     "ManageWatcher": {
       "name": "manage_watcher",
@@ -454,6 +470,7 @@
         "openrouter",
         "mistral",
         "venice",
+        "vercel",
         "ollama"
       ],
       "/properties/reasoning_effort": [
@@ -687,6 +704,21 @@
         "error"
       ]
     },
+    "job_heal_respond": {
+      "/properties/decision": [
+        "pause",
+        "propose",
+        "raise_limit",
+        "rerun",
+        "tell"
+      ],
+      "/properties/change/properties/delivery_mode": [
+        "none",
+        "origin",
+        "channel",
+        "local"
+      ]
+    },
     "model_routing_config": {
       "/properties/key": [
         "subagent_provider",
@@ -713,6 +745,25 @@
         "live",
         "closed",
         "any"
+      ]
+    },
+    "phone_call": {
+      "/properties/brief/properties/destination_kind": [
+        "business",
+        "owner"
+      ],
+      "/properties/action": [
+        "start",
+        "status",
+        "cancel"
+      ]
+    },
+    "phone_call_end": {
+      "/properties/reason": [
+        "cannot_proceed",
+        "done",
+        "needs_owner",
+        "voicemail"
       ]
     }
   },
@@ -790,6 +841,14 @@
       "obligations": [
         "open_loop_state",
         "delivery_receipt",
+        "actual_advertised_schemas"
+      ]
+    },
+    "phone_call": {
+      "runtime_status": "unavailable",
+      "obligations": [
+        "call_identity",
+        "granted_tools",
         "actual_advertised_schemas"
       ]
     }

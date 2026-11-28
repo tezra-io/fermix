@@ -68,9 +68,9 @@
 (* one wait the worker ends.                                               *)
 (***************************************************************************)
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/move_worker.ex @ b07d6b9515a7
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/home/candidate.ex @ 433d4ef550e0
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/home/candidate.ex @ d93c30ee7062
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/home/move_responder.ex @ 834af9c6f6cb
-\* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate/activation.ex @ 5a71862e2f64
+\* SOURCE: apps/fermix_core/lib/fermix_core/home/candidate/activation.ex @ f7e445093ddd
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/move.ex#start,move_id,write_request,put_phase,pending?,not_pending,max_attempts,@max_attempts,@pending,@running,@phases,finish_at_boot,finish_due,ending,finish,view,remember_unrecorded_ending,boot_ending,@boot_key @ edf6fd077214
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/role.ex#resolve,primary,configured_role @ 6b56d83c809d
 \* SOURCE: apps/fermix_core/lib/fermix_core/home/moved.ex#write,exclusive_write,read @ f1fa82381547
@@ -711,7 +711,7 @@ Activate ==
 
 \* handle_info(:restart) (candidate.ex:286-290) -> Lifecycle.restart_self/0. The
 \* boot reads role = "primary" and finishes the activation
-\* (FermixCore.Application, application.ex:202-222).
+\* (FermixCore.Application, application.ex:247-267).
 Restart ==
     /\ CandIdle /\ cand = "active"
     /\ candUp' = "primary"

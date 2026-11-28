@@ -283,6 +283,7 @@ defmodule FermixCore.Tools.SubagentsTest do
                  "openrouter",
                  "mistral",
                  "venice",
+                 "vercel",
                  "ollama"
                ]
 

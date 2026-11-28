@@ -23,6 +23,7 @@ import os
 import re
 import secrets
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -37,12 +38,18 @@ REPO_ROOT = os.path.dirname(SKILL_DIR)
 sys.path.insert(0, HERE)
 
 import eval_home_state
-from evallib import companion, cue_drive, voice
+# A case's `state:` is seeded by the capability runner's own `checker.state` seeding,
+# so the two tiers restore one baseline one way.
+import run_capability
+from evallib import companion, cue_drive, owner_inbox, voice
 from evallib import config as cfgmod
 from evallib import driver, grade, judge, report
 from evallib.fixture_server import (FIXTURE_URL_PLACEHOLDER, FixtureServer,
-                                    ServerError, case_uses_fixture, home_port)
-from evallib.opik import OpikClient, OpikError, parse_ts, valid_run_id
+                                    ServerError, case_uses_fixture, case_uses_pages,
+                                    case_uses_phone, check_state, home_port)
+from evallib import phone_sim
+from evallib.opik import OpikClient, OpikError, parse_ts, text_of, valid_run_id
+from evallib.phone_sim import PHONE_SCRIPTS_DIR
 from evallib.session_ids import sess
 from evallib.suites import (ALWAYS_STICKY_GATES, RISK_LEVELS, STICKY_GATE_KEYS,
                             SuiteError, load_all, platform_of)
@@ -86,6 +93,17 @@ _ACCOUNT_ABORT_WHY = "This is an external account condition, not a product failu
 _RESET_ABORT_WHY = ("The eval home could not be put back to its seeded state, so no later "
                     "case could start from it either: this is the harness, not a product "
                     "failure.")
+_STATE_ABORT_WHY = ("The eval home's jobs and reminders could not be seeded, so no later "
+                    "case could start from its seed either: this is the harness, not a "
+                    "product failure.")
+# A case's `state:` can seed a failed run, which opens a heal (M106 §5.4) the daemon's
+# Scheduler claims on its next pass, at most its 60 s reconcile; its heal run diagnoses
+# it (§5.5, a watchdog of 120 s) and sends. A spec may instead seed the heal concluded,
+# which leaves nothing to wait for. The turn waits until every heal of a seeded job has
+# left `open` and `diagnosing`, so the owner's question is asked of the record the
+# product would have by then.
+_SEEDED_HEAL_WAIT_S = 240
+_SEEDED_HEAL_POLL_S = 1.0
 
 
 def now_utc() -> datetime:
@@ -263,17 +281,18 @@ def voice_cases_left_out(suites, args, profiles) -> int:
                if scenario.risk in profiles for case in scenario.cases if case.needs_voice)
 
 
-def hold_out_unseeded(cfg, chosen) -> tuple[list, list]:
+def hold_out_unseeded(cfg, chosen, reset_home: bool = False) -> tuple[list, list]:
     """Cases whose `requires:` (their suite's, then their own) the eval home was not
     seeded with (`cues`: --cues; `computers`: --computers; `coding_signed_out`:
-    --coding-signed-out). They are NOT EVALUATED, named and left out of the
+    --coding-signed-out; `phone_calls`: --phone-calls, and a run that starts every
+    attempt from the seeded home, `reset_home`). They are NOT EVALUATED, named and left out of the
     run, never driven and never failures: the capability runner's rule for an unmet
     precondition, so a sweep over an unseeded home reports the gap instead of a
     suite of zeros. A case's sibling that needs no seed still runs."""
     home = cfg.daemon.fermix_home
     needs = {need for suite, scns in chosen for scenario in scns for case in scenario.cases
              for need in case_requirements(suite, case)}
-    problems = {need: requirement_problem(need, home) for need in needs}
+    problems = {need: requirement_problem(need, home, reset_home) for need in needs}
     unmet = {need: why for need, why in problems.items() if why is not None}
     kept, held = [], []
     for suite, scns in chosen:
@@ -301,8 +320,9 @@ def unmet_reason(suite, case, unmet: dict[str, str]) -> str | None:
     return next((unmet[need] for need in case_requirements(suite, case) if need in unmet), None)
 
 
-def requirement_problem(need: str, home: str) -> str | None:
-    """Why `home` cannot run a case that requires `need`, or None."""
+def requirement_problem(need: str, home: str, reset_home: bool = False) -> str | None:
+    """Why `home` cannot run a case that requires `need`, or None. A phone case
+    also needs `reset_home`, this run starting each attempt from the seeded home."""
     if need == "cues":
         return cue_drive.home_problem(home)
     if need == "computers":
@@ -315,6 +335,20 @@ def requirement_problem(need: str, home: str) -> str | None:
         stub = os.path.join(os.path.expanduser(home), "eval-bin", "claude")
         return None if os.path.isfile(stub) and os.access(stub, os.X_OK) else (
             "the eval home was not seeded with --coding-signed-out (seed_capability_home.py)")
+    if need == "phone_calls":
+        # seed_capability_home.PHONE_CALLS_MANIFEST: phone calls on, with the
+        # invented trunk the simulated endpoint checks every create against.
+        marker = os.path.join(os.path.expanduser(home), "eval-fixtures", "phone_calls.json")
+        if not os.path.isfile(marker):
+            return "the eval home was not seeded with --phone-calls (seed_capability_home.py)"
+        # Each dial spends one of the home's five daily attempts and a lost create
+        # holds its one call slot for hours: a phone attempt that does not start from
+        # the seeded home measures the attempts before it.
+        return None if reset_home else (
+            "a phone case runs only with --reset-home, each attempt from the seeded home "
+            "(its five daily attempts and one call slot)")
+    if need in owner_inbox.INBOXES:
+        return owner_inbox.home_problem(home, need)
     raise ValueError(f"unknown requirement {need!r}")
 
 
@@ -630,14 +664,18 @@ def voice_precondition_error(fermix_home: str) -> str | None:
 def resets_home(scenario, case) -> bool:
     """Whether --reset-home restores the seeded state before an attempt of this case:
     an isolated_mutation case driven over the companion socket, where the owner's
-    words change the home (a watcher made, a memory stored) for every later case."""
-    return case.drive == "companion" and scenario.risk == "isolated_mutation"
+    words change the home (a watcher made, a memory stored) for every later case,
+    or one that places phone calls, where each dial spends one of the home's five
+    daily attempts and a dispatch whose answer was lost holds the home's one call
+    slot for hours (PhoneCalls.Limits)."""
+    return scenario.risk == "isolated_mutation" and (
+        case.drive == "companion" or case_uses_phone(case))
 
 
 def reset_home_error(args, profiles: set[str]) -> str | None:
     if getattr(args, "reset_home", False) and "isolated_mutation" not in profiles:
         return ("--reset-home needs --profile isolated_mutation: it restores a disposable "
-                "eval home before each isolated companion attempt")
+                "eval home before each isolated companion or phone-call attempt")
     return None
 
 
@@ -1580,6 +1618,106 @@ def _rubric_record(cfg, case, scn, run_id, trial, judge_on, transcript, evidence
             "watch": [{"n": n, "reason": reason} for n, reason in case.watch]}
 
 
+# --- phone cases: the call's own report, and waiting for a call to end --------
+
+# The record's query for a report turn, which no one typed.
+REPORT_TURN_QUERY = "(no message: the phone call's own report arrived in this conversation)"
+# How the judge is told the report turn is not the owner speaking.
+_REPORT_FRAME = ("[No message from the owner. When the phone call ended, Fermix put its own "
+                 "report of the call into this conversation, and the assistant's next reply "
+                 "is what the owner heard about it. The report:]\n")
+# How often an `after: call_end` turn reads the simulator's record while it waits.
+_CALL_END_POLL_S = 1.0
+
+
+def calls_ended(state) -> bool:
+    """Whether every call the simulator recorded for this attempt has ended:
+    each `phone.calls.<n>` with a create has an `ended`. No call: nothing to wait for."""
+    calls = ((state or {}).get("phone") or {}).get("calls") or {}
+    return all("ended" in call for call in calls.values()
+               if isinstance(call, dict) and call.get("creates"))
+
+
+def _await_calls_ended(fixture, timeout_s: float, clock=time.monotonic,
+                       sleep=time.sleep) -> str | None:
+    """Wait for `calls_ended` on this attempt's record, polling the in-process
+    state, bounded by `timeout_s`. None, or why the wait gave up."""
+    if fixture is None:
+        return "no simulated phone endpoint is bound to this attempt"
+    deadline = clock() + timeout_s
+    for _poll in range(int(timeout_s / _CALL_END_POLL_S) + 2):
+        if calls_ended(fixture.state()):
+            return None
+        if clock() >= deadline:
+            break
+        sleep(_CALL_END_POLL_S)
+    return f"the attempt's simulated call had not ended within {int(timeout_s)}s"
+
+
+def phone_floor_without_turn(case, fixture, records: list[dict]) -> list[dict]:
+    """The case's `fixture_state` as a gate, for a phone case that stopped before
+    its final turn graded it: a report that never arrived must not hide a second
+    dial or a leak. Read from the simulator's record, which needs no trace; only a
+    violated `absent:` clause is conclusive, so a positive clause that cannot hold
+    yet leaves the case incomplete, and a forbidden one recorded fails it."""
+    clauses = case.expect.get("fixture_state")
+    if fixture is None or not clauses or not case_uses_phone(case):
+        return []
+    if any(gate.get("key") == "fixture_state" for rec in records for gate in rec["gates"]):
+        return []
+    verdict = check_state(_fixture_state(fixture), clauses)
+    return [{"key": "fixture_state", "passed": verdict.passed,
+             "detail": verdict.detail + " (read when the case stopped before its final turn)",
+             "conclusive": verdict.conclusive}]
+
+
+def _bare_record(index: int, query: str, session: str, error: str | None) -> dict:
+    """A turn record no `fermix ask` result stands behind."""
+    return {"index": index, "query": query, "session": session, "status": "error",
+            "drive_error": error, "note": None, "correlation": "n/a", "gates": [],
+            "tools": [], "reply": "", "cost_usd": 0.0, "duration_ms": 0.0, "tokens": 0,
+            "iterations": None, "subagent_spawns": 0, "trace_id": None, "trace_url": "",
+            "main_models": [], "main_providers": [], "main_efforts": []}
+
+
+def _waited_record(index: int, session: str, why: str) -> dict:
+    rec = _bare_record(index, "(waiting for the phone call to end)", session, why)
+    rec["note"] = "the turn after the wait was not driven"
+    return rec
+
+
+def _report_turn(cfg, client, session, index, began, seen, poll_s, expect, fixture,
+                 asked) -> tuple[dict, object, str]:
+    """Find and grade the call's own report: the turn Fermix starts in this
+    conversation once the call has ended and its result was read, which no
+    runner query started (`OpikClient.find_unprompted_turn_trace`). Graded like
+    any turn but for latency, which nothing here measures. (record, view or
+    None, the report text it was given)."""
+    rec = _bare_record(index, REPORT_TURN_QUERY, session, None)
+    try:
+        found = client.poll_for_unprompted_turn(session, began, seen, asked, poll_s,
+                                                cfg.opik.poll_interval_s)
+        if found is None:
+            rec["correlation"] = "missing"
+            rec["drive_error"] = (f"no report turn for the call appeared on this conversation "
+                                  f"within {int(poll_s)}s")
+            return rec, None, ""
+        seen.add(found["id"])
+        trace, spans = client.await_complete(found)
+    except OpikError as exc:
+        _record_opik_error(rec, exc)
+        return rec, None, ""
+    gates = grade.grade(trace, spans, expect, elapsed_ms=None, require_duration=False,
+                        fixture_state=_fixture_state(fixture))
+    view = grade.TurnView.build(trace, spans, elapsed_ms=None, require_duration=False)
+    _record_graded_turn(rec, cfg, trace, gates, view,
+                        "the call's own report, started by Fermix: no latency gate")
+    if _provider_limit_reply(view.reply):
+        rec["status"] = "provider_limited"
+        rec["drive_error"] = "provider usage/rate/quota limit; turn is not gradable"
+    return rec, view, text_of(trace.get("input"))
+
+
 def run_case(cfg, client, suite, scn, case, run_id, trial, judge_on, fixture=None):
     budget = {"max_cost_usd": cfg.budgets.max_cost_usd,
               "max_duration_ms": cfg.budgets.max_duration_ms}
@@ -1593,9 +1731,35 @@ def run_case(cfg, client, suite, scn, case, run_id, trial, judge_on, fixture=Non
     # The turn driven but not yet graded: (record, expect, workspace before). A
     # turn that breaks the loop before its trace settled still gets its disk read.
     ungraded = None
+    # What this attempt asked, and when it began: a phone case's report turn is
+    # the one turn on its conversation that none of these started.
+    asked: list[str] = []
+    began = None
 
     for index, turn in enumerate(case.turns):
+        if turn.after is not None:
+            late = _await_calls_ended(fixture, timeout_ms / 1000.0)
+            if late is not None:
+                records.append(_waited_record(index, session, late))
+                incomplete = True
+                break
+        if turn.awaits is not None:
+            expect = {"max_cost_usd": cfg.budgets.max_cost_usd}
+            expect.update(_render_expect(turn.expect, run_id, trial))
+            rec, view, notice = _report_turn(cfg, client, session, index, began, seen,
+                                             poll_s, expect, fixture, asked)
+            records.append(rec)
+            if view is None or _view_incomplete(view):
+                incomplete = True
+                break
+            transcript.extend([{"role": "user", "content": _REPORT_FRAME + notice},
+                               {"role": "assistant", "content": view.reply or ""}])
+            evidence.append(_tool_evidence(view, index))
+            if any(not gate["passed"] for gate in rec["gates"]):
+                gate_ok = False
+            continue
         query = _render_query(turn.query, run_id, trial, fixture_url)
+        asked.append(query)
         # The loader resolved the turn's layers (the defaults, the case's expect
         # on the final turn, the turn's own); only the run budget joins them here.
         expect = dict(budget)
@@ -1608,6 +1772,7 @@ def run_case(cfg, client, suite, scn, case, run_id, trial, judge_on, fixture=Non
                                     attachments=(case.images if index == 0 else None))
         rec = _turn_record(index, query, session, result)
         ungraded = (rec, expect, workspace_before)
+        began = began or result.sent_at - timedelta(seconds=10)
         if _provider_limit_reply(result.response):
             rec["status"] = "provider_limited"
             rec["drive_error"] = "provider usage/rate/quota limit; turn is not gradable"
@@ -1677,6 +1842,9 @@ def run_case(cfg, client, suite, scn, case, run_id, trial, judge_on, fixture=Non
         broken_rec, broken_expect, broken_before = ungraded
         broken_rec["gates"] = broken_rec["gates"] + workspace_gate_without_trace(
             cfg, broken_expect, broken_before)
+    if incomplete and records:
+        records[-1]["gates"] = records[-1]["gates"] + phone_floor_without_turn(
+            case, fixture, records)
 
     candidate_routes = _candidate_routes_from_turns(records)
     rubric = None if incomplete else _rubric_record(
@@ -2080,11 +2248,24 @@ def _print_dry_run(chosen, profiles, judge_on: bool, args,
         print(f"  voice: {voice_jobs} case trial(s) would each open one paid voice call "
               f"on <FERMIX_HOME>/{voice.SOCKET_NAME}")
     fixture_jobs = sum(1 for _suite, _scenario, case, _trial in jobs
-                       if case_uses_fixture(case))
+                       if case_uses_pages(case))
     if fixture_jobs:
         # Validated, not started: a dry run binds nothing and serves nothing.
         print(f"  fixture server: {fixture_jobs} case trial(s) address "
               f"{FIXTURE_URL_PLACEHOLDER}; the run would start one on 127.0.0.1")
+    phone_jobs = sum(1 for _suite, _scenario, case, _trial in jobs if case_uses_phone(case))
+    if phone_jobs:
+        # Validated, not started: the scripts are loaded and checked, nothing listens.
+        try:
+            scripts = phone_sim.load_scripts(PHONE_SCRIPTS_DIR)
+        except phone_sim.ScriptError as exc:
+            print(f"dry-run: the phone scripts cannot be played: {exc}", file=sys.stderr)
+            return 2
+        reset = "" if getattr(args, "reset_home", False) else \
+            "; without --reset-home every one would be NOT EVALUATED"
+        print(f"  phone endpoint: {phone_jobs} case trial(s) place calls on the simulated "
+              f"GPT-Live endpoint ({len(scripts)} scripted number(s), on the fixture server, "
+              f"loopback; the home needs --phone-calls{reset})")
     reset_jobs = sum(1 for _suite, scenario, case, _trial in jobs
                      if getattr(args, "reset_home", False) and resets_home(scenario, case))
     if reset_jobs:
@@ -2092,6 +2273,12 @@ def _print_dry_run(chosen, profiles, judge_on: bool, args,
         print(f"  home reset: {reset_jobs} case trial(s) would each start from the seeded "
               "state (capability-daemon.sh reset: one daemon restart per attempt, "
               "--fail-retries re-drives included)")
+    state_jobs = sum(1 for _suite, _scenario, case, _trial in jobs if case.state is not None)
+    if state_jobs:
+        # Validated, not seeded: the spec files exist; a dry run starts no helper.
+        print(f"  state: {state_jobs} case trial(s) would each seed the eval home's jobs and "
+              "reminders first (bin/seed_state.exs, every attempt), then wait up to "
+              f"{_SEEDED_HEAL_WAIT_S} s for any heal the seed opened to be sent")
     for suite, scenario, case, trial in jobs:
         action = _skip_reason(case, args) or "run"
         print(f"  - {suite.name}/{scenario.id}/{case.id}#{trial} "
@@ -2191,13 +2378,88 @@ def _drive_case(cfg, client, suite, scenario, case, run_id: str, trial: int,
             suite, scenario, case, run_id, trial, exc, fixture)
 
 
+def seed_case_state(cfg, suite, case) -> tuple[dict | None, str | None]:
+    """Restore `case.state` in the eval home with `bin/seed_state.exs`, as the capability
+    runner restores a `checker.state`: (the helper's manifest, None), or (None, why it
+    could not). The spec path is relative to the suite file."""
+    try:
+        manifest = run_capability._seed_state(cfg.daemon.fermix_home,
+                                              os.path.dirname(suite.path), case.state)
+    except (run_capability.StateSeedError, run_capability.checker.CheckerBoundaryError) as exc:
+        return None, str(exc)
+    return manifest, None
+
+
+def unsent_seeded_heals(db_path: str, job_ids: list[str]) -> list[str]:
+    """The heals of the seeded jobs still `open` or `diagnosing`: their message is not
+    sent yet. A job's own heal, and a plugin's (M106 §6), which has no job of its own and
+    is found by the seeded runs it took. Read-only: the runner never writes the store it
+    grades."""
+    if not job_ids:
+        return []
+    marks = ", ".join("?" for _id in job_ids)
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
+    try:
+        rows = conn.execute(f"SELECT id FROM job_heals WHERE state IN ('open', 'diagnosing') "
+                            f"AND (job_id IN ({marks}) OR id IN (SELECT heal_id FROM "
+                            f"job_heal_runs WHERE job_id IN ({marks}))) ORDER BY id",
+                            [*job_ids, *job_ids])
+        return [row[0] for row in rows]
+    finally:
+        conn.close()
+
+
+def await_seeded_heals(home: str, manifest: dict, timeout_s: float = _SEEDED_HEAL_WAIT_S,
+                       clock=time.monotonic, sleep=time.sleep) -> str | None:
+    """None once no heal a seeded failure opened is waiting to be sent, else why not
+    within `timeout_s`. A seeded failed run of the owner's job opens a heal in the
+    seed's own settle (bin/seed_state.exs), and the daemon claims and sends it."""
+    jobs = manifest.get("jobs") if isinstance(manifest, dict) else None
+    job_ids = [job["id"] for job in (jobs or {}).values()]
+    db_path = os.path.join(os.path.expanduser(home), "memory.db")
+    deadline = clock() + timeout_s
+    while True:
+        try:
+            pending = unsent_seeded_heals(db_path, job_ids)
+        except sqlite3.Error as exc:
+            return f"the seeded heals could not be read from {db_path}: {exc}"
+        if not pending:
+            return None
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return (f"the daemon did not send the seeded heal(s) {', '.join(pending)} within "
+                    f"{timeout_s:g} s (still open or diagnosing)")
+        sleep(min(_SEEDED_HEAL_POLL_S, remaining))
+
+
+def _seed_attempt(cfg, suite, scenario, case, run_id: str, trial: int):
+    """Seed a `state:` case's attempt: None when it may be driven, else (its undriven
+    result, the abort it raises). A seed that fails ends the run, as a failed reset
+    does: the home holds no known baseline for any later case. A seeded heal the
+    daemon did not send in time leaves only this attempt INCOMPLETE."""
+    manifest, error = seed_case_state(cfg, suite, case)
+    if error:
+        result = _ungraded_result(suite, scenario, case, run_id, trial,
+                                  f"state seed failed: {error}", "the attempt was not driven")
+        return result, {"suite": suite.name, "case": case.id, "tool": "seed_state.exs",
+                        "fragment": "state seed failed", "message": error,
+                        "why": _STATE_ABORT_WHY}
+    unsent = await_seeded_heals(cfg.daemon.fermix_home, manifest)
+    if unsent:
+        return _ungraded_result(suite, scenario, case, run_id, trial, unsent,
+                                "the attempt was not driven: its seeded record never "
+                                "reached the state the turn asks about"), None
+    return None
+
+
 def _drive_attempt(cfg, client, suite, scenario, case, run_id: str, trial: int,
                    judge_on: bool, fixtures, reset_home) -> tuple[dict, dict | None]:
     """One attempt and the abort it raises, if any.
 
     With --reset-home an isolated companion attempt starts from the seeded world.
     A reset that fails leaves the attempt undriven and ends the run: the home is in
-    no known state, so no later case could start from the seed either."""
+    no known state, so no later case could start from the seed either. A case with
+    a `state:` is seeded before each of its attempts (`_seed_attempt`)."""
     if reset_home is not None and resets_home(scenario, case):
         error = reset_home()
         if error:
@@ -2207,6 +2469,10 @@ def _drive_attempt(cfg, client, suite, scenario, case, run_id: str, trial: int,
             return result, {"suite": suite.name, "case": case.id,
                             "tool": "capability-daemon.sh reset", "fragment": "reset failed",
                             "message": error, "why": _RESET_ABORT_WHY}
+    if case.state is not None:
+        undriven = _seed_attempt(cfg, suite, scenario, case, run_id, trial)
+        if undriven is not None:
+            return undriven
     result = _drive_case(cfg, client, suite, scenario, case, run_id, trial, judge_on,
                          fixtures)
     return result, _abort_signal(suite, result) if suite.abort_on_tool_error else None
@@ -2459,7 +2725,7 @@ def _reset_home_for(cfg, args):
     if error:
         return None, error
     print(f"  [ok] seeded-state snapshot in {cfg.daemon.fermix_home}: each isolated "
-          "companion attempt starts from it, one daemon restart each")
+          "companion or phone-call attempt starts from it, one daemon restart each")
     return home_resetter(cfg), None
 
 
@@ -2539,12 +2805,18 @@ def _start_fixture_server(jobs, home: str) -> FixtureServer | None:
     if not any(case_uses_fixture(case) for _suite, _scenario, case, _trial in jobs):
         return None
     wanted = home_port(home)
-    fixtures = FixtureServer(FIXTURE_PAGES_DIR)
+    phone = any(case_uses_phone(case) for _suite, _scenario, case, _trial in jobs)
+    fixtures = FixtureServer(FIXTURE_PAGES_DIR,
+                             phone_scripts=PHONE_SCRIPTS_DIR if phone else None)
     port = fixtures.start(wanted)
     reach = ("the home's fixture port: web_fetch and browser" if wanted
              else "ephemeral: browser only")
     print(f"fixture server: 127.0.0.1:{port} ({reach}; "
           f"{len(fixtures.documents)} document(s), one token per case attempt)")
+    if fixtures.phone is not None:
+        print(f"  simulated GPT-Live endpoint on the same port: "
+              f"{len(fixtures.phone.numbers)} scripted number(s); the daemon's phone calls "
+              "reach it, and nothing else")
     return fixtures
 
 
@@ -2663,7 +2935,7 @@ def main(argv=None, host: str | None = None) -> int:
     if judge_error:
         print(f"judge precondition failed: {judge_error}", file=sys.stderr)
         return 3
-    chosen, held = hold_out_unseeded(cfg, chosen)
+    chosen, held = hold_out_unseeded(cfg, chosen, getattr(args, "reset_home", False))
     if held:
         print_not_evaluated(held)
     if not chosen:

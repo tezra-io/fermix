@@ -1,0 +1,204 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "anthropic/claude-sonnet-4.6",
+      "object": "model",
+      "created": 1755815280,
+      "released": 1771286400,
+      "owned_by": "anthropic",
+      "name": "Claude Sonnet 4.6",
+      "type": "language",
+      "tags": [
+        "file-input",
+        "reasoning",
+        "tool-use",
+        "vision",
+        "explicit-caching",
+        "web-search",
+        "structured-output"
+      ],
+      "context_window": 1000000,
+      "max_tokens": 128000
+    },
+    {
+      "id": "anthropic/claude-fable-5.2",
+      "object": "model",
+      "created": 1755815280,
+      "released": 1794182400,
+      "owned_by": "anthropic",
+      "name": "Claude Fable 5.2",
+      "type": "language",
+      "tags": [
+        "explicit-caching",
+        "fast",
+        "file-input",
+        "reasoning",
+        "structured-output",
+        "tool-use",
+        "vision"
+      ],
+      "context_window": 1000000,
+      "max_tokens": 128000
+    },
+    {
+      "id": "anthropic/claude-fable-5.2-batch",
+      "object": "model",
+      "created": 1755815280,
+      "released": 1794182400,
+      "owned_by": "anthropic",
+      "name": "Claude Fable 5.2 (Batch)",
+      "type": "language",
+      "tags": [
+        "explicit-caching",
+        "file-input",
+        "reasoning",
+        "structured-output",
+        "tool-use",
+        "vision"
+      ],
+      "context_window": 1000000,
+      "max_tokens": 128000
+    },
+    {
+      "id": "openai/gpt-6-luna",
+      "object": "model",
+      "created": 1755815280,
+      "released": 1790035200,
+      "owned_by": "openai",
+      "name": "GPT-6 Luna",
+      "type": "language",
+      "tags": [
+        "explicit-caching",
+        "file-input",
+        "implicit-caching",
+        "reasoning",
+        "structured-output",
+        "tool-use",
+        "vision",
+        "web-search",
+        "fast"
+      ],
+      "context_window": 1050000,
+      "max_tokens": 128000
+    },
+    {
+      "id": "openai/gpt-6.2-sol",
+      "object": "model",
+      "created": 1755815280,
+      "released": 1794873600,
+      "owned_by": "openai",
+      "name": "GPT-6.2 Sol",
+      "type": "language",
+      "tags": [
+        "explicit-caching",
+        "file-input",
+        "implicit-caching",
+        "reasoning",
+        "structured-output",
+        "tool-use",
+        "vision",
+        "web-search",
+        "fast"
+      ],
+      "context_window": 1050000,
+      "max_tokens": 128000
+    },
+    {
+      "id": "openai/gpt-6.2-astra",
+      "object": "model",
+      "created": 1755815280,
+      "released": 1794873600,
+      "owned_by": "openai",
+      "name": "GPT-6.2 Astra",
+      "type": "language",
+      "tags": [
+        "explicit-caching",
+        "file-input",
+        "implicit-caching",
+        "reasoning",
+        "structured-output",
+        "tool-use",
+        "vision",
+        "web-search",
+        "fast"
+      ],
+      "context_window": 1050000,
+      "max_tokens": 128000
+    },
+    {
+      "id": "spacexai/grok-4.7",
+      "object": "model",
+      "created": 1755815280,
+      "released": 1789948800,
+      "owned_by": "spacexai",
+      "name": "Grok 4.7",
+      "type": "language",
+      "tags": [
+        "implicit-caching",
+        "reasoning",
+        "structured-output",
+        "tool-use",
+        "vision"
+      ],
+      "context_window": 500000,
+      "max_tokens": 500000
+    },
+    {
+      "id": "google/gemini-3-pro-image",
+      "object": "model",
+      "created": 1755815280,
+      "released": 1756684800,
+      "owned_by": "google",
+      "name": "Nano Banana Pro (Gemini 3 Pro Image)",
+      "type": "language",
+      "tags": [
+        "image-generation",
+        "web-search",
+        "implicit-caching",
+        "vision",
+        "structured-output"
+      ],
+      "context_window": 65536,
+      "max_tokens": 32768
+    },
+    {
+      "id": "spacexai/grok-voice-3.0",
+      "object": "model",
+      "created": 1755815280,
+      "released": 1791936000,
+      "owned_by": "spacexai",
+      "name": "Grok Voice 3.0",
+      "type": "realtime",
+      "tags": [
+        "audio-input",
+        "reasoning",
+        "tool-use",
+        "websocket-realtime"
+      ],
+      "context_window": 0,
+      "max_tokens": 0
+    },
+    {
+      "id": "acme/no-name",
+      "object": "model",
+      "owned_by": "acme",
+      "type": "language",
+      "tags": [
+        "tool-use"
+      ],
+      "context_window": 128000
+    },
+    {
+      "id": "openai/gpt-5-undated",
+      "object": "model",
+      "owned_by": "openai",
+      "name": "GPT-5 Undated",
+      "type": "language",
+      "tags": [
+        "tool-use"
+      ],
+      "context_window": 400000
+    }
+  ]
+}

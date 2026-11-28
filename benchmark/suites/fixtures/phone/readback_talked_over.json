@@ -1,0 +1,37 @@
+{
+  "name": "readback_talked_over",
+  "number": "+19175550131",
+  "party": "Quill & Ember, a restaurant in New York. The host talks over the assistant's read-back with a quick yes and hangs up; nothing was confirmed.",
+  "steps": [
+    {
+      "ring": true
+    },
+    {
+      "pause_ms": 600
+    },
+    {
+      "pick_up": "Quill and Ember, this is Sasha."
+    },
+    {
+      "voice": "Hi Sasha, I'm an AI assistant calling for a customer. Could I book a table for two on Saturday, February 20th, at 7 pm, under Rowan?"
+    },
+    {
+      "say": "Let me see what I have."
+    },
+    {
+      "pause_ms": 800
+    },
+    {
+      "voice": "So that's a table for two on Saturday, February 20th at 7 pm, under the name Rowan. Can you confirm that's booked?"
+    },
+    {
+      "cut_in": "Yeah, yeah, fine."
+    },
+    {
+      "say": "Sorry, it's slammed here tonight, I have to go."
+    },
+    {
+      "hang_up": true
+    }
+  ]
+}

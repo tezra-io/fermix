@@ -53,6 +53,7 @@ class Span:
     cache_write_tokens: int | None = None
     errored: bool = False
     under_subagent: bool = False
+    speed: str | None = None
 
 
 # --- provider_route ---------------------------------------------------------
@@ -413,8 +414,9 @@ def test_malformed_spans_raise_rather_than_being_skipped():
 # checked against first-party vendor pricing; the card carries the reason beside
 # the entry, and the assertion here is what makes the reason enforceable.
 
-_OPENAI_CACHE_WRITE_MODELS = ("gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol",
-                              "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
+_OPENAI_CACHE_WRITE_MODELS = ("gpt-6-astra", "gpt-6.2-astra", "gpt-6.2-sol", "gpt-6.1-sol",
+                              "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol",
+                              "gpt-5.6-terra", "gpt-5.6-luna")
 
 
 @pytest.mark.parametrize("model", _OPENAI_CACHE_WRITE_MODELS)
@@ -616,6 +618,22 @@ def test_gpt_6_1_terra_costs_half_gpt_6_1_sol_on_every_leg():
         assert getattr(terra, leg) * 2 == pytest.approx(getattr(sol, leg)), leg
 
 
+def test_gpt_6_2_astra_undercuts_gpt_6_astra_and_gpt_6_2_sol_keeps_gpt_6_1_sol_rate():
+    # Read first-party 2026-11-17, their release day, standard tier: Astra
+    # 8.00/40.00 with a 0.40 cached read and a 10.00 write, below GPT-6 Astra on
+    # every leg; Sol 2.00/10.00/0.10/2.50, GPT-6.1 Sol's rate exactly.
+    # OpenRouter lists the same prices that day.
+    for route, prefix in (("openai", ""), ("openai_codex", ""), ("openrouter", "openai/")):
+        assert pricing.CARD[(route, f"{prefix}gpt-6.2-astra")] == \
+            pricing.Rate(8.00, 40.00, 0.40, 10.00), route
+        assert pricing.CARD[(route, f"{prefix}gpt-6.2-sol")] == \
+            pricing.Rate(2.00, 10.00, 0.10, 2.50), route
+    new, old = pricing.CARD[("openai", "gpt-6.2-astra")], pricing.CARD[("openai", "gpt-6-astra")]
+    for leg in ("input_per_mtok", "output_per_mtok", "cached_input_per_mtok",
+                "cache_write_per_mtok"):
+        assert getattr(new, leg) < getattr(old, leg), leg
+
+
 def test_fable_5_1_caches_at_a_tenth_of_its_siblings_read_rate():
     # Verified first-party: the vendor's table footnotes Fable 5.1 and Mythos
     # 5.1 as the only models at 0.025x input; everything else but Opus 5.5
@@ -753,6 +771,61 @@ def test_an_openrouter_slug_with_a_direct_entry_carries_its_rate():
         assert routed == direct, model
 
 
+# Vercel AI Gateway's Grok ids name the maker `spacexai`, OpenRouter's `x-ai`.
+_VERCEL_DIRECT_ROUTES = {"anthropic": "anthropic", "openai": "openai", "spacexai": "xai"}
+
+
+def test_a_vercel_slug_prices_exactly_as_its_direct_entry():
+    """Vercel AI Gateway bills at the model maker's list price and a cache leg
+    belongs to the vendor's price list, so every curated Vercel slug prices as
+    the direct entry for the same model. Vercel's public listing
+    (`GET https://ai-gateway.vercel.sh/v1/models`, read 2026-11-22) agrees on
+    every leg it publishes for every pair here."""
+    pairs = {}
+    for (route, model), rate in pricing.CARD.items():
+        if route != "vercel":
+            continue
+        vendor, _, slug = model.partition("/")
+        direct_route = _VERCEL_DIRECT_ROUTES[vendor]
+        direct = slug.replace(".", "-") if direct_route == "anthropic" else slug
+        pairs[model] = (rate, pricing.CARD[(direct_route, direct)])
+    # Derived, so it must not pass by finding nothing.
+    assert len(pairs) == 16, sorted(pairs)
+    for model, (routed, direct) in pairs.items():
+        assert routed == direct, model
+
+
+# The figures Vercel's listing publishes for the curated `@vercel` list, read
+# 2026-11-22: `pricing.input`, `.output` and `.input_cache_read`, per token in
+# the listing and per million here. Standard tier only: the listing's tiers
+# above 272k (GPT) and 200k (Grok) input tokens are the long-context cliffs the
+# card does not model.
+_VERCEL_LISTING_RATES = (
+    ("anthropic/claude-sonnet-4.6", (3.00, 15.00, 0.30)),
+    ("anthropic/claude-fable-5.2", (8.00, 40.00, 0.20)),
+    ("openai/gpt-6.2-astra", (8.00, 40.00, 0.40)),
+    ("openai/gpt-5.5", (5.00, 30.00, 0.50)),
+    ("spacexai/grok-4.7", (2.00, 6.00, 0.50)),
+    ("spacexai/grok-4.3", (1.25, 2.50, 0.20)),
+)
+
+
+@pytest.mark.parametrize("model,expected", _VERCEL_LISTING_RATES)
+def test_the_vercel_route_carries_the_listing_figures(model, expected):
+    rate = pricing.CARD[("vercel", model)]
+    assert (rate.input_per_mtok, rate.output_per_mtok,
+            rate.cached_input_per_mtok) == expected, model
+
+
+def test_a_vercel_model_outside_the_curated_list_is_unpriced_not_silently_zero():
+    # The picker offers every tool-calling model the gateway lists, not just the
+    # carded sixteen, so a run can route to one with no card entry.
+    result = pricing.price([Span("alibaba/qwen4-max", "vercel", "chat_completions",
+                                 prompt_tokens=1_000, completion_tokens=10)])
+    assert result.basis == "unpriced"
+    assert result.unpriced_routes == ("vercel/alibaba/qwen4-max",)
+
+
 # Venice's curated `@venice` catalog list, with the figures transcribed from
 # `model_spec.pricing` on the listing read 2026-09-19, and grok-4-7's on the
 # listing read 2026-10-03.
@@ -861,6 +934,67 @@ def test_card_version_is_stamped_on_every_verdict():
         assert result.card_version == pricing.CARD_VERSION
 
 
+# --- the fast tier ------------------------------------------------------------
+#
+# Read first-party 2026-11-23. A span's `speed` is the speed the vendor reported
+# it ran at; only "fast" selects the fast table.
+
+def test_a_fast_span_is_priced_from_the_fast_table():
+    span = Span("gpt-6.2-sol", "openai", "responses", prompt_tokens=1_000_000,
+                completion_tokens=1_000_000, speed="fast")
+    assert pricing.price([span]).cost_usd == pytest.approx(4.00 + 20.00)
+
+    opus = Span("claude-opus-5-5", "anthropic", "messages", prompt_tokens=1_000_000,
+                completion_tokens=1_000_000, cached_input_tokens=500_000,
+                cache_write_tokens=250_000, speed="fast")
+    # 250k uncached at 8.00, 500k read at 0.40, 250k written at 10.00, 1M out at 40.00.
+    assert pricing.price([opus]).cost_usd == pytest.approx(2.00 + 0.20 + 2.50 + 40.00)
+
+
+def test_a_standard_or_unset_speed_keeps_the_standard_table():
+    for speed in ("standard", None):
+        span = Span("gpt-6.2-sol", "openai", "responses", prompt_tokens=1_000_000,
+                    completion_tokens=1_000_000, speed=speed)
+        assert pricing.price([span]).cost_usd == pytest.approx(2.00 + 10.00), speed
+
+
+def test_a_fast_span_with_no_fast_rate_is_unpriced_not_priced_at_standard():
+    # The ChatGPT plan route refuses the fast tier, so a fast span there is a
+    # defect to surface; a standard rate would under-state it by the premium.
+    span = Span("gpt-6.2-sol", "openai", "chatgpt_plan", prompt_tokens=10,
+                completion_tokens=2, speed="fast")
+    result = pricing.price([span])
+    assert result.cost_usd is None
+    assert result.basis == "unpriced"
+    assert result.unpriced_routes == ("openai_codex/gpt-6.2-sol (fast)",)
+
+
+def test_an_unknown_speed_is_refused():
+    span = Span("gpt-6.2-sol", "openai", "responses", prompt_tokens=10,
+                completion_tokens=2, speed="turbo")
+    with pytest.raises(ValueError, match="speed"):
+        pricing.price([span])
+
+
+def test_every_fast_rate_has_a_standard_one_and_costs_more():
+    for key, fast in pricing.FAST_CARD.items():
+        standard = pricing.CARD[key]
+        assert fast.input_per_mtok > standard.input_per_mtok, key
+        assert fast.output_per_mtok > standard.output_per_mtok, key
+
+
+def test_the_anthropic_fast_cache_legs_keep_the_standard_multipliers():
+    # "Prompt caching multipliers apply on top of fast mode pricing": each leg
+    # is its standard entry's ratio to input, applied to the fast input.
+    for (route, model), fast in pricing.FAST_CARD.items():
+        if route != "anthropic":
+            continue
+        standard = pricing.CARD[(route, model)]
+        for leg in ("cached_input_per_mtok", "cache_write_per_mtok"):
+            assert getattr(fast, leg) / fast.input_per_mtok == pytest.approx(
+                getattr(standard, leg) / standard.input_per_mtok), f"{model}.{leg}"
+
+
 def test_every_rate_is_internally_consistent():
     for (route, model), rate in pricing.CARD.items():
         label = f"{route}/{model}"
@@ -878,7 +1012,7 @@ def test_a_cache_leg_is_a_float_the_sentinel_or_unestablished():
     # Three states, never a fourth: a published figure, the vendor's verified
     # "no premium/discount", or "not established". A stray string or int would
     # price silently wrong.
-    for (route, model), rate in pricing.CARD.items():
+    for (route, model), rate in [*pricing.CARD.items(), *pricing.FAST_CARD.items()]:
         for leg in (rate.cached_input_per_mtok, rate.cache_write_per_mtok):
             assert leg is None or leg is pricing.BILLS_AT_INPUT_RATE \
                 or isinstance(leg, float), f"{route}/{model}: {leg!r}"
@@ -905,7 +1039,7 @@ _CATALOG_PATH = ("apps/fermix_core/lib/fermix_core/providers/model_catalog.ex")
 # models are listed live per account), so there is nothing to extract for it.
 # Its observed routes stay covered by _SPAN_CENSUS below.
 _CATALOG_PROVIDERS = ("openai", "anthropic", "xai", "openrouter",
-                      "mistral", "venice", "ollama")
+                      "mistral", "venice", "vercel", "ollama")
 
 
 def _catalog_models() -> dict[str, list[str]]:
@@ -928,6 +1062,35 @@ def _catalog_models() -> dict[str, list[str]]:
     assert "claude-opus-4-8" in parsed["anthropic"], parsed["anthropic"]
     assert sum(len(ids) for ids in parsed.values()) >= 30, parsed
     return parsed
+
+
+def _catalog_fast_models() -> set[tuple[str, str]]:
+    """Every (provider, model) the catalog flags `fast?: true`.
+
+    The route asks for the fast tier only on these, so they are the population
+    `FAST_CARD` has to cover. A parse that finds none fails as stale.
+    """
+    source = (REPO_ROOT / _CATALOG_PATH).read_text()
+    blocks = re.findall(r"^  @(" + "|".join(_CATALOG_PROVIDERS) + r") \[(.*?)^  \]$",
+                        source, re.MULTILINE | re.DOTALL)
+    flagged = {(provider, entry_id)
+               for provider, body in blocks
+               for entry in body.split("%Entry{")[1:]
+               for entry_id in re.findall(r'id:\s*"([^"]+)"', entry)
+               if re.search(r"fast\?:\s*true", entry)}
+    assert ("openai", "gpt-6.2-sol") in flagged and ("anthropic", "claude-opus-5-5") in flagged, (
+        f"parsed {sorted(flagged)} from {_CATALOG_PATH} — the extraction is stale, not the catalog")
+    return flagged
+
+
+def test_every_model_the_route_runs_fast_has_a_fast_rate():
+    """A model flagged `fast?` without a fast price must fail HERE.
+
+    Otherwise its fast calls price as unpriced and blank the turn's figure.
+    """
+    missing = sorted(f"{route}/{model}" for route, model in _catalog_fast_models()
+                     if (route, model) not in pricing.FAST_CARD)
+    assert not missing, f"no FAST_CARD entry for the fast-mode models: {missing}"
 
 
 def test_every_model_the_product_can_route_to_is_classified():

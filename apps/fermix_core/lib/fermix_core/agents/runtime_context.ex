@@ -173,6 +173,26 @@ defmodule FermixCore.Agents.RuntimeContext do
   end
 
   @doc """
+  The profile of a turn that may only write its reply (M94 D23: the turn that
+  reports a finished phone call). It carries no capability, offered or
+  dispatchable, whatever the registry holds, and its runtime section says so
+  (`RuntimeSections.reply_only/0`), prose and wire together: a tool its model
+  names anyway is answered as not found, and nothing runs.
+  """
+  @spec reply_only_profile(:operator | :guest) :: profile()
+  def reply_only_profile(trust) when trust in [:operator, :guest] do
+    content = RuntimeSections.reply_only()
+
+    %{
+      trust: trust,
+      capabilities: [],
+      dispatchable: [],
+      runtime_message: %{role: "system", content: content},
+      runtime_accounting: Accounting.entry(:runtime, nil, content)
+    }
+  end
+
+  @doc """
   Return the cached profile for `trust`.
 
   `harness_tools?: false` selects the harness-free variant (see `harness_free/3`)
@@ -204,6 +224,8 @@ defmodule FermixCore.Agents.RuntimeContext do
   A Live voice delegation puts its backend addendum here
   (MILESTONE_41_OPENAI_LIVE_VOICE.md §6.3) — it must never mutate the shared
   prompt a text conversation replays, so it is never cached into a profile.
+  An owner's turn puts its `## Computers` section here too (M102 N10): a
+  computer joins or goes away with nothing to rebuild a cached profile.
   Empty (the default) leaves every existing caller byte-identical.
 
   The volatile tier is the owner's memory (USER.md and MEMORY.md). A turn on

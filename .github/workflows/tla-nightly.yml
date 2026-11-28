@@ -1,0 +1,79 @@
+# Every TLA+ check, run in TLC with no saved verdicts. `make -C tla check` reuses
+# a saved pass while the spec and config are unchanged, which is what keeps it
+# fast before a push; this run is what would catch a saved verdict that should
+# not have been reused, a stale spec, or a check that has outgrown its bound.
+#
+# Schedules execute the workflow file on the DEFAULT branch (main), so this must
+# exist on main to fire. It checks out `dev` so the result tracks active work.
+name: tla-nightly
+
+on:
+  schedule:
+    # 02:41 UTC, clear of eval-nightly (04:17) and eval-weekly (Saturday 06:23).
+    - cron: "41 2 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: every TLA+ check in TLC
+    runs-on: ubuntu-24.04
+    # About 30 minutes on an idle Mac, one check at a time.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'dev' || github.ref }}
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      - name: Run every check
+        run: make -C tla check-fresh
+
+      - name: Upload TLC's output
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tla-output-${{ github.run_attempt }}
+          path: tla/out
+          retention-days: 14
+          if-no-files-found: warn
+
+  alert:
+    name: file an issue when the checks failed or left no result
+    needs: check
+    # always(): a cancelled run is an absent result, not a passing one.
+    if: ${{ always() && needs.check.result != 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        env:
+          RESULT: ${{ needs.check.result }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const title = "tla-nightly: the TLA+ checks are not green";
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const line = `The uncached run ended with \`${process.env.RESULT}\`: ${runUrl}`;
+            const open = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: "open", per_page: 100,
+            });
+            const existing = open.find((issue) => issue.title === title && !issue.pull_request);
+            if (existing) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: existing.number, body: `Still red. ${line}` });
+              return;
+            }
+            const body = [
+              line,
+              "",
+              "A FAIL is a broken rule or a spec that no longer matches the code; a STALE spec needs a re-read and a re-pin (`tla/README.md`). A check that passes locally from a saved verdict and fails here means the saved verdict's key is missing something: fix that first.",
+              "",
+              "Further failures comment here while this stays open. Close it once the run is green.",
+            ].join("\n");
+            await github.rest.issues.create({ owner, repo, title, body });

@@ -7,6 +7,7 @@ defmodule FermixChannels.Channels.Telegram.PollerTest do
   alias FermixChannels.Channels.Telegram.Poller
   alias FermixChannels.Gateway.AlbumBuffer
   alias FermixChannels.Gateway.Idempotency
+  alias FermixChannels.Test.AlbumBufferIdle
   alias FermixCore.Memory.Repo
   alias FermixTestSupport.SafeRm
 
@@ -537,8 +538,10 @@ defmodule FermixChannels.Channels.Telegram.PollerTest do
 
       assert_receive {:dispatched, [album]}
       assert Enum.map(album.attachments, & &1.file_id) == ["photo-a", "photo-b"]
-      # Every cast the buffer was sent is handled once this call returns.
-      :sys.get_state(buffer)
+      # Every cast the buffer was sent is handled, and every dispatch it started
+      # has ended, once this returns; no part is left to flush later.
+      assert %{buffers: buffers} = AlbumBufferIdle.await_dispatches_done(buffer)
+      assert buffers == %{}
       refute_received {:dispatched, _messages}
     end
 

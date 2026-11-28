@@ -40,7 +40,7 @@ defmodule FermixCore.Management.Placement do
   did. A device opens no database (`FermixCore.Home.Role`), so with no link it
   refuses every method of a family whose state is the primary's `memory.db`
   (`database_family?/1`: the cues, their sources, watchers, mandates and
-  proposals) as retired (`retired/1`): `primary_unreachable`, as a linked
+  proposals, and the phone calls) as retired (`retired/1`): `primary_unreachable`, as a linked
   desktop's is while its server is out of reach, with the sentence its own
   summary's `retired` says (`HomeSummary.retired_sentence/2`). The home's recovery, enrollment and move are the primary's too
   (`home.snapshots.*`, `home.enroll.open`, `home.enroll.withdraw`,
@@ -104,8 +104,9 @@ defmodule FermixCore.Management.Placement do
   # (M97 §6.3); it does not match `computer_use.`.
   @device_families ~w(lifecycle. doctor. computer_use. imessage. accessories. computer.)
   # The primary-class families whose state is the primary's memory.db, which
-  # a device never opens: one with no link refuses them as retired.
-  @database_families ~w(cues.)
+  # a device never opens: one with no link refuses them as retired. A phone
+  # call's record is the primary's (M94 §09).
+  @database_families ~w(cues. phone_calls.)
   @rail_only_methods ~w(home.move.readiness home.move.start home.enroll.open home.enroll.withdraw
                         home.enroll.approve home.enroll.deny home.snapshots.run home.restart)
   @rail_only_sentence "Always On takes this step itself: send home.act with the action the " <>

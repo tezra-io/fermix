@@ -720,6 +720,40 @@ defmodule Fermix.CLI.Service.PackagedTest do
       refute_received {:ran, "systemctl", ["--user", "restart", _unit]}
     end
 
+    # M94 §12: the owner's own restart (`fermix restart`) takes the window a
+    # phone call in progress holds; an upgrade's restart is not asked.
+    test "the owner's restart takes the window a phone call holds, and says its refusal",
+         context do
+      held = "A phone call is in progress, and restarting Fermix now would hang it up."
+
+      opts =
+        restart_opts(context,
+          pids: ["100"],
+          request: fn
+            _socket, "lifecycle.prepare_restart", _params ->
+              {:error,
+               {:management_error, "unavailable", "Not available.",
+                %{"capability" => "phone_calls", "sentence" => held}}}
+          end
+        )
+        |> Keyword.merge(hello: publishing_hello(["100"]), owner_restart: true)
+
+      assert Packaged.restart(opts) == {:error, {:lifecycle_refused, held}}
+      assert_receive {:called, "lifecycle.prepare_restart", %{}}
+      refute_received {:ran, "systemctl", ["--user", "restart", _unit]}
+    end
+
+    test "a restart that is not the owner's takes the plain window", context do
+      opts =
+        context
+        |> restart_opts(pids: ["100", "412"])
+        |> Keyword.put(:hello, publishing_hello(["100", "412"]))
+
+      assert {:ok, _result} = Packaged.restart(opts)
+      assert_receive {:called, "lifecycle.prepare", %{}}
+      refute_received {:called, "lifecycle.prepare_restart", _params}
+    end
+
     test "no bound home is its own refusal, not a guessed one", context do
       SafeRm.rm_rf!(context.config_root)
 
@@ -742,6 +776,20 @@ defmodule Fermix.CLI.Service.PackagedTest do
 
       assert {:ok, result} = Packaged.restart(opts)
       assert result["alignment"] == "pending_restart"
+    end
+  end
+
+  # A `hello` that answers `pids` in turn and publishes the owner's restart
+  # window, as a daemon with phone calls does.
+  defp publishing_hello(pids) do
+    counter = :counters.new(1, [])
+    minimums = %{"lifecycle.prepare" => 1, "lifecycle.prepare_restart" => 2}
+
+    fn _socket_path ->
+      index = min(:counters.get(counter, 1), length(pids) - 1)
+      :counters.add(counter, 1, 1)
+      engine = Map.put(Map.drop(installed_identity(), ["engine_id"]), "pid", Enum.at(pids, index))
+      {:ok, %{"engine" => engine, "capabilities" => %{"minimum_versions" => minimums}}}
     end
   end
 

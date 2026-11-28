@@ -23,6 +23,7 @@ defmodule FermixCore.Management.Settings do
   alias FermixCore.Home.Snapshot.Settings, as: SnapshotSettings
   alias FermixCore.Management.Accessories, as: AccessoryLink
   alias FermixCore.Management.Mobile, as: PhoneChannel
+  alias FermixCore.Management.PhoneCalls, as: PhoneCallFacts
   alias FermixCore.Management.Settings.Accessories
   alias FermixCore.Management.Settings.AnswerMap
   alias FermixCore.Management.Settings.Assistant
@@ -31,6 +32,7 @@ defmodule FermixCore.Management.Settings do
   alias FermixCore.Management.Settings.CodingMachine
   alias FermixCore.Management.Settings.Cues, as: CuesSection
   alias FermixCore.Management.Settings.Mobile
+  alias FermixCore.Management.Settings.PhoneCalls
   alias FermixCore.Management.Settings.Providers
   alias FermixCore.Management.Settings.Row
   alias FermixCore.Management.Settings.Secrets
@@ -56,6 +58,7 @@ defmodule FermixCore.Management.Settings do
     Mobile,
     CuesSection,
     Voice,
+    PhoneCalls,
     Accessories,
     # Before Tools: both apps draw the coding pane's sections in this order,
     # this machine's own approval first, then the home's preferred tool.
@@ -135,6 +138,10 @@ defmodule FermixCore.Management.Settings do
   and the accessory link's are applied the moment they are written: a write
   that moves one starts or stops its subtree (M51 §5.5, M91 E3), and
   `:mobile_switch` and `:accessories_switch` replace those calls in a test.
+  Phone calls' switch is applied the same way, once its write has landed
+  (M94 §12): off stops new calls, ends what has not dialed and asks a live
+  call to end, on reopens admission; `:phone_calls_switch` replaces it in a
+  test, and `:phone_calls` names the call facts' seams for the section's rows.
   """
   @spec apply(String.t(), map(), keyword()) :: {:ok, map()} | {:error, write_error()}
   def apply(section, values, opts \\ [])
@@ -198,9 +205,10 @@ defmodule FermixCore.Management.Settings do
     current = ConfigStore.current_snapshot()
 
     for sentence <-
-          phone_switch(before, current, opts) ++
+          mobile_switch(before, current, opts) ++
             reach_switch(before, current, opts) ++
-            accessories_switch(before, current, opts) ++ misplaced_machine_settings(),
+            accessories_switch(before, current, opts) ++
+            phone_calls_switch(before, current, opts) ++ misplaced_machine_settings(),
         do: Logger.warning("settings reload: #{sentence}")
 
     {:ok,
@@ -295,6 +303,7 @@ defmodule FermixCore.Management.Settings do
   end
 
   defp commit(:meetings, answers), do: MeetingsConfig.save(answers)
+  defp commit(:phone_calls, answers), do: PhoneCalls.save(answers)
   defp commit(:cues, answers), do: CuesSection.save(answers)
   defp commit(:browser, answers), do: BrowserConfig.save(answers)
   defp commit(:snapshots, answers), do: SnapshotSettings.save(answers)
@@ -333,7 +342,7 @@ defmodule FermixCore.Management.Settings do
   defp applied(keys, before, opts) do
     current = ConfigStore.current_snapshot()
     switch = engine_switch(before, current)
-    phone = phone_switch(before, current, opts)
+    mobile = mobile_switch(before, current, opts)
 
     %{
       "applied" => keys ++ derived_keys(keys, switch),
@@ -341,11 +350,28 @@ defmodule FermixCore.Management.Settings do
       "readiness" => readiness(),
       "side_effects" =>
         side_effects(before, current, switch) ++
-          phone ++
+          mobile ++
           reach_switch(before, current, opts) ++
-          accessories_switch(before, current, opts)
+          accessories_switch(before, current, opts) ++
+          phone_calls_switch(before, current, opts)
     }
   end
+
+  # Phone calls' switch is live (M94 §12), and its runtime half runs only once
+  # the section's write has landed, so a write that failed stops nothing. Off
+  # closes admission in the call manager, ends what has not dialed and asks a
+  # live call to end; on reopens admission. What it did that the owner did not
+  # type is said in their words.
+  defp phone_calls_switch(before, current, opts) do
+    now = phone_calls_on?(current)
+
+    if phone_calls_on?(before) == now,
+      do: [],
+      else: Keyword.get(opts, :phone_calls_switch, &PhoneCallFacts.apply_enabled/1).(now)
+  end
+
+  defp phone_calls_on?(snapshot),
+    do: snapshot |> Source.core(:phone_calls) |> Keyword.get(:enabled, false) == true
 
   # The accessory link's switch is live (M91 E3), as the phone's is: a write or
   # a reload that moves it starts or stops the link at once, and a link that
@@ -366,13 +392,14 @@ defmodule FermixCore.Management.Settings do
   defp accessories_on?(snapshot),
     do: snapshot |> Source.channel(:accessories) |> Keyword.get(:enabled, false) == true
 
-  # The phone channel's switch is live (M51 §5.5): a write or a reload that moves
-  # it starts or stops the channel at once, and a channel that did not follow it
-  # is said in the daemon's words. Nothing is called when it did not move.
-  defp phone_switch(before, current, opts) do
-    now = phone_on?(current)
+  # The paired phone's channel (`:mobile`) switch is live (M51 §5.5): a write
+  # or a reload that moves it starts or stops the channel at once, and a
+  # channel that did not follow it is said in the daemon's words. Nothing is
+  # called when it did not move.
+  defp mobile_switch(before, current, opts) do
+    now = mobile_on?(current)
 
-    if phone_on?(before) == now do
+    if mobile_on?(before) == now do
       []
     else
       case Keyword.get(opts, :mobile_switch, &PhoneChannel.apply_enabled/1).(now) do
@@ -382,7 +409,7 @@ defmodule FermixCore.Management.Settings do
     end
   end
 
-  defp phone_on?(snapshot),
+  defp mobile_on?(snapshot),
     do: snapshot |> Source.channel(:mobile) |> Keyword.get(:enabled, false) == true
 
   # Reach from anywhere is live too (M62 D4), within a phone channel that runs:
@@ -391,7 +418,7 @@ defmodule FermixCore.Management.Settings do
   defp reach_switch(before, current, opts) do
     now = reach_on?(current)
 
-    if phone_on?(before) and phone_on?(current) and reach_on?(before) != now do
+    if mobile_on?(before) and mobile_on?(current) and reach_on?(before) != now do
       case Keyword.get(opts, :mobile_reach_switch, &PhoneChannel.apply_iroh/1).(now) do
         :ok -> []
         {:error, sentence} when is_binary(sentence) -> [sentence]
@@ -618,6 +645,11 @@ defmodule FermixCore.Management.Settings do
 
   defp family_rows(ThisComputer, section, snapshot, opts),
     do: ThisComputer.rows(section, snapshot, Keyword.take(opts, [:macos?]))
+
+  # The status row reads the call records, the call manager and the clock,
+  # which a test names (`:phone_calls`).
+  defp family_rows(PhoneCalls, section, snapshot, opts),
+    do: PhoneCalls.rows(section, snapshot, Keyword.take(opts, [:phone_calls]))
 
   defp family_rows(module, section, snapshot, _opts), do: module.rows(section, snapshot)
 end

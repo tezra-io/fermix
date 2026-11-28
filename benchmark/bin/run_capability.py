@@ -62,9 +62,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL_DIR = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 
-from evallib import (aggregate, checker, config as cfgmod, cue_drive, driver, grade, judge,
-                     leaderboard, leaderboard_html, pricing, release_gate, safe_rm, scoring,
-                     uplift)
+from evallib import (aggregate, app_drive, checker, config as cfgmod, cue_drive, driver,
+                     grade, judge,
+                     leaderboard, leaderboard_html, owner_inbox, pricing, release_gate,
+                     safe_rm, scoring, uplift)
 from evallib.experiments import ExperimentWriter, OpikWriteError, stable_id
 from evallib.fixture_server import (FIXTURE_URL_PLACEHOLDER, PAGE_READY_PATH, FixtureServer,
                                     ServerError, case_uses_fixture, check_state, home_port,
@@ -95,6 +96,10 @@ FIXTURE_HELPER = os.path.join(FIXTURE_PAGES_DIR, "fixture.js")   # served beside
 REPO_ROOT = os.path.dirname(SKILL_DIR)
 SEED_STATE_SCRIPT = os.path.join(SKILL_DIR, "bin", "seed_state.exs")
 STATE_SEED_TIMEOUT_S = 240
+# The owner's own local chat: `fermix ask`'s default session, where a card bound to
+# the CLI inbox answers from (`Delivery.OwnerInbox.answer_origin/1`). An
+# `owner_command` case types there unless its `command.chat` is `trial`.
+OWNER_CHAT = "cli"
 DATASET = "fermix-capability"
 # `fixture_state` is this tier's third ground-truth scorer (beside `score:` and
 # `checker:`), never a constraint: the page's own record IS the task outcome, so
@@ -1332,6 +1337,145 @@ def _is_cue(case) -> bool:
     return getattr(case, "drive", "ask") == "cue"
 
 
+def _is_command(case) -> bool:
+    return getattr(case, "drive", "ask") == "owner_command"
+
+
+def _command_trial(cfg, s, case, run_id, i, task_key, cleanup_root, tasks_root=None):
+    """One owner-command trial (`drive: owner_command`): seed the case's state, then
+    type each turn's command (`/confirm`, `/deny`) through `fermix ask`, in the owner's
+    inbox chat or, with `command.chat: trial`, in the trial's own session. The gateway
+    answers a command with no model, so there is no trace to wait for: each reply is
+    the turn's evidence, the episode's usage is none, and the checker grades the store.
+    A command the daemon did not answer, or answered with nothing, makes the trial
+    INVALID, not a 0."""
+    home = cfg.daemon.fermix_home
+    label = f"{case.id} t{i}"
+    session = (OWNER_CHAT if case.command.get("chat", "inbox") == "inbox"
+               else sess("e2e-cmd", run_id, s.name, case.id, f"t{i}"))
+    scoped = checker.scoped_dir(home, task_key, i)
+    started = time.monotonic()
+    try:
+        checker.seed_workspace(scoped, tasks_root or SKILL_DIR, None, cleanup_root)
+        state = _seed_state(home, tasks_root or SKILL_DIR, case.checker_spec["state"])
+        replies, unanswered = _type_commands(cfg, case, session)
+        elapsed_ms = (time.monotonic() - started) * 1000.0
+        if unanswered:
+            print(f"    ! {label}: {unanswered} — trial INVALID (not a model failure)",
+                  file=sys.stderr)
+            return _command_finish(case, 0.0, label, elapsed_ms, invalid_status="not_running",
+                                   detail=unanswered)
+        evidence = {"schema": 1, "run_id": run_id, "trial": i, "session": session,
+                    "token": trial_token(s.name, case.id, run_id, i), "trace_id": None,
+                    "expect": case.checker_spec.get("expect"), "state": state,
+                    "reply": replies[-1]["reply"], "replies": replies, "tool_spans": []}
+        cr = checker.run_checker(SKILL_DIR, case.checker_spec, scoped, replies[-1]["reply"],
+                                 home, evidence=evidence)
+        if cr.error:
+            print(f"    ! checker error {label}: {cr.error} — trial INVALID (not a model "
+                  "failure)", file=sys.stderr)
+            return _command_finish(case, 0.0, label, elapsed_ms, invalid_status="checker_error")
+        if cr.violations:
+            print(f"    ⚠️ {label}: checker reported violation(s): {'; '.join(cr.violations)}",
+                  file=sys.stderr)
+        if cr.score < 1.0:
+            print(f"    · {label}: checker: {cr.detail}", file=sys.stderr)
+        return _command_finish(case, cr.score, label, elapsed_ms, checker_safety=cr.safety_ok,
+                               grader_detail=cr.detail)
+    finally:
+        if os.path.isdir(scoped):
+            checker.teardown_workspace(cleanup_root, scoped)
+
+
+def _type_commands(cfg, case, session: str) -> tuple[list[dict], str | None]:
+    """Each turn's command, typed in `session` in order: the replies, or why one went
+    unanswered (the daemon down, an error, an empty reply)."""
+    replies = []
+    for turn in case.turns:
+        res = driver.drive_query(cfg, session, turn.query, case.timeout_ms)
+        if res.status != "ok" or not (res.response or "").strip():
+            return replies, (f"{turn.query!r} in session {session} got no reply "
+                             f"({res.status}: {res.error or 'empty'})")
+        replies.append({"command": turn.query, "session": session, "reply": res.response})
+    return replies, None
+
+
+def _command_finish(case, succ: float, label: str, elapsed_ms: float,
+                    invalid_status: str | None = None, checker_safety: bool | None = None,
+                    detail: str = "", grader_detail: str = ""
+                    ) -> tuple[aggregate.TrialResult, str | None, list]:
+    """Fold a command episode into a trial: no model ran, so it has no trace, no tokens
+    and no model; its cost is unknown to the rate card, never claimed as $0."""
+    status = invalid_status or "ok"
+    trial = aggregate.score_trial(
+        case.id, task_success=0.0 if invalid_status else succ,
+        safety_ok=None if invalid_status else checker_safety,
+        cost=0.0, duration_ms=elapsed_ms, tokens=0, tool_calls=0, status=status,
+        trace_id=None, cost_known=False, status_detail=detail, grader_detail=grader_detail,
+        main_llm_calls=0)
+    print(f"    · {label}: command episode {status}", file=sys.stderr)
+    return (trial, None, [])
+
+
+def _is_app(case) -> bool:
+    return getattr(case, "drive", "ask") == "app"
+
+
+def _app_trial(cfg, s, case, run_id, i, task_key, cleanup_root, tasks_root=None):
+    """One app trial (`drive: app`): open the companion socket as the Fermix app does,
+    seed the case's state while it is open, then take the case's `app.steps`
+    (evallib/app_drive.py). The checker grades the store and every event the socket
+    received. What reached the app needs no model; a `say` step is the owner's message
+    and runs a turn, whose usage this drive does not read from a trace, so a trial's
+    cost is unknown, never claimed as $0. A socket that refused or closed makes the
+    trial INVALID, not a 0."""
+    home = cfg.daemon.fermix_home
+    label = f"{case.id} t{i}"
+    marker = sess("e2e-app", run_id, s.name, case.id, f"t{i}", limit=60)
+    scoped = checker.scoped_dir(home, task_key, i)
+    started = time.monotonic()
+    seeded: dict = {}
+
+    def seed():
+        seeded.update(_seed_state(home, tasks_root or SKILL_DIR, case.checker_spec["state"]))
+
+    def cli(command: str) -> str:
+        res = driver.drive_query(cfg, OWNER_CHAT, command, case.timeout_ms)
+        return res.response or "" if res.status == "ok" else ""
+
+    try:
+        checker.seed_workspace(scoped, tasks_root or SKILL_DIR, None, cleanup_root)
+        app, broken = app_drive.drive(home, case.app, marker, seed, cli,
+                                      (case.timeout_ms or 240000) / 1000.0)
+        elapsed_ms = (time.monotonic() - started) * 1000.0
+        if broken:
+            print(f"    ! {label}: {broken} — trial INVALID (not a model failure)",
+                  file=sys.stderr)
+            return _command_finish(case, 0.0, label, elapsed_ms, invalid_status="not_running",
+                                   detail=broken)
+        reply = app["replies"][-1]["reply"] if app["replies"] else ""
+        evidence = {"schema": 1, "run_id": run_id, "trial": i, "session": marker,
+                    "token": trial_token(s.name, case.id, run_id, i), "trace_id": None,
+                    "expect": case.checker_spec.get("expect"), "state": seeded,
+                    "reply": reply, "replies": app["replies"], "app": app, "tool_spans": []}
+        cr = checker.run_checker(SKILL_DIR, case.checker_spec, scoped, reply, home,
+                                 evidence=evidence)
+        if cr.error:
+            print(f"    ! checker error {label}: {cr.error} — trial INVALID (not a model "
+                  "failure)", file=sys.stderr)
+            return _command_finish(case, 0.0, label, elapsed_ms, invalid_status="checker_error")
+        if cr.violations:
+            print(f"    ⚠️ {label}: checker reported violation(s): {'; '.join(cr.violations)}",
+                  file=sys.stderr)
+        if cr.score < 1.0:
+            print(f"    · {label}: checker: {cr.detail}", file=sys.stderr)
+        return _command_finish(case, cr.score, label, elapsed_ms, checker_safety=cr.safety_ok,
+                               grader_detail=cr.detail)
+    finally:
+        if os.path.isdir(scoped):
+            checker.teardown_workspace(cleanup_root, scoped)
+
+
 def _needs_cues(suite, case) -> bool:
     return _is_cue(case) or "cues" in getattr(suite, "requires", ())
 
@@ -1358,6 +1502,26 @@ def _hold_out_unseeded_cues(cfg, cases) -> tuple[list, list]:
     return kept, unmet
 
 
+def _hold_out_unseeded_inbox(cfg, cases) -> tuple[list, list]:
+    """Tasks of a suite that `requires: [owner_inbox_cli]` or `[owner_inbox_app]`, held
+    out NOT EVALUATED on a home whose owner inbox is not that one (seeded without
+    --owner-inbox-cli or --owner-inbox-app): there a message to the owner never reaches
+    the place the task reads, and its task would score 0 with nothing wrong in the
+    product."""
+    unmet = []
+    for requirement in owner_inbox.INBOXES:
+        needing = [row for row in cases if requirement in row[0].requires]
+        problem = (owner_inbox.home_problem(cfg.daemon.fermix_home, requirement)
+                   if needing else None)
+        unmet += [(suite.name, case.id, problem) for suite, _scn, case in needing if problem]
+    if not unmet:
+        return cases, []
+    unmet = sorted(unmet)
+    _print_not_evaluated(unmet)
+    held = {(suite_name, case_id) for suite_name, case_id, _why in unmet}
+    return [row for row in cases if (row[0].name, row[2].id) not in held], unmet
+
+
 def run_task(cfg, opik, s, scn, case, trials, k, threshold, run_id,
              want_judge, fixtures=None, tasks_root: str | None = None) -> TaskOutcome:
     is_checker = case.checker_spec is not None
@@ -1377,6 +1541,12 @@ def run_task(cfg, opik, s, scn, case, trials, k, threshold, run_id,
             elif _is_cue(case):
                 tr, trace_id, tmodels = _cue_trial(
                     cfg, opik, s, case, run_id, i, task_key, cleanup_root, tasks_root)
+            elif _is_command(case):
+                tr, trace_id, tmodels = _command_trial(
+                    cfg, s, case, run_id, i, task_key, cleanup_root, tasks_root)
+            elif _is_app(case):
+                tr, trace_id, tmodels = _app_trial(
+                    cfg, s, case, run_id, i, task_key, cleanup_root, tasks_root)
             else:
                 tr, trace_id, tmodels = _standard_trial(
                     cfg, opik, s, case, run_id, i, is_checker, task_key, fixture_path,
@@ -1410,6 +1580,9 @@ def run_task(cfg, opik, s, scn, case, trials, k, threshold, run_id,
     stats = aggregate.aggregate_task(results, k=k, threshold=threshold,
                                      family=f"{s.name}/{scn.id}")
     method = (f"cue:{os.path.basename(case.checker_spec['script'])}" if _is_cue(case)
+              else f"command:{os.path.basename(case.checker_spec['script'])}"
+              if _is_command(case)
+              else f"app:{os.path.basename(case.checker_spec['script'])}" if _is_app(case)
               else f"checker:{os.path.basename(case.checker_spec['script'])}" if is_checker
               else "cross_session" if case.cross_session
               else case.score_spec.get("match") if case.score_spec else "judge")
@@ -1432,10 +1605,14 @@ def _expected(case) -> str:
 # --- measurement validity (separate from task outcome, separate from release) ---
 
 def _planned_turns(cases) -> int:
-    """Turns ONE trial actually drives across the selection. A cross-session case is
-    two real turns; counting cases × trials understated the declared input by every
-    memory store turn (the review's §10 "120 turns" was 130)."""
-    return sum(len(case.turns) for _s, _scn, case in cases)
+    """Model turns ONE trial actually drives across the selection. A cross-session case
+    is two real turns; counting cases × trials understated the declared input by every
+    memory store turn (the review's §10 "120 turns" was 130). A typed owner command
+    (`drive: owner_command`) reaches no model, so it is no turn the estimate prices; an
+    app case's turns are the owner's messages it says (`drive: app`), and its other
+    steps reach none."""
+    return sum(len(app_drive.says(case.app)) if _is_app(case) else len(case.turns)
+               for _s, _scn, case in cases if not _is_command(case))
 
 
 def _validity_problems(outcomes, routes: set) -> list[str]:
@@ -2046,10 +2223,12 @@ def main(argv=None) -> int:
     if refusal is not None:
         return refusal
     cases, unseeded = _hold_out_unseeded_cues(cfg, cases)
-    not_evaluated = [*not_evaluated, *unseeded]
+    cases, no_inbox = _hold_out_unseeded_inbox(cfg, cases)
+    not_evaluated = [*not_evaluated, *unseeded, *no_inbox]
     if not cases:
         print("no capability task is measurable on this daemon: every selected task "
-              "needs cues this eval home was not seeded with (--cues)", file=sys.stderr)
+              "needs a seed this eval home was not seeded with (--cues, --owner-inbox-cli)",
+              file=sys.stderr)
         return 3
     return _sweep(cfg, args, lb_path, cases, want_judge, not_evaluated, tasks_root)
 
