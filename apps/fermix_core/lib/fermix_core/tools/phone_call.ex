@@ -560,10 +560,6 @@ defmodule FermixCore.Tools.PhoneCall do
     end
   end
 
-  # This process is not the home's running engine, which owns the call.
-  defp cancelled({:error, :owned_by_running_engine}, _call_id, _context),
-    do: error(Report.owned_elsewhere(:stop))
-
   defp cancelled({:error, reason}, _call_id, _context), do: error(reason)
 
   # A row the manager found over always has a refusal: none would be a call

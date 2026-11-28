@@ -824,18 +824,6 @@ defmodule FermixCore.PhoneCalls.ReportTest do
                  "its report follows."
     end
 
-    test "a call the running engine owns is stopped or confirmed there" do
-      assert Report.owned_elsewhere(:stop) ==
-               "That call belongs to the Fermix that is running, so it is stopped there."
-
-      assert Report.owned_elsewhere(:confirm) ==
-               "That call belongs to the Fermix that is running, so its end is confirmed there."
-
-      assert Report.running_engine_calls(2) ==
-               "The Fermix that is running still has 2 calls, and applies the switch when it " <>
-                 "reads the setting."
-    end
-
     test "a refusal for an unresolved call names the slot and both ways out" do
       held = DateTime.add(@expires, -60, :second)
 

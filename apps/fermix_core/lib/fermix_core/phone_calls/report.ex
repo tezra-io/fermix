@@ -224,9 +224,6 @@ defmodule FermixCore.PhoneCalls.Report do
   @stop_ended "That call has already ended."
   # A process that is not the home's running engine (a setup page served from
   # another tree, a command that booted one) owns no worker of the daemon's.
-  @stop_elsewhere "That call belongs to the Fermix that is running, so it is stopped there."
-  @confirm_elsewhere "That call belongs to the Fermix that is running, so its end is " <>
-                       "confirmed there."
   @slot_ways_out " It holds the call slot until it is confirmed ended, in the recovery view " <>
                    "or with the settings command, or until OpenAI's own limit on " <>
                    "a call passes."
@@ -445,10 +442,6 @@ defmodule FermixCore.PhoneCalls.Report do
         @stop_ended,
         @stop_placement_unknown,
         @stop_termination_unconfirmed,
-        @stop_elsewhere,
-        @confirm_elsewhere,
-        running_engine_calls(1),
-        running_engine_calls(2),
         @not_checked_other,
         @expired,
         slot_held_sentence(),
@@ -1066,27 +1059,6 @@ defmodule FermixCore.PhoneCalls.Report do
       true -> @stop_ended
     end
   end
-
-  @doc """
-  What a process that is not the home's running engine says when asked to
-  stop a call (`:stop`) or to confirm that one ended (`:confirm`): the call
-  belongs to the Fermix that is running, and that is where it is done
-  (`PhoneCalls.Manager`'s `:owned_by_running_engine`).
-  """
-  @spec owned_elsewhere(:stop | :confirm) :: String.t()
-  def owned_elsewhere(:stop), do: @stop_elsewhere
-  def owned_elsewhere(:confirm), do: @confirm_elsewhere
-
-  @doc """
-  The off switch's word for the `count` calls the running engine still owns,
-  seen from a process that is not it: the running engine applies the switch
-  when it reads the setting.
-  """
-  @spec running_engine_calls(pos_integer()) :: String.t()
-  def running_engine_calls(count) when is_integer(count) and count > 0,
-    do:
-      "The Fermix that is running still has #{count(count, "call")}, and applies the " <>
-        "switch when it reads the setting."
 
   # --- helpers ---------------------------------------------------------------------
 

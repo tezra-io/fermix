@@ -481,21 +481,6 @@ defmodule FermixCore.Tools.PhoneCallTest do
       end
     end
 
-    # A process that is not the home's running engine owns no worker of the
-    # daemon's: the call is the running Fermix's, and is stopped there.
-    test "cancel from a process that is not the running engine says where the call is", ctx do
-      id = seed_call!(ctx, "default")
-      {:ok, _row} = Ledger.claim_dispatch(id, @t0, server: ctx.repo)
-      manager = boot_manager!(ctx, "elsewhere", daemon: false, reconcile: false)
-      turn = owner_turn(ctx, %{phone_call_manager: manager})
-
-      assert refusal(PhoneCall.execute(%{"action" => "cancel", "call_id" => id}, turn)) ==
-               "That call belongs to the Fermix that is running, so it is stopped there."
-
-      {:ok, row} = Ledger.get(id, server: ctx.repo)
-      assert is_nil(row.cancel_requested_at)
-    end
-
     # The Manager finds the call over; one whose end is unresolved says so and
     # names both ways out, as the apps' Stop says for it.
     test "cancel of an unresolved call says its end is unresolved, not that it ended", ctx do

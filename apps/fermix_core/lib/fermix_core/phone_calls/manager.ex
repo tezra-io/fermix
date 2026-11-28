@@ -48,11 +48,7 @@ defmodule FermixCore.PhoneCalls.Manager do
       the owner's release, never a row in hand.
     * **Cancel (`cancel/3`)** stops new work: a call not yet dispatched ends at
       once with nothing dialed (its later dispatch claim fails); a dispatched
-      one is asked to stop and reads `stopping` until its end is known. A
-      Manager that is not the home's daemon (`daemon: false`, a command that
-      booted the tree) stops only a call it tracks itself, and answers
-      `{:error, :owned_by_running_engine}` for any other, as it does for the
-      owner's word that a call ended.
+      one is asked to stop and reads `stopping` until its end is known.
     * **The off switch (`disable/1`)**, serialized with admission here: no new
       start, admitted work that has not dispatched ends with nothing dialed,
       a live call is asked to stop. Cleanup, status, recovery and report
@@ -157,7 +153,7 @@ defmodule FermixCore.PhoneCalls.Manager do
   @end_statuses ~w(ended failed dispatch_unknown closure_unconfirmed)
   # What the off switch did: calls it ended with nothing dialed, calls it asked
   # to stop, and calls it left to the home's running engine.
-  @no_stops %{cancelled: 0, stopping: 0, running_engine: 0}
+  @no_stops %{cancelled: 0, stopping: 0}
   @cleanup_resends Limits.max_cleanup_retries()
   # The uncertainty note of a call settled by its recorded closure.
   @closed_unread "The call ended, but what was said was never read, so the result is unknown."
@@ -1142,14 +1138,10 @@ defmodule FermixCore.PhoneCalls.Manager do
     end
   end
 
-  # A Manager that is not the home's running engine (a command that booted
-  # the tree in a process of its own) tracks no worker of the daemon's, so it
-  # settles nothing it does not track: the running engine owns that call.
   defp cancel_row(%{status: status} = row, why, state) do
     cond do
       Ledger.terminal?(status) -> {{:error, :already_terminal}, state}
       Map.has_key?(state.calls, row.id) -> stop_tracked(row, why, state)
-      not state.daemon? -> {{:error, :owned_by_running_engine}, state}
       true -> stop_untracked(row, why, state)
     end
   end
@@ -1295,9 +1287,6 @@ defmodule FermixCore.PhoneCalls.Manager do
       {{:error, :already_terminal}, state} ->
         {counts, state}
 
-      {{:error, :owned_by_running_engine}, state} ->
-        {Map.update!(counts, :running_engine, &(&1 + 1)), state}
-
       {{:error, reason}, state} ->
         {counts, log_terminal_error(row.id, reason, state)}
     end
@@ -1386,9 +1375,6 @@ defmodule FermixCore.PhoneCalls.Manager do
   end
 
   # --- the owner's word that a call ended -------------------------------------------
-
-  defp release_on_owners_word(_call_id, _owner_id, _now, %{daemon?: false}),
-    do: {:error, :owned_by_running_engine}
 
   defp release_on_owners_word(call_id, owner_id, now, state) do
     with {:ok, row} <- Ledger.get_for_owner(call_id, owner_id, opts(state)),
@@ -1481,7 +1467,6 @@ defmodule FermixCore.PhoneCalls.Manager do
       delivery_opts: Keyword.get(opts, :delivery_opts, []),
       continuation_opts: [dispatcher: Keyword.get(opts, :continuation_dispatcher)],
       reconcile?: Keyword.get(opts, :reconcile, true),
-      daemon?: Keyword.get(opts, :daemon, true),
       timer_enabled?: Keyword.get(opts, :timer_enabled, true),
       prune_interval_ms: Keyword.get(opts, :prune_interval_ms, Limits.prune_interval_ms()),
       drain_schedule: Keyword.get(opts, :drain_schedule, &schedule_self/2),

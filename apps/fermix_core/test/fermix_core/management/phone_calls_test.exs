@@ -853,51 +853,6 @@ defmodule FermixCore.Management.PhoneCallsTest do
     end
   end
 
-  # A process that is not the home's running engine (a setup page served
-  # from another tree, a command that booted one) owns no worker of the
-  # daemon's: it says the call is the running Fermix's, and changes nothing.
-  describe "a call the running engine owns" do
-    # As `FermixCore.Application.phone_calls_opts/2` starts one outside the
-    # daemon: no boot reconciliation, no timers.
-    @not_the_daemon [daemon: false, reconcile: false]
-
-    test "is stopped and confirmed there, in the stop's own sentences", ctx do
-      seed!(ctx, phone_calls: phone(true))
-      live = seed_call!(ctx, "main-elsewhere-1", [:claim, :session])
-      manager = start_manager(ctx, @not_the_daemon)
-
-      assert {:error, :unavailable, %{"capability" => "phone_calls", "sentence" => stop}} =
-               route(ctx, "phone_calls.stop", %{"call_id" => live}, manager)
-
-      assert stop == "That call belongs to the Fermix that is running, so it is stopped there."
-      assert stop == Report.owned_elsewhere(:stop)
-      assert is_nil(row!(ctx, live).cancel_requested_at)
-
-      step!(ctx, live, {:end, "closure_unconfirmed"})
-
-      assert {:error, :unavailable, %{"sentence" => confirm}} =
-               route(ctx, "phone_calls.recovery.confirm", %{"call_id" => live}, manager)
-
-      assert confirm ==
-               "That call belongs to the Fermix that is running, so its end is confirmed there."
-
-      assert is_nil(row!(ctx, live).slot_released_at)
-    end
-
-    test "the off switch says the running engine still has the call", ctx do
-      seed_ready!(ctx)
-      seed_call!(ctx, "main-elsewhere-2", [:claim, :session])
-      manager = start_manager(ctx, @not_the_daemon)
-
-      assert {:ok, result} = apply_phone(ctx, %{"phone_calls_enabled" => false}, manager)
-
-      assert result["side_effects"] == [
-               "The Fermix that is running still has 1 call, and applies the switch when it " <>
-                 "reads the setting."
-             ]
-    end
-  end
-
   # The owner's own restart (M94 §12): the drain window a restart to apply
   # takes, refused while a call is in progress. An update, a move or a
   # disable takes `lifecycle.prepare`, which no call holds.

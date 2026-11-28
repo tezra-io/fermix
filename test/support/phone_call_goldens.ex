@@ -111,19 +111,6 @@ defmodule FermixTestSupport.PhoneCallGoldens do
     ]
   end
 
-  @doc """
-  `world`'s options with its call manager one that is not the home's running
-  engine (as `FermixCore.Application.phone_calls_opts/2` starts it outside
-  the daemon): it owns none of the daemon's calls.
-  """
-  @spec not_the_daemon(keyword()) :: keyword()
-  def not_the_daemon(world) when is_list(world) do
-    name = :"phone_goldens_elsewhere_#{System.unique_integer([:positive])}"
-    {module, opts} = real_manager(name, Keyword.fetch!(world, :repo))
-    start_supervised!({module, Keyword.put(opts, :daemon, false)}, id: name)
-    Keyword.put(world, :manager, name)
-  end
-
   # The call in progress has a worker: a process registered under its id in
   # the world's call registry, as `PhoneCalls.Call` registers.
   defp live_worker(:in_progress, registry) do

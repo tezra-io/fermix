@@ -419,8 +419,6 @@ defmodule FermixCore.Management.PhoneCalls do
 
   defp confirm_refused(_call_id, :disabled), do: memory_off()
 
-  defp confirm_refused(_call_id, :owned_by_running_engine), do: owned_elsewhere(:confirm)
-
   defp confirm_refused(call_id, reason) do
     Logger.error(
       "management phone calls: #{call_id} could not be released: #{Redaction.format(reason)}"
@@ -473,7 +471,6 @@ defmodule FermixCore.Management.PhoneCalls do
     case manager_call(opts, &Manager.cancel(row.id, row.owner_id, &1)) do
       {:ok, {:ok, stopped}} when stopped in [:cancelled, :stopping] -> {:ok, stopped}
       {:ok, {:error, :already_terminal}} -> ended_meanwhile(row.id, opts)
-      {:ok, {:error, :owned_by_running_engine}} -> owned_elsewhere(:stop)
       {:ok, {:error, reason}} -> cancel_failed(row.id, reason)
       :not_running -> {:error, {:unavailable, @capability, @not_running_sentence}}
       {:error, sentence} -> {:error, {:unavailable, @capability, sentence}}
@@ -489,10 +486,6 @@ defmodule FermixCore.Management.PhoneCalls do
       end
     end
   end
-
-  # This process is not the home's running engine, which owns the call.
-  defp owned_elsewhere(what),
-    do: {:error, {:unavailable, @capability, Report.owned_elsewhere(what)}}
 
   defp cancel_failed(call_id, reason) do
     Logger.error(
@@ -531,15 +524,12 @@ defmodule FermixCore.Management.PhoneCalls do
     end
   end
 
-  # What the switch stopped here, and the calls the running engine still owns
-  # when this process is not it (`running_engine`).
-  defp stopped_sentences(%{cancelled: cancelled, stopping: stopping} = stopped) do
-    running = Map.get(stopped, :running_engine, 0)
-
+  # What the switch stopped.
+  defp stopped_sentences(%{cancelled: cancelled, stopping: stopping}) do
     Enum.flat_map(
       [{cancelled, @undispatched_stopped_sentence}, {stopping, @live_stopped_sentence}],
       fn {n, sentence} -> if n > 0, do: [sentence], else: [] end
-    ) ++ if(running > 0, do: [Report.running_engine_calls(running)], else: [])
+    )
   end
 
   # Turning phone calls on is no evidence that an earlier call ended.

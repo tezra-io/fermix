@@ -893,18 +893,6 @@ defmodule FermixCore.Management.ProtocolContractTest do
          lifecycle_server: lifecycle_server(),
          operation_opts: [phone_calls: in_progress]
        )},
-      {"unavailable_phone_calls_owned_elsewhere_stop",
-       phone_route(
-         "phone_calls.stop",
-         %{"call_id" => PhoneCallGoldens.ids().in_progress},
-         PhoneCallGoldens.not_the_daemon(in_progress)
-       )},
-      {"unavailable_phone_calls_owned_elsewhere_confirm",
-       phone_route(
-         "phone_calls.recovery.confirm",
-         %{"call_id" => PhoneCallGoldens.ids().lost},
-         PhoneCallGoldens.not_the_daemon(PhoneCallGoldens.world(:lost))
-       )},
       {"unavailable_phone_calls_confirm_in_progress",
        phone_route(
          "phone_calls.recovery.confirm",
