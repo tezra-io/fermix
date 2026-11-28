@@ -40,6 +40,7 @@ defmodule FermixChannels.Mobile.Supervisor do
   alias FermixCore.Home.Candidate
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Memory.Repo, as: MemoryRepo
+  alias FermixCore.Setup.ConfigStore
 
   @default_max_media_bytes 20 * 1_024 * 1_024
   @secret_sentinels FermixCore.Setup.SecretWriter.sentinels()
@@ -355,10 +356,7 @@ defmodule FermixChannels.Mobile.Supervisor do
     Supervisor.init(children, strategy: :rest_for_one)
   end
 
-  defp root(opts) do
-    Keyword.get(opts, :root) ||
-      System.get_env("FERMIX_HOME") || Path.join(System.user_home!(), ".fermix")
-  end
+  defp root(opts), do: Keyword.get(opts, :root) || ConfigStore.fermix_home()
 
   defp boot_epoch(opts) do
     case Keyword.fetch(opts, :boot_epoch) do

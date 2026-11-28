@@ -13,6 +13,7 @@ defmodule Fermix.CLI.Upgrade.Swapper do
 
   alias Fermix.CLI.Upgrade.Cosign
   alias FermixCore.Net.StreamDownload
+  alias FermixCore.Setup.ConfigStore
 
   @type staged :: %{
           blob_path: Path.t(),
@@ -75,16 +76,12 @@ defmodule Fermix.CLI.Upgrade.Swapper do
 
   @spec default_staging_dir() :: Path.t()
   def default_staging_dir do
-    Path.join(default_fermix_home(), "upgrade.staging")
+    Path.join(ConfigStore.fermix_home(), "upgrade.staging")
   end
 
   @spec default_previous_path() :: Path.t()
   def default_previous_path do
-    Path.join(default_fermix_home(), ".previous")
-  end
-
-  defp default_fermix_home do
-    System.get_env("FERMIX_HOME") || Path.join(System.user_home!(), ".fermix")
+    Path.join(ConfigStore.fermix_home(), ".previous")
   end
 
   defp snapshot_previous(installed_path, previous_path) do

@@ -183,15 +183,12 @@ defmodule Fermix.CLI.Daemon do
 
   @doc """
   The control socket this daemon listens on when `start_link/1` names none:
-  `daemon.sock` in `FERMIX_HOME`, else in `~/.fermix`. The engine's boot takes
-  the home's lock beside the same path (`FermixCore.Application`), so the lock
-  and the socket can never name two places.
+  `daemon.sock` in the home `ConfigStore.fermix_home/0` names. The engine's boot
+  takes the home's lock beside the same path (`FermixCore.Application`), so the
+  lock and the socket can never name two places.
   """
   @spec default_socket_path() :: Path.t()
-  def default_socket_path do
-    fermix_home = System.get_env("FERMIX_HOME") || Path.join(System.user_home!(), ".fermix")
-    Path.join(fermix_home, "daemon.sock")
-  end
+  def default_socket_path, do: Path.join(ConfigStore.fermix_home(), "daemon.sock")
 
   @doc """
   Answers one management request a desktop forwarded over the rail (M75 §6),

@@ -25,6 +25,7 @@ defmodule Fermix.CLI.Daemon.Client do
 
   alias Fermix.CLI.Daemon.Lock
   alias FermixCore.Management.Protocol
+  alias FermixCore.Setup.ConfigStore
 
   @default_timeout_ms 3_000
   # Above the daemon's own bound on a forget (the manager's GenServer.call
@@ -359,8 +360,5 @@ defmodule Fermix.CLI.Daemon.Client do
 
   defp classify(reason, _socket_path), do: {:error, reason}
 
-  defp default_socket_path do
-    fermix_home = System.get_env("FERMIX_HOME") || Path.join(System.user_home!(), ".fermix")
-    Path.join(fermix_home, "daemon.sock")
-  end
+  defp default_socket_path, do: Path.join(ConfigStore.fermix_home(), "daemon.sock")
 end

@@ -20,6 +20,7 @@ defmodule FermixChannels.Mobile.Identity do
   """
 
   alias FermixCore.Home.Epoch
+  alias FermixCore.Setup.ConfigStore
 
   @enforce_keys [
     :gateway_private_key,
@@ -574,15 +575,11 @@ defmodule FermixChannels.Mobile.Identity do
   defp validate_rename(rename), do: {:error, {:invalid_identity_rename, rename}}
 
   defp resolve_root(opts) do
-    root = Keyword.get(opts, :root) || default_root()
+    root = Keyword.get(opts, :root) || ConfigStore.fermix_home()
 
     if is_binary(root) and root != "",
       do: {:ok, Path.expand(root)},
       else: {:error, {:invalid_identity_root, root}}
-  end
-
-  defp default_root do
-    System.get_env("FERMIX_HOME") || Path.join(System.user_home!(), ".fermix")
   end
 
   defp identity_files(paths), do: [paths.gateway_key, paths.tls_key, paths.tls_cert]

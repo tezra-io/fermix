@@ -18,6 +18,7 @@ defmodule FermixChannels.Mobile.DeviceStore do
   require Logger
 
   alias FermixChannels.Mobile.PushRelay
+  alias FermixCore.Setup.ConfigStore
 
   defmodule Device do
     @moduledoc """
@@ -1065,17 +1066,13 @@ defmodule FermixChannels.Mobile.DeviceStore do
 
   defp resolve_root(opts) do
     unknown = Keyword.keys(opts) -- [:root, :name]
-    root = Keyword.get(opts, :root) || default_root()
+    root = Keyword.get(opts, :root) || ConfigStore.fermix_home()
 
     cond do
       unknown != [] -> {:error, {:invalid_device_store_options, unknown}}
       not is_binary(root) or root == "" -> {:error, {:invalid_device_store_root, root}}
       true -> {:ok, Path.expand(root)}
     end
-  end
-
-  defp default_root do
-    System.get_env("FERMIX_HOME") || Path.join(System.user_home!(), ".fermix")
   end
 
   defp mobile_dir(root), do: Path.join(root, "mobile")

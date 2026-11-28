@@ -30,6 +30,8 @@ defmodule FermixCore.ComputerHistory.SingletonLock do
 
   require Logger
 
+  alias FermixCore.Setup.ConfigStore
+
   # A live holder heartbeats every @heartbeat_ms; a lock older than
   # @stale_after_ms is assumed abandoned by a crashed holder and is broken once.
   @stale_after_ms 30_000
@@ -192,11 +194,7 @@ defmodule FermixCore.ComputerHistory.SingletonLock do
   # First line = the holder's FERMIX_HOME (named in status when contended);
   # second = a debug breadcrumb. Staleness is judged by mtime, not this content.
   defp marker(opts) do
-    home = Keyword.get(opts, :home, fermix_home())
+    home = Keyword.get(opts, :home, ConfigStore.fermix_home())
     "#{home}\n#{System.system_time(:millisecond)} #{System.pid()}\n"
-  end
-
-  defp fermix_home do
-    System.get_env("FERMIX_HOME") || Path.join(System.user_home!(), ".fermix")
   end
 end

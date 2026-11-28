@@ -21,6 +21,7 @@ defmodule FermixChannels.Mobile.MediaStore do
   require Logger
 
   alias FermixChannels.Gateway.MediaDownload
+  alias FermixCore.Setup.ConfigStore
 
   @default_max_media_bytes 20 * 1_024 * 1_024
   @default_max_store_bytes 2 * 1_024 * 1_024 * 1_024
@@ -1458,7 +1459,5 @@ defmodule FermixChannels.Mobile.MediaStore do
   defp optional_poster_of(value) when is_binary(value) and value != "", do: :ok
   defp optional_poster_of(_value), do: {:error, {:invalid_field, :poster_of}}
 
-  defp default_root do
-    Path.join(System.get_env("FERMIX_HOME") || Path.expand("~/.fermix"), "mobile")
-  end
+  defp default_root, do: Path.join(ConfigStore.fermix_home(), "mobile")
 end

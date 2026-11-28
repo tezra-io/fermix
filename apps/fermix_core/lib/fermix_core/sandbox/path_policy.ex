@@ -6,6 +6,7 @@ defmodule FermixCore.Sandbox.PathPolicy do
   alias FermixCore.Harness.Identity
   alias FermixCore.Sandbox.Config
   alias FermixCore.Sandbox.Mode
+  alias FermixCore.Setup.ConfigStore
 
   # `.config/fermix` holds a Linux service's env file, where its secrets live.
   @protected_home_dirs ~w(.ssh .aws .gnupg .docker .kube .codex .anthropic .config/fermix)
@@ -277,9 +278,9 @@ defmodule FermixCore.Sandbox.PathPolicy do
   end
 
   defp fermix_homes(%{home: home}) when is_binary(home) and home != "",
-    do: Enum.uniq([fermix_home(), home])
+    do: Enum.uniq([ConfigStore.fermix_home(), home])
 
-  defp fermix_homes(_config), do: [fermix_home()]
+  defp fermix_homes(_config), do: [ConfigStore.fermix_home()]
 
   defp home_entries(home), do: Enum.map(@protected_fermix_entries, &Path.join(home, &1))
 
@@ -511,14 +512,5 @@ defmodule FermixCore.Sandbox.PathPolicy do
 
     [Path.join(os_home, ".claude.json") | claude_files] ++
       List.wrap(Identity.vendor_config_dir("codex"))
-  end
-
-  # Mirrors ConfigStore.fermix_home/0: a blank "" is truthy, so a bare
-  # `|| default` would leave home as "" and make the protected paths cwd-relative.
-  defp fermix_home do
-    case System.get_env("FERMIX_HOME") do
-      home when is_binary(home) and home != "" -> home
-      _ -> Path.join(System.user_home!(), ".fermix")
-    end
   end
 end

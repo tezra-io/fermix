@@ -52,6 +52,7 @@ defmodule FermixCore.Auth.Store do
   """
 
   alias FermixCore.Plugins.Dist.Lock
+  alias FermixCore.Setup.ConfigStore
 
   require Logger
 
@@ -377,10 +378,7 @@ defmodule FermixCore.Auth.Store do
       "Run `chmod 600 #{path}` and restart."
   end
 
-  defp default_path do
-    home = System.get_env("FERMIX_HOME") || Path.join(System.user_home!(), ".fermix")
-    Path.join(home, "auth.json")
-  end
+  defp default_path, do: Path.join(ConfigStore.fermix_home(), "auth.json")
 
   defp check_mode(_path, 0o600), do: :ok
   defp check_mode(path, mode), do: {:error, {:insecure_permissions, path, mode}}

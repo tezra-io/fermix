@@ -31,6 +31,7 @@ defmodule FermixCore.Acp.IdentityStore do
 
   alias FermixCore.Acp.Identity
   alias FermixCore.Nostr.Key
+  alias FermixCore.Setup.ConfigStore
 
   @version 1
   @extension ".json"
@@ -101,10 +102,7 @@ defmodule FermixCore.Acp.IdentityStore do
 
   @doc "The store directory. One derivation, so doctor and the daemon agree."
   @spec dir() :: Path.t()
-  def dir do
-    home = System.get_env("FERMIX_HOME") || Path.join(System.user_home!(), ".fermix")
-    Path.join(home, "acp_identities")
-  end
+  def dir, do: Path.join(ConfigStore.fermix_home(), "acp_identities")
 
   # --- write ---
 

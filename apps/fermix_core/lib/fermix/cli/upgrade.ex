@@ -21,6 +21,7 @@ defmodule Fermix.CLI.Upgrade do
   alias Fermix.CLI.Upgrade.Manifest
   alias Fermix.CLI.Upgrade.Swapper
   alias FermixCore.BuildInfo
+  alias FermixCore.Setup.ConfigStore
 
   @health_check_timeout_ms 10_000
   @health_check_poll_ms 500
@@ -240,14 +241,10 @@ defmodule Fermix.CLI.Upgrade do
   defp current_version, do: BuildInfo.product_version()
 
   defp default_socket_path do
-    Path.join(default_fermix_home(), "daemon.sock")
+    Path.join(ConfigStore.fermix_home(), "daemon.sock")
   end
 
   defp default_audit_path do
-    Path.join(default_fermix_home(), @audit_filename)
-  end
-
-  defp default_fermix_home do
-    System.get_env("FERMIX_HOME") || Path.join(System.user_home!(), ".fermix")
+    Path.join(ConfigStore.fermix_home(), @audit_filename)
   end
 end
