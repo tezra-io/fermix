@@ -586,8 +586,9 @@ S3 bucket (E1): enrolled with it and `--snapshot-instance-role`, the
 credentials helper's session that the engine account reads and cannot
 change, no secret in any command line, each of the helper's failures in its
 own words, a first boot whose helper fails stopped before enrolling, the
-destination file's refusals, and a restore host. It is not wired into CI;
-`scripts/release/test_fermix_update.py` runs the update's release choice,
+destination file's refusals, and a restore host. CI's `first-boot` job runs
+the whole of it on every pull request, on `ubuntu-24.04`, and the `gate` job
+needs it. `scripts/release/test_fermix_update.py` runs the update's release choice,
 its checked install (the site's installer never run, a package refused
 before `apt-get` when it is not the release workflow's or not the one the
 table lists, an update without the package's cosign or with a Sigstore

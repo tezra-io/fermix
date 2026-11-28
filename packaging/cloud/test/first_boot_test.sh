@@ -20,7 +20,8 @@
 # (apt-get installs nftables and shellcheck, Chromium in its scenario, and
 # ca-certificates, curl and gpg in the tailnet scenario, which reads
 # pkgs.tailscale.com).
-# Not wired into CI; run it by hand, whole or the host part alone:
+# CI's first-boot job runs it whole on every pull request; by hand, run it
+# whole or the host part alone:
 #
 #   sh packaging/cloud/test/first_boot_test.sh
 #   sh packaging/cloud/test/first_boot_test.sh host

@@ -398,6 +398,29 @@ jobs:
       - name: Run the TLA+ runner's hermetic tests
         run: make -C tla tests
 
+  first-boot:
+    # packaging/cloud/first-boot.sh runs as root on every Always On server and
+    # writes the update script each one runs every five minutes. Its tests:
+    # shellcheck on every script there, the host part (the script's own main,
+    # the steps that need a Debian server stood in for) and one throwaway
+    # debian:trixie-slim container per scenario, which shellchecks the update
+    # script it writes, needs network inside for apt, and asks this runner's
+    # kernel for its Landlock ABI (3 or later, as the check legs prove). No
+    # secrets, no FERMIX_HOME.
+    name: Always On first boot (shellcheck, host, containers)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+      - name: Pull the scenarios' image
+        run: docker pull debian:trixie-slim
+      - name: Run the first boot's tests
+        run: sh packaging/cloud/test/first_boot_test.sh
+
   disclaim-shim:
     # The macOS disclaim exec shim ships inside release payloads, cross-compiled
     # by `zig cc` under strict flags — while dev macOS builds use the lenient
@@ -479,7 +502,7 @@ jobs:
   gate:
     name: compile · format · credo · test
     runs-on: ubuntu-24.04
-    needs: [check, stress, checksum-integrity, harness, release-scripts, disclaim-shim]
+    needs: [check, stress, checksum-integrity, harness, release-scripts, first-boot, disclaim-shim]
     if: always()
     steps:
       - name: Require every matrix leg to have passed
@@ -489,6 +512,7 @@ jobs:
           CHECKSUM_RESULT: ${{ needs.checksum-integrity.result }}
           HARNESS_RESULT: ${{ needs.harness.result }}
           RELEASE_SCRIPTS_RESULT: ${{ needs.release-scripts.result }}
+          FIRST_BOOT_RESULT: ${{ needs.first-boot.result }}
           DISCLAIM_RESULT: ${{ needs.disclaim-shim.result }}
         run: |
           echo "check (matrix) result: $CHECK_RESULT"
@@ -496,10 +520,12 @@ jobs:
           echo "checksum-integrity result: $CHECKSUM_RESULT"
           echo "harness result: $HARNESS_RESULT"
           echo "release-scripts result: $RELEASE_SCRIPTS_RESULT"
+          echo "first-boot result: $FIRST_BOOT_RESULT"
           echo "disclaim-shim result: $DISCLAIM_RESULT"
           [ "$CHECK_RESULT" = "success" ] || exit 1
           [ "$STRESS_RESULT" = "success" ] || exit 1
           [ "$CHECKSUM_RESULT" = "success" ] || exit 1
           [ "$HARNESS_RESULT" = "success" ] || exit 1
           [ "$RELEASE_SCRIPTS_RESULT" = "success" ] || exit 1
+          [ "$FIRST_BOOT_RESULT" = "success" ] || exit 1
           [ "$DISCLAIM_RESULT" = "success" ] || exit 1

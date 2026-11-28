@@ -14,6 +14,7 @@ RELEASE_WORKFLOW = ROOT / ".github/workflows/release.yml"
 CI_WORKFLOW = ROOT / ".github/workflows/ci.yml"
 LINUX_PACKAGES_WORKFLOW = ROOT / ".github/workflows/linux-packages.yml"
 NIF_MAKEFILE = ROOT / "apps/fermix_nif/Makefile"
+FIRST_BOOT_TEST = ROOT / "packaging/cloud/test/first_boot_test.sh"
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 USES = re.compile(r"^\s*-?\s*uses:\s*([^\s#]+)", re.MULTILINE)
 
@@ -87,6 +88,24 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn('for t in scripts/release/test_*.py; do echo "== $t =="; uv run "$t" || exit 1; done', self.ci)
         self.assertRegex(self.ci, r"needs:\s*\[[^\]]*release-scripts[^\]]*\]")
         self.assertIn("${{ needs.release-scripts.result }}", self.ci)
+
+    # first-boot.sh runs as root on every Always On server and writes the
+    # update script each one runs, so its tests run on every pull request,
+    # shellcheck and the container scenarios included, and the gate needs them.
+    def test_ci_runs_the_always_on_first_boot_tests_as_a_required_gate(self):
+        job = self._job("first-boot", self.ci)
+        image = re.search(r"^image=(\S+)$", FIRST_BOOT_TEST.read_text(encoding="utf-8"), re.MULTILINE)
+        self.assertIsNotNone(image, "first_boot_test.sh names no image")
+        pull = f"        run: docker pull {image.group(1)}\n"
+        run = "        run: sh packaging/cloud/test/first_boot_test.sh\n"
+        self.assertIn("    runs-on: ubuntu-24.04\n", job)
+        self.assertIn("sudo apt-get install -y shellcheck\n", job)
+        self.assertIn(pull, job)
+        self.assertIn(run, job)
+        self.assertLess(job.index(pull), job.index(run))
+        self.assertRegex(self.ci, r"needs:\s*\[[^\]]*\bfirst-boot\b[^\]]*\]")
+        self.assertIn("FIRST_BOOT_RESULT: ${{ needs.first-boot.result }}\n", self.ci)
+        self.assertIn('[ "$FIRST_BOOT_RESULT" = "success" ] || exit 1\n', self.ci)
 
     # The Apple Maps helper is built by the Makefile on CI's macOS legs and on
     # the app-engine release runners alike; the CI step's own copy of the flags
@@ -405,13 +424,13 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn('git -C "$tap_repo" pull --ff-only', self._job("homebrew"))
         self.assertEqual(self._job("homebrew").count("brew update >/dev/null"), 1)
 
-    def _job(self, name):
+    def _job(self, name, workflow=None):
         job = re.search(
             rf"^  {re.escape(name)}:\n(.*?)(?=^  [a-z][a-z0-9-]*:\n|\Z)",
-            self.release,
+            self.release if workflow is None else workflow,
             re.DOTALL | re.MULTILINE,
         )
-        self.assertIsNotNone(job, f"release.yml has no {name} job")
+        self.assertIsNotNone(job, f"the workflow has no {name} job")
         return job.group(1)
 
 
