@@ -55,9 +55,10 @@ defmodule FermixChannels.ReqTestOwnershipInvariantTest do
   end
 
   defp test_files do
-    "../../../../apps/*/test/**/*_test.exs"
+    "../../../../apps/*/test"
     |> Path.expand(__DIR__)
     |> Path.wildcard()
+    |> Enum.flat_map(&FermixTestSupport.TestSourceScan.files_under(&1, ["_test.exs"]))
     |> Enum.reject(&(&1 == Path.expand(__ENV__.file)))
   end
 
@@ -67,7 +68,7 @@ defmodule FermixChannels.ReqTestOwnershipInvariantTest do
   # escaped `"set_req_test_\x74o_shared"` stays escaped), so the AST check can
   # match only a call the text check has already kept.
   defp offending_modules(file) do
-    source = File.read!(file)
+    source = FermixTestSupport.TestSourceScan.read!(file)
     if String.contains?(source, @shared_call), do: offenders_in(file, source), else: []
   end
 

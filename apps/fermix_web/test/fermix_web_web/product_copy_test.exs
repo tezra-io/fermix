@@ -15,8 +15,7 @@ defmodule FermixWebWeb.ProductCopyTest do
   test "renderable web copy contains no em dashes" do
     offenders =
       @web_root
-      |> Path.join("**/*.{ex,heex}")
-      |> Path.wildcard()
+      |> FermixTestSupport.TestSourceScan.files_under([".ex", ".heex"])
       |> Enum.flat_map(&em_dash_lines/1)
 
     assert offenders == [],
@@ -26,7 +25,7 @@ defmodule FermixWebWeb.ProductCopyTest do
 
   defp em_dash_lines(path) do
     path
-    |> File.read!()
+    |> FermixTestSupport.TestSourceScan.read!()
     |> strip_heex_comments()
     |> String.split("\n")
     |> Enum.with_index(1)

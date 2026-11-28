@@ -21,6 +21,8 @@ defmodule FermixCore.Net.EgressSurfaceTest do
 
   use ExUnit.Case, async: true
 
+  alias FermixTestSupport.TestSourceScan
+
   @umbrella Path.expand("../../../../..", __DIR__)
   @scanned ~w(fermix_core fermix_channels fermix_web fermix_opik)
 
@@ -98,16 +100,24 @@ defmodule FermixCore.Net.EgressSurfaceTest do
     "apps/fermix_channels/lib/fermix_channels/mobile/push_pigeon_dispatcher.ex"
   ]
 
-  test "every Req request is routed through the egress policy" do
-    sites = sites(@req_execution)
+  # Every scanned file is listed and read once for the module, and read without
+  # the VM's file server. Each case asks a pattern or more of every file, and a
+  # listing and a read for every pattern, queued on that one process behind the
+  # whole suite's file calls, outlasted the test timeout on a loaded runner.
+  setup_all do
+    %{code: scanned_code()}
+  end
+
+  test "every Req request is routed through the egress policy", %{code: code} do
+    sites = sites(code, @req_execution)
 
     for known <- @known_req_sites do
       assert Map.has_key?(sites, known), "the scan no longer finds #{known}"
     end
 
     unrouted =
-      for {path, executions} <- sites, executions > count(path, @routed) do
-        "#{path}: #{executions} Req call(s), #{count(path, @routed)} routed"
+      for {path, executions} <- sites, executions > count(code, path, @routed) do
+        "#{path}: #{executions} Req call(s), #{count(code, path, @routed)} routed"
       end
 
     assert unrouted == [],
@@ -123,8 +133,8 @@ defmodule FermixCore.Net.EgressSurfaceTest do
     assert source =~ "apply(FermixCore.Net.Egress, :attach, [request, :direct])"
   end
 
-  test "every other dial asks the egress policy first, or says why it need not" do
-    sites = sites(@dial)
+  test "every other dial asks the egress policy first, or says why it need not", %{code: code} do
+    sites = sites(code, @dial)
 
     for known <- @known_dial_sites do
       assert Map.has_key?(sites, known), "the scan no longer finds #{known}"
@@ -133,8 +143,8 @@ defmodule FermixCore.Net.EgressSurfaceTest do
     unasked =
       for {path, dials} <- sites,
           not Map.has_key?(@direct_by_construction, path),
-          dials > count(path, @asks_first) do
-        "#{path}: #{dials} dial(s), #{count(path, @asks_first)} ask Egress.ensure_direct/2"
+          dials > count(code, path, @asks_first) do
+        "#{path}: #{dials} dial(s), #{count(code, path, @asks_first)} ask Egress.ensure_direct/2"
       end
 
     assert unasked == [],
@@ -143,43 +153,46 @@ defmodule FermixCore.Net.EgressSurfaceTest do
              Enum.join(Enum.sort(unasked), "\n  ")
   end
 
-  test "every stated exception still exists and still dials" do
-    sites = sites(@dial)
+  test "every stated exception still exists and still dials", %{code: code} do
+    sites = sites(code, @dial)
 
     for {path, _reason} <- @direct_by_construction do
       assert Map.has_key?(sites, path), "#{path} is exempted but no longer dials"
     end
   end
 
-  test "a dependency that dials on its own is never called unrouted" do
+  test "a dependency that dials on its own is never called unrouted", %{code: code} do
     for {pattern, what} <- @delegated_dialers do
-      offenders = sites(pattern) |> Map.keys() |> Enum.sort()
+      offenders = code |> sites(pattern) |> Map.keys() |> Enum.sort()
 
       assert offenders == [], "#{what} dials outside Net.Egress in: #{Enum.join(offenders, ", ")}"
     end
   end
 
   # path (relative to the umbrella) => number of matches, for files with any.
-  defp sites(pattern) do
-    for path <- source_files(), matches = count(path, pattern), matches > 0, into: %{} do
+  defp sites(code, pattern) do
+    for {path, text} <- code, matches = matches(text, pattern), matches > 0, into: %{} do
       {path, matches}
     end
   end
 
-  defp source_files do
+  defp count(code, path, pattern), do: code |> Map.fetch!(path) |> matches(pattern)
+
+  defp matches(text, pattern), do: length(Regex.scan(pattern, text))
+
+  # path (relative to the umbrella) => its code, for every scanned file.
+  defp scanned_code do
     files =
       Enum.flat_map(@scanned, fn app ->
         @umbrella
-        |> Path.join("apps/#{app}/lib/**/*.ex")
-        |> Path.wildcard()
+        |> Path.join("apps/#{app}/lib")
+        |> TestSourceScan.files_under([".ex"])
         |> Enum.map(&Path.relative_to(&1, @umbrella))
       end)
 
     assert length(files) > 500, "the scan found #{length(files)} source files; it is misdirected"
-    files
+    Map.new(files, &{&1, code(&1)})
   end
-
-  defp count(path, pattern), do: length(Regex.scan(pattern, code(path)))
 
   # Comment lines carry prose about these calls; only code can make one.
   defp code(path) do
@@ -190,5 +203,5 @@ defmodule FermixCore.Net.EgressSurfaceTest do
     |> Enum.join("\n")
   end
 
-  defp read(path), do: File.read!(Path.join(@umbrella, path))
+  defp read(path), do: TestSourceScan.read!(Path.join(@umbrella, path))
 end

@@ -2509,7 +2509,7 @@ defmodule FermixCore.Management.CopyTest do
   end
 
   defp source_files do
-    Path.wildcard(Path.join(@lib, "management/**/*.ex")) ++
+    TestSourceScan.files_under(Path.join(@lib, "management"), [".ex"]) ++
       [
         Path.join(@lib, "readiness.ex"),
         Path.join(@lib, "setup/restart_state.ex"),
@@ -2554,7 +2554,7 @@ defmodule FermixCore.Management.CopyTest do
 
   defp collect(files, render) do
     Enum.flat_map(files, fn file ->
-      {:ok, ast} = Code.string_to_quoted(File.read!(file))
+      {:ok, ast} = Code.string_to_quoted(TestSourceScan.read!(file))
       {_ast, found} = Macro.prewalk(ast, [], &collect_sentence(&1, &2, render))
 
       found |> Enum.uniq() |> Enum.map(&{file, &1})

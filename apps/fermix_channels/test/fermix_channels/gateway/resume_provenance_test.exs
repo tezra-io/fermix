@@ -405,9 +405,8 @@ defmodule FermixChannels.Gateway.ResumeProvenanceTest do
 
     callers =
       lib
-      |> Path.join("**/*.ex")
-      |> Path.wildcard()
-      |> Enum.filter(&(File.read!(&1) =~ "keep_chain_metadata: true"))
+      |> FermixTestSupport.TestSourceScan.files_under([".ex"])
+      |> Enum.filter(&(FermixTestSupport.TestSourceScan.read!(&1) =~ "keep_chain_metadata: true"))
       |> Enum.map(&Path.relative_to(&1, lib))
       |> Enum.sort()
 
