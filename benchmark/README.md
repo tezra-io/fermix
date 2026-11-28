@@ -89,7 +89,22 @@ uv run bin/run_capability.py --check --judge  # capability + judge preflight
 ```
 
 `make tests` is a separate developer command for the harness's unit/integration
-tests. Behavioral and capability E2E commands do not invoke it implicitly.
+tests. Behavioral and capability E2E commands do not invoke it implicitly. It is the
+same set on every machine, the gate and CI included: no test in it reads or writes a
+service it did not start itself, so an Opik that happens to be up changes nothing
+(`bin/test_experiments.py` holds the Opik writer to its requests against a server of
+its own).
+
+`make opik-live` is the one check that writes to a live Opik, and it runs only when
+someone asks for it. It writes to the Opik and project a runner would (`config.yaml`'s
+`opik` section, or `OPIK_BASE_URL` and `OPIK_PROJECT`): one dataset, one experiment
+linked to the project's newest trace and one feedback score on that trace, each named
+for that run and each removed before it ends. An Opik it cannot reach, or a project
+with no trace, is a failure, never a skip. To keep it off the dev project's traces:
+
+```sh
+OPIK_PROJECT=fermix-capability-eval make opik-live
+```
 
 ---
 
