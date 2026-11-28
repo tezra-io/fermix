@@ -104,8 +104,13 @@ cosign-signs all four package files beside the binaries and generates
 `service install` → `status` → `uninstall` transaction runs against a home whose
 path contains a space and a percent character, and the rpms inside a `fedora:41`
 container, where there is no user service manager and `service status --json`
-must answer the structured `user_manager_unreachable` error. `stage-release`
-attaches the packages to the draft.
+must answer the structured `user_manager_unreachable` error. On each deb both
+jobs also make the check an Always On server's update makes
+(`scripts/release/verify_update_signature.sh`, which runs first-boot.sh's own
+`release_signature_holds` with the cosign that deb ships and a fresh Sigstore
+cache), so a release whose packaged cosign refuses its own signature stops
+before any server is asked to take it. `stage-release` attaches the packages
+to the draft.
 
 **The installer, and the one job that runs after publishing.** `scripts/install.sh`
 is what `https://fermix.ai/install` serves. On Linux with apt, dnf or zypper it

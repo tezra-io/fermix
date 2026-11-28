@@ -252,6 +252,25 @@ class ReleaseWorkflowTest(unittest.TestCase):
                     body,
                 )
 
+    # An Always On server installs an update only once the cosign its package
+    # ships verifies the release's signature, and that cosign is not the one
+    # that signed it, so both verification jobs run the server's own check
+    # on each deb (verify_update_signature.sh), after the runner's cosign
+    # has checked the same signature.
+    def test_each_deb_is_checked_as_an_always_on_server_s_update_checks_it(self):
+        for job, variable in (("verify-candidate", "CANDIDATE_ARTIFACT"), ("verify-published", "STAGED_ARTIFACT")):
+            with self.subTest(job=job):
+                body = self._job(job)
+                step = (
+                    "      - name: Check the deb's signature as an Always On server's update does\n"
+                    "        if: matrix.kind == 'deb'\n"
+                    "        env:\n"
+                    "          TAG_NAME: ${{ github.ref_name }}\n"
+                    '        run: scripts/release/verify_update_signature.sh "$' + variable + '" "${TAG_NAME#v}"\n'
+                )
+                self.assertIn(step, body)
+                self.assertLess(body.index("cosign verify-blob"), body.index(step))
+
     def test_the_release_feed_is_generated_where_both_halves_are_present(self):
         self.assertIn("PACKAGES_DIR: linux_packages", self.release)
         self.assertRegex(

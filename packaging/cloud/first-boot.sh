@@ -693,11 +693,10 @@ fetch_checked() {
 }
 
 # The release workflow's signature on file $2 of Fermix $1 (the $3), checked
-# as fermix upgrade and the release workflow check one: cosign verify-blob,
-# the certificate's identity release.yml on the tag v$1 of this repository
-# and its issuer GitHub's OIDC, with the cosign the installed package ships
-# and its Sigstore cache (TUF_ROOT) in root's own folder, so the engine
-# account can neither seed nor replace what cosign trusts.
+# as fermix upgrade and the release workflow check one (release_signature_holds),
+# with the cosign the installed package ships and its Sigstore cache in root's
+# own folder, so the engine account can neither seed nor replace what cosign
+# trusts.
 signed_by_the_release() {
   if [ ! -x "$COSIGN" ]; then
     REFUSED="$COSIGN, the cosign the Fermix package ships, is not on this server, so the signature of the $3 for Fermix $1 could not be checked"
@@ -711,12 +710,24 @@ signed_by_the_release() {
     REFUSED="the signature of the $3 for Fermix $1 could not be downloaded from its GitHub release (curl's message above says why)"
     return 1
   fi
-  if ! TUF_ROOT=$SIGSTORE_DIR "$COSIGN" verify-blob --certificate "$WORK/$2.pem" --signature "$WORK/$2.sig" \
-    --certificate-identity "https://github.com/$RELEASE_REPO/$RELEASE_WORKFLOW@refs/tags/v$1" \
-    --certificate-oidc-issuer "$RELEASE_ISSUER" "$WORK/$2" </dev/null 9>&-; then
+  if ! release_signature_holds "$1" "$2"; then
     REFUSED="the $3 for Fermix $1 is not signed by the Fermix release workflow (cosign's message above says why)"
     return 1
   fi
+}
+
+# Whether $COSIGN verifies file $2 of Fermix $1 in WORK, with its signature
+# ($2.sig) and certificate ($2.pem) beside it, as the release workflow's:
+# cosign verify-blob, the certificate's identity release.yml on the tag v$1
+# of this repository and its issuer GitHub's OIDC, with its Sigstore cache
+# (TUF_ROOT) in SIGSTORE_DIR. The release workflow runs this same function
+# on each candidate deb, with the cosign that deb ships and a fresh cache
+# (scripts/release/verify_update_signature.sh), so no release ships whose
+# own cosign refuses its signature.
+release_signature_holds() {
+  TUF_ROOT=$SIGSTORE_DIR "$COSIGN" verify-blob --certificate "$WORK/$2.pem" --signature "$WORK/$2.sig" \
+    --certificate-identity "https://github.com/$RELEASE_REPO/$RELEASE_WORKFLOW@refs/tags/v$1" \
+    --certificate-oidc-issuer "$RELEASE_ISSUER" "$WORK/$2" </dev/null 9>&-
 }
 
 # Fermix $1's Linux package for this server, kept by fetch_checked with the

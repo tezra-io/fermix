@@ -407,6 +407,17 @@ jobs:
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             "$artifact"
 
+      # An Always On server installs an update only once the cosign its
+      # package ships verifies the release's signature, and that cosign is not
+      # the one that signed it. This runs the server's own check (first-boot.sh's
+      # release_signature_holds) with the cosign this deb ships and a fresh
+      # Sigstore cache, so a release no server would take stops here.
+      - name: Check the deb's signature as an Always On server's update does
+        if: matrix.kind == 'deb'
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: scripts/release/verify_update_signature.sh "$CANDIDATE_ARTIFACT" "${TAG_NAME#v}"
+
       - name: Run standalone candidate
         if: matrix.kind == 'standalone'
         env:
@@ -581,6 +592,13 @@ jobs:
             --certificate-identity "$CERTIFICATE_IDENTITY" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             "$artifact"
+
+      # The staged deb is the one servers download, checked as they check it.
+      - name: Check the deb's signature as an Always On server's update does
+        if: matrix.kind == 'deb'
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: scripts/release/verify_update_signature.sh "$STAGED_ARTIFACT" "${TAG_NAME#v}"
 
       - name: Run staged standalone asset
         if: matrix.kind == 'standalone'
