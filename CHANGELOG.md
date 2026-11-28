@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-11-27
+
 ### Security
 
 - **Your Always On server installs an update only when fermix.ai and the

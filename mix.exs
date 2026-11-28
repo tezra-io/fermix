@@ -4,7 +4,7 @@ defmodule Fermix.MixProject do
   def project do
     [
       apps_path: "apps",
-      version: "0.20.0",
+      version: "0.21.0",
       start_permanent: Mix.env() == :prod,
       # The dev daemon recompiles edited sources inside its running VM
       # (`code_reloader`). With consolidated protocols on that VM's path, a
