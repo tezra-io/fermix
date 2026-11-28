@@ -230,6 +230,22 @@ defmodule FermixCore.PhoneCalls.DeliveryTest do
       later = "sideband_lost; hangup rejected, HTTP 400: x; cancelled_by_owner"
       assert Continuation.continuable?(%{origin_kind: "chat", failure_reason: later})
     end
+
+    # A stop asked once another cause had begun a call's end changes nothing
+    # in the call (`PhoneCalls.Call` takes no cancel in its ending tail), so
+    # the row says why the call ended and its report continues. The stamp a
+    # stop request leaves is the off switch's and the engine's stop's too: it
+    # never says whose stop it was, and nothing here reads it.
+    test "a call another cause ended continues though a stop was asked for it" do
+      asked = ~U[2031-03-04 15:03:20.000000Z]
+      ended = %{engine_stopping?: false, closed?: true, hangup_error: nil}
+
+      for cause <- [:deadline, :no_answer, :sideband_lost, {:finish, :done}] do
+        reason = Ending.failure_reason(Ending.new(cause), ended)
+        row = %{origin_kind: "chat", failure_reason: reason, cancel_requested_at: asked}
+        assert Continuation.continuable?(row), inspect(cause)
+      end
+    end
   end
 
   describe "hand_off/2" do
