@@ -106,6 +106,33 @@ defmodule FermixCore.PhoneCalls.TelemetryTest do
     assert unconfirmed.error == "closure_unconfirmed"
   end
 
+  # The failure words carry the vendor's own text after the engine's word (a
+  # create's unknown answer, a hang-up's refusal), so they pass the one scrub
+  # `vendor_message` does; the row keeps them whole.
+  test "the failure words pass the same number scrub as the vendor's message", %{id: id} do
+    words =
+      ~s(create_unknown: {:http_status, 504, %{message: "Timed out dialing +1 415 555 0123"}})
+
+    hangup = "call_failed; hangup rejected, HTTP 422: Number +14155550123 is not in this call"
+
+    for {status, reason} <- [{"dispatch_unknown", words}, {"closure_unconfirmed", hangup}] do
+      :ok =
+        Telemetry.run_end(row(id, %{status: status, outcome: "unknown", failure_reason: reason}))
+
+      assert_receive {:telemetry, [:fermix, :phone_call, :run_error], _measurements, meta}
+      assert meta.error == meta.failure_reason
+      assert meta.failure_reason =~ "[number]"
+      refute meta.failure_reason =~ "555"
+      assert String.starts_with?(meta.failure_reason, String.slice(reason, 0, 14))
+    end
+
+    :ok =
+      Telemetry.run_end(row(id, %{status: "ended", outcome: "unknown", failure_reason: words}))
+
+    assert_receive {:telemetry, [:fermix, :phone_call, :run_complete], _measurements, ended}
+    assert ended.failure_reason =~ "Timed out dialing [number]"
+  end
+
   test "a row with no id fails loud" do
     assert_raise ArgumentError, fn -> Telemetry.run_start(%{status: "admitted"}, 1) end
   end

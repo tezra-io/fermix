@@ -1104,7 +1104,11 @@ Shared metadata: `agent: "phone_call:<id>"`, `call_id`, `origin_kind`
 `PhoneCalls.Limits.max_record_text_bytes/0`, 500 bytes, every digit run that
 reads as a phone number replaced by `[number]`), and measure `duration_ms`,
 `voice_seconds`, `core_turns`, `dtmf_keys`, `cleanup_attempts` (`run_error`
-adds `count: 1`). The
+adds `count: 1`). Every free text these events carry passes that one scrub
+(`PhoneCalls.Telemetry`'s `scrub/1`): `vendor_message`, and `failure_reason`
+and the `error` read from it, which can follow the engine's failure word with
+the vendor's own (a create whose answer is unknown, a refused hang-up); the
+ledger row and the owner's report keep those words whole. The
 destination, the mandate and transcripts never reach these events, and no
 vendor word carries either credential: one scrub in `OpenAILive` (the
 function the sideband holds is `scrubber/1`) replaces the API key and the

@@ -17,7 +17,11 @@ defmodule FermixCore.PhoneCalls.Telemetry do
   destination, the mandate, transcripts and credentials never do; the
   vendor's own failure words do, bounded, with anything that reads as a
   phone number replaced, so a provider message that quotes the dialed number
-  does not carry it into a trace. Those words arrive already free of the API
+  does not carry it into a trace. That is one rule for every free text the
+  events carry (`scrub/1`): `vendor_message`, and `failure_reason` and the
+  `error` read from it, which append the vendor's words to the engine's own
+  (a create's unknown answer, a hang-up's refusal). The row and the owner's
+  report keep the words whole. Those words arrive already free of the API
   key and the trunk password: every vendor word, from the create and hang-up
   answers to whatever the sideband carries during the call, passes the one
   scrub in `OpenAILive` (`scrubber/1`) before it leaves the transport. The events also route into
@@ -90,11 +94,8 @@ defmodule FermixCore.PhoneCalls.Telemetry do
   end
 
   def run_end(%{status: status} = row) when is_binary(status) do
-    metadata =
-      row
-      |> base_metadata()
-      |> Map.merge(end_metadata(row))
-      |> Map.put(:error, Map.get(row, :failure_reason) || status)
+    metadata = row |> base_metadata() |> Map.merge(end_metadata(row))
+    metadata = Map.put(metadata, :error, metadata.failure_reason || status)
 
     execute(@run_error_event, Map.put(end_measurements(row), :count, 1), metadata)
   end
@@ -119,7 +120,7 @@ defmodule FermixCore.PhoneCalls.Telemetry do
       status: Map.get(row, :status),
       outcome: Map.get(row, :outcome),
       usage_state: Map.get(row, :usage_state),
-      failure_reason: Map.get(row, :failure_reason),
+      failure_reason: scrub(Map.get(row, :failure_reason)),
       vendor_message: scrub(Map.get(row, :vendor_message))
     }
   end
