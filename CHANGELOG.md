@@ -56,7 +56,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   your confirmation; a message after that one is an ordinary request. The
   report of a call asked by voice (sent to your inbox), of one you stopped, or
   of one whose report could not be brought back as that message is a plain
-  message, and a reply to it is an ordinary request. While a call
+  message, and a reply to it is an ordinary request. No chat shows a preview
+  of a link in a report, since a preview opens the link and the other person
+  could have said it (Messages may still draw one in iMessage, which has no
+  setting for it). While a call
   is in progress Fermix refuses `fermix restart`, the setup page's **Apply &
   restart**, and a change of the OpenAI key or the connection's password (the
   Linux app's Restart and an app's Restart of an Always On server are not
@@ -88,6 +91,7 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   proposes, on an approval card with **Approve** and **Deny** (or `/confirm`
   and `/deny` in the chat the card went to): a yes makes exactly the change
   shown, and only if the job is still as it was when the change was drawn.
+  A heal never changes where a job delivers, not even by a proposal.
   Editing, pausing or resuming the job yourself closes a proposal still
   waiting. A fix that does not hold is said once, and a heal nobody answers
   closes after seven days. Each step of a heal, and what became of each failed
@@ -171,10 +175,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Open loops are on by default.** Fermix keeps track of what you say you
   will do, decide or are waiting on, and may check in on it, without being
   switched on first: a home that never set `[fermix_core.open_loops] enabled`
-  has open loops running after this update. To turn them off, switch off
-  **Check in on things you plan to do by a date** on browser setup's
-  Personalization tab or under About you in the Fermix app's settings, or set
-  `enabled = false` under `[fermix_core.open_loops]`, then restart. A check-in
+  has open loops running after this update. Fermix 0.20 stored a switched-off
+  setting by removing it, so every home without an `enabled = false` line
+  written by hand has them on now, including one where you had turned them
+  off. To turn them off, switch off **Check in on things you plan to do by a
+  date** under About you in the Fermix app's settings, or with no app run
+  `fermix settings set personalization open_loops_enabled=false`, or set
+  `enabled = false` under `[fermix_core.open_loops]`; then restart. Browser
+  setup's Personalization tab no longer has this switch. A check-in
   now arrives in the chat where you mentioned the loop, when that is the
   app's chat or your Telegram, Signal, WhatsApp or iMessage chat with Fermix,
   and a loop mentioned anywhere else follows your inbox; an install with only
@@ -195,7 +203,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with the app or on an Always On server with a computer linked to it. An
   approval asked this way shows in the app as the approval card it already
   draws, on the Mac and the phone alike, and is answered from either. A
-  watcher's proposal card and reminders stay where they were.
+  watcher's proposal card and reminders stay where they were. A phone counts
+  as paired until you forget it, even one you no longer use: to keep these in
+  your messaging chat, use **Forget this phone** in the Fermix app, or name
+  the chat as `[fermix_core.jobs] default_delivery_target` in `config.toml`.
 
 - **The setup page's Realtime tab is now Voice.** It opens with **Talk to
   Fermix**, and its Back, Save and Save & next buttons sit at the foot of the
@@ -228,6 +239,16 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   read an index, which an existing home gains the first time it starts.
 
 ### Fixed
+
+- **A command such as `fermix memory` run while Fermix is running no longer
+  disturbs the work Fermix is doing.** On a standalone or Linux install,
+  `fermix memory` and the terminal `fermix setup` run a second copy of Fermix
+  for as long as they take, and that copy also started Fermix's background
+  work: it marked a scheduled job the running Fermix was in the middle of as
+  failed (which could set off Auto Heal or a retry), sent a reminder that was
+  being delivered a second time, ended running coding runs as interrupted,
+  failed a meeting in progress, and could run a due job itself. Only the
+  running Fermix runs that work now. This was already the case in 0.20.0.
 
 - **The Fermix app's chat no longer stays on Thinking after a report.** When a
   phone call or a coding run started from the app's chat finished, Fermix
@@ -275,6 +296,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   runs failed, reset reminders that were being sent so they went out twice,
   ended its coding runs as interrupted and failed its meetings. It is now
   refused before it reads or changes anything in the home.
+
+- **An empty `FERMIX_HOME` means `~/.fermix` everywhere.** Fermix already
+  read `FERMIX_HOME=""` as unset for its settings, but the engine's lock and
+  socket, the CLI's connection to it, `fermix upgrade`'s staging folder and
+  rollback copy, `auth.json`, ACP identities and the phone's keys, device
+  list and media took it as the current folder, so a command could find no
+  Fermix running on a home that had one. They now all use the same home.
 
 - **A job you pause, edit or remove stays that way.** When Fermix skipped a
   run that was too old to start, expired a job, or switched off one whose
