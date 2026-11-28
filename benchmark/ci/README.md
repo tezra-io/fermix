@@ -219,4 +219,4 @@ source of truth; re-render with `make rank`.
 | `FERMIX_CAP_PROJECT` | `fermix-capability-eval` | Opik project the daemon exports to |
 | `FERMIX_CAP_SEED_ARGS` | — | extra `seed_capability_home.py` flags (CI explicit mode) |
 | `FERMIX_CAP_OPIK` | `1` | `0` starts the daemon without the Opik exporter (macOS smoke) |
-| `READY_TIMEOUT` | `90` | seconds to wait for the control socket |
+| `READY_TIMEOUT` | `90` | seconds to wait for the control socket, at `up` and after every reset; at most 115 (the keeper refuses more: a reset's stop, restore and boot, with their kills and probes, must fit the 240 s a client waits for it) |

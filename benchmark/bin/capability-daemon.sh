@@ -9,16 +9,32 @@
 # control socket; --no-web => no shared port).
 #
 #   capability-daemon.sh up        seed (config; with --cues the cue watchers too) + snapshot
-#                                  the seeded state + start + wait ready
-#   capability-daemon.sh down      stop + clean the control socket
-#   capability-daemon.sh snapshot  take the seeded-state snapshot again (daemon down)
-#   capability-daemon.sh reset     stop + restore the snapshot + start + wait ready, so the
-#                                  next attempt starts from the seeded world
-#                                  (run_eval.py --reset-home calls it before each one)
+#                                  the seeded state + start the keeper, which starts the
+#                                  daemon + wait ready; a fresh up starts a new daemon.log.
+#                                  Up is a keeper that answers and a daemon that does: with
+#                                  both, up says "already up" (exit 0); with anything else
+#                                  of an earlier up running (a keeper whose daemon exited,
+#                                  a daemon without its keeper, one started by hand) it
+#                                  refuses (exit 3) with what clears it
+#   capability-daemon.sh down      stop the keeper (it stops its daemon) + clean the sockets
+#   capability-daemon.sh reset     ask the keeper to stop its daemon, restore the snapshot
+#                                  `up` took and start the daemon again with `up`'s
+#                                  environment, so the next attempt starts from the seeded
+#                                  world (run_eval.py --reset-home calls it before each one,
+#                                  and run_capability.py before each `checker.state` trial)
+#   capability-daemon.sh check     ask whether a reset would be carried out; changes nothing
 #   capability-daemon.sh run       up, run the capability tier, down; preserve its exit code
 #
-# Override the home with FERMIX_CAP_HOME (leaf must contain 'eval' or 'e2e'; snapshot
-# and reset refuse any other home before they stop or touch anything: eval_home_state.py).
+# Only the keeper `up` started (bin/eval_daemon_keeper.py) ever starts, stops or restores
+# the daemon after `up`: it holds the daemon's environment, as this script built it, in
+# its own memory (handed over a pipe, never a file), and the id of `up`'s snapshot.
+# `reset` and `check` exit 3, with the reason and what to do from there, and replace
+# nothing when no such keeper runs for the home (a daemon started by hand, say), when a
+# daemon it did not start answers the home, when the snapshot was taken again since its
+# `up`, or (FERMIX_CAP_PROJECT set) when the daemon exports to another Opik project.
+#
+# Override the home with FERMIX_CAP_HOME (leaf must contain 'eval' or 'e2e'; reset
+# refuses any other home before it stops or touches anything: eval_home_state.py).
 # CI knobs: FERMIX_CAP_PROJECT overrides the Opik project; FERMIX_CAP_SEED_ARGS
 # passes extra flags to seed_capability_home.py (e.g. the explicit --provider/
 # --model CI mode, or --cues for the cue suites); FERMIX_CAP_OPIK=0 starts the daemon without the Opik
@@ -39,14 +55,15 @@ BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"      # benchmark/bin
 BENCH="$(cd "$BIN_DIR/.." && pwd)"                            # benchmark
 REPO_ROOT="$(cd "$BENCH/.." && pwd)"                          # umbrella root
 PIDFILE="$HOME_DIR/daemon.pid"
+KEEPER_PIDFILE="$HOME_DIR/keeper.pid"
+KEEPER="$BIN_DIR/eval_daemon_keeper.py"
 LOGFILE="$HOME_DIR/daemon.log"
 READY_TIMEOUT="${READY_TIMEOUT:-90}"
+REFUSED=3
 
 FIXTURE_MANIFEST="$HOME_DIR/eval-fixtures/fixture_server.json"
 
 log() { printf '\033[36m[cap-daemon]\033[0m %s\n' "$*" >&2; }
-
-running() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
 
 seed() {
   log "seeding disposable home $HOME_DIR"
@@ -58,12 +75,20 @@ seed() {
 }
 
 up() {
-  if running; then
-    log "daemon already up (pid $(cat "$PIDFILE"))"
-    return 0
-  fi
+  # Up means a keeper answers AND its daemon does. Anything else of an earlier up (a
+  # keeper whose daemon exited, a daemon whose keeper is gone, one started by hand) is
+  # refused with what clears it; only a home where nothing runs is seeded and started.
+  local found=0
+  "$KEEPER" ask check "$HOME_DIR" --for-up ${FERMIX_CAP_PROJECT:+--project "$FERMIX_CAP_PROJECT"} \
+    || found=$?
+  case "$found" in
+    0) log "daemon already up (keeper pid $(cat "$KEEPER_PIDFILE"))"; return 0 ;;
+    4) ;;
+    *) log "nothing was seeded or started (the reason and what to do are above)"
+       return "$REFUSED" ;;
+  esac
   seed
-  rm -f "$HOME_DIR/daemon.sock"                    # drop any stale socket
+  rm -f "$HOME_DIR/daemon.sock"                    # nothing answers on it: stale
   log "compiling once so the readiness window stays tight"
   ( cd "$REPO_ROOT" && mix compile >/dev/null )
   # With --cues (FERMIX_CAP_SEED_ARGS) the cue suites' watchers and tasks are
@@ -85,7 +110,7 @@ up() {
   # The world every `reset` puts back, taken while the daemon is still down.
   log "snapshotting the seeded state"
   "$BIN_DIR/eval_home_state.py" snapshot "$HOME_DIR"
-  start_daemon
+  start_keeper
 }
 
 # The origin the manifest names, read by the runners' own reader of it
@@ -102,10 +127,13 @@ except ServerError as exc:
 ' "$HOME_DIR" )
 }
 
-start_daemon() {
+start_keeper() {
   # Keep channels running (--no-web/--no-realtime only): the CLI-ask turn queue
   # is FermixChannels.Gateway.Queue, so --no-channels would break every turn. No
   # channel is configured in the seeded home, so no bot adapters actually poll.
+  # The environment built here is the daemon's for its whole life: the keeper gets it,
+  # starts the daemon with it, and starts it with it again on every reset. A fresh up
+  # starts a new log; the keeper marks each start in it and appends.
   log "starting disposable daemon (no web/realtime); log: $LOGFILE"
   local -a opik_env=(FERMIX_OPIK_ENABLED=1 FERMIX_OPIK_PROJECT="$PROJECT")
   if [ "${FERMIX_CAP_OPIK:-1}" = "0" ]; then opik_env=(); fi
@@ -128,7 +156,7 @@ start_daemon() {
   # With --phone-calls the phone engine's OpenAI key is the invented one the seed
   # stored; an OPENAI_API_KEY the caller's environment carries would overlay it at
   # boot (config/runtime.exs), so that home's daemon starts without it.
-  local -a drop_env=(-u FERMIX_EVAL_FIXTURE_ORIGIN)
+  local -a drop_env=(-u FERMIX_EVAL_FIXTURE_ORIGIN -u EVAL_KEEPER_ENV_END)
   if [ -f "$HOME_DIR/eval-fixtures/phone_calls.json" ]; then
     if [ ! -f "$FIXTURE_MANIFEST" ]; then
       log "refusing to start: phone calls are on but $FIXTURE_MANIFEST is missing, so the"
@@ -138,72 +166,97 @@ start_daemon() {
     drop_env+=(-u OPENAI_API_KEY)
     log "phone calls on: the daemon's OpenAI key is the seed's invented one, and its calls reach the fixture origin only"
   fi
-  ( cd "$REPO_ROOT" && exec env "${drop_env[@]}" \
-      PATH="$daemon_path" \
-      FERMIX_HOME="$HOME_DIR" \
-      ${opik_env[@]+"${opik_env[@]}"} \
-      FERMIX_BROWSER_HEADLESS=1 \
-      ${fixture_env[@]+"${fixture_env[@]}"} \
-      mix fermix.dev --no-web --no-realtime ) >"$LOGFILE" 2>&1 &
-  echo $! >"$PIDFILE"
+  local -a daemon_env=("${drop_env[@]}"
+    PATH="$daemon_path"
+    FERMIX_HOME="$HOME_DIR"
+    ${opik_env[@]+"${opik_env[@]}"}
+    FERMIX_BROWSER_HEADLESS=1
+    ${fixture_env[@]+"${fixture_env[@]}"})
+  : >"$LOGFILE"
+  # The keeper gets the daemon's environment on stdin, exactly as `env` builds it here
+  # (`env -0`, through a pipe, then the EVAL_KEEPER_ENV_END entry it refuses a hand-over
+  # without), and starts the daemon with that alone: never with its own, to which its
+  # interpreter adds (uv run's venv, CPython's locale coercion).
+  ( cd "$REPO_ROOT" && { env "${daemon_env[@]}" env -0; printf 'EVAL_KEEPER_ENV_END=1\0'; } \
+      | exec "$KEEPER" serve "$HOME_DIR" --cwd "$REPO_ROOT" --ready-timeout "$READY_TIMEOUT" \
+          -- mix fermix.dev --no-web --no-realtime ) >>"$LOGFILE" 2>&1 &
+  local launcher=$!
   disown %% 2>/dev/null || true   # survive this shell exiting (up leaves it running)
-  log "waiting for the control socket (up to ${READY_TIMEOUT}s)"
-  local i
-  for ((i = 0; i < READY_TIMEOUT; i++)); do
-    if FERMIX_HOME="$HOME_DIR" "$BIN_DIR/fermix-shim" status --json >/dev/null 2>&1; then
-      log "daemon ready (pid $(cat "$PIDFILE"))"
-      return 0
+  log "waiting for the daemon to answer its control socket (up to ${READY_TIMEOUT}s)"
+  if ! "$KEEPER" ask check "$HOME_DIR" --wait-for "$launcher"; then
+    log "daemon did not come up — last log lines:"
+    tail -n 20 "$LOGFILE" >&2 || true
+    return 1
+  fi
+  log "daemon ready (pid $(cat "$PIDFILE"))"
+}
+
+# Stop the process a pidfile names: SIGTERM, then SIGKILL after $2 seconds.
+stop_pidfile() {
+  local pidfile="$1" grace="$2" pid i
+  [ -f "$pidfile" ] || return 0
+  pid="$(cat "$pidfile")"
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -TERM "$pid" 2>/dev/null || true
+    for ((i = 0; i < grace * 5; i++)); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.2
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      log "pid $pid still alive after SIGTERM — SIGKILL"
+      kill -KILL "$pid" 2>/dev/null || true
     fi
-    if ! running; then
-      log "daemon exited during boot — last log lines:"
-      tail -n 20 "$LOGFILE" >&2 || true
-      return 1
-    fi
-    sleep 1
-  done
-  log "daemon did not become ready within ${READY_TIMEOUT}s — see $LOGFILE"
-  return 1
+  fi
+  rm -f "$pidfile"
 }
 
 down() {
-  if [ -f "$PIDFILE" ]; then
-    local pid
-    pid="$(cat "$PIDFILE")"
-    if kill -0 "$pid" 2>/dev/null; then
-      log "stopping daemon (pid $pid)"
-      kill -TERM "$pid" 2>/dev/null || true
-      local i
-      for ((i = 0; i < 15; i++)); do
-        kill -0 "$pid" 2>/dev/null || break
-        sleep 1
-      done
-      if kill -0 "$pid" 2>/dev/null; then
-        log "daemon still alive after SIGTERM — SIGKILL fallback"
-        kill -KILL "$pid" 2>/dev/null || true
-      fi
-    fi
-    rm -f "$PIDFILE"
-  fi
+  # The keeper first (it stops its daemon, waiting 15 s for it), then a daemon a keeper
+  # killed outright left behind. The control socket goes only once nothing answers on it:
+  # a daemon this script did not start keeps its socket, and with it the probe every
+  # snapshot, restore and seed asks before it replaces anything.
+  log "stopping the keeper and its daemon"
+  stop_pidfile "$KEEPER_PIDFILE" 25
+  stop_pidfile "$PIDFILE" 15
+  rm -f "$HOME_DIR/keeper.sock"
+  # Whatever answers the control socket now, whoever started it (the keeper asks it).
+  local pid found=0
+  pid="$("$KEEPER" answering "$HOME_DIR")" || found=$?
+  case "$found" in
+    0) log "a daemon this script did not start still answers for $HOME_DIR (pid $pid):"
+       log "left it and its socket alone; stop it (kill $pid), then run down again"
+       return "$REFUSED" ;;
+    4) ;;
+    *) log "a daemon this script did not start still answers for $HOME_DIR (above): left"
+       log "it and its socket alone; find it (lsof $HOME_DIR/daemon.sock), stop it, then run down again"
+       return "$REFUSED" ;;
+  esac
   rm -f "$HOME_DIR/daemon.sock"
   log "stopped"
 }
 
-snapshot() {
-  "$BIN_DIR/eval_home_state.py" snapshot "$HOME_DIR"
+# The disposable-home guard and the snapshot's presence first, then the keeper `up`
+# started answers: it refuses (exit 3, the reason on stderr) before it stops anything.
+ask_keeper() {
+  "$BIN_DIR/eval_home_state.py" check "$HOME_DIR" >/dev/null || return "$REFUSED"
+  "$KEEPER" ask "$1" "$HOME_DIR" ${FERMIX_CAP_PROJECT:+--project "$FERMIX_CAP_PROJECT"}
 }
 
 reset() {
-  # The disposable-home guard and the snapshot's presence first: a home that is not
-  # an eval home, or holds no snapshot, is refused before its daemon is stopped.
-  "$BIN_DIR/eval_home_state.py" check "$HOME_DIR"
-  down
-  log "restoring the seeded state"
-  "$BIN_DIR/eval_home_state.py" restore "$HOME_DIR"
-  start_daemon
+  log "asking the keeper to restore the seeded state and restart the daemon"
+  ask_keeper reset
+}
+
+check() { ask_keeper check; }
+
+# The EXIT trap of `run`: a teardown that fails (a daemon this script did not start
+# still answering, exit 3) is said, and never replaces the runner's exit code.
+teardown() {
+  down || log "down exited $? (its reason above); the run's own exit code stands"
 }
 
 run() {
-  trap down EXIT
+  trap teardown EXIT
   # The private holdout (config private_suites.dir) joins every local run: synced
   # before seeding so its skills are in the home, scored after the public sweep as its
   # own :private row. CAPABILITY_PRIVATE=0 leaves it out (e.g. no access to its repo).
@@ -254,8 +307,8 @@ run() {
 case "${1:-run}" in
   up)       up ;;
   down)     trap - EXIT; down ;;
-  snapshot) snapshot ;;
   reset)    reset ;;
+  check)    check ;;
   run)      run ;;
-  *)        echo "usage: $(basename "$0") [up|down|snapshot|reset|run]" >&2; exit 2 ;;
+  *)        echo "usage: $(basename "$0") [up|down|reset|check|run]" >&2; exit 2 ;;
 esac

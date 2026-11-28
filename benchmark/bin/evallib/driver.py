@@ -312,7 +312,10 @@ def _capability_names(stdout: str) -> set[str]:
 
 
 def daemon_reachable(cfg) -> tuple[bool, str]:
-    """True iff the configured Opik-enabled daemon answers its control socket."""
+    """True iff the configured daemon answers its control socket with its overview:
+    `fermix status --json` prints the management `overview.get` result, the engine's
+    CLI and the bundled shim alike, and its `daemon` part names the status and pid. Any
+    other answer (an error reply, an unknown method's) is not a daemon that answered."""
     cmd = [cfg.daemon.fermix_bin, "status", "--json"]
     try:
         proc = subprocess.run(cmd, env=cfg.env, capture_output=True, text=True, timeout=15)
@@ -323,4 +326,11 @@ def daemon_reachable(cfg) -> tuple[bool, str]:
         return False, "daemon not running (control socket unreachable)"
     if proc.returncode != 0:
         return False, f"fermix status exit {proc.returncode}: {proc.stderr.strip() or out}"
-    return True, out[:200]
+    try:
+        overview = json.loads(out)
+    except ValueError:
+        overview = None
+    daemon = overview.get("daemon") if isinstance(overview, dict) else None
+    if not isinstance(daemon, dict) or "status" not in daemon:
+        return False, f"fermix status printed no daemon overview: {out[:200]}"
+    return True, f"daemon {daemon.get('status')} (pid {daemon.get('pid')})"

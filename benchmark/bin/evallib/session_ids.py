@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import secrets
 
 _SESS_RE = re.compile(r"[^A-Za-z0-9_-]")
 SESS_LIMIT = 90
@@ -44,3 +45,14 @@ def sess(*parts: str, limit: int = SESS_LIMIT) -> str:
     if head < 1:
         raise ValueError(f"session id tail {tail!r} does not fit in {limit} chars")
     return full[:head] + suffix
+
+
+def eval_marker(run_id: str) -> str:
+    """One message's eval marker, `e2e-mark-<run id>-<6 hex>`: what a message the runner
+    sends where no session can carry the correlation (the operator's Telegram chat, the
+    companion socket, the app's chat) appends as `(eval:<marker>)` for its trace to be
+    found by. The model reads it, so it names the run and nothing of the suite or the
+    case; a fresh one per message keeps two messages of one run apart."""
+    if not isinstance(run_id, str) or not run_id or _SESS_RE.search(run_id):
+        raise ValueError(f"eval_marker() needs a run id of [A-Za-z0-9_-], got {run_id!r}")
+    return f"e2e-mark-{run_id}-{secrets.token_hex(3)}"

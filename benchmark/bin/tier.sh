@@ -89,8 +89,10 @@ case "$1" in
     cmd=(uv run bin/run_eval.py --tag host-safe-core --judge --fail-retries 2) ;;
   behavioral-isolated)
     judged=1
+    # --reset-home: a `state:` case (job_auto_heal) or a phone case runs only with it,
+    # each attempt from the snapshot of the home `capability-daemon.sh up` started.
     cmd=(uv run bin/run_eval.py --profile isolated_mutation --all --judge --fail-retries 2
-         --confirm-daemon-isolated --confirm-isolated-env) ;;
+         --confirm-daemon-isolated --confirm-isolated-env --reset-home) ;;
   capability)
     cmd=(uv run bin/run_capability.py --trials 5)
     for flag in \

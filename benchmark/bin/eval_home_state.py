@@ -6,10 +6,11 @@
 
 `capability-daemon.sh up` takes the snapshot right after seeding, with the daemon
 still down, and `capability-daemon.sh reset` stops the daemon, restores it and
-starts the daemon again, so each attempt of an isolated companion case
-(`run_eval.py --reset-home`) starts from the world the seed made rather than from
-what the previous case's model left behind: a watcher it created, a memory
-directive it stored.
+starts the daemon again, so each attempt of an isolated companion, phone-call or
+`state:` case (`run_eval.py --reset-home`) and each trial of a `checker.state` task
+(`run_capability.py`) starts from the world the seed made rather than from what the
+previous case's model left behind: a watcher it created, a memory directive it
+stored, a conversation about the same seeded job.
 
 What is kept is what `seed_capability_home.reset_state` clears (`STATE_DIRS` and
 `STATE_FILES`: memory.db with its -wal and -shm, the memory/ tree, skills, job runs,
@@ -20,6 +21,11 @@ machine.toml (the sandbox the seed set, which a grant changes). An
 entry absent from the snapshot is removed on restore, as the seed left it.
 auth.json is not kept: the daemon may rotate an OAuth refresh token in it, and
 putting the old one back would sign the eval home out.
+
+Each snapshot carries an id of its own (`SNAPSHOT_ID`, inside the snapshot, never
+restored into the home). The keeper `up` starts holds the id of the snapshot that `up`
+took (bin/eval_daemon_keeper.py), and restores only that one: a snapshot taken again
+since is not the world its daemon started from.
 
   eval_home_state.py snapshot HOME   take it (daemon down; replaces an older one)
   eval_home_state.py restore HOME    put it back (daemon down)
@@ -36,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import secrets
 import shutil
 import sys
 
@@ -46,6 +53,7 @@ from evallib import safe_rm  # noqa: E402
 
 SNAPSHOT_DIR = "eval-snapshot"
 PARTIAL_DIR = "eval-snapshot.partial"
+SNAPSHOT_ID = "snapshot_id"
 KEPT = seed.STATE_DIRS + seed.STATE_FILES + ("config.toml", seed.MACHINE_FILE)
 
 
@@ -98,6 +106,8 @@ def snapshot(home: str) -> str:
         source = os.path.join(resolved, name)
         if os.path.lexists(source):
             _copy(source, os.path.join(partial, name))
+    with open(os.path.join(partial, SNAPSHOT_ID), "w", encoding="utf-8") as fh:
+        fh.write(secrets.token_hex(8) + "\n")
     _remove(final, resolved)
     os.rename(partial, final)
     return final
@@ -115,13 +125,23 @@ def restore(home: str) -> None:
             _copy(kept, live)
 
 
+def snapshot_id(home: str) -> str | None:
+    """The id the home's snapshot was taken with, or None when it holds no snapshot
+    or one taken before snapshots carried an id."""
+    path = os.path.join(os.path.expanduser(home), SNAPSHOT_DIR, SNAPSHOT_ID)
+    if not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8") as fh:
+        return fh.read().strip() or None
+
+
 def snapshot_path(home: str) -> str:
     """`<home>/eval-snapshot`, refused unless the home is disposable and holds one."""
     resolved = seed.disposable_home(home, "reset")
     saved = os.path.join(resolved, SNAPSHOT_DIR)
     if not os.path.isfile(os.path.join(saved, "config.toml")):
-        seed.die(f"no seeded-state snapshot in {resolved}: `capability-daemon.sh up` takes "
-                 "one after seeding")
+        seed.die(f"no seeded-state snapshot in {resolved}: run `capability-daemon.sh down`, "
+                 "then `up`, which takes one once seeding ends")
     return saved
 
 

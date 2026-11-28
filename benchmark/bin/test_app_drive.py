@@ -44,6 +44,7 @@ class FakeApp:
         self.waiting = False
         self.sends: list = []
         self.commands: list[dict] = []
+        self.messages: list[str] = []
         self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.server.bind(self.path)
         self.server.listen(4)
@@ -122,6 +123,7 @@ class FakeApp:
             self._resolve("approved" if event["name"] == "confirm" else "denied")
 
     def _message(self, event, send):
+        self.messages.append(event["text"])
         cid = event["client_msg_id"]
         send({"type": "accepted", "client_msg_id": cid})
         send({"type": "turn_started", "turn_id": f"t-{cid}", "in_reply_to": cid})
@@ -158,9 +160,15 @@ def _drive(fake, steps, cli=None):
         typed.append(command)
         return cli(command) if cli else "That card is not answered from here."
 
-    evidence, broken = app_drive.drive(fake.home, {"steps": steps}, "e2e-app-mark", fake.seed,
+    evidence, broken = app_drive.drive(fake.home, {"steps": steps}, _markers(), fake.seed,
                                        type_cli, timeout_s=5)
     return evidence, broken, typed
+
+
+def _markers():
+    """Opaque markers, one per call, as the runner's `session_ids.eval_marker` makes."""
+    made = iter(f"e2e-mark-RUN-{n:06x}" for n in range(1, 100))
+    return lambda: next(made)
 
 
 def _of(events, kind):
@@ -207,8 +215,26 @@ def test_a_say_step_is_a_message_whose_turn_end_and_resolution_are_read(app):
     fake = app()
     ev, broken, _typed = _drive(fake, ["await_card", {"say": "please move it to 6:45"}])
     assert broken is None
-    assert ev["steps"][-1] == {"step": "say", "timed_out": False, "resolved": "expired"}
+    step = ev["steps"][-1]
+    assert {key: step[key] for key in ("step", "timed_out", "resolved")} == {
+        "step": "say", "timed_out": False, "resolved": "expired"}
     assert ev["replies"][-1]["reply"] == "Moved it."
+
+
+def test_a_say_step_carries_the_marker_its_trace_is_found_by(app):
+    # The say is the trial's one model turn; the runner finds its trace on the app's
+    # thread by this marker, as the companion lane finds its own, so the run knows which
+    # model served it.
+    fake = app()
+    ev, broken, _typed = _drive(fake, ["await_card", {"say": "please move it to 6:45"}])
+    assert broken is None
+    [say] = [s for s in ev["steps"] if s["step"] == "say"]
+    # Opaque, as the companion lane's: a fresh marker that names the run and nothing of
+    # the suite or the case, which the model reads.
+    assert say["marker"] == "e2e-mark-RUN-000002"
+    assert fake.messages == [f"please move it to 6:45 (eval:{say['marker']})"]
+    assert say["sent_at"].endswith("Z") and say["elapsed_ms"] >= 0
+    assert ev["replies"][-1]["say"] == "please move it to 6:45"
 
 
 def test_a_wait_that_runs_out_is_recorded_and_stops_the_steps(app):
@@ -224,7 +250,7 @@ def test_a_wait_that_runs_out_is_recorded_and_stops_the_steps(app):
 def test_a_missing_socket_makes_the_attempt_ungradable():
     home = tempfile.mkdtemp(prefix="app")
     try:
-        ev, broken = app_drive.drive(home, {"steps": ["await_row"]}, "m", lambda: None,
+        ev, broken = app_drive.drive(home, {"steps": ["await_row"]}, _markers(), lambda: None,
                                      lambda c: "", timeout_s=1)
     finally:
         shutil.rmtree(home, ignore_errors=True)

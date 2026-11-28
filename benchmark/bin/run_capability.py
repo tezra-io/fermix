@@ -26,7 +26,12 @@ Exit codes:
   0  measurement valid, leaderboard written, release gate green — or not applicable:
      a soft-only (taste) selection is a directional signal with no release verdict
   2  usage / selection / argument refusal (nothing was driven)
-  3  preconditions (Opik or daemon down, or no route served the sweep)
+  3  preconditions (Opik or daemon down, a seeded task's reset the keeper would
+     refuse, or no route served the sweep: no trace names a model, whatever
+     `--config-id` says). The one exception is a selection every task of which reaches
+     no model by design (typed owner commands, app drives with no `say`): it is
+     recorded on the `no-model` row and exits by its trials. An invalid trial is exit
+     4 first
   4  measurement INVALID — missing trace evidence, a checker/evaluator failure,
      more than one main route, a usage limit, invalidated auth, an unavailable
      judge, or a provider usage map the rate card refuses. NO leaderboard row,
@@ -62,8 +67,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL_DIR = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 
-from evallib import (aggregate, app_drive, checker, config as cfgmod, cue_drive, driver,
-                     grade, judge,
+import eval_daemon_keeper
+import eval_home_state
+from evallib import (aggregate, app_drive, checker, companion, config as cfgmod, cue_drive,
+                     driver, grade, judge,
                      leaderboard, leaderboard_html, owner_inbox, pricing, release_gate,
                      safe_rm, scoring, uplift)
 from evallib.experiments import ExperimentWriter, OpikWriteError, stable_id
@@ -71,7 +78,7 @@ from evallib.fixture_server import (FIXTURE_URL_PLACEHOLDER, PAGE_READY_PATH, Fi
                                     ServerError, case_uses_fixture, check_state, home_port,
                                     read_path)
 from evallib.opik import OpikClient, OpikError
-from evallib.session_ids import sess
+from evallib.session_ids import eval_marker, sess
 from evallib.suites import UNCLASSIFIED_RISK, SuiteError, load_all
 
 # Negative "must-not" gates: a failure here is a SAFETY violation that zeroes the
@@ -96,6 +103,21 @@ FIXTURE_HELPER = os.path.join(FIXTURE_PAGES_DIR, "fixture.js")   # served beside
 REPO_ROOT = os.path.dirname(SKILL_DIR)
 SEED_STATE_SCRIPT = os.path.join(SKILL_DIR, "bin", "seed_state.exs")
 STATE_SEED_TIMEOUT_S = 240
+# Before that seed, the whole home goes back to the snapshot `capability-daemon.sh up`
+# took (`capability-daemon.sh reset`, which the keeper `up` started carries out: stop,
+# restore, start), the one step that puts every store a turn recalls from back, the
+# daemon's cached prompt memory included. Both bounds sit above the keeper's own answer
+# bound (`eval_daemon_keeper.ANSWER_TIMEOUT_S`, which a reset's stop, restore and boot
+# fit inside: the keeper refuses a READY_TIMEOUT that would not) by the script's helpers'
+# start-up, so the runner never gives up before the keeper's client does. Its readiness
+# is the control socket;
+# the companion socket comes up after it. In the first behavioral --reset-home cues run
+# it followed by 85 to 941 ms in the 45 boots where it came up, and five drives that
+# connected before it did were INCOMPLETE. 30 s is about 30 times the slowest gap.
+DAEMON_SCRIPT = os.path.join(HERE, "capability-daemon.sh")
+_RESET_TIMEOUT_S = eval_daemon_keeper.ANSWER_TIMEOUT_S + 60
+_CHECK_TIMEOUT_S = eval_daemon_keeper.ANSWER_TIMEOUT_S + 60
+_COMPANION_READY_S = 30
 # The owner's own local chat: `fermix ask`'s default session, where a card bound to
 # the CLI inbox answers from (`Delivery.OwnerInbox.answer_origin/1`). An
 # `owner_command` case types there unless its `command.chat` is `trial`.
@@ -190,6 +212,89 @@ def _seed_state(fermix_home: str, tasks_root: str, state_path: str) -> dict:
         raise StateSeedError(f"seed_state.exs printed no manifest for {state_path}") from exc
 
 
+def _restores_home(case) -> bool:
+    """A task whose trials each start from the seeded home: one that seeds a world per
+    trial (`checker.state`). Every trial asks about that same world, the same jobs under
+    the same names, so what an earlier trial's turn said about it in its own chat (its
+    history rows and their search index, the memory review's notes on it, the prompt
+    memory they render) answers a later trial's question as well as the record does. A
+    seed reaches none of it, and the daemon caches the prompt memory besides."""
+    return bool((case.checker_spec or {}).get("state"))
+
+
+def _daemon_script_env(cfg) -> dict:
+    """The lifecycle script's environment for this run: its eval home, and the Opik
+    project the run reads, which the keeper refuses a reset or a check for unless its
+    daemon exports there. The daemon never gets this environment: only the keeper `up`
+    started ever starts it, always with `up`'s (bin/eval_daemon_keeper.py)."""
+    return {**os.environ, "FERMIX_CAP_HOME": os.path.expanduser(cfg.daemon.fermix_home),
+            "FERMIX_CAP_PROJECT": cfg.opik.project}
+
+
+def _script_refusal(done: subprocess.CompletedProcess, verb: str) -> str:
+    tail = "\n".join(done.stderr.strip().splitlines()[-5:])
+    return f"capability-daemon.sh {verb} exited {done.returncode}: {tail}"
+
+
+def reset_precondition_error(cfg) -> str | None:
+    """Whether a reset of this run's eval home would be carried out, asked before any
+    spend (`capability-daemon.sh check`, which changes nothing): the home holds a
+    snapshot, the keeper `up` started answers, the daemon answering the home is the one
+    it started, the snapshot is the one its `up` took, and the daemon exports to this
+    run's project. None, or the refusal."""
+    try:
+        done = subprocess.run([DAEMON_SCRIPT, "check"], env=_daemon_script_env(cfg),
+                              capture_output=True, text=True, timeout=_CHECK_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return f"capability-daemon.sh check did not finish within {_CHECK_TIMEOUT_S}s"
+    return None if done.returncode == 0 else _script_refusal(done, "check")
+
+
+def home_resetter(cfg):
+    """The reset that puts the eval home back before a trial or an attempt:
+    `capability-daemon.sh reset`, which asks the keeper `up` started to stop its daemon,
+    restore `up`'s snapshot and start the daemon again with `up`'s environment (it
+    refuses, replacing nothing, on anything `reset_precondition_error` names), then the
+    wait until the companion socket answers a hello, since the keeper is done once the
+    control socket answers and the companion socket comes up after it. The callable
+    returns None, or why the home could not be reset. Both runners reset through it
+    (run_eval.py --reset-home)."""
+    home = os.path.expanduser(cfg.daemon.fermix_home)
+    env = _daemon_script_env(cfg)
+
+    def reset() -> str | None:
+        started = time.monotonic()
+        try:
+            done = subprocess.run([DAEMON_SCRIPT, "reset"], env=env, capture_output=True,
+                                  text=True, timeout=_RESET_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            return f"capability-daemon.sh reset did not finish within {_RESET_TIMEOUT_S}s"
+        if done.returncode != 0:
+            return _script_refusal(done, "reset")
+        # A daemon that had exited by itself before this reset is evidence about the run:
+        # the keeper's warning reaches the run's own console, not only daemon.log.
+        for line in done.stderr.splitlines():
+            if "WARNING" in line:
+                print(f"    ⚠️ {line.strip()}", file=sys.stderr, flush=True)
+        not_ready = companion.await_hello(home, _COMPANION_READY_S)
+        if not_ready:
+            return f"the daemon answered its control socket after the reset, but {not_ready}"
+        print(f"    eval home reset to its seeded state "
+              f"({time.monotonic() - started:.1f}s)", flush=True)
+        return None
+
+    return reset
+
+
+def _restore_home(cfg) -> None:
+    """Put the eval home back to its snapshot before a seeded trial, or raise: a trial
+    on whatever the last one left is a measurement of leftovers."""
+    error = home_resetter(cfg)()
+    if error:
+        raise StateSeedError(f"the eval home could not be put back to its seeded snapshot: "
+                             f"{error}")
+
+
 def _fixture_files(root: str) -> list[str]:
     return [os.path.join(current, name)
             for current, _dirs, files in os.walk(root) for name in files]
@@ -216,6 +321,12 @@ def _case_identity(suite_name: str, case, cfg, tasks_root: str | None = None) ->
         "judge": f"{cfg.judge.backend}/{cfg.judge.model}" if case.rubric else "",
         "timeout_ms": case.timeout_ms,
     }
+    if _restores_home(case):
+        # How its trials start is part of what a seeded task measures: each from the
+        # home's snapshot, where rows measured before could recall earlier trials. Only
+        # such a task carries the key, so every other task's identity, and the public
+        # sweep's cohort, stay as they were.
+        payload["trial_start"] = "seeded_snapshot"
     return json.dumps(payload, sort_keys=True, default=str)
 
 
@@ -302,7 +413,8 @@ class PricingContractError(RuntimeError):
 
 
 class StateSeedError(RuntimeError):
-    """A task's declared jobs/reminders baseline could not be restored before a trial.
+    """A task's seeded baseline (the home's snapshot, then its declared jobs and
+    reminders) could not be restored before a trial.
 
     A precondition, not a measurement: the trial would run against whatever the last
     trial left behind, so its score would measure leftovers. The sweep stops on the
@@ -1421,17 +1533,18 @@ def _is_app(case) -> bool:
     return getattr(case, "drive", "ask") == "app"
 
 
-def _app_trial(cfg, s, case, run_id, i, task_key, cleanup_root, tasks_root=None):
+def _app_trial(cfg, opik, s, case, run_id, i, task_key, cleanup_root, tasks_root=None):
     """One app trial (`drive: app`): open the companion socket as the Fermix app does,
     seed the case's state while it is open, then take the case's `app.steps`
     (evallib/app_drive.py). The checker grades the store and every event the socket
-    received. What reached the app needs no model; a `say` step is the owner's message
-    and runs a turn, whose usage this drive does not read from a trace, so a trial's
-    cost is unknown, never claimed as $0. A socket that refused or closed makes the
+    received. What reached the app needs no model. A `say` step is the owner's message
+    and runs a real turn: its trace, found on the app's thread by the marker the drive
+    sent with it, is the trial's captured turn, so the run knows the model that served it
+    and what it spent. A trial with no `say` has no trace and an unknown cost, never $0.
+    A socket that refused or closed, or a `say` whose trace never arrived, makes the
     trial INVALID, not a 0."""
     home = cfg.daemon.fermix_home
     label = f"{case.id} t{i}"
-    marker = sess("e2e-app", run_id, s.name, case.id, f"t{i}", limit=60)
     scoped = checker.scoped_dir(home, task_key, i)
     started = time.monotonic()
     seeded: dict = {}
@@ -1445,35 +1558,103 @@ def _app_trial(cfg, s, case, run_id, i, task_key, cleanup_root, tasks_root=None)
 
     try:
         checker.seed_workspace(scoped, tasks_root or SKILL_DIR, None, cleanup_root)
-        app, broken = app_drive.drive(home, case.app, marker, seed, cli,
+        app, broken = app_drive.drive(home, case.app, lambda: eval_marker(run_id), seed, cli,
                                       (case.timeout_ms or 240000) / 1000.0)
         elapsed_ms = (time.monotonic() - started) * 1000.0
         if broken:
             print(f"    ! {label}: {broken} — trial INVALID (not a model failure)",
                   file=sys.stderr)
-            return _command_finish(case, 0.0, label, elapsed_ms, invalid_status="not_running",
-                                   detail=broken)
+            return _app_finish(case, _Episode(caps=[], expects=[]), 0.0, label, elapsed_ms,
+                               invalid_status="not_running", detail=broken)
+        ep = _app_episode(cfg, opik, app, label)
+        unseen = [cap for cap in ep.caps if cap.status != "graded"]
+        if unseen:
+            return _app_finish(case, ep, 0.0, label, elapsed_ms,
+                               invalid_status=unseen[0].status, detail=unseen[0].detail)
         reply = app["replies"][-1]["reply"] if app["replies"] else ""
-        evidence = {"schema": 1, "run_id": run_id, "trial": i, "session": marker,
-                    "token": trial_token(s.name, case.id, run_id, i), "trace_id": None,
+        evidence = {"schema": 1, "run_id": run_id, "trial": i, "session": app.get("marker"),
+                    "token": trial_token(s.name, case.id, run_id, i),
+                    "trace_id": ep.caps[-1].trace.get("id") if ep.caps else None,
                     "expect": case.checker_spec.get("expect"), "state": seeded,
-                    "reply": reply, "replies": app["replies"], "app": app, "tool_spans": []}
-        cr = checker.run_checker(SKILL_DIR, case.checker_spec, scoped, reply, home,
-                                 evidence=evidence)
-        if cr.error:
-            print(f"    ! checker error {label}: {cr.error} — trial INVALID (not a model "
-                  "failure)", file=sys.stderr)
-            return _command_finish(case, 0.0, label, elapsed_ms, invalid_status="checker_error")
-        if cr.violations:
-            print(f"    ⚠️ {label}: checker reported violation(s): {'; '.join(cr.violations)}",
-                  file=sys.stderr)
-        if cr.score < 1.0:
-            print(f"    · {label}: checker: {cr.detail}", file=sys.stderr)
-        return _command_finish(case, cr.score, label, elapsed_ms, checker_safety=cr.safety_ok,
-                               grader_detail=cr.detail)
+                    "reply": reply, "replies": app["replies"], "app": app,
+                    "tool_spans": [span for cap in ep.caps
+                                   for span in _evidence_spans(cap.view)]}
+        return _app_grade(cfg, case, ep, evidence, scoped, label, elapsed_ms)
     finally:
         if os.path.isdir(scoped):
             checker.teardown_workspace(cleanup_root, scoped)
+
+
+def _app_episode(cfg, opik, app: dict, label: str) -> _Episode:
+    """One captured turn per `say` the drive sent, in order; no other step is a turn."""
+    caps = [_capture_say(cfg, opik, step, label)
+            for step in app["steps"] if step["step"] == "say"]
+    return _Episode(caps=caps, expects=[{} for _cap in caps])
+
+
+def _capture_say(cfg, opik, step: dict, label: str) -> _Captured:
+    """The trace of one `say` turn, found on the app's thread by the marker the drive sent
+    with the message, graded against the drive's own wall clock for that turn. An Opik
+    read failure is recorded, never raised, as `_capture_turn` records one."""
+    elapsed_ms = step["elapsed_ms"]
+    after = _parse_stamp(step["sent_at"]) - timedelta(seconds=10)
+    try:
+        hit = opik.poll_for_marker(app_drive.TRACE_THREAD_PREFIX, step["marker"], after,
+                                   set(), cfg.opik.poll_timeout_s, cfg.opik.poll_interval_s)
+        if hit is None:
+            print(f"    ! {label}: no trace found for the owner's message "
+                  f"{step['marker']} — this trial is an INVALID measurement, not a zero",
+                  file=sys.stderr)
+            return _Captured("no_trace", None, None, None, elapsed_ms)
+        trace, spans = opik.await_complete(hit)
+    except OpikError as exc:
+        print(f"    ! opik read failed for {label}: {exc}", file=sys.stderr)
+        return _Captured("opik_error", None, None, None, elapsed_ms)
+    view = grade.TurnView.build(trace, spans, elapsed_ms=elapsed_ms)
+    if driver.is_auth_invalidated_reply(view.reply):
+        raise driver.AuthInvalidated(view.reply)
+    incomplete = not _gradeable(view) or driver.is_usage_limit_reply(view.reply)
+    return _Captured("incomplete" if incomplete else "graded", view, trace, spans, elapsed_ms)
+
+
+def _app_grade(cfg, case, ep: _Episode, evidence: dict, scoped: str, label: str,
+               elapsed_ms: float) -> tuple[aggregate.TrialResult, str | None, list]:
+    """The checker over the store and the socket's events, folded into the trial."""
+    cr = checker.run_checker(SKILL_DIR, case.checker_spec, scoped, evidence["reply"],
+                             cfg.daemon.fermix_home, evidence=evidence)
+    if cr.error:
+        print(f"    ! checker error {label}: {cr.error} — trial INVALID (not a model "
+              "failure)", file=sys.stderr)
+        return _app_finish(case, ep, 0.0, label, elapsed_ms, invalid_status="checker_error")
+    if cr.violations:
+        print(f"    ⚠️ {label}: checker reported violation(s): {'; '.join(cr.violations)}",
+              file=sys.stderr)
+    if cr.score < 1.0:
+        print(f"    · {label}: checker: {cr.detail}", file=sys.stderr)
+    return _app_finish(case, ep, cr.score, label, elapsed_ms, checker_safety=cr.safety_ok,
+                       grader_detail=cr.detail)
+
+
+def _app_finish(case, ep: _Episode, succ: float, label: str, elapsed_ms: float,
+                invalid_status: str | None = None, checker_safety: bool | None = None,
+                detail: str = "", grader_detail: str = ""
+                ) -> tuple[aggregate.TrialResult, str | None, list]:
+    """Fold an app episode into a trial. Its `say` turns carry its usage, its models and
+    its trace; the steps around them reach no model. With no `say` no model ran: no
+    trace, no tokens, no llm call, and a cost unknown to the rate card, never $0."""
+    status = invalid_status or "ok"
+    usage = _episode_usage(ep)
+    last = ep.caps[-1].trace if ep.caps else None
+    trace_id = last.get("id") if last and not invalid_status else None
+    trial = aggregate.score_trial(
+        case.id, task_success=0.0 if invalid_status else succ,
+        safety_ok=None if invalid_status else _trial_safety(ep, checker_safety),
+        cost=usage["cost"], duration_ms=elapsed_ms, tokens=usage["tokens"],
+        tool_calls=usage["tool_calls"], status=status, trace_id=trace_id,
+        cost_known=usage["cost_known"], status_detail=detail, grader_detail=grader_detail,
+        main_llm_calls=usage["main_llm_calls"] if ep.caps else 0, **_episode_pricing(ep))
+    print(f"    · {label}: app episode {status}, {len(ep.caps)} turn(s)", file=sys.stderr)
+    return (trial, trace_id, _episode_models(ep))
 
 
 def _needs_cues(suite, case) -> bool:
@@ -1535,6 +1716,8 @@ def run_task(cfg, opik, s, scn, case, trials, k, threshold, run_id,
 
     for i in range(trials):
         try:
+            if _restores_home(case):
+                _restore_home(cfg)
             if case.cross_session:
                 tr, trace_id, tmodels = _cross_session_trial(
                     cfg, opik, s, case, run_id, i, fixtures)
@@ -1546,7 +1729,7 @@ def run_task(cfg, opik, s, scn, case, trials, k, threshold, run_id,
                     cfg, s, case, run_id, i, task_key, cleanup_root, tasks_root)
             elif _is_app(case):
                 tr, trace_id, tmodels = _app_trial(
-                    cfg, s, case, run_id, i, task_key, cleanup_root, tasks_root)
+                    cfg, opik, s, case, run_id, i, task_key, cleanup_root, tasks_root)
             else:
                 tr, trace_id, tmodels = _standard_trial(
                     cfg, opik, s, case, run_id, i, is_checker, task_key, fixture_path,
@@ -1635,11 +1818,24 @@ def _validity_problems(outcomes, routes: set) -> list[str]:
     return problems
 
 
-def _no_route_error(all_models, config_id) -> str | None:
-    """No main-agent llm span anywhere means no model served the sweep — an
-    "unknown-model" zero would overwrite a real row. A `--config-id` is a LABEL for
-    the row; it is not evidence that anything ran, so it waives nothing."""
+def _drives_no_model(case) -> bool:
+    """A task whose trials reach no model by design: a command the owner types, which
+    the gateway answers itself (`drive: owner_command`), or an app drive whose steps say
+    nothing (`drive: app` with no `say`). Its trials are graded from the store and the
+    socket, so no trace of them can name a model."""
+    return _is_command(case) or (_is_app(case) and not app_drive.says(case.app))
+
+
+def _no_route_error(all_models, config_id, cases=()) -> str | None:
+    """No main-agent llm span anywhere means no model served the sweep — a zero with no
+    route would stand in a model's place. A `--config-id` is a LABEL for the row; it is
+    not evidence that anything ran, so it waives nothing. The one exception: a selection
+    every task of which reaches no model by design (`_drives_no_model`) is reported, by
+    its trials, on the no-model row. A selection with any task that drives a model is no
+    measurement when no trace names one, whatever its trials scored."""
     if all_models:
+        return None
+    if cases and all(_drives_no_model(case) for _suite, _scn, case in cases):
         return None
     label = f" (--config-id {config_id!r} names a row, it does not supply a route)" \
         if config_id else ""
@@ -1868,10 +2064,12 @@ def write_opik(cfg, config_id, run_id, outcomes) -> str | None:
 # --- main -------------------------------------------------------------------
 
 def _detect_config_id(arg_id, all_models) -> str:
+    """The no-model row when no trace names a model; else `--config-id` (a label for the
+    served route), or the route the traces name most."""
+    if not all_models:
+        return leaderboard.NO_MODEL_CONFIG
     if arg_id:
         return arg_id
-    if not all_models:
-        return "unknown-model"
     return Counter(all_models).most_common(1)[0][0]
 
 
@@ -1946,11 +2144,12 @@ def _abort_judge_unavailable(unavailable, done: int, total: int) -> int:
 
 
 def _abort_state_seed(broken, done: int, total: int) -> int:
-    """Stop the sweep when a task's jobs/reminders baseline cannot be restored: every
-    later trial of that task would run on what the previous one left behind."""
+    """Stop the sweep when a task's seeded baseline (the home's snapshot, then its jobs
+    and reminders) cannot be restored: every later trial of that task would run on what
+    the previous one left behind."""
     where = (f"{broken.suite}/{broken.case_id} (trial {broken.trial})"
              if broken.suite else "a task")
-    print(f"\n⛔ could not restore the declared jobs/reminders state at {where}.",
+    print(f"\n⛔ could not restore the trial's seeded state at {where}.",
           file=sys.stderr)
     print(f"   {broken.error}", file=sys.stderr)
     print(f"   {done}/{total} task(s) scored before it. Leaderboard NOT written.",
@@ -2276,6 +2475,12 @@ def _execution_gate(cfg, args, cases) -> int | None:
         return 2
     require_isolated = _capability_requires_isolated_home(cases)
     problems = preconditions(cfg, require_isolated=require_isolated)
+    # Checked before any spend: a seeded trial that cannot start from the snapshot would
+    # stop the sweep at its first trial, after the tasks before it had run.
+    seeded = any(_restores_home(case) for _s, _scn, case in cases)
+    reset_problem = reset_precondition_error(cfg) if seeded and not problems else None
+    if reset_problem:
+        problems.append(reset_problem)
     if problems:
         print("preconditions:\n  - " + "\n  - ".join(problems), file=sys.stderr)
         return 3
@@ -2331,6 +2536,12 @@ def _print_plan(cases, trials: int) -> int:
           f"(≈ ${turns * 0.05:.1f}–${turns * 0.6:.0f}, "
           f"≈ {turns * 5 // 60 + 1}–{turns * 45 // 60 + 1} min at dev-daemon rates). "
           "Drop --estimate to run.")
+    resets = sum(1 for _s, _scn, case in cases if _restores_home(case)) * trials
+    if resets:
+        print(f"  home reset: {resets} trial(s) each start from the eval home's seeded "
+              "snapshot (capability-daemon.sh reset: one daemon restart per trial, its time "
+              "not in the time range above; the home must be one `capability-daemon.sh up` "
+              "started)")
     return 0
 
 
@@ -2439,35 +2650,25 @@ def _start_fixture_server(cases, home: str,
 
 def _report(cfg, args, lb_path, run: _Run) -> int:
     """Validity, then outcome, then the release decision — in that order, because a
-    completed run is not a valid one and a valid one is not a passing gate."""
-    route_error = _no_route_error(run.all_models, args.config_id)
+    completed run is not a valid one and a valid one is not a passing gate. A trial
+    whose evidence never arrived makes the run INVALID (exit 4, evidence kept) before the
+    route guard asks whether a model served it (exit 3)."""
+    config_id = _config_id(args, run)
+    routes = sorted(set(run.all_models))
+    out_dir = os.path.join(cfg.report_dir, "capability", run.run_id)
+    problems = _validity_problems(run.outcomes, set(routes))
+    if problems:
+        return _report_invalid(cfg, args, lb_path, run, config_id, routes, problems)
+    route_error = _no_route_error(run.all_models, args.config_id, run.cases)
     if route_error:
         print(route_error, file=sys.stderr)
         return 3
-    config_id = _config_id(args, run)
     score = aggregate.aggregate_config(config_id, run.task_stats,
                                        not_evaluated=_not_evaluated_names(run))
     for line in _cost_warning(score):
         print(line, file=sys.stderr)
-    routes = sorted(set(run.all_models))
     meta = _meta(cfg, args, run, routes)
-    out_dir = os.path.join(cfg.report_dir, "capability", run.run_id)
     os.makedirs(out_dir, exist_ok=True)
-    problems = _validity_problems(run.outcomes, set(routes))
-    if problems:
-        # Per-task results are kept for DIAGNOSIS, under a name run_uplift.py cannot be
-        # pointed at by habit: written as results.json they were byte-identical in shape
-        # to a valid arm, so an invalid sweep paired cleanly and published an uplift
-        # claim built on harness failures.
-        write_results_json(os.path.join(out_dir, "results.invalid.json"), "fermix",
-                           config_id, run.k, args.threshold, run.outcomes, valid=False)
-        _write_report(out_dir, run.run_id, config_id, meta, None, None, problems)
-        print("\n⛔ measurement INVALID — leaderboard NOT written:", file=sys.stderr)
-        print("   - " + "\n   - ".join(problems), file=sys.stderr)
-        print(f"   Results (results.invalid.json) and report kept for diagnosis: "
-              f"{out_dir}", file=sys.stderr)
-        _render_html(cfg, lb_path)
-        return 4
     # Per-task results = the Fermix arm of an uplift pairing (run_uplift.py reads this
     # against a baseline arm; run_arms.py against the control configuration's).
     write_results_json(os.path.join(out_dir, "results.json"), "fermix", config_id,
@@ -2488,6 +2689,26 @@ def _report(cfg, args, lb_path, run: _Run) -> int:
     print(f"leaderboard: {lb_path}")
     _render_html(cfg, lb_path)
     return _gate_exit(gate)
+
+
+def _report_invalid(cfg, args, lb_path, run: _Run, config_id: str, routes: list,
+                    problems: list[str]) -> int:
+    """An INVALID run: per-task results are kept for DIAGNOSIS, under a name
+    run_uplift.py cannot be pointed at by habit (written as results.json they were
+    byte-identical in shape to a valid arm, so an invalid sweep paired cleanly and
+    published an uplift claim built on harness failures), and no leaderboard row."""
+    out_dir = os.path.join(cfg.report_dir, "capability", run.run_id)
+    os.makedirs(out_dir, exist_ok=True)
+    write_results_json(os.path.join(out_dir, "results.invalid.json"), "fermix",
+                       config_id, run.k, args.threshold, run.outcomes, valid=False)
+    _write_report(out_dir, run.run_id, config_id, _meta(cfg, args, run, routes), None, None,
+                  problems)
+    print("\n⛔ measurement INVALID — leaderboard NOT written:", file=sys.stderr)
+    print("   - " + "\n   - ".join(problems), file=sys.stderr)
+    print(f"   Results (results.invalid.json) and report kept for diagnosis: "
+          f"{out_dir}", file=sys.stderr)
+    _render_html(cfg, lb_path)
+    return 4
 
 
 def _gate_record(gate) -> dict:

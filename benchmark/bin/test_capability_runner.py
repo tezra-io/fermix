@@ -7,8 +7,10 @@
 `requires_tools` suite validation. No daemon / no Opik. Run: `uv run bin/test_capability_runner.py`."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import shutil
 import socket
 import struct
@@ -1881,16 +1883,20 @@ def test_an_app_trial_seeds_with_the_socket_open_and_hands_the_checker_its_event
            "card": {"token": "jhl_1"}, "steps": [],
            "replies": [{"command": "/confirm jhl_1", "session": "cli", "reply": "x"}]}
 
-    def fake_app_drive(home, spec, marker, seed, cli, timeout_s):
+    def fake_app_drive(home, spec, new_marker, seed, cli, timeout_s):
         order.append("connect")
         seed()
         order.append(("cli", cli("/confirm jhl_1")))
-        assert home == cfg.daemon.fermix_home and marker.startswith("e2e-app")
+        assert home == cfg.daemon.fermix_home
+        # Opaque, like the companion lane's: the run, never the suite or the case.
+        marker = new_marker()
+        assert re.fullmatch(r"e2e-mark-run-[0-9a-f]{6}", marker) and marker != new_marker()
         return app, None
 
     monkeypatch.setattr(rc.app_drive, "drive", fake_app_drive)
-    trial, trace_id, models = rc._app_trial(cfg, SimpleNamespace(name="cap_x"), _app_case(),
-                                            "run", 0, "task", root, str(tmp_path))
+    trial, trace_id, models = rc._app_trial(
+        cfg, None, SimpleNamespace(name="cap_x"), _app_case(), "run", 0, "task", root,
+        str(tmp_path))
     assert order == ["connect", "seed", (rc.OWNER_CHAT, "/confirm jhl_1"),
                      ("cli", "Not from here.")]
     assert seen["evidence"]["app"] == app and seen["evidence"]["state"] == {"now": "x"}
@@ -1903,9 +1909,71 @@ def test_an_app_trial_whose_socket_refused_is_invalid(tmp_path, monkeypatch):
     cfg, root, _order, seen = _command_world(tmp_path, monkeypatch, [])
     monkeypatch.setattr(rc.app_drive, "drive",
                         lambda *_a, **_k: ({"connections": []}, "cannot connect to x"))
-    trial, _trace, _models = rc._app_trial(cfg, SimpleNamespace(name="cap_x"), _app_case(),
-                                           "run", 0, "task", root, str(tmp_path))
+    trial, _trace, _models = rc._app_trial(
+        cfg, None, SimpleNamespace(name="cap_x"), _app_case(), "run", 0, "task", root,
+        str(tmp_path))
     assert trial.status == "not_running" and not trial.valid and "evidence" not in seen
+
+
+SAY = {"say": "Can you move my Marrowfield library holds digest to 6:45?"}
+SAID = {"step": "say", "timed_out": False, "resolved": "expired",
+        "marker": "e2e-app-run-t0-say-1", "sent_at": "2026-11-27T09:00:00.000000Z",
+        "elapsed_ms": 4200.0}
+
+
+def _say_world(tmp_path, monkeypatch, found):
+    """An app trial whose one step is the owner's `say`, and an Opik that answers the
+    marker's poll with `found` (a trace, or None when it never arrived)."""
+    cfg, root, _order, seen = _command_world(tmp_path, monkeypatch, [])
+    cfg.opik = SimpleNamespace(poll_timeout_s=1, poll_interval_s=1)
+    app = {"connections": [], "card": {"token": "jhl_1"}, "steps": [{"step": "seed"}, SAID],
+           "replies": [{"say": SAY["say"], "session": "app", "reply": "Moved it to 6:45."}]}
+    monkeypatch.setattr(rc.app_drive, "drive", lambda *_a: (app, None))
+    polled = []
+
+    def poll(prefix, marker, after, seen_ids, timeout_s, interval_s):
+        polled.append((prefix, marker, after.isoformat()))
+        return found
+
+    opik = SimpleNamespace(poll_for_marker=poll, await_complete=lambda t: (t, []))
+    trial = rc._app_trial(cfg, opik, SimpleNamespace(name="cap_x"),
+                          _app_case(steps=("await_card", SAY)), "run", 0, "task",
+                          root, str(tmp_path))
+    return trial, polled, seen
+
+
+def test_an_app_trials_say_turn_is_read_from_its_trace_so_the_served_model_is_known(
+        tmp_path, monkeypatch):
+    # The app drive reads no trace for its steps, which reach no model, but a `say` is a
+    # real turn: found on the app's thread by its marker, it names the model that served
+    # the trial and what the turn spent.
+    monkeypatch.setattr(rc, "_models_of", lambda view: ["anthropic/claude-x/high"])
+    served = _trace(reply="Moved it to 6:45.", tokens=321, cost=0.02, trace_id="tr-say")
+    (trial, trace_id, models), polled, seen = _say_world(tmp_path, monkeypatch, served)
+    assert polled == [(rc.app_drive.TRACE_THREAD_PREFIX, SAID["marker"],
+                       "2026-11-27T08:59:50+00:00")]
+    assert models == ["anthropic/claude-x/high"] and trace_id == "tr-say"
+    assert trial.status == "ok" and trial.valid and trial.tokens == 321
+    assert seen["evidence"]["trace_id"] == "tr-say"
+
+
+def test_an_app_trials_say_turn_with_no_trace_is_an_invalid_trial(tmp_path, monkeypatch):
+    (trial, trace_id, models), _polled, seen = _say_world(tmp_path, monkeypatch, None)
+    assert trial.status == "no_trace" and not trial.valid
+    assert trace_id is None and models == [] and "evidence" not in seen
+
+
+def test_an_app_trial_with_no_say_reads_no_trace(tmp_path, monkeypatch):
+    cfg, root, _order, _seen = _command_world(tmp_path, monkeypatch, [])
+    app = {"connections": [], "card": {"token": "jhl_1"}, "steps": [{"step": "seed"}],
+           "replies": []}
+    monkeypatch.setattr(rc.app_drive, "drive", lambda *_a: (app, None))
+    opik = SimpleNamespace(poll_for_marker=lambda *_a: pytest.fail("no turn, no trace"))
+    trial, trace_id, models = rc._app_trial(
+        cfg, opik, SimpleNamespace(name="cap_x"), _app_case(), "run", 0, "task", root,
+        str(tmp_path))
+    assert trial.status == "ok" and trace_id is None and models == []
+    assert trial.cost_known is False and trial.main_llm_calls == 0
 
 
 def test_planned_turns_prices_an_app_case_by_what_the_owner_says():
@@ -1919,6 +1987,43 @@ def test_planned_turns_prices_no_typed_owner_command():
     cases = [(SimpleNamespace(name="s"), None, _plan_case(1)),
              (SimpleNamespace(name="s"), None, _command_case(commands=("/confirm", "/deny")))]
     assert rc._planned_turns(cases) == 1
+
+
+def test_a_seeded_selection_asks_whether_a_reset_would_be_carried_out_before_anything_runs(
+        monkeypatch, capsys):
+    # Every trial of a `checker.state` task starts from the snapshot; a reset the keeper
+    # would refuse (bin/test_home_reset.py proves each refusal against the stub daemon) is
+    # refused before the first task, not at the first seeded trial mid-sweep.
+    monkeypatch.setattr(rc, "preconditions", lambda *_a, **_k: [])
+    verdicts, asked = ["capability-daemon.sh check exited 3: no daemon started by up", None], []
+    monkeypatch.setattr(rc, "reset_precondition_error",
+                        lambda cfg: asked.append(cfg) or verdicts.pop(0))
+    cfg = SimpleNamespace(daemon=SimpleNamespace(fermix_home="/h/x-eval"))
+    args = SimpleNamespace(confirm_isolated_env=True, confirm_cost=False,
+                           confirm_daemon_isolated=True)
+    scenario = SimpleNamespace(risk="isolated_mutation", confirm_cost=False)
+    seeded = [(SimpleNamespace(name="cap_x"), scenario, _command_case())]
+    assert rc._execution_gate(cfg, args, seeded) == 3
+    assert "no daemon started by up" in capsys.readouterr().err
+    assert rc._execution_gate(cfg, args, seeded) is None
+    unseeded = [(SimpleNamespace(name="cap_x"), scenario, _plan_case(1))]
+    unseeded[0][2].checker_spec = None
+    assert rc._execution_gate(cfg, args, unseeded) is None
+    assert len(asked) == 2                     # a selection with no seeded task asks nothing
+
+
+def test_the_estimate_counts_the_trials_that_start_from_the_snapshot(capsys):
+    assert rc.main(["--candidates", "--suite", "cap_job_auto_heal", "--trials", "3",
+                    "--estimate"]) == 0
+    loaded = suites.load_all(rc.CAP_DIR, include_candidates=True)
+    [suite] = [s for s in loaded if s.name == "cap_job_auto_heal"]
+    seeded = sum(1 for scn in suite.scenarios for case in scn.cases
+                 if case.checker_spec and case.checker_spec.get("state"))
+    assert seeded > 0
+    out = capsys.readouterr().out
+    assert f"home reset: {seeded * 3} trial(s)" in out
+    # Its time range counts turns at dev-daemon rates; it says the restarts are not in it.
+    assert "not in the time range above" in out
 
 
 def test_a_state_seed_failure_stops_the_sweep_on_the_preconditions_exit(capsys):
@@ -2072,6 +2177,26 @@ def test_provenance_scorer_and_limit_changes_all_change_the_hash():
         score_spec={"match": "contains", "expected": "{token}", "single": True}))
 
 
+def test_a_seeded_tasks_identity_records_that_each_trial_starts_from_the_snapshot(
+        tmp_path, monkeypatch):
+    # Rows of a seeded task measured on one shared home (each trial able to recall the
+    # trials before it) and rows measured with every trial restored must not share a
+    # cohort; a task that seeds nothing is measured as before, so its rows (the public
+    # sweep's) keep theirs.
+    monkeypatch.setattr(rc, "SKILL_DIR", str(tmp_path))
+    (tmp_path / "chk.py").write_text("print('{\"score\": 1}')")
+    (tmp_path / "state.json").write_text('{"jobs": []}')
+    seeded = _hash_case(score_spec=None, checker_spec={
+        "script": "chk.py", "mode": "json", "reset": [], "state": "state.json"})
+    identity = json.loads(rc._case_identity("cap_x", seeded, _CFG))
+    assert identity["trial_start"] == "seeded_snapshot"
+    before = {key: value for key, value in identity.items() if key != "trial_start"}
+    hashed_before = hashlib.sha256(
+        json.dumps(before, sort_keys=True, default=str).encode()).hexdigest()[:16]
+    assert _hash(seeded) != hashed_before
+    assert "trial_start" not in json.loads(rc._case_identity("cap_x", _hash_case(), _CFG))
+
+
 def test_the_judge_configuration_is_part_of_a_rubric_tasks_identity():
     rubric = _hash_case(score_spec=None, rubric="rewards a decisive recommendation")
     other = SimpleNamespace(judge=SimpleNamespace(backend="openai", model="gpt-5.4"))
@@ -2170,6 +2295,45 @@ def test_a_config_id_label_cannot_waive_the_missing_route_guard():
     assert rc._no_route_error([], "openai_codex/gpt-5.6-sol") is not None
     assert rc._no_route_error([], None) is not None
     assert rc._no_route_error(["openai/gpt-x/high"], None) is None
+
+
+def test_no_model_on_any_trace_is_no_measurement_unless_none_was_to_be_reached():
+    # HEAD's rule, with one exception: a selection every task of which reaches no model
+    # by design reports on the no-model row. Any task that drives a model makes a run
+    # whose traces name none exit 3, whatever its trials scored.
+    free = [(SimpleNamespace(name="s"), None, _command_case()),
+            (SimpleNamespace(name="s"), None, _app_case())]
+    assert rc._no_route_error([], None, free) is None
+    said = [(SimpleNamespace(name="s"), None, _app_case(steps=("await_card", SAY)))]
+    assert rc._no_route_error([], None, said) is not None
+    assert rc._no_route_error([], None, [*free, *said]) is not None
+    asked = [*free, (SimpleNamespace(name="s"), None, _plan_case(1))]
+    assert rc._no_route_error([], "arm:control", asked) is not None
+    assert rc._no_route_error([], None, []) is not None
+
+
+def test_a_say_task_that_stopped_short_at_full_marks_is_still_no_measurement(
+        tmp_path, monkeypatch):
+    # The hole the second exception left: trials that never reached their `say`, which a
+    # checker scored 1.0, were exit 0 and PASS on `no-model`.
+    cfg, _root, _order, _seen = _command_world(tmp_path, monkeypatch, [])   # checker: 1.0
+    stopped = {"connections": [], "card": None, "replies": [],
+               "steps": [{"step": "seed"}, {"step": "await_card", "timed_out": True}]}
+    monkeypatch.setattr(rc.app_drive, "drive", lambda *_a: (stopped, None))
+    monkeypatch.setattr(rc, "_restore_home", lambda _cfg: None)
+    case = _app_case(steps=("await_card", SAY))
+    case.cross_session, case.score_spec, case.rubric = False, None, None
+    suite, scenario = SimpleNamespace(name="cap_x", soft=False), SimpleNamespace(id="s")
+    out = rc.run_task(cfg, None, suite, scenario, case, 2, 1, 1.0, "run", False)
+    assert [trial.effective_success for trial in out.trials] == [1.0, 1.0]
+    cfg = SimpleNamespace(**vars(cfg), **vars(_report_cfg(tmp_path)))
+    lb_path = os.path.join(cfg.report_dir, "capability", "leaderboard.json")
+    run = rc._Run(run_id="20261127T000000Z", revision={"sha": "0" * 40, "dirty_digest": "clean"},
+                  tasks_hash="deadbeefdeadbeef", cases=[(suite, scenario, case)], trials=2,
+                  k=1, want_judge=False, outcomes=[(suite.name, case.id, out)],
+                  all_models=[], task_stats=[out.stats], not_evaluated=[])
+    assert rc._report(cfg, _report_args(), lb_path, run) == 3
+    assert not os.path.exists(lb_path)
 
 
 def test_a_usage_limit_seen_only_in_the_server_trace_is_invalid_not_a_zero(monkeypatch):
@@ -2418,11 +2582,137 @@ def test_an_invalid_soft_only_run_still_exits_4(tmp_path):
     assert not os.path.exists(lb_path)
 
 
+def test_a_run_whose_traces_name_no_model_is_recorded_under_the_no_model_row(
+        tmp_path, capsys):
+    # Live (M106 S6): a selection that reaches no model by design passed every trial and
+    # exited 3. A run with no model span now reports, by its trials, under `no-model`.
+    cfg = _report_cfg(tmp_path)
+    lb_path = os.path.join(cfg.report_dir, "capability", "leaderboard.json")
+    run = _report_run(["ok", "ok"], routes=())
+    suite, scenario, _case = run.cases[0]
+    run.cases = [(suite, scenario, _command_case())]
+    assert rc._report(cfg, _report_args(), lb_path, run) == 0
+    assert "no served model" not in capsys.readouterr().err
+    out_dir = os.path.join(cfg.report_dir, "capability", run.run_id)
+    with open(os.path.join(out_dir, "results.json")) as fh:
+        assert json.load(fh)["valid"] is True
+    with open(os.path.join(out_dir, "report.md")) as fh:
+        report = fh.read()
+    assert f"config: `{rc.leaderboard.NO_MODEL_CONFIG}`" in report and "routes: none" in report
+    with open(lb_path) as fh:
+        [row] = json.load(fh)["rows"].values()
+    assert row["meta"]["routes"] == []
+
+
+def _say_task():
+    """The candidate's own `say` task, as its suite file declares it."""
+    cap_dir = os.path.join(os.path.dirname(HERE), "suites", "capability")
+    inbox = next(s for s in suites.load_all(cap_dir, include_candidates=True)
+                 if s.name == "cap_job_heal_app_inbox")
+    return next((inbox, scn, case) for scn in inbox.scenarios for case in scn.cases
+                if case.id == "owner_edit_ends_the_card")
+
+
+def test_a_say_task_whose_card_never_arrived_is_invalid_and_never_a_row(
+        tmp_path, monkeypatch, capsys):
+    # The regression cap_job_heal_app_inbox exists to catch: the heal was sent to the app
+    # and its card never reached the socket, so owner_edit_ends_the_card's trials stop at
+    # their `await_card` before their `say`. Its own checker (job_app_inbox.py, run for
+    # real over a store whose heal was delivered) cannot grade such a trial: INVALID,
+    # exit 4 with the evidence kept, never a red or green row under `no-model`.
+    import test_checker as tc
+    suite, scenario, case = _say_task()
+    home = tmp_path / "x-eval"
+    (home / "workspace" / "eval").mkdir(parents=True)
+    tc._app_db(home, tc.APP_HEAL, [tc.HOLDS])
+    tc._app_trace(home)
+    never = {"connections": [{"hello": [], "events": []}], "card": None,
+             "steps": [{"step": "seed"}, {"step": "await_card", "timed_out": True}],
+             "replies": []}
+    # The drive's own record of a card that never came (test_app_drive holds the drive
+    # to it): it seeds once the socket is open, then waits out the card. The seed is the
+    # store above, as seed_state.exs left it.
+
+    def drive(_home, _spec, _new_marker, seed, _cli, _timeout_s):
+        seed()
+        return never, None
+
+    monkeypatch.setattr(rc.app_drive, "drive", drive)
+    monkeypatch.setattr(rc, "_seed_state", lambda *_a: tc.PROPOSAL_STATE)
+    monkeypatch.setattr(rc, "_restore_home", lambda _cfg: None)
+    cfg = SimpleNamespace(daemon=SimpleNamespace(fermix_home=str(home)),
+                          **vars(_report_cfg(tmp_path)))
+    out = rc.run_task(cfg, None, suite, scenario, case, 2, 1, 1.0, "run", False)
+    assert [trial.status for trial in out.trials] == ["checker_error"] * 2
+    assert "trial INVALID" in capsys.readouterr().err
+    lb_path = os.path.join(cfg.report_dir, "capability", "leaderboard.json")
+    run = rc._Run(run_id="20261127T000000Z", revision={"sha": "0" * 40, "dirty_digest": "clean"},
+                  tasks_hash="deadbeefdeadbeef", cases=[(suite, scenario, case)], trials=2,
+                  k=1, want_judge=False, outcomes=[(suite.name, case.id, out)],
+                  all_models=[], task_stats=[out.stats], not_evaluated=[])
+    assert rc._report(cfg, _report_args(), lb_path, run) == 4
+    err = capsys.readouterr().err
+    assert "measurement INVALID" in err and "no served model" not in err
+    out_dir = os.path.join(cfg.report_dir, "capability", run.run_id)
+    with open(os.path.join(out_dir, "results.invalid.json")) as fh:
+        assert json.load(fh)["valid"] is False
+    assert not os.path.exists(lb_path)
+    assert not os.path.exists(os.path.join(out_dir, "results.json"))
+
+
+def test_a_say_task_whose_say_ran_and_named_no_model_is_no_measurement(tmp_path, capsys):
+    # Its `say` was sent and its trials are valid, yet no trace names a model: not a
+    # measurement, as at HEAD. Had a trial's trace never arrived, the trial is invalid,
+    # and an invalid run is exit 4 with its evidence kept, before the route guard runs.
+    cfg = _report_cfg(tmp_path)
+    lb_path = os.path.join(cfg.report_dir, "capability", "leaderboard.json")
+    for statuses, code in ((["ok", "ok"], 3), (["no_trace", "no_trace"], 4)):
+        run = _report_run(statuses, success=0.0, routes=())
+        suite, scenario, _case = run.cases[0]
+        said = _app_case(steps=("await_card", SAY))
+        run.cases, run.outcomes = [(suite, scenario, said)], [("cap_x", said.id,
+                                                               run.outcomes[0][2])]
+        assert rc._report(cfg, _report_args(), lb_path, run) == code
+        err = capsys.readouterr().err
+        assert ("no served model detected" in err) == (code == 3)
+        invalid = os.path.join(cfg.report_dir, "capability", run.run_id, "results.invalid.json")
+        assert os.path.exists(invalid) == (code == 4)
+    assert not os.path.exists(lb_path)
+
+
+def test_a_config_id_never_puts_a_run_with_no_model_on_a_models_row(tmp_path):
+    # A selection that reaches no model by design is the no-model row whatever
+    # --config-id says (run_arms.py always passes one).
+    cfg = _report_cfg(tmp_path)
+    lb_path = os.path.join(cfg.report_dir, "capability", "leaderboard.json")
+    run = _report_run(["ok", "ok"], routes=())
+    suite, scenario, _case = run.cases[0]
+    run.cases = [(suite, scenario, _command_case())]
+    assert rc._report(cfg, _report_args(config_id="arm:control"), lb_path, run) == 0
+    with open(lb_path) as fh:
+        [key] = json.load(fh)["rows"]
+    assert key.startswith(f"{rc.leaderboard.NO_MODEL_CONFIG}@")
+    assert rc._config_id(_report_args(config_id="openai_codex/gpt-x"),
+                         _report_run(["ok"])) == "openai_codex/gpt-x"
+
+
 def test_a_soft_only_run_no_route_served_still_exits_3(tmp_path):
     cfg = _report_cfg(tmp_path)
     lb_path = os.path.join(cfg.report_dir, "capability", "leaderboard.json")
     run = _report_run(["ok", "ok"], routes=(), soft=True, safety_ok=None)
     assert rc._report(cfg, _report_args(), lb_path, run) == 3
+
+
+def test_a_model_driven_run_with_no_model_span_still_exits_3(tmp_path, capsys):
+    # The review's probe: hard-gated, every trial valid at 0.0, no trace names a model,
+    # --config-id arm:control. At HEAD exit 3 and no row; run_arms.py counts 5 as a
+    # measurement and would pair an all-zero arm.
+    cfg = _report_cfg(tmp_path)
+    lb_path = os.path.join(cfg.report_dir, "capability", "leaderboard.json")
+    run = _report_run(["ok", "ok"], success=0.0, routes=())
+    assert rc._report(cfg, _report_args(config_id="arm:control"), lb_path, run) == 3
+    assert "no served model detected" in capsys.readouterr().err
+    assert not os.path.exists(lb_path)
 
 
 def test_a_mixed_selection_is_still_gated(tmp_path, capsys):
@@ -2851,7 +3141,9 @@ def test_a_held_out_task_is_named_in_the_report_and_never_scored(tmp_path, capsy
 
 def _fake_capability_daemon(home, names):
     """A one-request stand-in for the daemon's control socket, speaking the same
-    {packet, 4} framing the shim does. Bounded: one connection, then the thread ends."""
+    {packet, 4} framing the shim does, for the engine's v0 `capabilities` method alone
+    (`Fermix.CLI.Daemon`): any other request gets no answer. Bounded: one connection,
+    then the thread ends."""
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(os.path.join(home, "daemon.sock"))
     server.settimeout(10)
@@ -2860,7 +3152,9 @@ def _fake_capability_daemon(home, names):
     def serve():
         with server, server.accept()[0] as conn:
             length = struct.unpack(">I", conn.recv(4))[0]
-            conn.recv(length)
+            if json.loads(conn.recv(length)) != {"method": "capabilities",
+                                                  "params": {"kind": "all"}}:
+                return
             payload = json.dumps({"status": "ok", "capabilities": {
                 "counts": {"total": len(names)},
                 "capabilities": [{"name": n, "kind": "builtin"} for n in names]},

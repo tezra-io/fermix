@@ -20,7 +20,10 @@
 # to earlier follow-ups (`open_loop_replies`) become open_loop_reactions rows, and
 # what the owner wrote lately (`owner_messages`) becomes their messages in the cli
 # chat every seeded loop is delivered to, which a check-in reads. The reset also
-# deletes that chat's messages, so no earlier trial's words reach a later run.
+# deletes that chat's messages, so the seeded ones are the only ones there. What earlier
+# trials said in their own chats, and what the memory review kept of it, no seed can
+# reach (the daemon caches the prompt memory): the runners put the whole home back to
+# its snapshot before every seeded trial (`capability-daemon.sh reset`), then run this.
 # Prints one JSON manifest line last: the created ids, job snapshots, loops,
 # replies, the zone and local date.
 #

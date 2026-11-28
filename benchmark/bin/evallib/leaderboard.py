@@ -54,6 +54,12 @@ CURRENT_HASH_VERSION = 3
 # shared task set — so a legacy cohort is described but never ranked (review §7).
 LEGACY_HASH_VERSION = 1
 _IDENTITY_KEYS = ("tasks_hash", "hash_version", "k", "threshold")
+# The row of a capability run no trace of which names a model and that the runner still
+# reports (`run_capability._no_route_error`): one every task of which reaches no model
+# by design (typed owner commands, app drives with no `say`). It measures what code did
+# with no model asked, so it is never a model's row, whatever `--config-id` says, and
+# names no route the rate card could price. Every other row key is provider/model/effort.
+NO_MODEL_CONFIG = "no-model"
 # The one column the markdown table adds beyond the numbers: it splits the SCORE block
 # from the block reported beside it. Markdown has no column groups, and the ordering
 # alone was not legible at a glance — a reader scanning left to right could not see

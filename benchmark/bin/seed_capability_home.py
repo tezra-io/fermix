@@ -1249,8 +1249,8 @@ def disposable_home(home: str, what: str) -> str:
 def daemon_answers(home: str) -> bool:
     """Whether a daemon is serving this home, by connecting to its control socket.
 
-    The same evidence `capability-daemon.sh`'s ready loop waits on (`fermix-shim status`
-    speaks to `<home>/daemon.sock`), read directly so the probe spawns nothing and
+    The same socket the keeper's readiness wait asks `hello` on (`<home>/daemon.sock`),
+    connected to and closed without a request, so the probe spawns nothing and
     depends on nothing outside the home. A stale socket file left by a killed daemon
     refuses the connection and correctly reads as "down"; `up()`'s pidfile check cannot
     see a daemon started outside the script at all."""

@@ -102,8 +102,12 @@ A **case** may declare `requires:` too, from the same values, when its suite run
 without that seed (`coding_harness.yaml`'s `claude_code_signed_out_run`): the
 case needs its suite's requirements and its own, and only that case is held out,
 its siblings still run. A held-out case is listed on the console before the run
-(`note: NOT EVALUATED — N case(s) …`, each `suite/case — reason`), never driven,
-never scored and never a failure; a run left with nothing to drive exits 3.
+(`note: NOT EVALUATED — N case(s) …`, each `suite/case — reason`), named with its reason
+(the seed or flag it needs) in `results.json` (`selection.not_evaluated`) and under *Not
+evaluated* in the report, counted on the console's summary line, never driven, never
+scored and never a failure. It does not change the run's outcome, as a platform skip
+does not; a run left with nothing to drive exits 3. The README's *Cases a home holds
+out* says which seed makes which suites run.
 `--dry-run` does not look at the home, so it plans the case either way. Only
 `run_eval.py` reads a case's `requires`: in a capability suite (`cap_*`) it is a
 load error, since `run_capability.py` holds a task out by its suite's `cues`,
@@ -445,10 +449,13 @@ the `query` shorthand; multi-turn uses `turns`.
 - `state` (string, optional; `drive: ask` in a behavioral suite) — a jobs,
   reminders and open-loops spec in the `checker.state` format (see *`checker.state`*
   below), relative to the suite file and contained under `suites/fixtures/`
-  (`fixtures/state/<name>.json`). Before EVERY attempt of the case, retries
-  included, `run_eval.py` restores it in the eval home with `bin/seed_state.exs`,
-  the capability runner's own seeding (`run_capability._seed_state`), so the turn
-  is asked of a known record. The seed deletes every job, reminder and open loop in
+  (`fixtures/state/<name>.json`). The case runs only with `run_eval.py
+  --reset-home` (without it, it is held out as NOT EVALUATED, see *`requires`*):
+  before EVERY attempt, retries included, the eval home is put back to the snapshot
+  `capability-daemon.sh up` took, and then `run_eval.py` restores the spec in it with
+  `bin/seed_state.exs`, the capability runner's own seeding
+  (`run_capability._seed_state`), so the turn is asked of a known record and can
+  recall no earlier attempt's conversation. The seed deletes every job, reminder and open loop in
   the home, so the case's scenario must be `risk: isolated_mutation`; a case-level
   `state` anywhere else, on another drive or in a capability suite (which uses
   `checker.state`) is a load error, and so is a spec file that does not exist. A
@@ -900,14 +907,28 @@ assistant `row` whose origin is a job); `answer: approve | deny` (the card's own
 it, then up to 10 s for its `approval_resolved`); `reconnect`; `type_cli: "/confirm
 {card}"` (one command typed in the owner's terminal chat through `fermix ask`,
 `{card}` standing for the card's token); `say: "<text>"` (one message of the owner's in
-the app: a model turn, waited to its end, then up to 10 s for the card's resolution).
+the app: a model turn, sent with `(eval:e2e-mark-<run id>-<6 hex>)` appended, the
+marker a `drive: companion` or operator message carries (`session_ids.eval_marker`, a
+fresh one per message, naming the run and nothing of the suite or the case), waited to
+its end, then up to 10 s for the card's resolution).
 `answer` and `type_cli` need an `await_card` before them. Every event each connection
 received goes to the checker (`app.connections`, each `hello` and `events`), with the
 replies (`replies`); a wait that runs out is recorded and stops the steps, and the
 checker decides from the store whether the heal was never sent (invalid) or went
 somewhere else (a 0). A socket that refused or closed makes the trial INVALID. No
 `query`, `turns`, `expect`, `score`, `rubric` or `image`; only a `say` step is a turn
-`--estimate` prices, and the drive reads no trace, so a trial's cost reads unknown.
+`--estimate` prices. Each `say` turn's trace is found on the `companion:` thread by its
+marker and is the trial's captured turn: its served model is the run's route, its usage
+the trial's, and a `say` whose trace never arrives makes the trial INVALID. A trial
+with no `say` reads no trace and runs no model, so its cost reads unknown, never $0. A
+run no trace of which names a model is no measurement and exits 3, whatever
+`--config-id` says, with one exception, scored by its trials on the `no-model` row: a
+selection every task of which reaches no model by design (typed commands, app drives
+with no `say`). A selection with a `say` task is exit 3 when no trace names a model,
+whatever its trials scored. An invalid trial is exit 4 before that question is asked:
+a `say` task whose card never arrived stops before its `say`, and its checker cannot
+grade what the owner's edit did, so the trial is INVALID (`results.invalid.json` kept,
+no row).
 
 ### `drive: cue` — cues into the eval daemon's door
 
@@ -1070,8 +1091,30 @@ has no job to go with, and a closed one keeps the same failure quiet for 7 days,
 one trial's heal would join or silence the next trial's), deletes every
 scheduled job, cancels every active reminder, closes every live open loop, then
 creates the spec's through `Jobs.Registry`, the scheduler's claim/settle calls (for
-past runs), `Temporal.Registry` and, for open loops, `Memory.Repo` directly. The
-spec:
+past runs), `Temporal.Registry` and, for open loops, `Memory.Repo` directly.
+
+Before that seed, every trial of such a task first puts the whole eval home back to
+the snapshot `capability-daemon.sh up` took (`capability-daemon.sh reset`: stop the
+daemon, restore memory.db, `memory/` and the rest of the seeded state, start it again,
+one restart per trial). Every trial asks about the same seeded world, the same jobs
+under the same names, and its turn runs in a chat of its own that no seed clears: what
+an earlier trial's turn said there (its history and the search index over it, the
+memory review's notes on it, the USER.md and MEMORY.md they render, which the daemon
+caches) would otherwise be in a later trial's recall, and a later trial answered from
+it in the first live Auto Heal run. Only the keeper `capability-daemon.sh up` started
+carries a reset out, restarting the daemon with `up`'s environment; it refuses one,
+replacing nothing, when no keeper runs for the home (a daemon started by hand), when a
+daemon it did not start answers the home, when the snapshot was taken again since its
+`up`, or when the run reads another Opik project than the daemon exports to. A
+selection with such a task asks it the same (`capability-daemon.sh check`) and is
+refused on exit 3 before anything runs; a restore that fails mid-sweep stops the sweep
+on exit 3 as a failed seed does. A daemon that exited by itself between two trials is
+started again by the next reset, which names it, with its exit code, on the console and
+in `daemon.log`. Such a task's identity records how its trials start
+(`trial_start`), so its rows measured before this sit in a cohort of their own. The
+behavioral runner's `state:` does the
+same with `--reset-home`, and holds a `state:` case out as NOT EVALUATED without it.
+The spec:
 
 ```json
 {"jobs": [{"key": "weather", "name": "morning weather", "schedule": "0 7 * * *",

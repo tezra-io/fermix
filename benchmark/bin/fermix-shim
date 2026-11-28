@@ -13,6 +13,11 @@ of the Homebrew binary, which may be behind on protocol changes.
 Supports: fermix status [--json]
           fermix ask --json --session ID --timeout MS <query>
           fermix capabilities --json [--kind KIND]
+
+Each speaks what the engine's `fermix` does (Fermix.CLI): `status` the management v1
+`hello` and `overview.get` (apps/fermix_core/priv/management/PROTOCOL.md), `--json`
+printing `overview.get`'s result; `ask` and `capabilities` the v0 `agent_message` and
+`capabilities` methods.
 """
 import base64
 import json
@@ -26,10 +31,36 @@ FERMIX_HOME = os.environ.get("FERMIX_HOME", os.path.expanduser("~/.fermix"))
 SOCKET_PATH = os.path.join(FERMIX_HOME, "daemon.sock")
 
 
+# The management version the engine's own CLI declares (its current one).
+PROTOCOL_VERSION = 2
+
+
 def call_daemon(method, params=None, timeout_s=5.0):
+    """One v0 request: the reply as the daemon sent it."""
     msg = {"method": method}
     if params:
         msg["params"] = params
+    return _exchange(msg, timeout_s)
+
+
+class ManagementError(Exception):
+    """A v1 error envelope, or a reply that is not one to the request sent."""
+
+
+def call_v1(method, params=None, timeout_s=5.0):
+    """One management v1 request: its `result`, or ManagementError with the reason."""
+    request_id = f"fermix-shim-{os.getpid()}-{method}"
+    resp = _exchange({"request_id": request_id, "protocol_version": PROTOCOL_VERSION,
+                      "method": method, "params": params or {}}, timeout_s)
+    if not isinstance(resp, dict) or resp.get("request_id") != request_id:
+        raise ManagementError(f"not a reply to {method}: {json.dumps(resp)[:160]}")
+    if "error" in resp:
+        error = resp["error"] if isinstance(resp["error"], dict) else {}
+        raise ManagementError(f"{error.get('code')}: {error.get('message')}")
+    return resp.get("result") or {}
+
+
+def _exchange(msg, timeout_s):
     payload = json.dumps(msg).encode()
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
         sock.settimeout(timeout_s)
@@ -52,13 +83,17 @@ def call_daemon(method, params=None, timeout_s=5.0):
 def cmd_status(args):
     as_json = "--json" in args
     try:
-        resp = call_daemon("status", timeout_s=5.0)
         if as_json:
-            print(json.dumps(resp))
+            print(json.dumps(call_v1("overview.get", timeout_s=5.0)))
         else:
-            print(f"fermix {resp.get('version','?')} "
-                  f"(pid {resp.get('pid','?')}, uptime {resp.get('uptime_ms','?')}ms)")
+            engine = call_v1("hello", timeout_s=5.0).get("engine") or {}
+            daemon = call_v1("overview.get", timeout_s=5.0).get("daemon") or {}
+            print(f"fermix: running (pid {engine.get('pid', '?')}, version "
+                  f"{engine.get('product_version', '?')}, up {daemon.get('uptime_ms', '?')} ms)")
         sys.exit(0)
+    except ManagementError as exc:
+        print(f"fermix status: {exc}", file=sys.stderr)
+        sys.exit(1)
     except TimeoutError:
         if as_json:
             print(json.dumps({"status": "error", "error": "timeout"}))

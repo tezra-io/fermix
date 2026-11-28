@@ -23,8 +23,12 @@ lives with it:
      offered again;
    - `type_cli: "<command>"`: type a command in the owner's terminal chat (`fermix
      ask`), `{card}` standing for the card's token, as an answer from somewhere else;
-   - `say: "<text>"`: one message of the owner's in the app (a model turn), waited to
-     its end and then, up to `SETTLE_S`, for the card's `approval_resolved`.
+   - `say: "<text>"`: one message of the owner's in the app (a model turn), sent with
+     the marker its trace is found by appended, `(eval:<marker>)`, as the companion
+     lane sends its own, waited to its end and then, up to `SETTLE_S`, for the card's
+     `approval_resolved`. The step records the marker, when the message was sent and
+     how long its turn took, so the runner can read that turn's trace (the model that
+     served it, its usage) on the app's thread (`TRACE_THREAD_PREFIX`).
 
 Every event every connection receives is kept, in order, split at its barrier, and
 goes to the checker as evidence (`app`). A wait that runs out is recorded, not raised:
@@ -37,6 +41,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from datetime import datetime, timezone
 
 from . import companion
 
@@ -47,6 +52,9 @@ MAX_STEPS = 8
 # How long after an answer's own reply, or a turn's end, the card's resolution is
 # waited for: the daemon announces it in the same pass that wrote the answer.
 SETTLE_S = 10.0
+# The app's chat exports its turns to Opik under the companion channel's thread
+# (`companion:main`), where a `say` turn's trace is found by its marker.
+TRACE_THREAD_PREFIX = "companion:"
 
 
 def spec_problems(spec, where: str) -> list[str]:
@@ -108,10 +116,12 @@ class _Recorder(companion._Session):
 
 class _Trial:
     """One attempt: its connections, in order, each with what its hello offered again
-    (`hello`) and every event after that (`events`)."""
+    (`hello`) and every event after that (`events`). `new_marker()` gives a fresh opaque
+    marker (`session_ids.eval_marker`): one for the attempt's command ids, one per `say`."""
 
-    def __init__(self, home: str, marker: str, deadline: float):
-        self.home, self.marker, self.deadline = home, marker, deadline
+    def __init__(self, home: str, new_marker, deadline: float):
+        self.home, self.new_marker, self.deadline = home, new_marker, deadline
+        self.marker = new_marker()
         self.connections: list[dict] = []
         self.session: _Recorder | None = None
         self.card: dict | None = None
@@ -166,8 +176,8 @@ class _Trial:
         return resolved()
 
     def evidence(self) -> dict:
-        return {"connections": self.connections, "card": self.card, "steps": self.steps,
-                "replies": self.replies}
+        return {"marker": self.marker, "connections": self.connections, "card": self.card,
+                "steps": self.steps, "replies": self.replies}
 
 
 def _is_card(event: dict) -> bool:
@@ -220,13 +230,18 @@ def _run_step(trial: _Trial, step, cli) -> bool:
         trial.replies.append({"command": command, "session": "cli", "reply": cli(command)})
         trial.steps.append({"step": name, "command": command})
         return True
-    target = trial.session.message(f"{trial.marker}-say-{len(trial.steps)}",
-                                   step["say"])
+    marker = trial.new_marker()
+    sent_at = datetime.now(timezone.utc)
+    started = time.monotonic()
+    target = trial.session.message(marker, f"{step['say']} (eval:{marker})")
     ended = trial.session.pump(target.ended, trial.deadline)
+    elapsed_ms = (time.monotonic() - started) * 1000.0
     resolved = trial.settle() if ended else None
     trial.replies.append({"say": step["say"], "session": "app", "reply": target.reply()})
     trial.steps.append({"step": "say", "timed_out": not ended,
-                        "resolved": (resolved or {}).get("outcome")})
+                        "resolved": (resolved or {}).get("outcome"), "marker": marker,
+                        "sent_at": sent_at.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                        "elapsed_ms": elapsed_ms})
     return ended
 
 
@@ -236,13 +251,14 @@ def _answer(turn: companion.TurnWire) -> str:
                      if e.get("type") == "row" and e.get("role") == "assistant")
 
 
-def drive(home: str, spec: dict, marker: str, seed, cli,
+def drive(home: str, spec: dict, new_marker, seed, cli,
           timeout_s: float) -> tuple[dict, str | None]:
     """One attempt: connect and start a fresh conversation, `seed()` the trial's state,
-    then run the steps. `cli(command)` types a command in the owner's terminal chat and
-    returns its reply. Returns the evidence and, when the socket refused or closed, why
+    then run the steps. `new_marker()` returns a fresh opaque eval marker
+    (`session_ids.eval_marker`). `cli(command)` types a command in the owner's terminal
+    chat and returns its reply. Returns the evidence and, when the socket refused or closed, why
     the attempt cannot be graded (None otherwise). The connection is closed on return."""
-    trial = _Trial(home, marker, time.monotonic() + timeout_s)
+    trial = _Trial(home, new_marker, time.monotonic() + timeout_s)
     try:
         trial.connect()
         trial.command("new")

@@ -97,11 +97,14 @@ def test_regression_runs_the_host_safe_core_judged_suite(stub_path):
     assert judge == "<environment>"
 
 
-def test_behavioral_isolated_carries_both_attestations(stub_path):
+def test_behavioral_isolated_carries_both_attestations_and_starts_attempts_seeded(
+        stub_path):
+    # --reset-home: its `state:` cases (job_auto_heal) and phone cases run only with it,
+    # and are NOT EVALUATED without it.
     _judge, argv = plan("behavioral-isolated", stub_path, ANTHROPIC_API_KEY=INVENTED_KEY)
     assert argv == ["uv", "run", "bin/run_eval.py", "--profile", "isolated_mutation",
                     "--all", "--judge", "--fail-retries", "2",
-                    "--confirm-daemon-isolated", "--confirm-isolated-env"]
+                    "--confirm-daemon-isolated", "--confirm-isolated-env", "--reset-home"]
 
 
 def test_capability_is_bare_without_the_confirm_vars(stub_path):
@@ -265,11 +268,22 @@ def test_print_only_refuses_extra_arguments(stub_path):
     assert "usage:" in p.stderr
 
 
-@pytest.mark.parametrize("check_exit,run_exit", [(0, 0), (0, 2), (0, 4), (0, 5), (3, 0)])
-def test_auto_run_preserves_exit_code_and_always_cleans_up(tmp_path, check_exit, run_exit):
-    # Exercise the real run function with startup/teardown stubbed: no daemon or home.
+def _lifted(*names: str) -> str:
+    """The script's own definitions of `names` (run, and teardown, its EXIT trap)."""
     source = Path(HERE, "capability-daemon.sh").read_text()
-    body = source.split("\nrun() {\n", 1)[1].split("\n}\n", 1)[0]
+    return "".join(f"{name}() {{\n" + source.split(f"\n{name}() {{\n", 1)[1].split("\n}\n", 1)[0]
+                   + "\n}\n" for name in names)
+
+
+@pytest.mark.parametrize("check_exit,run_exit,down_exit", [
+    (0, 0, 0), (0, 2, 0), (0, 4, 0), (0, 5, 0), (3, 0, 0),
+    # A teardown that fails (a daemon the script did not start still answers) is
+    # said, and the runner's code stands, its 0 included.
+    (0, 5, 3), (0, 0, 3), (3, 0, 3)])
+def test_auto_run_preserves_exit_code_and_always_cleans_up(
+        tmp_path, check_exit, run_exit, down_exit):
+    # Exercise the real run function and its trap with startup/teardown stubbed: no
+    # daemon or home.
     uv = tmp_path / "uv"
     uv.write_text('#!/bin/sh\ncase " $* " in\n'
                   f'  *" --check "*) exit {check_exit} ;;\n'
@@ -278,8 +292,8 @@ def test_auto_run_preserves_exit_code_and_always_cleans_up(tmp_path, check_exit,
     script = ('set -euo pipefail\n'
               'log() { printf "%s\\n" "$*" >&2; }\n'
               'up() { :; }\n'
-              'down() { printf "cleaned\\n"; }\n'
-              'run() {\n' + body + '\n}\nrun\n')
+              f'down() {{ printf "cleaned\\n"; return {down_exit}; }}\n'
+              + _lifted("teardown", "run") + 'run\n')
     env = {**os.environ, "BENCH": BENCH, "BIN_DIR": HERE,
            "HOME_DIR": str(tmp_path / "disposable-eval"), "PROJECT": "test-eval",
            "CAPABILITY_PRIVATE": "0",
@@ -288,13 +302,12 @@ def test_auto_run_preserves_exit_code_and_always_cleans_up(tmp_path, check_exit,
                             capture_output=True, text=True, timeout=10)
     assert result.returncode == (check_exit or run_exit), result.stderr
     assert result.stdout.splitlines().count("cleaned") == 1
+    assert ("the run's own exit code stands" in result.stderr) == bool(down_exit)
 
 
 def _auto_run_with_private(tmp_path, stub_path, *, sync_ok=True, public=0, private=0):
     """The real run() body with startup stubbed and a fake `uv` that answers the sync,
     the preflight, the public sweep and the --private sweep with chosen codes."""
-    source = Path(HERE, "capability-daemon.sh").read_text()
-    body = source.split("\nrun() {\n", 1)[1].split("\n}\n", 1)[0]
     uv = tmp_path / "uv"
     uv.write_text('#!/bin/sh\ncase " $* " in\n'
                   f'  *" sync "*) {"echo noise; echo /tmp/fermix-eval-private; exit 0" if sync_ok else "exit 3"} ;;\n'
@@ -306,7 +319,7 @@ def _auto_run_with_private(tmp_path, stub_path, *, sync_ok=True, public=0, priva
               'log() { printf "%s\\n" "$*" >&2; }\n'
               'up() { printf "up seed_args=%s\\n" "${FERMIX_CAP_SEED_ARGS:-}"; }\n'
               'down() { printf "cleaned\\n"; }\n'
-              'run() {\n' + body + '\n}\nrun\n')
+              + _lifted("teardown", "run") + 'run\n')
     env = {**{k: v for k, v in os.environ.items() if k not in CONTROLLED},
            "BENCH": BENCH, "BIN_DIR": HERE, "HOME_DIR": str(tmp_path / "disposable-eval"),
            "PROJECT": "test-eval",

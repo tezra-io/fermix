@@ -1146,12 +1146,34 @@ def test_every_leaderboard_row_is_classified():
     if not os.path.exists(path):
         pytest.skip(f"no leaderboard store at {path} — run the capability tier first")
     rows = leaderboard.load_store(path).get("rows", {})
+    unknown = _unpriceable(rows, path)
+    assert not unknown, f"{path} ranks configs the card cannot price: {sorted(set(unknown))}"
+
+
+def _unpriceable(rows, path: str) -> list[str]:
+    """The `route/model` of each row the card cannot price. The no-model row (a run
+    whose every task reaches no model by design) names no route: there is nothing to
+    price, and its `$/✓` reads unknown, so it is not one of them."""
     unknown = []
     for key in rows:
-        route, model = _split_config_id(key.rsplit("@", 1)[0], path)
+        config_id = key.rsplit("@", 1)[0]
+        if config_id.split(":", 1)[0] == leaderboard.NO_MODEL_CONFIG:
+            continue
+        route, model = _split_config_id(config_id, path)
         if pricing.classification(route, model) == "unknown":
             unknown.append(f"{route}/{model}")
-    assert not unknown, f"{path} ranks configs the card cannot price: {sorted(set(unknown))}"
+    return unknown
+
+
+def test_the_no_model_row_is_no_route_to_price():
+    # A capability run of the app-inbox candidate's model-free tasks writes it; the store
+    # check above then raised on its key, which is not provider/model/effort.
+    rows = {f"{leaderboard.NO_MODEL_CONFIG}@94847f3875c7": {},
+            f"{leaderboard.NO_MODEL_CONFIG}:cap_response_quality@b40bd04288c1": {},
+            "anthropic/claude-opus-5-5/high@94847f3875c7": {}}
+    assert _unpriceable(rows, "x") == []
+    assert _unpriceable({"vela/unlisted-model-9/high@94847f3875c7": {}}, "x") == [
+        "vela/unlisted-model-9"]
 
 
 def _split_config_id(config_id: str, path: str) -> tuple[str, str]:

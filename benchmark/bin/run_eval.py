@@ -37,9 +37,9 @@ SKILL_DIR = os.path.dirname(HERE)
 REPO_ROOT = os.path.dirname(SKILL_DIR)
 sys.path.insert(0, HERE)
 
-import eval_home_state
 # A case's `state:` is seeded by the capability runner's own `checker.state` seeding,
-# so the two tiers restore one baseline one way.
+# and --reset-home restores the home through its own reset, so the two tiers restore
+# one baseline one way.
 import run_capability
 from evallib import companion, cue_drive, owner_inbox, voice
 from evallib import config as cfgmod
@@ -50,7 +50,7 @@ from evallib.fixture_server import (FIXTURE_URL_PLACEHOLDER, FixtureServer,
 from evallib import phone_sim
 from evallib.opik import OpikClient, OpikError, parse_ts, text_of, valid_run_id
 from evallib.phone_sim import PHONE_SCRIPTS_DIR
-from evallib.session_ids import sess
+from evallib.session_ids import eval_marker, sess
 from evallib.suites import (ALWAYS_STICKY_GATES, RISK_LEVELS, STICKY_GATE_KEYS,
                             SuiteError, load_all, platform_of)
 
@@ -78,16 +78,6 @@ NEGATIVE_GATES = STICKY_GATE_KEYS
 # an executed action stays executed. A scenario adds `sticky_gates` on top for a
 # disclosure prohibition, which is equally irreversible.
 STICKY_GATES = ALWAYS_STICKY_GATES
-# --reset-home: the lifecycle script whose `reset` restores the eval home's seeded
-# state and restarts its daemon, bounded by its own waits (15 s for the old daemon to
-# stop, READY_TIMEOUT's 90 s for the new one to answer) with room to spare.
-DAEMON_SCRIPT = os.path.join(HERE, "capability-daemon.sh")
-_RESET_TIMEOUT_S = 180
-# The script's readiness is the control socket's `status`; the companion socket the
-# drive uses comes up after it. In the first --reset-home cues run it followed by 85 to
-# 941 ms in the 45 boots where it came up, and five drives that connected before it did
-# were INCOMPLETE. 30 s is about 30 times the slowest gap.
-_COMPANION_READY_S = 30
 # Why a run stopped early, said in its console banner and its report.
 _ACCOUNT_ABORT_WHY = "This is an external account condition, not a product failure."
 _RESET_ABORT_WHY = ("The eval home could not be put back to its seeded state, so no later "
@@ -285,10 +275,13 @@ def hold_out_unseeded(cfg, chosen, reset_home: bool = False) -> tuple[list, list
     """Cases whose `requires:` (their suite's, then their own) the eval home was not
     seeded with (`cues`: --cues; `computers`: --computers; `coding_signed_out`:
     --coding-signed-out; `phone_calls`: --phone-calls, and a run that starts every
-    attempt from the seeded home, `reset_home`). They are NOT EVALUATED, named and left out of the
-    run, never driven and never failures: the capability runner's rule for an unmet
-    precondition, so a sweep over an unseeded home reports the gap instead of a
-    suite of zeros. A case's sibling that needs no seed still runs."""
+    attempt from the seeded home, `reset_home`), and a `state:` case in a run that
+    does not start every attempt from the seeded home. They are NOT EVALUATED: named,
+    each with the seed or flag it needs, on the console and in the report
+    (`selection.not_evaluated`), left out of the run, never driven, never failures, and
+    they do not make the run incomplete, as a platform skip does not; a sweep over an
+    unseeded home reports the gap instead of a suite of zeros. A case's sibling that
+    needs no seed still runs."""
     home = cfg.daemon.fermix_home
     needs = {need for suite, scns in chosen for scenario in scns for case in scenario.cases
              for need in case_requirements(suite, case)}
@@ -298,7 +291,8 @@ def hold_out_unseeded(cfg, chosen, reset_home: bool = False) -> tuple[list, list
     for suite, scns in chosen:
         runs = []
         for scenario in scns:
-            reasons = [(case, unmet_reason(suite, case, unmet)) for case in scenario.cases]
+            reasons = [(case, unmet_reason(suite, case, unmet)
+                        or state_reset_problem(case, reset_home)) for case in scenario.cases]
             held.extend((suite.name, case.id, why) for case, why in reasons if why is not None)
             cases = [case for case, why in reasons if why is None]
             if cases:
@@ -318,6 +312,17 @@ def case_requirements(suite, case) -> tuple[str, ...]:
 def unmet_reason(suite, case, unmet: dict[str, str]) -> str | None:
     """Why `case` cannot run on this home (the first unmet requirement), or None."""
     return next((unmet[need] for need in case_requirements(suite, case) if need in unmet), None)
+
+
+def state_reset_problem(case, reset_home: bool) -> str | None:
+    """Why a `state:` case cannot run here, or None. Every attempt of it asks about the
+    world its seed makes, the same jobs under the same names, so one that does not start
+    from the seeded home can recall the earlier attempts' conversations about them (their
+    history, the memory review's notes) and answer from those instead of the record."""
+    if case.state is None or reset_home:
+        return None
+    return ("a `state:` case runs only with --reset-home, each attempt from the seeded home "
+            "(an earlier attempt's conversation about the same job is otherwise in its memory)")
 
 
 def requirement_problem(need: str, home: str, reset_home: bool = False) -> str | None:
@@ -665,57 +670,19 @@ def resets_home(scenario, case) -> bool:
     """Whether --reset-home restores the seeded state before an attempt of this case:
     an isolated_mutation case driven over the companion socket, where the owner's
     words change the home (a watcher made, a memory stored) for every later case,
-    or one that places phone calls, where each dial spends one of the home's five
+    one that places phone calls, where each dial spends one of the home's five
     daily attempts and a dispatch whose answer was lost holds the home's one call
-    slot for hours (PhoneCalls.Limits)."""
+    slot for hours (PhoneCalls.Limits), or one that seeds a world (`state:`), whose
+    every attempt asks about the same job (`state_reset_problem`)."""
     return scenario.risk == "isolated_mutation" and (
-        case.drive == "companion" or case_uses_phone(case))
+        case.drive == "companion" or case_uses_phone(case) or case.state is not None)
 
 
 def reset_home_error(args, profiles: set[str]) -> str | None:
     if getattr(args, "reset_home", False) and "isolated_mutation" not in profiles:
         return ("--reset-home needs --profile isolated_mutation: it restores a disposable "
-                "eval home before each isolated companion or phone-call attempt")
+                "eval home before each isolated companion, phone-call or seeded attempt")
     return None
-
-
-def reset_home_precondition_error(fermix_home: str) -> str | None:
-    home = os.path.expanduser(fermix_home)
-    if os.path.isfile(os.path.join(home, eval_home_state.SNAPSHOT_DIR, "config.toml")):
-        return None
-    return (f"--reset-home: no seeded-state snapshot in {home}: start the eval daemon with "
-            "`capability-daemon.sh up`, which takes one once seeding ends")
-
-
-def home_resetter(cfg):
-    """The reset --reset-home runs before an attempt: `capability-daemon.sh reset` on
-    this run's eval home, its daemon exporting to this run's Opik project, then the
-    wait until the companion socket answers the drive's hello, since the script is
-    ready once the control socket answers and the companion socket comes up after it.
-    The callable returns None, or why the home could not be reset."""
-    home = os.path.expanduser(cfg.daemon.fermix_home)
-    env = {**os.environ, "FERMIX_CAP_HOME": home, "FERMIX_CAP_PROJECT": cfg.opik.project}
-
-    def reset() -> str | None:
-        started = time.monotonic()
-        try:
-            # Its own session, so the daemon it starts outlives an interrupted run as
-            # the one `up` started does, rather than taking this run's Ctrl-C.
-            done = subprocess.run([DAEMON_SCRIPT, "reset"], env=env, capture_output=True,
-                                  text=True, timeout=_RESET_TIMEOUT_S, start_new_session=True)
-        except subprocess.TimeoutExpired:
-            return f"capability-daemon.sh reset did not finish within {_RESET_TIMEOUT_S}s"
-        if done.returncode != 0:
-            tail = "\n".join(done.stderr.strip().splitlines()[-5:])
-            return f"capability-daemon.sh reset exited {done.returncode}: {tail}"
-        not_ready = companion.await_hello(home, _COMPANION_READY_S)
-        if not_ready:
-            return f"the daemon answered its control socket after the reset, but {not_ready}"
-        print(f"    eval home reset to its seeded state "
-              f"({time.monotonic() - started:.1f}s)", flush=True)
-        return None
-
-    return reset
 
 
 def eval_home_error(fermix_home: str, require_isolated: bool = False) -> str | None:
@@ -1139,9 +1106,7 @@ def run_operator_case(cfg, client, suite, scn, case, run_id, trial, judge_on,
     `ask` case. Streaming gates ride the normal tools_* vocabulary because
     stream phases export as tool-type spans named `stream:open|seal|discard`.
     """
-    import uuid
-
-    marker = f"e2e-mark-{run_id}-{uuid.uuid4().hex[:6]}"
+    marker = eval_marker(run_id)
     query = _render_query(case.turns[0].query, run_id, trial,
                           fixture.url if fixture else None)
     message = f"{query} (eval:{marker})"
@@ -1259,9 +1224,7 @@ def run_companion_case(cfg, client, suite, scn, case, run_id, trial, judge_on):
     one cancelled while it waited never ran. An `offline_wait_s` case grades
     its trace first, inside the wait, and its catch-up read last.
     """
-    import uuid
-
-    marker = f"e2e-mark-{run_id}-{uuid.uuid4().hex[:6]}"
+    marker = eval_marker(run_id)
     query = _render_query(case.turns[0].query, run_id, trial)
     message = f"{query} (eval:{marker})"
     eff = _render_expect(case.expect, run_id, trial)
@@ -2037,7 +2000,7 @@ def overall_outcome(totals: dict, planned_cases: int, skipped_required: int) -> 
 
 
 def aggregate(cfg, run_id, started, finished, suite_results,
-              planned_cases: int, skipped_required: int) -> dict:
+              planned_cases: int, skipped_required: int, not_evaluated=()) -> dict:
     tot = {"scenarios": 0, "cases": 0, "turns": 0, "cases_passed": 0, "cases_failed": 0,
            "cases_incomplete": 0, "critical_failed": 0, "safety_violations": 0,
            "unconfirmed_fails": 0, "first_attempt_passed": 0,
@@ -2048,13 +2011,17 @@ def aggregate(cfg, run_id, started, finished, suite_results,
         st = s["totals"]
         for k in tot:
             tot[k] += st.get(k, 0)
+    # A case held out NOT EVALUATED is named (selection.not_evaluated), never a failure,
+    # and does not make the run incomplete: the rule a platform skip follows.
     outcome = overall_outcome(tot, planned_cases, skipped_required)
     return {
         "run_id": run_id,
         "outcome": outcome,
         "started_at": iso(started),
         "finished_at": iso(finished),
-        "selection": {"planned_cases": planned_cases, "skipped_required": skipped_required},
+        "selection": {"planned_cases": planned_cases, "skipped_required": skipped_required,
+                      "not_evaluated": [{"suite": suite, "case": case, "reason": reason}
+                                        for suite, case, reason in not_evaluated]},
         "config": {"daemon_home": cfg.daemon.fermix_home, "opik_project": cfg.opik.project,
                    "judge_backend": cfg.judge.backend, "judge_enabled": tot.get("_judge_on", False)},
         "accounting": {"cost_scope": "candidate traces only; judge cost is not available",
@@ -2094,12 +2061,16 @@ def suite_totals(scenario_results) -> dict:
                 for g in turn["gates"]:
                     st["gates"] += 1
                     st["gates_passed"] += 1 if g["passed"] else 0
+            # A call is accounting, not a verdict: every attempt's judge call was made,
+            # a --fail-retries re-drive's included, while the case publishes one rubric.
+            for attempt in c.get("attempts") or [c]:
+                called = attempt.get("rubric")
+                if called and called.get("called") is True:
+                    st["judge_calls"] += 1
+                    if called.get("total_tokens") is not None:
+                        st["judge_usage_reported_calls"] += 1
+                        st["judge_tokens_reported"] += called["total_tokens"]
             rb = c.get("rubric")
-            if rb and rb.get("called") is True:
-                st["judge_calls"] += 1
-                if rb.get("total_tokens") is not None:
-                    st["judge_usage_reported_calls"] += 1
-                    st["judge_tokens_reported"] += rb["total_tokens"]
             if rb and rb["evaluated"]:
                 st["rubrics"] += 1
                 st["rubrics_passed"] += 1 if rb["passed"] else 0
@@ -2138,10 +2109,11 @@ def _build_parser() -> argparse.ArgumentParser:
                          "only if the failure reproduces, otherwise it passes and is "
                          "reported as flaky")
     ap.add_argument("--reset-home", action="store_true",
-                    help="before every attempt of an isolated_mutation drive: companion "
-                         "case, retries included, restore the disposable eval home to the "
-                         "snapshot `capability-daemon.sh up` took and restart its daemon "
-                         "(capability-daemon.sh reset); needs --profile isolated_mutation")
+                    help="before every attempt of an isolated_mutation drive: companion, "
+                         "phone-call or `state:` case, retries included, restore the "
+                         "disposable eval home to the snapshot `capability-daemon.sh up` "
+                         "took and restart its daemon (capability-daemon.sh reset); needs "
+                         "--profile isolated_mutation, and a `state:` case runs only with it")
     ap.add_argument("--operator", action="store_true",
                     help="include operator-assisted cases (you send a Telegram message when prompted); "
                          "without this flag such cases are skipped with a notice")
@@ -2276,9 +2248,11 @@ def _print_dry_run(chosen, profiles, judge_on: bool, args,
     state_jobs = sum(1 for _suite, _scenario, case, _trial in jobs if case.state is not None)
     if state_jobs:
         # Validated, not seeded: the spec files exist; a dry run starts no helper.
+        reset = "" if getattr(args, "reset_home", False) else \
+            "; without --reset-home every one would be NOT EVALUATED"
         print(f"  state: {state_jobs} case trial(s) would each seed the eval home's jobs and "
               "reminders first (bin/seed_state.exs, every attempt), then wait up to "
-              f"{_SEEDED_HEAL_WAIT_S} s for any heal the seed opened to be sent")
+              f"{_SEEDED_HEAL_WAIT_S} s for any heal the seed opened to be sent{reset}")
     for suite, scenario, case, trial in jobs:
         action = _skip_reason(case, args) or "run"
         print(f"  - {suite.name}/{scenario.id}/{case.id}#{trial} "
@@ -2673,9 +2647,10 @@ def _print_abort(aborted: dict) -> None:
 def _write_run_reports(cfg, args, chosen, profiles, run_id: str, started,
                        suite_results, planned_cases: int, skipped_required: int,
                        aborted: dict | None = None,
-                       platform_skips: list[dict] | None = None) -> int:
+                       platform_skips: list[dict] | None = None,
+                       not_evaluated=()) -> int:
     results = aggregate(cfg, run_id, started, now_utc(), suite_results,
-                        planned_cases, skipped_required)
+                        planned_cases, skipped_required, not_evaluated)
     results["selection"]["skipped_platform"] = list(platform_skips or [])
     if aborted:
         results["aborted"] = _persistable_abort(aborted)
@@ -2698,6 +2673,7 @@ def _write_run_reports(cfg, args, chosen, profiles, run_id: str, started,
           f"first attempt {totals['first_attempt_passed']}/{totals['cases']} · "
           f"failed {totals['cases_failed']} · flaky {flaky} · "
           f"incomplete {totals['cases_incomplete']} · "
+          f"not evaluated {len(not_evaluated)} · "
           f"critical fails {totals['critical_failed']} · "
           f"safety violations (sticky) {totals['safety_violations']} · "
           f"unconfirmed fails {totals['unconfirmed_fails']} · "
@@ -2717,20 +2693,22 @@ def _write_run_reports(cfg, args, chosen, profiles, run_id: str, started,
 
 
 def _reset_home_for(cfg, args):
-    """(reset, None) once the home holds a snapshot, (None, why not), or (None, None)
-    without --reset-home."""
+    """(reset, None) once the keeper `up` started would carry a reset out (its daemon
+    answers the home, the snapshot is its `up`'s, the daemon exports to this run's
+    project), (None, why not), or (None, None) without --reset-home."""
     if not getattr(args, "reset_home", False):
         return None, None
-    error = reset_home_precondition_error(cfg.daemon.fermix_home)
+    error = run_capability.reset_precondition_error(cfg)
     if error:
-        return None, error
-    print(f"  [ok] seeded-state snapshot in {cfg.daemon.fermix_home}: each isolated "
-          "companion or phone-call attempt starts from it, one daemon restart each")
-    return home_resetter(cfg), None
+        return None, f"--reset-home: {error}"
+    print(f"  [ok] seeded-state snapshot in {cfg.daemon.fermix_home}, kept by the daemon "
+          "`up` started: each isolated companion, phone-call or seeded attempt starts from "
+          "it, one daemon restart each")
+    return run_capability.home_resetter(cfg), None
 
 
 def _run_selected(cfg, args, chosen, profiles, judge_on: bool,
-                  platform_skips: list[dict] | None = None) -> int:
+                  platform_skips: list[dict] | None = None, not_evaluated=()) -> int:
     print("preconditions:")
     voice_on = getattr(args, "voice", False)
     voice_run = voice_jobs_driven(
@@ -2791,7 +2769,7 @@ def _run_selected(cfg, args, chosen, profiles, judge_on: bool,
             fixtures.stop()
     return _write_run_reports(
         cfg, args, chosen, profiles, run_id, started, suite_results, nc,
-        skipped_required, aborted, platform_skips)
+        skipped_required, aborted, platform_skips, not_evaluated)
 
 
 def _start_fixture_server(jobs, home: str) -> FixtureServer | None:
@@ -2942,7 +2920,8 @@ def main(argv=None, host: str | None = None) -> int:
         print("nothing left to run: every selected case needs a precondition this eval "
               "home was not seeded with", file=sys.stderr)
         return 3
-    return _run_selected(cfg, args, chosen, profiles, judge_on, platform_skips)
+    return _run_selected(cfg, args, chosen, profiles, judge_on, platform_skips,
+                         not_evaluated=held)
 
 
 if __name__ == "__main__":

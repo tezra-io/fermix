@@ -219,7 +219,7 @@ one decided the outcome:
 |---|---|
 | `0` | measurement valid, leaderboard written, release gate green — or not applicable: a soft-only (taste) selection such as `cap_response_quality` is a directional signal with no release verdict, and prints *"release gate: not applicable — soft taste axis"* |
 | `2` | usage / selection / argument refusal — nothing was driven |
-| `3` | preconditions (Opik or daemon down, or no route served the sweep) |
+| `3` | preconditions (Opik or daemon down, a seeded task's reset the keeper would refuse), or no route served the sweep: no trace names a model, whatever `--config-id` says. The one exception is a selection every task of which reaches no model by design (typed owner commands, app drives with no `say`): it is reported on the `no-model` row and exits by its trials. A run with an invalid trial is exit `4` first, whatever its traces name |
 | `4` | measurement INVALID — missing trace evidence, a checker/evaluator failure, more than one route, a usage limit, invalidated auth, or an unavailable judge. No leaderboard row. The first three kinds are detected at report time and keep `results.invalid.json` + a banner-marked report for diagnosis; the three abort kinds stop the sweep where it stood and print the reason to stderr instead, because there is no completed set of outcomes to write |
 | `5` | measurement valid and recorded, release gate RED |
 
@@ -271,7 +271,9 @@ private_suites:
   gate). `CAPABILITY_PRIVATE=0 make capability-auto` leaves the private suites out, for
   a machine without access to that repo.
 - `make capability-private` scores only the private suites (judged) against an isolated
-  daemon you started yourself.
+  daemon `capability-daemon.sh up` started: a private task that seeds state
+  (`checker.state`) restarts that daemon from its snapshot before every trial, which only
+  the keeper `up` started can do, so a daemon started by hand is refused for it on exit 3.
 - CI never clones or runs them.
 
 For a private run the runner resolves workspace seeds (`checker.seed`) under the private
@@ -328,26 +330,85 @@ Under the hood (`bin/capability-daemon.sh` + `bin/seed_capability_home.py`) it:
    can never be answered in an eval. The seed also resets `$FERMIX_HOME/skills`
    (the daemon re-seeds the bundled skills at boot), so a skill created by a
    prior sweep can't make a later fresh `skill_create` fail "already exists".
-2. **Starts it in the background** — `mix fermix.dev --no-web --no-realtime` with
-   `FERMIX_OPIK_PROJECT=fermix-capability-eval` and a headless browser. Channels stay
+2. **Starts it in the background, through its keeper** — `bin/eval_daemon_keeper.py`,
+   one process that owns the daemon for its whole life: it starts `mix fermix.dev
+   --no-web --no-realtime` with `FERMIX_OPIK_PROJECT=fermix-capability-eval` and a
+   headless browser, holds that environment in its own memory (never on disk) and the
+   id of the snapshot `up` took, and is the only thing that ever stops, restores and
+   starts the daemon again (`capability-daemon.sh reset`, which both runners ask for
+   before a seeded trial or a `--reset-home` attempt). `up` hands it the environment it
+   built through a pipe (`env -0`), and the keeper starts the daemon with exactly that,
+   never with its own, to which its interpreter adds (a venv, a coerced `LC_CTYPE`). A
+   restarted daemon therefore has `up`'s environment, never a runner's, and a reset is
+   refused on exit 3, replacing nothing, when no keeper runs for the home (a daemon
+   started by hand), when a daemon the keeper did not start answers it, when the
+   snapshot was taken again since `up`, or when the run reads another Opik project than
+   the daemon exports to; `capability-daemon.sh check` asks the same and that the daemon
+   answers, changes nothing, and is what the runners ask before any spend. A fresh `up`
+   starts a new `daemon.log`; every reset appends to it, under a line naming the start.
+   The keeper serves one request at a time over `<home>/keeper.sock` and survives
+   anything one client does (one that goes away before its reply, says nothing for 5 s,
+   or sends a line that is not a short JSON request, at most 4096 bytes, is one line in
+   the log); only SIGTERM, SIGHUP or SIGINT ends it, and it stops its daemon first. A
+   daemon that exits by itself under it is a line in the log when it happens, with its
+   exit code. `up` hands the environment over ending in an `EVAL_KEEPER_ENV_END` entry and
+   naming the home as `FERMIX_HOME`; a hand-over cut short or malformed is refused before
+   anything starts. A reset's restore runs in a process group of its own, which its 60 s
+   bound, or a termination of the keeper, kills whole. Channels stay
    *on* (no `--no-channels`) because the CLI-ask turn queue is
    `FermixChannels.Gateway.Queue`; the seeded home configures no channel, so no bot
    adapter actually polls. `--no-web` drops the Phoenix port entirely, so it never
    collides with your `~/.fermix-dev` daemon (which owns a different home, a
    different control socket, and its own port); the two coexist untouched.
-3. **Waits for readiness** — polls the control socket until `fermix status` answers.
+3. **Waits for readiness** — the keeper polls the control socket until the daemon it
+   started answers the engine's management `hello` as itself (`result.engine.pid`, the
+   field `fermix status` reads; apps/fermix_core/priv/management/PROTOCOL.md). Anything
+   else in the meantime (nothing yet, an `unavailable` while the engine boots, a probe
+   that times out) is not ready yet; only `READY_TIMEOUT` ends the wait, and the keeper
+   then stops the daemon it started and says so.
 4. **Runs the checker preflight and `bin/tier.sh capability` directly**, and on exit **stops the daemon**
-   (SIGTERM the BEAM, SIGKILL fallback) and clears its socket.
+   (SIGTERM the keeper, which SIGTERMs the BEAM, SIGKILL fallback) and clears its socket;
+   a daemon the script did not start is left running, with its socket, and `down` says
+   so on exit 3 (under `run`, that is a line in the log, and the runner's code stands).
 
 The lifecycle script preserves the preflight/runner exit code and prints it before
 teardown. GNU `make` still returns `2` when a recipe fails; automation that needs
 the distinct `3`/`4`/`5` statuses should invoke
 `benchmark/bin/capability-daemon.sh run` directly from the repo root.
 
+**Up** is a keeper that answers and a daemon that answers it: `up` then says *"daemon
+already up"* and exits 0. Anything else of an earlier `up` still running is refused on
+exit 3, seeding nothing, with what clears it; `check` and `reset` refuse the same states
+the same way. Each way out below is a sequence that works from the state it names:
+
+| state | said by | what clears it |
+|---|---|---|
+| nothing runs for the home | `check`, `reset` | `up` |
+| the keeper's daemon exited by itself (the log, `up` and `check` name its exit code) | `up`, `check`; a `reset` starts it again and says so, with the code, on stderr and in the log | `down`, then `up` |
+| the script's own daemon runs without its keeper (the keeper was killed) | `up`, `check`, `reset` (naming its pid) | `down`, which stops it, then `up` |
+| a daemon started by hand answers the home | `up`, `check`, `reset`, `down` (naming its pid) | `kill <pid>`, then `up` (or `down` again) |
+| a second daemon answers beside the keeper's | `up`, `check`, `reset` (naming its pid) | `kill <pid>`, then `down` and `up` |
+| the keeper's own daemon runs and does not answer `hello` (hung) | `up`, `check`, `reset` (naming its pid) | `down`, which stops it, then `up` |
+| another process answers the home and cannot say which process it is | `up`, `check`, `reset`, `down` | find it (`lsof <home>/daemon.sock`), stop it, then `up` (`down` and `up` while a keeper runs) |
+| the snapshot was taken again since `up`, or is gone | `check`, `reset` | `down`, then `up` |
+| the daemon exports to another Opik project than the run reads | `check`, `reset`, `up` with that `FERMIX_CAP_PROJECT` | `down`, then `FERMIX_CAP_OPIK=1 FERMIX_CAP_PROJECT=<project> up` |
+| a reset failed: its restore failed or ran past 60 s, or the daemon it started exited during its boot or never answered as itself within `READY_TIMEOUT` (it says what it stopped, restored and started; `check` says the same until a start) | `reset`, then `up`, `check` | fix what `daemon.log` says, then `down` and `up` |
+| `up`'s daemon exited during its boot, or never answered as itself within `READY_TIMEOUT` (its keeper stopped it, and itself) | `up` (with the log's last lines) | fix what `daemon.log` says, then `up` |
+| the keeper closed the connection without an answer (it stopped) | `check`, `reset` | `down`, then `up` |
+| the keeper did not answer within 240 s (a reset may still be under way) | `check`, `reset` | `check` |
+
+The bounds derive from one: a client waits 240 s for its answer, and the worst reset fits
+inside it: the probe before it (5 s), the daemon's stop (15 s, then SIGKILL and 5 s), the
+restore (60 s, then its kill and 5 s), the boot (`READY_TIMEOUT`, at most 115 s; the
+keeper refuses more) with its last probe (5 s), and the stop of a daemon that never
+answered (20 s); the runners give the script 300 s. At its bound the client says so and
+exits 3; the keeper finishes the request and serves on.
+
 `make capability-auto` always scores the **current `~/.fermix-dev` primary** — the
 seed regenerates `config.toml` from it on every run. To rank *several* models, drive
 the daemon manually per §4 (you hand-edit which provider is primary between runs);
-don't use `capability-auto` for that loop.
+don't use `capability-auto` for that loop. A selection with a task that seeds state
+(`checker.state`) needs a daemon `up` started, so give `up` the model instead (§4).
 
 Useful flags on `bin/run_capability.py`:
 
@@ -396,7 +457,7 @@ trace that produced it. Four surfaces make that possible:
 | `{token}` | a per-run, per-trial marker the runner interpolates into the query (`TOK-<8 hex>`, derived from suite/case/run/trial). A checker requires it in the artifact, so a file memorized from an earlier sweep or copied from a sibling trial cannot pass this one |
 | `requires_tools` / `requires_tools_all` | provenance. `requires_tools` is **any-of** (≥1 must have succeeded), `requires_tools_all` is **all-of** (a two-step task states both, so half the work cannot score). A span carrying `error_info` satisfies neither — a failed call caused nothing |
 | `checker.reset` | home-relative subtrees (under `skills/` or `workspace/`) the runner safe-removes **before every trial**, so each trial starts from the seeded baseline. Without it a skill left by trial 1 makes trial 2's `skill_create` refuse "already exists" and the run measures leftovers |
-| `checker.state` | a JSON spec of scheduled jobs (with past runs) and reminders the runner restores in the eval home's `memory.db` **before every trial**, through `bin/seed_state.exs`: it deletes every job, cancels every reminder, then creates the spec's through the engine's own registries. The checker reads what was seeded (job snapshots, reminder ids, the home's local date) from the evidence file as `state`. A seed failure stops the sweep on exit 3 |
+| `checker.state` | a JSON spec of scheduled jobs (with past runs) and reminders the runner restores in the eval home's `memory.db` **before every trial**, through `bin/seed_state.exs`: it deletes every job, cancels every reminder, then creates the spec's through the engine's own registries. Before that seed the whole home goes back to the snapshot `capability-daemon.sh up` took (`capability-daemon.sh reset`, one daemon restart per trial), so no trial can recall an earlier trial's conversation about the same seeded jobs (suites/SCHEMA.md, `checker.state`); a home with no snapshot is refused on exit 3 before anything runs. The checker reads what was seeded (job snapshots, reminder ids, the home's local date) from the evidence file as `state`. A seed or restore failure stops the sweep on exit 3 |
 
 A root-level entry (`skills/`, `skills/.`) is refused at LOAD time, before any
 spend. At run time the reset path re-asserts the eval-home leaf guard and goes
@@ -471,7 +532,11 @@ in an invented cohort.
 shared helpers, plus the existing episode and fixture identity. Shared grading code
 must live beside its checkers. Changing any of those sources changes the cohort for
 that directory's checkers. Hash-v1/v2 rows remain visible but unranked; rerun them to
-obtain a current comparison. The JSON store format itself remains v2.
+obtain a current comparison. The JSON store format itself remains v2. A task that seeds
+state (`checker.state`) also records how its trials start (`trial_start:
+seeded_snapshot`, each from the home's snapshot), so its rows measured before that,
+when a trial could recall the trials before it, sit in a cohort of their own; no other
+task's identity carries the key, so the public sweep's cohorts are unchanged.
 
 Read the **safety column** literally. `✓ n/N` and `✗ v/N` both state the
 denominator: N trials actually had a safety gate graded. `n/e` means **not
@@ -489,6 +554,22 @@ equal. For a real comparison run the paired analysis (`bin/run_uplift.py`).
 To rank multiple providers/models, repeat this loop **once per model**. Configure
 each provider only in the disposable `~/.fermix-capability-eval` home; do not
 reuse or point the runner at the normal/dev daemon.
+
+This loop serves selections with no task that seeds state, such as `make capability`
+below. **A task that seeds state** (`checker.state`: the Auto Heal and open-loop
+candidates, and any private task that does) restarts its daemon from the home's
+snapshot before every trial, which only the keeper `capability-daemon.sh up` started
+can do; against a daemon started by hand the runner refuses it on exit 3 before
+anything runs. For those, give `up` the model instead of hand-editing `config.toml`:
+
+```sh
+# that provider block of ~/.fermix-dev/config.toml: its model, effort and auth
+FERMIX_CAP_SEED_ARGS="--dev-provider anthropic" bin/capability-daemon.sh up
+# a model you name, its API key (here OPENAI_API_KEY) exported where `up` runs: the
+# keeper keeps it for every restart, in memory only
+FERMIX_CAP_SEED_ARGS="--provider openai --model gpt-5.5 --reasoning-effort high" \
+  bin/capability-daemon.sh up
+```
 
 **List the rankable provider × model matrix** (from the repo root):
 
@@ -850,7 +931,8 @@ uv run bin/run_eval.py --suite browser --scenario page_offered_tools --judge
 uv run bin/run_eval.py --suite browser --scenario consequential_control_left_alone --judge
 
 # capability, ground-truth scored (needs the disposable capability daemon)
-uv run bin/run_capability.py --candidates --suite cap_browser_corpus --trials 3 \
+FERMIX_EVAL_HOME=~/.fermix-capability-eval OPIK_PROJECT=fermix-capability-eval \
+  uv run bin/run_capability.py --candidates --suite cap_browser_corpus --trials 3 \
   --confirm-daemon-isolated --confirm-isolated-env
 
 # the same pages over the SCREEN instead of the browser tool — attended only,
@@ -883,13 +965,18 @@ home, and are held out without it:
 
 ```sh
 FERMIX_CAP_SEED_ARGS="--cues --cue-mandates --workspace-snapshot" bin/capability-daemon.sh up
-uv run bin/run_capability.py --candidates --suite cap_cues --trials 3 \
+FERMIX_EVAL_HOME=~/.fermix-capability-eval OPIK_PROJECT=fermix-capability-eval \
+  uv run bin/run_capability.py --candidates --suite cap_cues --trials 3 \
   --confirm-daemon-isolated --confirm-isolated-env
-FERMIX_EVAL_HOME=~/.fermix-capability-eval uv run bin/run_eval.py --suite cues \
-  --profile isolated_mutation --judge --confirm-daemon-isolated --confirm-isolated-env \
-  --reset-home
+FERMIX_EVAL_HOME=~/.fermix-capability-eval OPIK_PROJECT=fermix-capability-eval \
+  ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-$(security find-generic-password \
+    -s fermix:fermix-dev:ANTHROPIC_API_KEY -a fermix -w)}" \
+  uv run bin/run_eval.py --suite cues --profile isolated_mutation --judge \
+  --confirm-daemon-isolated --confirm-isolated-env --reset-home
 bin/capability-daemon.sh down
 ```
+
+(The judge's key and both variables: *Auto Heal* below.)
 
 `--reset-home` starts every attempt of the suite from the seeded world. Without
 it, what one case's model did stays in the home for the next: a watcher it made on
@@ -900,20 +987,46 @@ steers every later turn. `capability-daemon.sh up` snapshots the seeded state in
 runs, journals, grants, bootstrap, browser, harness, eval-mcp) and `config.toml`,
 never `auth.json`, whose OAuth refresh token the daemon may rotate. With the flag,
 `run_eval.py` runs `capability-daemon.sh reset` before each attempt of an
-`isolated_mutation` `drive: companion` case, `--fail-retries` re-drives included:
-stop the daemon, restore the snapshot, start it and wait until it answers on its
-control socket. The runner then waits, up to 30 s, until the companion socket
+`isolated_mutation` `drive: companion`, phone-call or `state:` case, `--fail-retries`
+re-drives included (a `state:` or phone case runs only with it, and is held out as NOT
+EVALUATED without it, see *Cases a home holds out* below): the keeper `up` started stops
+the daemon, restores the snapshot, starts it again with `up`'s environment and waits
+until it answers on its control socket.
+`make behavioral-isolated` passes the flag, so it needs a home `up` started. The runner
+then waits, up to 30 s, until the companion socket
 answers the drive's own hello: the daemon serves that socket after the control
 socket, and a drive that connected in between was refused. It is
 off by default, needs `--profile isolated_mutation`, and refuses to start a run on
-a home with no snapshot. `reset` (like `snapshot`) refuses any home whose leaf
+a home whose reset the keeper would refuse (`capability-daemon.sh check`). `reset`
+refuses any home whose leaf
 names neither `eval` nor `e2e` before it stops or touches anything, with the
-seeder's own guard (`bin/eval_home_state.py`). Each attempt pays one daemon
+seeder's own guard (`bin/eval_home_state.py`); only `up` takes a snapshot. Each attempt pays one daemon
 restart, a few seconds, and the run prints each reset's time. A reset that fails,
 a companion socket that never answers included, stops the run: the case is
 reported INCOMPLETE, the rest are left unrun, as an exhausted account does, and the
 banner names the harness. Reports redact every `drive_error` by default;
 `--include-content` keeps the text.
+
+### Cases a home holds out
+
+A case the eval home was not seeded for, or a flag the run was not given, is held out as
+NOT EVALUATED: listed before the run (`note: NOT EVALUATED — N case(s) …`), named with
+its reason (the seed or flag it needs) in `results.json` (`selection.not_evaluated`) and
+under *Not evaluated* in `report.md` and `report.html`, counted on the console's summary
+line, never driven, never scored, and never a failure. It does not change the run's
+outcome, as a case skipped for its platform does not; a run left with nothing to drive
+exits 3. What makes each group run:
+
+| cases | run on a home seeded with (`FERMIX_CAP_SEED_ARGS`), and the run's flag |
+|---|---|
+| `cues`, `coding_agent_models` (and the `cap_cues` candidate) | `--cues` |
+| `cap_cues`'s two mandate cases | `--cues --cue-mandates` |
+| `computers` | `--computers` |
+| `coding_harness`'s `claude_code_signed_out_run` | `--coding-signed-out` |
+| `phone_call` | `--phone-calls`, and `run_eval.py --reset-home` |
+| `job_auto_heal`, and the `cap_job_auto_heal` candidate | `--owner-inbox-cli` |
+| `cap_job_heal_app_inbox` candidate | `--owner-inbox-app` |
+| every behavioral case with `state:` (`job_auto_heal`'s) | a home `up` started, and `run_eval.py --reset-home` |
 
 ### Auto Heal (M106)
 
@@ -924,41 +1037,69 @@ answered by a typed `/confirm` or `/deny` with no model: `checkers/job_proposal.
 the behavioral suite `job_auto_heal` seeds
 each case's record (`state:`) and asks about it. Both need the local chat as the owner's
 inbox (`--owner-inbox-cli`; held out as NOT EVALUATED without it), and the behavioral
-run needs the workspace snapshot:
+run needs the workspace snapshot and `--reset-home`:
 
 ```sh
 FERMIX_CAP_SEED_ARGS="--owner-inbox-cli --workspace-snapshot --dev-provider anthropic" \
   bin/capability-daemon.sh up
 uv run bin/run_capability.py --candidates --suite cap_job_auto_heal --trials 3 --estimate
-uv run bin/run_capability.py --candidates --suite cap_job_auto_heal --trials 3 \
+FERMIX_EVAL_HOME=~/.fermix-capability-eval OPIK_PROJECT=fermix-capability-eval \
+  uv run bin/run_capability.py --candidates --suite cap_job_auto_heal --trials 3 \
   --confirm-daemon-isolated --confirm-isolated-env
-FERMIX_EVAL_HOME=~/.fermix-capability-eval uv run bin/run_eval.py --suite job_auto_heal \
-  --profile isolated_mutation --judge --dry-run
-FERMIX_EVAL_HOME=~/.fermix-capability-eval uv run bin/run_eval.py --suite job_auto_heal \
-  --profile isolated_mutation --judge --fail-retries 2 \
-  --confirm-daemon-isolated --confirm-isolated-env
+uv run bin/run_eval.py --suite job_auto_heal --profile isolated_mutation --judge \
+  --reset-home --dry-run
+FERMIX_EVAL_HOME=~/.fermix-capability-eval OPIK_PROJECT=fermix-capability-eval \
+  ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-$(security find-generic-password \
+    -s fermix:fermix-dev:ANTHROPIC_API_KEY -a fermix -w)}" \
+  uv run bin/run_eval.py --suite job_auto_heal --profile isolated_mutation --judge \
+  --reset-home --fail-retries 2 --confirm-daemon-isolated --confirm-isolated-env
 bin/capability-daemon.sh down
 ```
 
+Both runners score the eval home only when told so: `FERMIX_EVAL_HOME` names it and
+`OPIK_PROJECT` the project its daemon exports to (`capability-daemon.sh` starts it
+exporting to `fermix-capability-eval`); without them each refuses its preconditions on
+exit 3 (the dev home and the `fermix-dev` project are refused for an isolated run).
+With `FERMIX_CAP_HOME` set to another home, give both runners that home as
+`FERMIX_EVAL_HOME`. The judge signs in with `ANTHROPIC_API_KEY`: the one already
+exported, else the dev profile's keychain item, which is the one `bin/tier.sh` reads
+(`fermix:<profile>:ANTHROPIC_API_KEY`, `fermix:ANTHROPIC_API_KEY` for the default
+profile; `fermix-dev` is the dev home's). The key goes into that one command's
+environment and is never printed; with no key the runner's judge precondition refuses
+the run. It is the judge's, and must not reach the daemon under test, whose Anthropic
+route signs in the way the dev home's `anthropic` block does: it does not, because
+every daemon start after `up` is the keeper's, with `up`'s environment, never the
+runner's; so do not export it where `up` runs either (`up`'s environment is the
+daemon's, and an exported `ANTHROPIC_API_KEY` there would sign the daemon in with it).
+The `--estimate` and `--dry-run` lines spend nothing and need none of the three.
+
+Every trial of either capability candidate, and every attempt of the behavioral suite,
+starts from the snapshot `up` took (`capability-daemon.sh reset`, one daemon restart
+each, which `--estimate` and `--dry-run` count; the estimate's time range leaves the
+restarts out), so no trial can recall what an earlier one's turn said about the same
+seeded job (suites/SCHEMA.md, `checker.state`). Both runners refuse, on exit 3 before
+anything runs, a home whose daemon `up` did not start, or whose snapshot is not that
+`up`'s (`capability-daemon.sh check`).
 `--dev-provider anthropic` because a fixture's route pin names the home's one
 provider (`mistyped_model_offered_as_a_pair` pins an Anthropic model; suites/SCHEMA.md),
-and the eval box seeds `--provider anthropic` too. With `FERMIX_CAP_HOME` set to another
-home, give both runners the same home as
-`FERMIX_EVAL_HOME`. `--estimate` counts turns only: each diagnosed task also runs one
-diagnosis on the home's main model (at most six steps), and every turn is followed by
-the home's memory review. Seeded runs sit at their jobs' own fire times
-(`bin/seed_run_times.exs`).
+and the eval box seeds `--provider anthropic` too. `--estimate` counts turns only: each
+diagnosed task also runs one diagnosis on the home's main model (at most six steps), and
+every turn is followed by the home's memory review. Seeded runs sit at their jobs' own
+fire times (`bin/seed_run_times.exs`).
 
 The Fermix app as the owner's inbox (stage S6) is its own candidate,
 `cap_job_heal_app_inbox`, on a home seeded with `--owner-inbox-app` instead (one inbox
 per home; each suite is held out of the other's): each trial seeds a heal whose
 conclusion is recorded and left for the daemon to send, and drives the companion
-socket as the app does (`drive: app`), so only its one edit task runs a model turn.
+socket as the app does (`drive: app`), so only its one edit task runs a model turn,
+whose trace the runner reads for the route that served it. The seed names the same
+provider as the first pass, so both passes score one route and their rows one config:
 
 ```sh
-FERMIX_CAP_SEED_ARGS="--owner-inbox-app" bin/capability-daemon.sh up
+FERMIX_CAP_SEED_ARGS="--owner-inbox-app --dev-provider anthropic" bin/capability-daemon.sh up
 uv run bin/run_capability.py --candidates --suite cap_job_heal_app_inbox --trials 3 --estimate
-uv run bin/run_capability.py --candidates --suite cap_job_heal_app_inbox --trials 3 \
+FERMIX_EVAL_HOME=~/.fermix-capability-eval OPIK_PROJECT=fermix-capability-eval \
+  uv run bin/run_capability.py --candidates --suite cap_job_heal_app_inbox --trials 3 \
   --confirm-daemon-isolated --confirm-isolated-env
 bin/capability-daemon.sh down
 ```
@@ -1167,9 +1308,10 @@ decided once, at boot (`FermixCore.Application.phone_call_transport_opts/2`): to
 `FERMIX_EVAL_FIXTURE_ORIGIN` when the home's fixture manifest honours it
 (`Tools.WebFetch.EvalFixture.origin/1`), every call refused when it is set and not
 honoured, never the vendor's. So the manifest and the variable are in place before
-the daemon starts: `capability-daemon.sh` sets the variable from the manifest on
-every start (`up` after the seed, `reset` after the restore, which leaves
-`eval-fixtures/` alone), refuses to start a phone home without the manifest, and
+the daemon starts: `capability-daemon.sh up` sets the variable from the manifest once,
+after the seed, in the environment its keeper starts the daemon with every time (each
+`reset` restarts it with that environment, and the restore leaves `eval-fixtures/`
+alone), refuses to start a phone home without the manifest, and
 drops a caller's `OPENAI_API_KEY` so the seed's invented key is the one in use; the
 seed refuses a home whose daemon answers, so no manifest appears under a running
 daemon. The suite grades the agent path and what the owner
@@ -1193,12 +1335,16 @@ FERMIX_CAP_SEED_ARGS="--phone-calls --workspace-snapshot" bin/capability-daemon.
 FERMIX_EVAL_HOME=~/.fermix-capability-eval OPIK_PROJECT=fermix-capability-eval \
   uv run bin/run_eval.py --suite phone_call --profile isolated_mutation --judge \
   --reset-home --dry-run
-# one case first, then the suite
+# one case first, then the suite (the judge's key: *Auto Heal* above)
 FERMIX_EVAL_HOME=~/.fermix-capability-eval OPIK_PROJECT=fermix-capability-eval \
+  ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-$(security find-generic-password \
+    -s fermix:fermix-dev:ANTHROPIC_API_KEY -a fermix -w)}" \
   uv run bin/run_eval.py --suite phone_call --case book_table_readback_confirmed \
   --profile isolated_mutation --judge --reset-home \
   --confirm-daemon-isolated --confirm-isolated-env
 FERMIX_EVAL_HOME=~/.fermix-capability-eval OPIK_PROJECT=fermix-capability-eval \
+  ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-$(security find-generic-password \
+    -s fermix:fermix-dev:ANTHROPIC_API_KEY -a fermix -w)}" \
   uv run bin/run_eval.py --suite phone_call --profile isolated_mutation --judge \
   --reset-home --confirm-daemon-isolated --confirm-isolated-env
 bin/capability-daemon.sh down

@@ -51,8 +51,9 @@ description: >
   `--candidates --suite cap_job_heal_app_inbox`.
 
   COST: no task runs a diagnosis (each conclusion is seeded); owner_edit_ends_the_card
-  runs one turn on the home's main model, and every other task runs no model at all.
-  The app drive reads no trace, so a trial's cost is reported unknown, never $0.
+  runs one turn on the home's main model, whose trace the runner reads (the run's route,
+  that trial's usage), and every other task runs no model at all and reads no trace, so
+  its cost is reported unknown, never $0.
 
   DETERMINISM: what reaches the app, the card and each answer are code with no model;
   they vary only with the Scheduler's pickup inside the case's timeout. The edit task

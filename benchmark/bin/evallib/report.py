@@ -177,6 +177,28 @@ def _platform_skips_markdown(r: dict) -> list[str]:
     return lines
 
 
+def _not_evaluated(r: dict) -> list[dict]:
+    return (r.get("selection") or {}).get("not_evaluated") or []
+
+
+_NOT_EVALUATED_NOTE = ("Selected, but this eval home or this run cannot measure them: never "
+                       "driven, not failed, not counted in the totals above, and they do "
+                       "not make the run incomplete, as a platform skip does not. Each "
+                       "reason names the seed or flag that makes the case run.")
+
+
+def _not_evaluated_markdown(r: dict) -> list[str]:
+    rows = _not_evaluated(r)
+    if not rows:
+        return []
+    lines = ["## Not evaluated", "", _NOT_EVALUATED_NOTE, "",
+             "| Case | Reason |", "|---|---|"]
+    lines.extend(f"| `{row['suite']}/{row['case']}` | {_cell(row['reason'])} |"
+                 for row in rows)
+    lines.append("")
+    return lines
+
+
 def _markdown(r: dict) -> str:
     t = r["totals"]
     overall = {"pass": "✅ PASS", "fail": "❌ FAIL",
@@ -226,6 +248,7 @@ def _markdown(r: dict) -> str:
     lines.append("")
     lines.extend(_sticky_markdown(r))
     lines.extend(_unconfirmed_markdown(r))
+    lines.extend(_not_evaluated_markdown(r))
     lines.extend(_platform_skips_markdown(r))
 
     for s in r["suites"]:
@@ -431,6 +454,19 @@ def _platform_skips_html(r: dict) -> list[str]:
     return out
 
 
+def _not_evaluated_html(r: dict) -> list[str]:
+    rows = _not_evaluated(r)
+    if not rows:
+        return []
+    out = ["<h2>Not evaluated</h2>",
+           f"<div class='meta'>{_e(_NOT_EVALUATED_NOTE)}</div>",
+           "<table><tr><th>Case</th><th>Reason</th></tr>"]
+    out.extend(f"<tr><td>{_e(row['suite'] + '/' + row['case'])}</td>"
+               f"<td>{_e(row['reason'])}</td></tr>" for row in rows)
+    out.append("</table>")
+    return out
+
+
 def _attempts_html(case: dict) -> list[str]:
     summary = _attempt_summary(case)
     if len(summary) < 2:
@@ -484,6 +520,7 @@ def _html(r: dict) -> str:
     out.append("</table>")
     out.extend(_sticky_html(r))
     out.extend(_unconfirmed_html(r))
+    out.extend(_not_evaluated_html(r))
     out.extend(_platform_skips_html(r))
 
     for s in r["suites"]:

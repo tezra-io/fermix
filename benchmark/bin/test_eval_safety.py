@@ -151,6 +151,8 @@ def test_overall_outcome_is_fail_closed(totals, planned, skipped, expected):
     assert run_eval.overall_outcome(totals, planned, skipped) == expected
 
 
+
+
 def test_judge_rejects_string_boolean_and_non_finite_score():
     wrong_type = judge._verdict_from('{"pass":"false","score":0.2,"rationale":"x"}', "openai")
     non_finite = judge._verdict_from('{"pass":false,"score":NaN,"rationale":"x"}', "openai")
@@ -358,6 +360,25 @@ def test_judge_accounting_counts_only_dispatched_calls():
     assert run_eval.suite_totals([base])["judge_calls"] == 1
 
 
+def test_judge_accounting_counts_every_attempts_call():
+    # Live (M106): 9 judge calls were made over 7 cases and the report said 7, because
+    # only the published attempt's rubric was counted, never a --fail-retries re-drive's.
+    judged = {"backend": "anthropic", "called": True, "evaluated": True, "passed": True,
+              "total_tokens": 120}
+    failed = dict(judged, passed=False, total_tokens=None)
+    retried = {"outcome": "pass", "turns": [], "rubric": judged,
+               "attempts": [{"outcome": "fail", "turns": [], "rubric": failed},
+                            {"outcome": "pass", "turns": [], "rubric": judged}]}
+    unjudged = {"outcome": "incomplete", "turns": [],
+                "rubric": {"backend": "anthropic", "called": False, "evaluated": False},
+                "attempts": [{"outcome": "incomplete", "turns": [], "rubric": None}]}
+    totals = run_eval.suite_totals([{"severity": "normal", "cases": [retried, unjudged]}])
+    assert totals["judge_calls"] == 2
+    assert totals["judge_usage_reported_calls"] == 1 and totals["judge_tokens_reported"] == 120
+    # The verdicts stay one per published case.
+    assert totals["rubrics"] == 1 and totals["rubrics_passed"] == 1
+
+
 @pytest.mark.parametrize(
     ("command", "args"),
     [("cmd_status", ["--json"]), ("cmd_ask", ["--json", "--timeout", "1", "hello"])],
@@ -369,11 +390,95 @@ def test_eval_shim_classifies_socket_timeout_as_timeout(command, args, capsys):
     def timeout(*_args, **_kwargs):
         raise TimeoutError("socket read timed out")
 
-    namespace[command].__globals__["call_daemon"] = timeout
+    namespace[command].__globals__["_exchange"] = timeout
     with pytest.raises(SystemExit) as exc:
         namespace[command](args)
     assert exc.value.code == 1
     assert '"error": "timeout"' in capsys.readouterr().out
+
+
+_MANAGEMENT = pathlib.Path(HERE).parents[1] / "apps" / "fermix_core" / "priv" / "management"
+
+
+def _management_golden(name: str) -> dict:
+    for line in (_MANAGEMENT / "fixtures" / "success.jsonl").read_text().splitlines():
+        entry = json.loads(line)
+        if entry["name"] == name:
+            return entry["response"]
+    raise LookupError(name)
+
+
+@pytest.mark.parametrize("args", [["--json"], []])
+def test_eval_shim_status_asks_what_the_engines_cli_asks(args, capsys):
+    """`fermix status` is `hello` plus `overview.get` (management v1), `--json` the
+    overview alone: the unversioned `status` the shim used to send was deleted from the
+    engine, which answers it `unknown method`. Replies are the engine's goldens."""
+    namespace = runpy.run_path(os.path.join(HERE, "fermix-shim"))
+    goldens = {"hello": _management_golden("hello"),
+               "overview.get": _management_golden("overview_get")}
+    sent = []
+
+    def exchange(msg, _timeout_s):
+        sent.append(msg)
+        assert set(msg) == {"request_id", "protocol_version", "method", "params"}
+        protocol = goldens["hello"]["result"]["protocol"]
+        assert protocol["minimum_version"] <= msg["protocol_version"] <= \
+            protocol["maximum_version"]
+        return {**goldens[msg["method"]], "request_id": msg["request_id"]}
+
+    namespace["cmd_status"].__globals__["_exchange"] = exchange
+    with pytest.raises(SystemExit) as exc:
+        namespace["cmd_status"](args)
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    if args:
+        assert [m["method"] for m in sent] == ["overview.get"]
+        assert json.loads(out) == goldens["overview.get"]["result"]
+    else:
+        assert [m["method"] for m in sent] == ["hello", "overview.get"]
+        engine = goldens["hello"]["result"]["engine"]
+        assert f"(pid {engine['pid']}, version {engine['product_version']}" in out
+
+
+def _status_bin(tmp_path, out: str, code: int) -> SimpleNamespace:
+    """A `fermix` that prints `out` and exits `code` for `status --json`."""
+    path = tmp_path / "fermix"
+    path.write_text(f"#!/bin/sh\ncat <<'EOF'\n{out}\nEOF\nexit {code}\n")
+    path.chmod(0o755)
+    return SimpleNamespace(daemon=SimpleNamespace(fermix_bin=str(path)), env=dict(os.environ))
+
+
+def test_the_daemon_is_reachable_only_when_its_overview_answers(tmp_path):
+    # Any reply counted: what the engine answers the deleted v0 `status` (its `unknown
+    # method`) read as a reachable daemon.
+    overview = _management_golden("overview_get")["result"]
+    ok, detail = driver.daemon_reachable(_status_bin(tmp_path, json.dumps(overview), 0))
+    assert ok and f"pid {overview['daemon']['pid']}" in detail
+    unknown = '{"status": "error", "reason": "unknown method", "method": "status"}'
+    ok, detail = driver.daemon_reachable(_status_bin(tmp_path, unknown, 0))
+    assert not ok and "no daemon overview" in detail
+    ok, detail = driver.daemon_reachable(_status_bin(tmp_path, "not json", 0))
+    assert not ok and "no daemon overview" in detail
+    ok, detail = driver.daemon_reachable(_status_bin(tmp_path, "", 1))
+    assert not ok and "exit 1" in detail
+    ok, detail = driver.daemon_reachable(
+        _status_bin(tmp_path, '{"status": "error", "error": "not_running"}', 3))
+    assert not ok and "not running" in detail
+
+
+def test_eval_shim_status_says_a_refused_management_request(capsys):
+    namespace = runpy.run_path(os.path.join(HERE, "fermix-shim"))
+    errors = (_MANAGEMENT / "fixtures" / "errors.jsonl").read_text().splitlines()
+    refused = next(json.loads(line) for line in errors if '"name":"unavailable"' in line)
+
+    def exchange(msg, _timeout_s):
+        return {**refused["response"], "request_id": msg["request_id"]}
+
+    namespace["cmd_status"].__globals__["_exchange"] = exchange
+    with pytest.raises(SystemExit) as exc:
+        namespace["cmd_status"](["--json"])
+    assert exc.value.code == 1
+    assert "fermix status: unavailable:" in capsys.readouterr().err
 
 
 def test_eval_shim_attaches_any_file_by_name_and_bytes(tmp_path, capsys):
@@ -2153,6 +2258,55 @@ def test_the_report_lists_platform_skips_with_their_reason(tmp_path):
         assert "safety/attached_note_command_waits_for_owner/kiosk_note_follow_steps" in text
         assert "runs only on linux; this host is macos" in text
     assert data["selection"]["skipped_platform"] == [skip]
+
+
+def test_a_held_out_case_is_in_the_reports_selection_and_leaves_its_outcome_alone(
+        tmp_path):
+    # Live: `make behavioral-isolated` held every job_auto_heal case out and said so once
+    # on stdout; its report read as if they had never been selected. Now it names them,
+    # each with the seed or flag it needs. A held-out case is not a failure and does not
+    # make the run incomplete, the rule a platform skip follows (SCHEMA, `requires`).
+    suite = _write_suite(tmp_path, "host_readonly")
+    chosen = [(suite, suite.scenarios)]
+    suite_results = [{"name": suite.name, "title": "Safety", "scenarios": [{
+        "id": "example", "title": "Example", "severity": "normal",
+        "cases": [run_eval._case_verdict([_attempt("pass")], _PROHIBITIONS)]}],
+        "totals": run_eval.suite_totals([{"severity": "normal", "cases": [
+            run_eval._case_verdict([_attempt("pass")], _PROHIBITIONS)]}])}]
+    held = [("job_auto_heal", "tide_report_never_came",
+             "a `state:` case runs only with --reset-home, each attempt from the seeded home")]
+    cfg = SimpleNamespace(
+        daemon=SimpleNamespace(fermix_home=str(tmp_path / "home")),
+        opik=SimpleNamespace(project="fermix-eval-test"),
+        judge=SimpleNamespace(backend="fermix", model=None, enabled=False),
+        skill_dir=str(tmp_path))
+    out_dir = tmp_path / "reports"
+    args = SimpleNamespace(judge=False, include_content=False, repeat=1, max_cases=0,
+                           out=str(out_dir))
+    exit_code = run_eval._write_run_reports(
+        cfg, args, chosen, {"host_readonly"}, "20261127T090000Z01234567", run_eval.now_utc(),
+        suite_results, planned_cases=1, skipped_required=0, not_evaluated=held)
+    assert exit_code == 0
+    data = json.loads((out_dir / "results.json").read_text())
+    assert data["outcome"] == "pass"
+    assert data["selection"]["not_evaluated"] == [
+        {"suite": "job_auto_heal", "case": "tide_report_never_came", "reason": held[0][2]}]
+    for name in ("report.md", "report.html"):
+        text = (out_dir / name).read_text()
+        assert "Not evaluated" in text and "job_auto_heal/tide_report_never_came" in text
+        assert "--reset-home" in text and "do not make the run incomplete" in text
+
+
+def test_the_main_entry_hands_the_held_out_cases_to_the_run(tmp_path, monkeypatch):
+    held = [("phone_call", "dial_the_pharmacy", "a phone case runs only with --reset-home")]
+    monkeypatch.setattr(run_eval, "judge_precondition_error", lambda *_a: None)
+    monkeypatch.setattr(run_eval, "hold_out_unseeded",
+                        lambda _cfg, chosen, _reset=False: (chosen, held))
+    seen = {}
+    monkeypatch.setattr(run_eval, "_run_selected",
+                        lambda *a, **k: seen.update(args=a, kwargs=k) or 0)
+    assert run_eval.main(["--tag", "host-safe-core", "--judge"]) == 0
+    assert seen["kwargs"]["not_evaluated"] == held
 
 
 def test_the_report_has_no_platform_section_when_nothing_was_skipped(tmp_path):
@@ -4121,6 +4275,19 @@ def test_default_report_redaction_reaches_retained_attempts():
 
 
 # --- one session-id implementation -------------------------------------------
+
+def test_an_eval_marker_names_the_run_and_nothing_of_the_suite_or_the_case():
+    # A message the model reads carries it; eval wording in what a model reads once
+    # made one refuse to call an action done.
+    from evallib import session_ids
+
+    first, second = (session_ids.eval_marker("20261127T090000Z0a1b2c3d") for _ in range(2))
+    assert re.fullmatch(r"e2e-mark-20261127T090000Z0a1b2c3d-[0-9a-f]{6}", first)
+    assert first != second
+    # The purge path recognises exactly this shape as one of the run's operator traces.
+    trace = {"input": f"Hello (eval:{first})"}
+    assert opik._operator_trace_has_run_id(trace, "20261127T090000Z0a1b2c3d")
+
 
 def test_the_runner_uses_the_shared_session_id_helper():
     from evallib import session_ids
