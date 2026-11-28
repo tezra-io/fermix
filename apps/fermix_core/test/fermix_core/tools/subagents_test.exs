@@ -165,22 +165,21 @@ defmodule FermixCore.Tools.SubagentsTest do
     agent_supervisor = :"subagents_agent_sup_#{suffix}"
     task_supervisor = :"subagents_task_sup_#{suffix}"
 
+    # The probe's holder is the test's own, started before the supervisors
+    # whose workers write to it: ExUnit stops it after them and before the next
+    # test starts, so the name is free there.
+    start_supervised!(%{
+      id: @probe_ctx,
+      start: {Agent, :start_link, [fn -> nil end, [name: @probe_ctx]]}
+    })
+
     {:ok, _} = start_supervised({Task.Supervisor, name: task_supervisor})
     {:ok, _} = start_supervised({AgentSupervisor, name: agent_supervisor})
     {:ok, _} = start_supervised({CapabilityRegistry, name: registry})
 
-    ensure_probe_holder()
-
     on_exit(fn -> MockAdapter.cleanup() end)
 
     %{registry: registry, agent_supervisor: agent_supervisor, task_supervisor: task_supervisor}
-  end
-
-  defp ensure_probe_holder do
-    case Process.whereis(@probe_ctx) do
-      nil -> {:ok, _} = Agent.start_link(fn -> nil end, name: @probe_ctx)
-      _pid -> Agent.update(@probe_ctx, fn _ -> nil end)
-    end
   end
 
   defp context(ctx, overrides \\ %{}) do

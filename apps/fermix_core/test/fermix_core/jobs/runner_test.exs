@@ -418,14 +418,10 @@ defmodule FermixCore.Jobs.RunnerTest do
 
     @worker_caps :fanout_worker_caps
 
-    def reset_worker_caps do
-      case Process.whereis(@worker_caps) do
-        nil -> Agent.start_link(fn -> [] end, name: @worker_caps)
-        _pid -> Agent.update(@worker_caps, fn _ -> [] end)
-      end
-
-      :ok
-    end
+    # The record of what each worker was offered. A test starts it as its own
+    # (`start_supervised!`), so ExUnit stops it before the next test starts.
+    def worker_caps_record,
+      do: %{id: @worker_caps, start: {Agent, :start_link, [fn -> [] end, [name: @worker_caps]]}}
 
     def worker_caps, do: Agent.get(@worker_caps, & &1)
 
@@ -2362,7 +2358,7 @@ defmodule FermixCore.Jobs.RunnerTest do
 
   describe "scheduled-run delegation (§11)" do
     setup do
-      :ok = FanoutAdapter.reset_worker_caps()
+      start_supervised!(FanoutAdapter.worker_caps_record())
       :ok
     end
 
@@ -2575,8 +2571,10 @@ defmodule FermixCore.Jobs.RunnerTest do
       capability_registry: capability_registry,
       output_base_dir: output_base_dir
     } do
-      {:ok, _} = Agent.start_link(fn -> nil end, name: :runner_route_probe)
-      on_exit(fn -> stop_probe_agent() end)
+      start_supervised!(%{
+        id: :runner_route_probe,
+        start: {Agent, :start_link, [fn -> nil end, [name: :runner_route_probe]]}
+      })
 
       :ok = CapabilityRegistry.register(capability_registry, route_probe_capability())
 
@@ -2642,13 +2640,6 @@ defmodule FermixCore.Jobs.RunnerTest do
         executor: {__MODULE__, :execute_route_probe, []},
         policy_class: :read_only
       })
-    end
-
-    defp stop_probe_agent do
-      case Process.whereis(:runner_route_probe) do
-        nil -> :ok
-        pid -> Agent.stop(pid)
-      end
     end
   end
 

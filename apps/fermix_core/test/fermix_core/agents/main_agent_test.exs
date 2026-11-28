@@ -335,17 +335,20 @@ defmodule FermixCore.Agents.MainAgentTest do
   defmodule ReviewProbe do
     @state :main_agent_review_probe
 
+    # The probe is the calling test's own: ExUnit stops it before the next
+    # test starts, so nothing looks for one an earlier test left.
     def init(test_pid \\ self()) do
-      cleanup()
-      {:ok, _} = Agent.start_link(fn -> %{test_pid: test_pid, mode: :ok} end, name: @state)
+      state = %{test_pid: test_pid, mode: :ok}
+
+      ExUnit.Callbacks.start_supervised!(%{
+        id: @state,
+        start: {Agent, :start_link, [fn -> state end, [name: @state]]}
+      })
+
       :ok
     end
 
     def set_mode(mode), do: Agent.update(@state, &%{&1 | mode: mode})
-
-    def cleanup do
-      if Process.whereis(@state), do: Agent.stop(@state)
-    end
 
     def start_background(opts) do
       %{test_pid: test_pid, mode: mode} = Agent.get(@state, & &1)
@@ -655,7 +658,6 @@ defmodule FermixCore.Agents.MainAgentTest do
       Application.put_env(:fermix_core, :compaction, previous_compaction_config)
       Application.put_env(:fermix_core, :prompt_bootstrap, previous_bootstrap_config)
       MockProvider.cleanup()
-      ReviewProbe.cleanup()
       FermixTestSupport.SafeRm.rm_rf!(skills_dir)
       FermixTestSupport.SafeRm.rm_rf!(journal_dir)
       FermixTestSupport.SafeRm.rm_rf!(prompt_dir)
