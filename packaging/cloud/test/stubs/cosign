@@ -7,9 +7,11 @@
 # only with its TUF cache in TUF_ROOT, root's own folder of the update. Logs
 # the call as the file, the identity and the issuer it was asked for.
 set -eu
-[ "$#" -eq 10 ] &&
-  [ "$1 $2 $4 $6 $8" = "verify-blob --certificate --signature --certificate-identity --certificate-oidc-issuer" ] ||
-  { echo "cosign stand-in: unexpected arguments: $*" >&2; exit 2; }
+if [ "$#" -ne 10 ] ||
+  [ "$1 $2 $4 $6 $8" != "verify-blob --certificate --signature --certificate-identity --certificate-oidc-issuer" ]; then
+  echo "cosign stand-in: unexpected arguments: $*" >&2
+  exit 2
+fi
 cert=$3 sig=$5 identity=$7 issuer=$9
 shift 9
 blob=$1

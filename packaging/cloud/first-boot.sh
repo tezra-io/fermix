@@ -934,8 +934,9 @@ read_release() {
   minor_patch=${2#*.}
   patch=${minor_patch#*.}
   case "$patch" in *.*) fail "--release takes a Fermix release, such as 0.17.0." ;; esac
-  [ "$minor_patch" != "$2" ] && [ "$patch" != "$minor_patch" ] ||
+  if [ "$minor_patch" = "$2" ] || [ "$patch" = "$minor_patch" ]; then
     fail "--release takes a Fermix release, such as 0.17.0."
+  fi
   HAND=1
   WANTED=$2
   if [ "$#" -eq 3 ]; then AHEAD_OF_APPS=1; fi
