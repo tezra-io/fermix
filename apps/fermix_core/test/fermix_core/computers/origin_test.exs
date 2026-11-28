@@ -15,6 +15,7 @@ defmodule FermixCore.Computers.OriginTest do
       {%{trigger: "schedule"}, :scheduled},
       {%{trigger: "manual"}, :scheduled},
       {%{trigger: "watcher"}, :scheduled},
+      {%{trigger: "retry"}, :scheduled},
       {%{trigger: "cue"}, :cue},
       {%{computer_use_origin: :interactive, subagent_depth: 1}, :worker},
       {%{computer_use_origin: :voice, skill_depth: 2}, :worker},

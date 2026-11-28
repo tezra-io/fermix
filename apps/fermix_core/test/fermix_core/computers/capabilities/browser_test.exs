@@ -158,19 +158,26 @@ defmodule FermixCore.Computers.Capabilities.BrowserTest do
       %{seams: {:ok, seams}}
     end
 
-    test "a sign-in only on a chat turn: never by voice, never unattended", %{seams: seams} do
+    # A scheduled run's sign-in is the server's to admit, on its job's row
+    # (`AccessGate`); this computer sees only that a job's run asked.
+    test "a sign-in on a chat turn or a job's run: never by voice, a cue or a worker",
+         %{seams: seams} do
       signing = request("sign_in", %{"site" => "shop.example.com", "password_ref" => "t"})
       looking = request("login_for", %{"site" => "shop.example.com"})
 
       for {op, args} <- [{"browser.sign_in", signing}, {"browser.login_for", looking}] do
-        assert BrowserCapability.admit(op, args, context(seams, :chat)) == :ok
+        for origin <- [:chat, :scheduled] do
+          assert BrowserCapability.admit(op, args, context(seams, origin)) == :ok
+        end
 
         assert {:refused, :unavailable, "A sign-in is approved in the chat, not by voice."} =
                  BrowserCapability.admit(op, args, context(seams, :voice))
 
-        for origin <- [:scheduled, :cue, :worker, :background] do
-          assert {:refused, :not_attended, _sentence} =
+        for origin <- [:cue, :worker, :background] do
+          assert {:refused, :not_attended, sentence} =
                    BrowserCapability.admit(op, args, context(seams, origin))
+
+          assert sentence =~ "the owner's own turn in the chat or a scheduled job of theirs"
         end
       end
     end

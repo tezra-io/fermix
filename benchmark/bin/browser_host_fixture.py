@@ -28,6 +28,8 @@ without starting anything.
     benchmark/bin/browser_host_fixture.py --login-page  # a login page with no login saved for it
     benchmark/bin/browser_host_fixture.py --login-page --login-url https://accounts.example.com/login \
         --saved-login example.com=person@example.com     # a site that signs in on a host of its own
+    benchmark/bin/browser_host_fixture.py --login-page --saved-login example.com=person@example.com \
+        --account-code KESTREL-4471                      # an account page behind the sign-in
 
 `--login-page` answers every page with an https sign-in form (an email field,
 a password field, a Sign in button) at `--login-url` (https://example.com/login
@@ -36,7 +38,10 @@ unless given), and the two sign-in requests of protocol 2 as the Mac app does:
 form: lower-cased, one leading `www.` folded) or, when none is, for the closest
 domain that host is under, or `sign_in_no_login`, and `page.sign_in` with the
 fields it was given. It holds no password and types
-nothing anywhere: a fill is only the answer naming what was filled.
+nothing anywhere: a fill is only the answer naming what was filled. With
+`--account-code`, once a fill named the password field every page it answers
+is the signed-in account, which shows that code and no sign-in form: a code a
+reply can only hold after a completed sign-in.
 
 Ctrl-C stops it; the daemon reads the closed socket as `host_stopping` never
 having arrived at all, i.e. a plain disconnect (BROWSER-4: fails every task
@@ -150,6 +155,27 @@ def login_page(url: str) -> dict:
     }
 
 
+def account_page(login_url: str, code: str) -> dict:
+    """What `--account-code` answers every page with once a login's password
+    was typed: the account on the sign-in form's own host, showing `code`."""
+    origin = login_url.split("/login", 1)[0]
+    return {
+        "url": f"{origin}/account",
+        "title": "Your Example account",
+        "ready_state": "complete",
+        "nodes": [
+            {
+                "nodeId": "1",
+                "role": {"value": "RootWebArea"},
+                "name": {"value": "Your Example account"},
+                "childIds": ["2", "3"],
+            },
+            {"nodeId": "2", "role": {"value": "heading"}, "name": {"value": "Your Example account"}},
+            {"nodeId": "3", "role": {"value": "heading"}, "name": {"value": f"Latest order code: {code}"}},
+        ],
+    }
+
+
 def site_key(host: str) -> str:
     """A host's key form, as the Mac app keeps a login under it."""
     host = host.lower().rstrip(".")
@@ -193,6 +219,7 @@ class FakeHost:
         login_page: bool = False,
         saved_logins: dict[str, str] | None = None,
         login_url: str = LOGIN_URL,
+        account_code: str | None = None,
     ) -> None:
         self.fail_after = fail_after
         self.fail_reason = fail_reason
@@ -204,6 +231,10 @@ class FakeHost:
         self.login_page = login_page
         self.login_url = login_url
         self.saved_logins = {site_key(site): user for site, user in (saved_logins or {}).items()}
+        self.account_code = account_code
+        # Whether a fill has named the password field: the profile's sign-in,
+        # which every later page of every task sees, as a kept cookie would be.
+        self.signed_in_account = False
         self.tabs: dict[str, str] = {}
         self.next_tab = 1
         self.answered = 0
@@ -301,6 +332,8 @@ class FakeHost:
         raise SystemExit(f"browser_host_fixture: no answer scripted for {request_type}")
 
     def page(self, url: str) -> dict:
+        if self.signed_in_account and self.account_code:
+            return account_page(self.login_url, self.account_code)
         return login_page(self.login_url) if self.login_page else example_page(url)
 
     def opened(self, frame: dict) -> dict:
@@ -368,7 +401,9 @@ class FakeHost:
             if field in frame and frame[field] != ref:
                 raise Refusal("sign_in_field", f"ref {frame[field]} is not the form's {field[:-4]} field")
         filled = [field[:-4] for field in expected if field in frame]
+        # The form as it stood for the fill; the account shows from the next page.
         page = login_page(self.login_url)
+        self.signed_in_account = self.signed_in_account or "password" in filled
         result = {"url": page["url"], "title": page["title"], "filled": filled}
         if frame.get("observe"):
             result["page"] = page
@@ -436,6 +471,7 @@ def run(args: argparse.Namespace) -> None:
         login_page=args.login_page,
         saved_logins=dict(args.saved_login),
         login_url=args.login_url,
+        account_code=args.account_code,
     )
     try:
         for frame in read_frames(sock):
@@ -493,6 +529,12 @@ def parse_args() -> argparse.Namespace:
         default=[],
         metavar="SITE=USERNAME",
         help="a login the fake app keeps for SITE (repeatable); none means sign_in_no_login",
+    )
+    parser.add_argument(
+        "--account-code",
+        default=None,
+        metavar="CODE",
+        help="once a sign-in typed the password, answer every page with the account showing CODE",
     )
     parser.add_argument(
         "--no-attach",

@@ -12,6 +12,9 @@ defmodule FermixChannels.BrowserHost.SignInEndToEndTest do
   answer, or when the turn is stopped, and a later tool call of the same step
   runs only after the answer.
 
+  A scheduled run has no one to ask: it types the login when its job's row
+  names `browser`, and nothing when it does not.
+
   Sync: it drives the browser tree's own availability process and profile
   registry, the gate's own store of waiting calls and the channel's token
   store, as the owner's commands find them.
@@ -96,6 +99,16 @@ defmodule FermixChannels.BrowserHost.SignInEndToEndTest do
         model: "scripted"
       }
     end
+  end
+
+  # The rows of the jobs a scheduled run below is a run of: one the owner set
+  # up naming `browser`, and one with no list of its own.
+  defmodule BrowserJob do
+    def get_job("job_e2e", _opts), do: {:ok, %{allowed_tools: ["web_search", "browser"]}}
+  end
+
+  defmodule OpenJob do
+    def get_job("job_e2e", _opts), do: {:ok, %{allowed_tools: []}}
   end
 
   # Stands in for `computer_use`, a later call in the same step: when it runs,
@@ -314,6 +327,93 @@ defmodule FermixChannels.BrowserHost.SignInEndToEndTest do
     assert output =~ "sign_in_no_login"
     assert output =~ "Settings > Browser > Website logins"
     assert request_types(connection) == ["tab.open", "page.login_for"]
+  end
+
+  # ── a job's run ──────────────────────────────────────────────────────────
+
+  test "a scheduled run whose job names browser types the saved login, and no one is asked",
+       ctx do
+    connection = attach_app(ctx)
+    :ok = register(ctx, connection)
+    session = session()
+    TelemetryCapture.attach([[:fermix, :tool, :exec]], session_id: session)
+
+    run = start_run(ctx, session, BrowserJob, [[open()], [{"browser", @sign_in}]])
+
+    assert {{:ok, %{response: "Done."}}, results} = Task.await(run)
+    refute_received {:asked, _waiter, _request}
+    refute_received {:prompt, _part}
+
+    assert request_types(connection) == ["tab.open", "page.login_for", "page.sign_in"]
+
+    signed = results |> Enum.at(1) |> Map.fetch!(:output)
+    assert signed =~ ~s("filled":["username","password"])
+    assert signed =~ ~s("site":"example.com")
+
+    # The call's one event says whose consent let it through.
+    sign_ins = for {:telemetry, _, _, %{tool: "browser", kind: "sign_in"} = m} <- drain(), do: m
+    assert [%{success: true, access_gate: "scheduled", site: "example.com"}] = sign_ins
+  end
+
+  test "a scheduled run with no saved login for the page says where the owner adds one", ctx do
+    connection = attach_app(ctx, no_login: true)
+    :ok = register(ctx, connection)
+    run = start_run(ctx, session(), BrowserJob, [[open()], [{"browser", @sign_in}]])
+
+    assert {{:ok, _result}, results} = Task.await(run)
+    output = results |> Enum.at(1) |> Map.fetch!(:output)
+    assert output =~ "sign_in_no_login"
+    assert output =~ "Settings > Browser > Website logins"
+    assert request_types(connection) == ["tab.open", "page.login_for"]
+  end
+
+  test "a scheduled run whose job names no browser is refused before the app is asked", ctx do
+    connection = attach_app(ctx)
+    :ok = register(ctx, connection)
+    run = start_run(ctx, session(), OpenJob, [[open()], [{"browser", @sign_in}]])
+
+    assert {{:ok, _result}, results} = Task.await(run)
+    refute_received {:asked, _waiter, _request}
+    output = results |> Enum.at(1) |> Map.fetch!(:output)
+    assert output =~ "(sign_in_not_allowed)"
+    assert output =~ "a scheduled job of theirs whose allowed tools name browser"
+    assert request_types(connection) == ["tab.open"]
+  end
+
+  # A run of the owner's job `job_e2e`, in its own process as the runner runs
+  # one: no chat, no approval closure, and its job's row behind `jobs`.
+  defp start_run(ctx, session, jobs, steps) do
+    conversation = {:scheduled_job, "job_e2e", "run_#{System.unique_integer([:positive])}"}
+    {:ok, scope} = Scope.owner_key(%{source_trust: :operator, conversation_key: conversation})
+    pane = Scope.pane_key(scope, conversation)
+    on_exit(fn -> ProfileManager.stop_owner(pane) end)
+
+    context = %{
+      agent_name: "scheduled:job_e2e",
+      session_id: session,
+      source_trust: :operator,
+      conversation_key: conversation,
+      job_id: "job_e2e",
+      trigger: "schedule",
+      jobs_registry: jobs,
+      capability_registry: ctx.registry
+    }
+
+    Task.Supervisor.async_nolink(ctx.turns, fn ->
+      Process.put(:script, steps ++ [:done])
+
+      result =
+        AgentLoop.run(
+          messages: [%{role: "user", content: "Check the account page."}],
+          adapter: ScriptedAdapter,
+          adapter_opts: [model: "scripted"],
+          capability_registry: ctx.registry,
+          trust: :operator,
+          context: context
+        )
+
+      {result, Process.get(:tool_results, [])}
+    end)
   end
 
   # ── the turn ─────────────────────────────────────────────────────────────

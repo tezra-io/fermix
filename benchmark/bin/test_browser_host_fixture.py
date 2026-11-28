@@ -119,6 +119,42 @@ def test_sign_in_names_what_it_filled_in_order_and_nothing_else():
     assert fake.answer("page.sign_in", alone)["filled"] == ["username"]
 
 
+def test_the_account_shows_its_code_only_after_a_password_was_typed():
+    saved = {"example.com": "person@example.com"}
+    fake = host(login_page=True, saved_logins=saved, account_code="KESTREL-4471")
+    opening = {"task_id": "task-1", "url": "https://example.com/login", "observe": True}
+    frame = {"tab_id": "t1", "site": "example.com", "login_site": "example.com", "observe": True}
+
+    def shown(page: dict) -> str:
+        return json.dumps(page)
+
+    assert "KESTREL-4471" not in shown(fake.answer("tab.open", opening))
+
+    # A username alone signs nothing in, and the fill itself still shows the form.
+    fake.answer("page.sign_in", {**frame, "username_ref": fixture.USERNAME_REF})
+    assert "KESTREL-4471" not in shown(fake.answer("page.snapshot", {"tab_id": "t1"}))
+    typed = fake.answer("page.sign_in", {**frame, "password_ref": fixture.PASSWORD_REF})
+    assert typed["page"]["title"] == "Sign in to Example"
+
+    for request, more in [("page.snapshot", {}), ("page.act", {"kind": "submit", "observe": True})]:
+        answer = fake.answer(request, {"tab_id": "t1", **more})
+        assert "Latest order code: KESTREL-4471" in shown(answer)
+        assert "Password" not in shown(answer)
+
+    # Another task's page sees the same account, as a kept sign-in would.
+    later = fake.answer("tab.open", {**opening, "task_id": "task-2"})
+    assert later["url"] == "https://example.com/account"
+    assert "KESTREL-4471" in shown(later)
+
+
+def test_without_an_account_code_a_sign_in_changes_no_page():
+    fake = host(login_page=True, saved_logins={"example.com": "person@example.com"})
+    frame = {"tab_id": "t1", "site": "example.com", "login_site": "example.com", "observe": False}
+    fake.answer("page.sign_in", {**frame, "password_ref": fixture.PASSWORD_REF})
+    opened = fake.answer("tab.open", {"task_id": "task-1", "url": "https://example.com/login", "observe": True})
+    assert opened["title"] == "Sign in to Example"
+
+
 def test_sign_in_refuses_a_field_that_is_not_the_forms():
     fake = host(login_page=True, saved_logins={"example.com": "person@example.com"})
     frame = {"tab_id": "t1", "site": "example.com", "login_site": "example.com", "password_ref": 13, "observe": False}

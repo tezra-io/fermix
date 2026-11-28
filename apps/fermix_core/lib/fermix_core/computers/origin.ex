@@ -11,7 +11,7 @@ defmodule FermixCore.Computers.Origin do
       subagent or a skill at any depth) is `worker`, whatever surface it
       runs on;
     * a run a cue woke (`trigger: "cue"`) is `cue`; any other job run
-      (`trigger` `schedule`, `manual`, `watcher`) is `scheduled`;
+      (`trigger` `schedule`, `manual`, `watcher`, `retry`) is `scheduled`;
     * a coding run's notice re-entering a chat (`harness_continuation_depth`
       above 0) is `background`: the owner did not type it;
     * then the surface (`computer_use_origin`, `TurnRunner`'s one resolver):
@@ -35,7 +35,7 @@ defmodule FermixCore.Computers.Origin do
   @origins [:chat, :voice, :scheduled, :cue, :worker, :background]
   @wire_origins @origins ++ [:computer]
   @words Map.new(@wire_origins, &{Atom.to_string(&1), &1})
-  @scheduled_triggers ~w(schedule manual watcher)
+  @scheduled_triggers ~w(schedule manual watcher retry)
   # Every key `of/1` reads (`Access.worker?/1`'s depths among them).
   @facts [
     :subagent_depth,

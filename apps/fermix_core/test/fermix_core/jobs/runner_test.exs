@@ -6,6 +6,7 @@ defmodule FermixCore.Jobs.RunnerTest do
 
   alias FermixCore.Agents.AgentDefinition
   alias FermixCore.Agents.TurnRunner
+  alias FermixCore.Capabilities.AccessGate
   alias FermixCore.Capabilities.Builtin, as: BuiltinCapability
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
@@ -2164,6 +2165,70 @@ defmodule FermixCore.Jobs.RunnerTest do
     )
 
     assert_receive {:trigger_seen, "manual"}
+  end
+
+  # M84 K7: the context a real run hands its tools is the one the access gate
+  # reads a job's row from, so a run of a job that names `browser` reaches the
+  # browser tool with its sign-in let through and stamped, and a run of a job
+  # with no list of its own is refused before the tool.
+  test "a run signs in to a website only when its job's row names browser", %{
+    repo: repo,
+    capability_registry: capability_registry,
+    output_base_dir: output_base_dir
+  } do
+    browser = BuiltinCapability.from_tool_module(FermixCore.Tools.Browser)
+    stand_in = %{browser | executor: {__MODULE__, :report_context, [self()]}}
+    :ok = CapabilityRegistry.register(capability_registry, stand_in)
+
+    sign_in = %{
+      "action" => "act",
+      "kind" => "sign_in",
+      "site" => "example.com",
+      "username_ref" => "textbox_1",
+      "password_ref" => "textbox_2"
+    }
+
+    call = %{id: "fc_1", call_id: "call_1", name: "browser", arguments: Jason.encode!(sign_in)}
+    script = [%{tool_calls: [call]}, %{content: "Done."}]
+    run_opts = [repo: repo, capability_registry: capability_registry, script: script]
+    run_opts = Keyword.put(run_opts, :output_base_dir, output_base_dir)
+
+    assert {:ok, {job, run}} =
+             create_claimed_job(repo, name: "Order check", allowed_tools: ["browser"])
+
+    assert_runner_exits_normally(job, run, run_opts)
+    assert_receive {:tool_context, context}
+    assert context.access_gate == "scheduled"
+    assert AccessGate.job_sign_in?(context)
+
+    # A retry of the same job is a run of it like any other.
+    {:ok, {job, retry}} =
+      Repo.claim_job_now(
+        job.id,
+        %{state: "running", updated_at: ~U[2026-05-02 14:16:00Z]},
+        claim_run_attrs(job, ~U[2026-05-02 14:16:00Z], "retry"),
+        server: repo
+      )
+
+    assert_runner_exits_normally(job, retry, run_opts)
+    assert_receive {:tool_context, %{trigger: "retry", access_gate: "scheduled"}}
+
+    assert {:ok, {open_job, open_run}} = create_claimed_job(repo, name: "No list")
+    assert_runner_exits_normally(open_job, open_run, run_opts)
+    refute_received {:tool_context, _context}
+
+    refusals =
+      for {:adapter_continue, [%{output: output}]} <- flush_adapter_continues(), do: output
+
+    assert Enum.any?(refusals, &(&1 =~ "(sign_in_not_allowed)"))
+  end
+
+  defp flush_adapter_continues(seen \\ []) do
+    receive do
+      {:adapter_continue, _results} = message -> flush_adapter_continues([message | seen])
+    after
+      0 -> Enum.reverse(seen)
+    end
   end
 
   def execute_trigger_probe(_args, context, test_pid) do

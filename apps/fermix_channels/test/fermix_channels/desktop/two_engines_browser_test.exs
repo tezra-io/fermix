@@ -47,6 +47,12 @@ defmodule FermixChannels.Desktop.TwoEnginesBrowserTest do
   @report "%PDF-1.7 allotment orders"
   @receipts "date,item,total\n2026-10-30,seed potatoes,14.20\n"
 
+  # The row of the job a scheduled run below is a run of: one the owner set up
+  # naming `browser`.
+  defmodule BrowserJobs do
+    def get_job("job-cart", _opts), do: {:ok, %{allowed_tools: ["browser"]}}
+  end
+
   defmodule FakeChrome do
     @moduledoc """
     Chrome on the computer, as far as its profile server can tell: each
@@ -710,6 +716,57 @@ defmodule FermixChannels.Desktop.TwoEnginesBrowserTest do
       assert ops(ctx.e) == ~w(browser.open browser.login_for)
     end
 
+    # A job the owner set up naming `browser`: the server's gate reads its row,
+    # and the computer takes a job's run for one that may sign in.
+    test "a job's run whose row names browser signs in on the computer, and no one is asked",
+         ctx do
+      run = %{
+        trigger: "schedule",
+        conversation_key: {:scheduled_job, "job-cart", "run-1"},
+        job_id: "job-cart",
+        jobs_registry: BrowserJobs,
+        computer_use_origin: :background
+      }
+
+      {opened, signed} =
+        in_turn(fn ->
+          opened =
+            call(ctx, on_mac(%{"action" => "open", "url" => "https://example.com/login"}), run)
+
+          signed =
+            call(
+              ctx,
+              %{
+                "action" => "act",
+                "kind" => "sign_in",
+                "site" => "example.com",
+                "username_ref" => "textbox_1",
+                "password_ref" => "textbox_2",
+                "target" => decoded(opened)["target"]
+              },
+              run
+            )
+
+          {opened, signed}
+        end)
+
+      refute_received {:asked, _waiter, _id}
+      assert decoded(opened)["backend"] == "fermix_app"
+
+      said = decoded(signed)
+      assert said["filled"] == ["username", "password"]
+      assert said["computer"] == "studio Mac"
+
+      assert [{"tab.open", _open}, {"page.login_for", _lookup}, {"page.sign_in", typed}] =
+               FakeBrowserHostConnection.requests(ctx.browser.connection)
+
+      assert typed["password_ref"] == 12
+      assert ops(ctx.e) == ~w(browser.open browser.login_for browser.sign_in)
+
+      _open = exec_event()
+      assert %{access_gate: "scheduled", site: "example.com"} = exec_event()
+    end
+
     test "a tab handed over outlives its turn, and the next turn takes it over", ctx do
       first =
         in_turn(fn ->
@@ -767,7 +824,7 @@ defmodule FermixChannels.Desktop.TwoEnginesBrowserTest do
         "conversation" => "owner-YWxsb3RtZW50"
       }
 
-      scheduled = %{session_id: ctx.sid, trigger: "schedule", source_trust: :operator}
+      cue = %{session_id: ctx.sid, trigger: "cue", source_trust: :operator}
       voice = %{session_id: ctx.sid, computer_use_origin: :voice, source_trust: :operator}
 
       assert {:error, %Outcome{status: :refused, refusal: :not_attended}} =
@@ -776,7 +833,7 @@ defmodule FermixChannels.Desktop.TwoEnginesBrowserTest do
                  BrowserCapability,
                  "browser.login_for",
                  request,
-                 scheduled,
+                 cue,
                  TwoEngines.call_opts(ctx.e)
                )
 

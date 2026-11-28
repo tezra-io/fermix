@@ -460,8 +460,8 @@ defmodule FermixCore.Tools.Browser do
       %{
         tag: "sign_in_not_allowed",
         description:
-          "sign-ins run only on the owner's own attended turn, never from a shared channel, a " <>
-            "worker, a cue or a scheduled run"
+          "sign-ins run on the owner's own attended turn, or in a scheduled job of theirs " <>
+            "whose allowed tools name browser; never from a shared channel, a worker or a cue"
       },
       %{
         tag: "sign_in_not_on_voice",

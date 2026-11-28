@@ -1591,6 +1591,169 @@ defmodule FermixCore.Tools.JobsTest do
     end
   end
 
+  # M84 K7: a run of the owner's job that names `browser` signs in to websites
+  # with their saved logins and asks no one, so such a job is set up, changed,
+  # resumed and run now only on their direct ask, and is judged as the owner's
+  # job whoever asks.
+  describe "jobs naming the browser" do
+    setup %{context: context} do
+      registry = :"job_browser_caps_#{System.unique_integer([:positive])}"
+      start_supervised!({CapabilityRegistry, name: registry})
+      register_stand_in(registry, "web_search", :network, {__MODULE__, :report_context, [self()]})
+
+      for tool <- [FermixCore.Tools.Browser, ScheduleJob] do
+        :ok = CapabilityRegistry.register(registry, BuiltinCapability.from_tool_module(tool))
+      end
+
+      direct =
+        Map.merge(context, %{
+          capability_registry: registry,
+          computer_use_origin: :interactive,
+          chat_type: "private"
+        })
+
+      tainted = Map.put(direct, :outside_sources, MapSet.new([{:tool, "web_fetch"}]))
+
+      job = %{
+        "name" => "Order check",
+        "schedule" => "every 15 minutes",
+        "task" => "Read the newest order on the account page.",
+        "allowed_tools" => ["browser"]
+      }
+
+      %{direct: direct, tainted: tainted, registry: registry, job: job}
+    end
+
+    defp browser_job(direct, job) do
+      assert {:ok, %{success: true} = created} = ScheduleJob.execute(job, direct)
+      Jason.decode!(created.output)["id"]
+    end
+
+    # No scheduler runs here, so a run-now the gate let through ends at it.
+    defp past_the_gate?({:ok, %{success: false, error: error}}), do: error == ":disabled"
+
+    defp signs_in_refusal?(%{success: false, error: error}) do
+      assert error =~ "A scheduled job that names browser signs in to websites"
+      assert error =~ "only when you ask directly"
+      true
+    end
+
+    # What the turn read does not count: a turn looks a job's last run up
+    # before it changes or reruns the job.
+    test "schedule_job names it only from the owner's own turn, whatever that turn read", %{
+      direct: direct,
+      tainted: tainted,
+      job: job
+    } do
+      buzz = Map.put(direct, :session_env, %{"BUZZ_RELAY_URL" => "wss://relay.example.test"})
+
+      for context <- [
+            Map.put(direct, :skill_depth, 1),
+            Map.put(direct, :computer_use_origin, :unattended),
+            buzz
+          ] do
+        assert {:ok, refused} = ScheduleJob.execute(job, context)
+        assert signs_in_refusal?(refused)
+      end
+
+      assert {:ok, []} = Repo.list_scheduled_jobs(%{}, server: direct.memory_repo)
+      assert is_binary(browser_job(direct, job))
+      assert is_binary(browser_job(tainted, Map.put(job, "name", "Order check, after a look")))
+    end
+
+    test "update_job, run_job_now and resume_job refuse such a job from a turn nobody is in", %{
+      direct: direct,
+      tainted: tainted,
+      job: job
+    } do
+      job_id = browser_job(direct, job)
+      background = Map.put(direct, :computer_use_origin, :unattended)
+
+      assert {:ok, refused} =
+               UpdateJob.execute(
+                 %{"job_id" => job_id, "task" => "Buy the first item."},
+                 background
+               )
+
+      assert signs_in_refusal?(refused)
+      assert {:ok, stored} = Repo.get_scheduled_job(job_id, server: direct.memory_repo)
+      assert stored.task_prompt == job["task"]
+
+      assert {:ok, refused} = RunJobNow.execute(%{"job_id" => job_id}, background)
+      assert signs_in_refusal?(refused)
+      assert {:ok, []} = Repo.list_job_runs(%{job_id: job_id}, server: direct.memory_repo)
+
+      # Pausing only stops it, and stays open to any turn; resuming re-arms it.
+      assert {:ok, %{success: true}} = PauseJob.execute(%{"job_id" => job_id}, background)
+      assert {:ok, refused} = ResumeJob.execute(%{"job_id" => job_id}, background)
+      assert signs_in_refusal?(refused)
+
+      # The owner's own turn does all three, after reading the job's last run too.
+      assert {:ok, %{success: true}} = ResumeJob.execute(%{"job_id" => job_id}, tainted)
+
+      assert {:ok, %{success: true}} =
+               UpdateJob.execute(%{"job_id" => job_id, "task" => "Read the two newest."}, tainted)
+
+      assert past_the_gate?(RunJobNow.execute(%{"job_id" => job_id}, tainted))
+    end
+
+    # The job is the owner's and runs at their trust, so who asks does not make
+    # it a guest's: a plugin skill's worker (guest trust) starts none.
+    test "a guest-trust caller neither runs nor resumes the owner's job", %{
+      direct: direct,
+      job: job
+    } do
+      job_id = browser_job(direct, job)
+      plugin_worker = Map.merge(direct, %{effective_trust: :guest, skill_depth: 1})
+
+      assert {:ok, refused} = RunJobNow.execute(%{"job_id" => job_id}, plugin_worker)
+      assert signs_in_refusal?(refused)
+      assert {:ok, []} = Repo.list_job_runs(%{job_id: job_id}, server: direct.memory_repo)
+
+      assert {:ok, %{success: true}} = PauseJob.execute(%{"job_id" => job_id}, direct)
+      assert {:ok, refused} = ResumeJob.execute(%{"job_id" => job_id}, plugin_worker)
+      assert signs_in_refusal?(refused)
+
+      assert {:ok, %{state: "paused"}} =
+               Repo.get_scheduled_job(job_id, server: direct.memory_repo)
+    end
+
+    # A narrowed run's job gets the run's own tools when it names none, so a
+    # worker with the browser would hand it on: it names a list without it.
+    test "a worker with the browser sets up a job that leaves it out", %{
+      direct: direct,
+      registry: registry
+    } do
+      run_tools = ["web_search", "browser", "schedule_job"]
+
+      worker =
+        direct |> loop_context(registry, allowed_tools: run_tools) |> Map.put(:skill_depth, 1)
+
+      digest = %{"name" => "Digest", "schedule" => "every 15 minutes", "task" => "Summarize."}
+
+      assert {:ok, refused} = ScheduleJob.execute(digest, worker)
+      assert signs_in_refusal?(refused)
+      assert refused.error =~ "can be given allowed tools that leave it out"
+
+      assert {:ok, %{success: true} = created} =
+               ScheduleJob.execute(Map.put(digest, "allowed_tools", ["web_search"]), worker)
+
+      assert Jason.decode!(created.output)["allowed_tools"] == ["web_search"]
+    end
+
+    test "jobs that do not name it behave as before from any turn", %{direct: direct} do
+      background = Map.put(direct, :computer_use_origin, :unattended)
+      weather = %{"name" => "Weather", "schedule" => "every 15 minutes", "task" => "Weather."}
+      assert {:ok, %{success: true} = created} = ScheduleJob.execute(weather, background)
+      job_id = Jason.decode!(created.output)["id"]
+
+      assert {:ok, %{success: true}} =
+               UpdateJob.execute(%{"job_id" => job_id, "task" => "Rain?"}, background)
+
+      assert past_the_gate?(RunJobNow.execute(%{"job_id" => job_id}, background))
+    end
+  end
+
   # M60 §9.1, §15: a watcher's task is a job that runs on cues. The job tools
   # show it with its label, never run it by hand and never give it a schedule.
   describe "a job that runs on cues" do

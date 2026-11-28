@@ -76,16 +76,21 @@ defmodule FermixCore.Capabilities.AccessGate do
        host command reaches these rules only after outside content, so it
        parks at 6, and its prompt names what was read, never the channel).
 
-  The fourth kind only refuses (M84): a `browser` call of `act` kind `sign_in`
-  (`gate_kind/2`). It runs only on the owner's own attended turn, never from a
-  delegated worker, a cue or scheduled run (a job row naming `browser` does not
-  admit it), or a shared Buzz channel (`sign_in_not_allowed`), and never on a
-  voice turn (`sign_in_not_on_voice`): the model that read the page would
-  phrase the question, and a page can play a spoken yes. An admitted sign-in is
-  never parked. Its own call asks the owner with `ask_in_call/3` and waits for
-  the answer in the turn's process, since the pane task, its refs and its tab
-  end with the turn. Every confirm and deny path answers such a record by
-  message (`confirm_in_call/2`, `deny/2`) instead of running a recorded call.
+  The fourth kind runs or is refused and never parks (M84): a `browser` call of
+  `act` kind `sign_in` (`gate_kind/2`). It runs on the owner's own attended
+  turn, and in an operator scheduled run whose job row names `browser` (rule
+  3's consent, given when the owner set the job up); never from a delegated
+  worker, a cue run, a guest's job or a shared Buzz channel
+  (`sign_in_not_allowed`), and never on a voice turn (`sign_in_not_on_voice`):
+  the model that read the page would phrase the question, and a page can play a
+  spoken yes. On the owner's turn its own call asks them with `ask_in_call/3`
+  and waits for the answer in the turn's process, since the pane task, its refs
+  and its tab end with the turn. A scheduled run's asks no one
+  (`job_sign_in?/1`): the login typed is one the owner saved in the Fermix app
+  for the page's own site, and a job naming `browser` is set up, changed or
+  started only from a turn that could sign in itself (`check_job_tools/3`).
+  Every confirm and deny path answers a waiting record by message
+  (`confirm_in_call/2`, `deny/2`) instead of running a recorded call.
 
   Two related questions live here too: `owner_consent_turn?/1`, whether a turn
   may change what a watcher reads or what a task may do (with
@@ -150,6 +155,9 @@ defmodule FermixCore.Capabilities.AccessGate do
   @max_command_chars 2_000
   @max_outcome_chars 400
   @max_source_labels 5
+  # The stamp a decided call carries once a scheduled run's job row let it
+  # through (`dispatch_label/1`), which `job_sign_in?/1` reads back.
+  @scheduled_label "scheduled"
   @after_confirm "Once you confirm, Fermix runs exactly this command."
   @after_confirm_in_call "Fermix goes ahead only once you confirm."
   # An effect outside the machine: the owner reads a whole rendering (a phone
@@ -597,6 +605,19 @@ defmodule FermixCore.Capabilities.AccessGate do
   the kernel does not hold it, from a tainted turn) may be set up, changed,
   resumed or run now only from a turn that would run that tool directly.
 
+  So may a job of the owner's naming `browser`, whose runs sign in to websites
+  unasked: only from a turn that could sign in itself, which is the owner's
+  own attended turn, a voice turn included (it is refused a sign-in of its own
+  only because the question is not asked aloud, and a job's sign-in asks no
+  one), or a run of a job that itself names `browser`. What the turn read does
+  not count, as it does not for a sign-in of the turn's own: a turn reads a
+  job's last run before it changes the job, and a Computer History note is in
+  the turn before its first word. Whose job it is decides, not who asks:
+  `job_trust` is the trust the job runs at, an existing job's own
+  (`check_job_access/2` hands it on) or, for a job being set up, the caller's
+  (`Registry.run_trust/1`, the default). A guest's job never signs in, so it
+  is set up, changed and started as before.
+
   A job can also reach host commands its list does not name: an empty list is
   the full operator surface (`Jobs.Runner` narrows `[]` to nil), and a job that
   can run now or resume a job (`run_job_now`, `resume_job`) can start, from its
@@ -609,13 +630,16 @@ defmodule FermixCore.Capabilities.AccessGate do
   through it. A `subagents` worker takes the job's own list and widens nothing.
   Unknown names and every other tool pass.
   """
-  @spec check_job_tools([String.t()], map()) :: :ok | {:error, String.t()}
-  def check_job_tools(names, context) when is_list(names) and is_map(context) do
+  @spec check_job_tools([String.t()], map(), :operator | :guest | nil) ::
+          :ok | {:error, String.t()}
+  def check_job_tools(names, context, job_trust \\ nil)
+      when is_list(names) and is_map(context) and job_trust in [:operator, :guest, nil] do
     registry = Map.get(context, :capability_registry) || CapabilityRegistry
+    trust = job_trust || CapabilityRegistry.run_trust(context)
 
-    case Enum.find(names, &blocked_job_tool?(registry, &1, context)) do
+    case Enum.find(names, &blocked_job_tool?(registry, &1, context, trust)) do
       nil -> check_wider_surface(registry, names, context)
-      name -> {:error, job_refusal(name)}
+      name -> {:error, job_refusal(registry, name)}
     end
   end
 
@@ -737,8 +761,9 @@ defmodule FermixCore.Capabilities.AccessGate do
 
   defp effect_call?(capability, args), do: effect_module!(capability).effect_call?(args)
 
-  # A sign-in only refuses: it never parks, and an admitted one asks the owner
-  # from its own call. Who is refused is `sign_in_refusal/1`'s answer.
+  # A sign-in runs or is refused and never parks: an admitted one asks the
+  # owner from its own call, or no one when its job's row is their consent
+  # (`job_sign_in?/1`). Who is refused is `sign_in_refusal/1`'s answer.
   defp sign_in_decision(context) do
     case sign_in_refusal(context) do
       nil ->
@@ -753,21 +778,41 @@ defmodule FermixCore.Capabilities.AccessGate do
     end
   end
 
-  # In order: no owner is in a worker's, a cue run's or a scheduled run's loop
-  # (a job row naming `browser` is never read), only the owner's attended turn
-  # may sign in, and other people post in a shared Buzz channel. A voice turn is
-  # a live call's (`voice_call_id`) or one its origin marks as voice.
+  # In order: no owner is in a worker's or a cue run's loop, a scheduled run
+  # signs in on its job's row alone, only the owner's attended turn may sign in
+  # otherwise, and other people post in a shared Buzz channel. A voice turn is a
+  # live call's (`voice_call_id`) or one its origin marks as voice.
   defp sign_in_refusal(context) do
     cond do
       Access.worker?(context) -> :worker
       cue_run?(context) -> :cue_run
-      Authorization.scheduled?(context) -> :scheduled
+      Authorization.scheduled?(context) -> scheduled_sign_in_refusal(context)
       not Access.attended_operator_turn?(context) -> :unattended
       shared_channel?(context) -> :shared_channel
       voice_turn?(context) -> :voice
       true -> nil
     end
   end
+
+  # Rule 3 for a sign-in: an operator scheduled run whose job row names
+  # `browser` signs in, the owner's consent given when they set the job up. A
+  # guest's job never does, and its row is not read.
+  defp scheduled_sign_in_refusal(context) do
+    if scheduled_operator?(context) and scheduled_decision(Browser.name(), context) == :dispatch,
+      do: nil,
+      else: :scheduled
+  end
+
+  @doc """
+  Whether the sign-in in `context` is a scheduled run's that `admit/3` let
+  through on its job's row: the owner's consent given when they set the job
+  up, so the call asks no one (`Browser.SignIn`). Read from the stamp
+  `admit/3` puts on the context of a decided call it dispatches, so a call
+  that did not come through the gate is never one.
+  """
+  @spec job_sign_in?(map()) :: boolean()
+  def job_sign_in?(context) when is_map(context),
+    do: Map.get(context, :access_gate) == @scheduled_label and Authorization.scheduled?(context)
 
   @doc """
   Whether `context` is a voice turn: a live call's own (`voice_call_id`), or
@@ -983,7 +1028,7 @@ defmodule FermixCore.Capabilities.AccessGate do
   defp apply_decision({:refuse, reason}, call), do: refuse(call, reason)
 
   defp dispatch_label(context),
-    do: if(Authorization.scheduled?(context), do: "scheduled", else: "direct")
+    do: if(Authorization.scheduled?(context), do: @scheduled_label, else: "direct")
 
   defp admit_confirmed(%{capability: capability, args: args, context: context} = call, digest) do
     if digest == digest(capability.name, args) do
@@ -1440,14 +1485,26 @@ defmodule FermixCore.Capabilities.AccessGate do
     |> bounded(@max_outcome_chars)
   end
 
-  defp blocked_job_tool?(registry, name, context) when is_binary(name) do
+  defp blocked_job_tool?(registry, name, context, job_trust) when is_binary(name) do
     case CapabilityRegistry.find(registry, name) do
-      {:ok, %Capability{} = capability} -> held_for_job?(capability, context)
-      :error -> false
+      {:ok, %Capability{metadata: %{tool_module: Browser}}} ->
+        job_trust == :operator and not sign_in_job_turn?(context)
+
+      {:ok, %Capability{} = capability} ->
+        held_for_job?(capability, context)
+
+      :error ->
+        false
     end
   end
 
-  defp blocked_job_tool?(_registry, _name, _context), do: false
+  defp blocked_job_tool?(_registry, _name, _context, _job_trust), do: false
+
+  # Whether this turn may set up, change or start a job of the owner's that
+  # names `browser`, which signs in unasked: one that could sign in itself
+  # (`sign_in_refusal/1`). A voice turn is one: the question it cannot ask
+  # aloud is one a job never asks.
+  defp sign_in_job_turn?(context), do: sign_in_refusal(context) in [nil, :voice]
 
   # Whether this turn could not run `capability` itself, so a job naming it may
   # not be set up from here either. No call's arguments: a job's run is never
@@ -1836,9 +1893,9 @@ defmodule FermixCore.Capabilities.AccessGate do
 
   defp refusal_text(:sign_in, :sign_in_not_allowed, _call) do
     "Not signed in: Fermix signs in to a website only when the owner asks in their own " <>
-      "chat or the Fermix app, never from a delegated worker, a cue, a scheduled job or a " <>
-      "shared channel. Ask the owner to request the sign-in from their own chat or the " <>
-      "Fermix app. (sign_in_not_allowed)"
+      "chat or the Fermix app, or in a scheduled job of theirs whose allowed tools name " <>
+      "browser, never from a delegated worker, a cue or a shared channel. Ask the owner to " <>
+      "request the sign-in from their own chat or the Fermix app. (sign_in_not_allowed)"
   end
 
   defp refusal_text(:sign_in, :sign_in_not_on_voice, _call) do
@@ -1952,6 +2009,20 @@ defmodule FermixCore.Capabilities.AccessGate do
   defp refusal_text(:no_surface, tool) do
     "#{tool} was not sent: it needs the owner's confirmation and Fermix has no private chat " <>
       "to ask them on. Ask from the Fermix app, your own chat, or by voice."
+  end
+
+  defp job_refusal(registry, name) do
+    case CapabilityRegistry.find(registry, name) do
+      {:ok, %Capability{metadata: %{tool_module: Browser}}} -> sign_in_job_refusal()
+      _command -> job_refusal(name)
+    end
+  end
+
+  defp sign_in_job_refusal do
+    "A scheduled job that names browser signs in to websites with the logins you saved, so " <>
+      "it can be set up, changed or run now only when you ask directly, from your own " <>
+      "chat, app or voice. Ask again directly. A job that does not use the browser can be " <>
+      "given allowed tools that leave it out."
   end
 
   defp job_refusal(tool) do

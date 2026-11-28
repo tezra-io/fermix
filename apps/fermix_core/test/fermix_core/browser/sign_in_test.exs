@@ -352,6 +352,66 @@ defmodule FermixCore.Browser.SignInTest do
       assert FakeBrowserHostConnection.releases(connection) == []
     end
 
+    # The owner's consent is the job's own row (`AccessGate.admit/3` stamps the
+    # call it admits on it), and a run has no chat to ask in.
+    test "a scheduled run the gate admitted on its job's row types the login and asks no one",
+         ctx do
+      {pid, connection} = pane(ctx)
+      {:ok, opened} = open_login(pid)
+      run = job_run(ctx)
+
+      assert {:ok, result} =
+               SignIn.run(Map.put(sign_in_args(), "target", opened), run, :fermix_app, route(pid))
+
+      refute_received {:asked, _waiter, _id}
+      assert :none = Pending.pending_from(run.session_id, ctx.pending)
+
+      assert result["filled"] == ["username", "password"]
+      assert result["username"] == "person@example.com"
+
+      assert [{"tab.open", _open}, {"page.login_for", _lookup}, {"page.sign_in", typed}] =
+               FakeBrowserHostConnection.requests(connection)
+
+      assert typed["username_ref"] == 11
+      assert typed["password_ref"] == 12
+    end
+
+    test "a scheduled run with no saved login for the page is told where the owner adds one",
+         ctx do
+      {pid, connection} = pane(ctx, no_login: true)
+      {:ok, opened} = open_login(pid)
+
+      assert {:error, %Error{code: "sign_in_no_login", message: message}} =
+               SignIn.run(
+                 Map.put(sign_in_args(), "target", opened),
+                 job_run(ctx),
+                 :fermix_app,
+                 route(pid)
+               )
+
+      assert message =~ "in Settings > Browser > Website logins"
+      assert message =~ "Never ask the owner for the password"
+      refute "page.sign_in" in request_types(connection)
+    end
+
+    # A scheduled run that reaches a sign-in without the gate's stamp was not
+    # admitted on its job's row: it is asked about like any other, and with no
+    # chat to ask in nothing is typed.
+    test "a scheduled run without the gate's stamp types nothing", ctx do
+      {pid, connection} = pane(ctx)
+      {:ok, opened} = open_login(pid)
+
+      assert {:error, %Error{code: "sign_in_not_delivered"}} =
+               SignIn.run(
+                 Map.put(sign_in_args(), "target", opened),
+                 Map.delete(job_run(ctx), :access_gate),
+                 :fermix_app,
+                 route(pid)
+               )
+
+      refute "page.sign_in" in request_types(connection)
+    end
+
     test "the owner's no types nothing", ctx do
       {pid, connection} = pane(ctx)
       {:ok, opened} = open_login(pid)
@@ -518,6 +578,21 @@ defmodule FermixCore.Browser.SignInTest do
         {:ok, "tok-1", :new}
       end,
       reply_fn: fn part -> send(test, {:prompt, part}) end
+    }
+  end
+
+  # A scheduled run of a job of the owner's, as the gate hands on the sign-in
+  # it admitted: no chat, no approval closure, and the gate's stamp.
+  defp job_run(ctx) do
+    %{
+      agent_name: "scheduled:job_x",
+      session_id: "sign-in-run-#{System.unique_integer([:positive])}",
+      source_trust: :operator,
+      conversation_key: {:scheduled_job, "job_x", "run_1"},
+      job_id: "job_x",
+      trigger: "schedule",
+      access_pending: ctx.pending,
+      access_gate: "scheduled"
     }
   end
 

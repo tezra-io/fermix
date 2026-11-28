@@ -142,6 +142,24 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **A scheduled job you set up to use the browser signs in to websites on its
+  own.** A run that met a signed-out site could not sign in at all, even with
+  the login saved in the Mac app, and could only tell you to ask from your
+  chat. Now a run of a job whose allowed tools name `browser` types the login
+  you saved under Settings > Browser > Website logins, with no question to
+  you: naming the browser on the job is your yes. Jobs that already name it
+  get this from their next run. Because such a job signs in unasked, one is
+  set up, changed, resumed or run by hand only from your own chat, app or
+  voice turn, or by a run of a job that itself names the browser: never by a
+  delegated worker, a background run, a watcher's cue run or a shared
+  channel. The password still never leaves the app, which types it only into
+  the site it was saved for. Where no login is saved for the site, the run
+  tells you where to add one and never asks for the password. A job with no
+  tool list of its own, a guest's job, a watcher's cue run and a delegated
+  worker still never sign in, and your own turns still ask before a password
+  is typed. A run while the Mac is locked or its display sleeps uses Chrome,
+  where saved logins are not typed.
+
 - **Open loops are on by default.** Fermix keeps track of what you say you
   will do, decide or are waiting on, and may check in on it, without being
   switched on first: a home that never set `[fermix_core.open_loops] enabled`

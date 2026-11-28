@@ -15,7 +15,9 @@ defmodule FermixCore.Browser.SignIn do
        call with `username_ref` alone is not asked about: it types only the
        saved username, only into a page of the saved site (its own host, or
        a subdomain of it the app found no login of its own for), and tells
-       the model nothing it did not have.
+       the model nothing it did not have. Nor is a scheduled run's the gate
+       let through on its job's row (`AccessGate.job_sign_in?/1`): naming
+       `browser` on the job was the owner's yes, and no one is there to ask.
     3. `sign_in` on the same profile, task and tab (`page.sign_in`): the app
        checks the page again, reads the password from its keychain and types
        it.
@@ -141,13 +143,17 @@ defmodule FermixCore.Browser.SignIn do
   # ── the owner's answer ─────────────────────────────────────────────────────
 
   defp approved(%{"password_ref" => ref}, site, login, context) when is_binary(ref) do
+    if AccessGate.job_sign_in?(context), do: :ok, else: asked(site, login, context)
+  end
+
+  defp approved(_username_only, _site, _login, _context), do: :ok
+
+  defp asked(site, login, context) do
     site
     |> prompt(login)
     |> AccessGate.ask_in_call(context, Timeouts.sign_in_approval())
     |> answer()
   end
-
-  defp approved(_username_only, _site, _login, _context), do: :ok
 
   # The login that will be used, as the app named it. The second form appears
   # only when the page's host and the site the login is saved for differ: the

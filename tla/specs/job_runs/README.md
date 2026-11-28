@@ -2547,9 +2547,9 @@ moved up by two with the code.
   AgentLoop survives it (JOB-8).
 - The access gate is outside the model. A run's access-sensitive tool call
   that its job row does not name is refused inside the one `Loop` step; a
-  scheduled run never parks a call for the owner (`access_gate.ex:320-330`,
-  `:898-907`), nor a phone call's start, the gate's external effect
-  (`:714-724`).
+  scheduled run never parks a call for the owner (`access_gate.ex:328-338`,
+  `:937-949`), nor a phone call's start, the gate's external effect
+  (`:738-748`).
   An owner edit, resume or run now of a job naming such a tool, from a turn
   that could not run it directly, is refused by the tool before any registry
   write or Scheduler call (`job_registry_support.ex:36-41`): a request the owner

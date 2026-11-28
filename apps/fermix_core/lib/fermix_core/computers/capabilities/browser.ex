@@ -31,10 +31,11 @@ defmodule FermixCore.Computers.Capabilities.Browser do
   same rule. A result above #{256} KiB rides the part too.
 
   On this computer, before anything runs (`admit/3`): a sign-in only on a
-  chat turn (a call's voice is refused, as the server refuses it), a hand-over
-  and a profile whose mode is a granted tab only on a turn the owner is in.
-  The origin is the server's word, so these guard against a bug there; the
-  server checks the same, and more (a shared channel), before it sends.
+  chat turn or a job's run (a call's voice is refused, as the server refuses
+  it), a hand-over and a profile whose mode is a granted tab only on a turn
+  the owner is in. The origin is the server's word, so these guard against a
+  bug there; the server checks the same, and more (a shared channel, the row
+  of a run's job), before it sends.
 
   Its configuration is the invocation's context (`context.browser`, the
   result of `Desktop.Invoke`'s `:browser`, `local/0` on a running engine),
@@ -516,13 +517,19 @@ defmodule FermixCore.Computers.Capabilities.Browser do
       else: {:refused, :unavailable, "Only a turn on the server uses this computer's browser."}
   end
 
-  defp signs_in_on(op, :chat) when op in ["browser.login_for", "browser.sign_in"], do: :ok
+  # A job's run signs in on its job's row, which the server's gate reads
+  # (`AccessGate`); here it is one more origin that may.
+  defp signs_in_on(op, origin)
+       when op in ["browser.login_for", "browser.sign_in"] and origin in [:chat, :scheduled],
+       do: :ok
 
   defp signs_in_on(op, :voice) when op in ["browser.login_for", "browser.sign_in"],
     do: {:refused, :unavailable, "A sign-in is approved in the chat, not by voice."}
 
-  defp signs_in_on(op, _origin) when op in ["browser.login_for", "browser.sign_in"],
-    do: {:refused, :not_attended, "A sign-in runs only on the owner's own turn in the chat."}
+  defp signs_in_on(op, _origin) when op in ["browser.login_for", "browser.sign_in"] do
+    {:refused, :not_attended,
+     "A sign-in runs only on the owner's own turn in the chat or a scheduled job of theirs."}
+  end
 
   defp signs_in_on(_op, _origin), do: :ok
 

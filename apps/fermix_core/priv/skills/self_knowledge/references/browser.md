@@ -168,10 +168,15 @@ on an `https` page whose host is the saved site (a leading `www.` aside) or,
 when no login is saved for that host itself, a subdomain of it: a login saved
 for `example.com` also signs in on `accounts.example.com`, and the approval
 names both. Never a look-alike such as `evilexample.com`. And only on the
-owner's own attended turn from their chat or the app: never by voice, from a
-shared channel, a delegated worker, a cue or a scheduled run, and never in
-Chrome (`fermix_chrome` included), the person's own tab or on Linux
-(`sign_in_pane_only`). When no login fits the page's host (`sign_in_no_login`),
+owner's own attended turn from their chat or the app, or in a run of a
+scheduled job of theirs whose `allowed_tools` names `browser`: never by voice,
+from a shared channel, a delegated worker or a cue, and never in Chrome
+(`fermix_chrome` included), the person's own tab or on Linux
+(`sign_in_pane_only`). A job's run asks no one, since naming `browser` on the
+job was the owner's yes; a job with no tool list of its own, and a guest's,
+never signs in (`sign_in_not_allowed`), and a run while the Mac is locked or
+its display sleeps is in Chrome, so it cannot sign in then. When no login fits
+the page's host (`sign_in_no_login`),
 the agent tells the owner to add one in Settings > Browser > Website logins in
 the Fermix app on their Mac, and never asks for the password in the chat. A
 build of the app that cannot open its keychain group has no login store
@@ -205,8 +210,9 @@ to there or a website login saved in that Mac's Fermix app. Without
   its computer across the call's tool calls.
 - **Website logins keep every rule.** The password stays in that Mac's
   keychain and its app types it, after the owner approves in the chat
-  within a minute; never by voice, from a shared channel, a worker, a cue,
-  a scheduled run or an unattended turn: the server refuses those, and that
+  within a minute, or unasked in a run of a scheduled job of theirs whose
+  `allowed_tools` names `browser`; never by voice, from a shared channel, a
+  worker, a cue or an unattended turn: the server refuses those, and that
   computer refuses them again.
 - **Files cross as bytes, at most 20 MiB.** A screenshot, a PDF or a
   download comes back and is kept in the server's own browser folder, and

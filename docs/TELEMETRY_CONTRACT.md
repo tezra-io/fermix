@@ -124,8 +124,9 @@ show the owner whole), `refused_unshown_file` (a coding run naming
 `refused_confirmation_too_long` (an effect whose confirmation is too long to
 show the owner whole), `refused_unconfirmable` (an effect its own module
 refuses before the owner is asked, in that module's sentence),
-`refused_sign_in_not_allowed` (a sign-in outside the owner's attended turn, or
-from a shared Buzz channel) and `refused_sign_in_not_on_voice` (a sign-in on a
+`refused_sign_in_not_allowed` (a sign-in outside the owner's attended turn and
+outside a scheduled run whose job row names `browser`, or from a shared Buzz
+channel) and `refused_sign_in_not_on_voice` (a sign-in on a
 voice turn). The refused
 labels are one function's output (`refused_<reason>`), so a new refusal reason
 is a new label here. `refused_cue_run` is an access-sensitive call made by a job

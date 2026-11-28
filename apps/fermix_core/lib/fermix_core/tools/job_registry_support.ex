@@ -36,12 +36,18 @@ defmodule FermixCore.Tools.JobRegistrySupport do
   An existing job row's access check for `update_job`, `resume_job` and
   `run_job_now`: a job whose allowlist names an access-sensitive tool may be
   changed, resumed or run now only from a turn that would run that tool
-  directly (`Capabilities.AccessGate`). Returns the row it read.
+  directly (`Capabilities.AccessGate`), judged at the trust the job itself
+  runs at, whoever asks. Returns the row it read.
   """
   @spec check_job_access(String.t(), map()) :: {:ok, map()} | {:error, term()}
   def check_job_access(job_id, context) when is_binary(job_id) and is_map(context) do
     with {:ok, job} <- JobsRegistry.get_job(job_id, repo: repo(context)),
-         :ok <- AccessGate.check_job_tools(Map.get(job, :allowed_tools) || [], context) do
+         :ok <-
+           AccessGate.check_job_tools(
+             Map.get(job, :allowed_tools) || [],
+             context,
+             Runner.effective_trust(job)
+           ) do
       {:ok, job}
     end
   end
