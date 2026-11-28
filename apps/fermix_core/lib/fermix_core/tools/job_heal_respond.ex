@@ -19,8 +19,9 @@ defmodule FermixCore.Tools.JobHealRespond do
   itself: whether a decision is carried out, and how, is code's, in the heal
   run after its loop has ended (`Jobs.HealDecision`). A note is at most 280
   characters, one or two sentences, and a longer one is refused, never cut. A proposed
-  `change` names only `update_job`'s own fields for what a job does, where
-  it reports and how long it may run: never its tools, and never its removal.
+  `change` names only `update_job`'s own fields for what a job does and how
+  long it may run (`Jobs.HealDecision.change_fields/0`): never where it
+  delivers, never its tools, and never its removal.
   Every accepted call is sent: keeping the first decision and ignoring a
   later one is the heal run's, which owns the run.
   """
@@ -39,8 +40,8 @@ defmodule FermixCore.Tools.JobHealRespond do
     "tell" => :tell
   }
   @note_max 280
-  @text_fields ~w(task schedule skill_name provider model delivery_mode)
-  @change_fields @text_fields ++ ~w(timeout_seconds clear_route_pin delivery_target)
+  @text_fields ~w(task schedule skill_name provider model)
+  @change_fields @text_fields ++ ~w(timeout_seconds clear_route_pin)
 
   @type decision :: %{
           decision: :rerun | :raise_limit | :pause | :propose | :tell,
@@ -95,9 +96,7 @@ defmodule FermixCore.Tools.JobHealRespond do
             timeout_seconds: %{type: "integer", minimum: 1},
             provider: %{type: "string"},
             model: %{type: "string"},
-            clear_route_pin: %{type: "boolean"},
-            delivery_mode: %{type: "string", enum: ["none", "origin", "channel", "local"]},
-            delivery_target: %{type: "object"}
+            clear_route_pin: %{type: "boolean"}
           }
         }
       }
@@ -244,7 +243,6 @@ defmodule FermixCore.Tools.JobHealRespond do
 
   defp valid_field?({"timeout_seconds", value}), do: is_integer(value) and value > 0
   defp valid_field?({"clear_route_pin", value}), do: value == true
-  defp valid_field?({"delivery_target", value}), do: is_map(value) and map_size(value) > 0
 
   defp ended(%{decision: decision}) do
     "Decision #{decision} recorded. This heal run ends here: make no further tool calls and " <>

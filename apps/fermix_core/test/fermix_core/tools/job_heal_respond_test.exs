@@ -4,7 +4,9 @@ defmodule FermixCore.Tools.JobHealRespondTest do
   # heal run it refuses, naming itself.
   use ExUnit.Case, async: true
 
+  alias FermixCore.Jobs.HealDecision
   alias FermixCore.Tools.JobHealRespond
+  alias FermixTestSupport.TelemetryCapture
 
   @note "The harbour page now waits on every fetch until the limit ends it."
 
@@ -72,6 +74,45 @@ defmodule FermixCore.Tools.JobHealRespondTest do
         refute_received {:job_heal_respond, _ref, _decision}
       end
     end
+  end
+
+  # A heal never changes where a job delivers, as it never touches the job's
+  # tools: a change naming either delivery field is refused as one naming any
+  # field a heal may not change, traced under that refusal's tag with the
+  # sentence naming the field, and the schema offers neither.
+  test "a proposal that moves where the job delivers is refused, and none is offered" do
+    TelemetryCapture.attach([[:fermix, :tool, :exec]], :emitter)
+
+    for {change, named} <- [
+          {%{"delivery_mode" => "channel"}, "delivery_mode"},
+          {%{"delivery_target" => %{"platform" => "telegram", "chat_id" => "99999"}},
+           "delivery_target"},
+          {%{"schedule" => "every 2 hours", "delivery_mode" => "none"}, "delivery_mode"}
+        ] do
+      {result, _ref} = respond(%{"decision" => "propose", "change" => change, "note" => @note})
+
+      refute result.success
+      assert result.error =~ "these are not: #{named}."
+      refute_received {:job_heal_respond, _ref, _decision}
+
+      assert_received {:telemetry, [:fermix, :tool, :exec], _measurements,
+                       %{tool: "job_heal_respond", error_code: "invalid_change"} = traced}
+
+      assert traced.error_summary =~ named
+    end
+
+    offered = Map.keys(JobHealRespond.parameters().properties.change.properties)
+    refute :delivery_mode in offered
+    refute :delivery_target in offered
+  end
+
+  # What the schema offers is what a stored change may name: the store reads a
+  # change naming any other field as none.
+  test "the change it offers names exactly the fields a stored change may name" do
+    offered = Map.keys(JobHealRespond.parameters().properties.change.properties)
+
+    assert Enum.sort(Enum.map(offered, &Atom.to_string/1)) ==
+             Enum.sort(HealDecision.change_fields())
   end
 
   # Stage S4, round two: the note is one or two sentences, so its bound is 280

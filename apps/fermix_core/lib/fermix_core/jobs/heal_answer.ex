@@ -47,9 +47,7 @@ defmodule FermixCore.Jobs.HealAnswer do
     "timeout_seconds" => :timeout_seconds,
     "provider" => :provider,
     "model" => :model,
-    "clear_route_pin" => :clear_route_pin,
-    "delivery_mode" => :delivery_mode,
-    "delivery_target" => :delivery_target
+    "clear_route_pin" => :clear_route_pin
   }
 
   @type reason ::
@@ -245,7 +243,7 @@ defmodule FermixCore.Jobs.HealAnswer do
   end
 
   # What is written must be what the owner was shown: every recorded field's
-  # value exactly, and nothing more than a cleared target.
+  # value exactly, and nothing more.
   defp faithful(attrs, change, job) do
     covered = Enum.map(change, fn {field, _value} -> Map.fetch!(@attr_keys, field) end)
 
@@ -254,7 +252,7 @@ defmodule FermixCore.Jobs.HealAnswer do
           Map.get(attrs, Map.fetch!(@attr_keys, field)) != to,
           do: field
 
-    extra = for {key, value} <- attrs, key not in covered, not is_nil(value), do: key
+    extra = for {key, _value} <- attrs, key not in covered, do: key
 
     case differing ++ Enum.map(extra, &Atom.to_string/1) do
       [] ->
@@ -332,6 +330,5 @@ defmodule FermixCore.Jobs.HealAnswer do
   defp job_words(name), do: "\"" <> HealMessage.shown_name(name) <> "\""
 
   defp reason_words(reason) when is_binary(reason), do: String.slice(reason, 0, @reason_max)
-  defp reason_words({:invalid_delivery_target, message}) when is_binary(message), do: message
   defp reason_words(reason), do: reason |> inspect() |> String.slice(0, @reason_max)
 end

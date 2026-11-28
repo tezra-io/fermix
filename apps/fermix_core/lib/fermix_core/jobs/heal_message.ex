@@ -349,8 +349,8 @@ defmodule FermixCore.Jobs.HealMessage do
   @doc """
   Each changed field of a heal's proposal as one line, built by code from the
   stored change (M106 §5.8, D5): its label and its new value only, in a fixed
-  order (task, schedule, skill, time limit, model, delivery); a pin's
-  provider and model, and a delivery's mode and target, are one line each.
+  order (task, schedule, skill, time limit, model); a pin's provider and
+  model are one line.
   A task is shown as its changed part: the common start and end trimmed to
   whole words, then the words added, the words removed, what replaces what,
   or the new text alone when nothing is in common, never both whole texts.
@@ -375,7 +375,7 @@ defmodule FermixCore.Jobs.HealMessage do
   change, in `change_lines/2`'s order. A task, or any value written over
   several lines, is set out line by line, each line marked as the value's,
   so no value can pass for a field of its own; every other value follows
-  its label. A delivery names its mode, platform and destination.
+  its label.
   """
   @spec change_detail(map()) :: String.t()
   def change_detail(change) when is_map(change) and map_size(change) > 0 do
@@ -384,8 +384,7 @@ defmodule FermixCore.Jobs.HealMessage do
       schedule: detail_pair(Map.get(change, "schedule")),
       skill: skill_detail(Map.get(change, "skill_name")),
       timeout: timeout_detail(Map.get(change, "timeout_seconds")),
-      model: pin_detail(change),
-      delivery: delivery_detail(change)
+      model: pin_detail(change)
     ]
     |> Enum.reject(fn {_field, pair} -> is_nil(pair) end)
     |> Enum.flat_map(fn {field, {now, after_change}} ->
@@ -400,8 +399,7 @@ defmodule FermixCore.Jobs.HealMessage do
       schedule: Map.get(change, "schedule"),
       skill: Map.get(change, "skill_name"),
       timeout: Map.get(change, "timeout_seconds"),
-      model: pin_change(change),
-      delivery: delivery_change(change)
+      model: pin_change(change)
     ]
     |> Enum.reject(fn {_field, value} -> is_nil(value) end)
   end
@@ -411,8 +409,7 @@ defmodule FermixCore.Jobs.HealMessage do
     schedule: "Schedule",
     skill: "Skill",
     timeout: "Time limit",
-    model: "Model",
-    delivery: "Delivery"
+    model: "Model"
   }
 
   # A task, and any value over several lines, line by line under its label,
@@ -467,32 +464,6 @@ defmodule FermixCore.Jobs.HealMessage do
 
   defp pin_words(_none), do: @no_pin
 
-  defp delivery_detail(change) do
-    if Map.has_key?(change, "delivery_mode") or Map.has_key?(change, "delivery_target") do
-      mode = Map.get(change, "delivery_mode")
-      target = Map.get(change, "delivery_target")
-
-      {delivery_whole(end_of(mode, "from"), end_of(target, "from")),
-       delivery_whole(end_of(mode, "to"), end_of(target, "to"))}
-    end
-  end
-
-  # A mode, the platform it reaches and where on it, whole.
-  defp delivery_whole(mode, %{"platform" => platform} = target) do
-    where = "on #{text(platform)}" <> destination_words(target)
-    if is_binary(mode), do: "#{mode}, #{where}", else: where
-  end
-
-  defp delivery_whole(mode, _target) when is_binary(mode), do: mode
-  defp delivery_whole(nil, _target), do: "none"
-
-  defp destination_words(target) do
-    case Enum.find_value(~w(chat_id channel_id recipient target reply_target), &target[&1]) do
-      nil -> ""
-      destination -> " (#{text(destination)})"
-    end
-  end
-
   defp pin_change(%{"clear_route_pin" => _cleared}), do: :cleared
 
   defp pin_change(change) do
@@ -500,12 +471,6 @@ defmodule FermixCore.Jobs.HealMessage do
       [] -> nil
       pin -> Enum.map_join(pin, " ", &text/1)
     end
-  end
-
-  defp delivery_change(change) do
-    if Map.has_key?(change, "delivery_mode") or Map.has_key?(change, "delivery_target"),
-      do: delivery_words(to(change["delivery_mode"]), to(change["delivery_target"])),
-      else: nil
   end
 
   defp field_line({:task, %{"to" => new} = task}, tail),
@@ -524,7 +489,6 @@ defmodule FermixCore.Jobs.HealMessage do
 
   defp field_line({:model, :cleared}, _tail), do: "Model: " <> @no_pin
   defp field_line({:model, pin}, tail), do: value_line("Model", pin, tail)
-  defp field_line({:delivery, words}, tail), do: value_line("Delivery", words, tail)
 
   defp value_line(label, value, tail),
     do: parts_line(label, [text(value)], &hd/1, @longer_value, tail)
@@ -607,14 +571,6 @@ defmodule FermixCore.Jobs.HealMessage do
 
   defp to(%{"to" => value}), do: value
   defp to(_absent), do: nil
-
-  # A mode and the platform it reaches; never a chat's id.
-  defp delivery_words(mode, %{"platform" => platform}) when is_binary(mode),
-    do: "#{mode}, on #{platform}"
-
-  defp delivery_words(mode, _target) when is_binary(mode), do: mode
-  defp delivery_words(nil, %{"platform" => platform}), do: "on #{platform}"
-  defp delivery_words(nil, _target), do: "no destination"
 
   # A stored value as text: the stored shape is someone else's to keep, so a
   # value of another type is shown as data rather than raising here.

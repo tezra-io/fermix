@@ -56,7 +56,8 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
   A stored tally or tool this engine cannot read (`Jobs.Degraded.readable_tally/1`)
   reads as none and is logged by its row's id, never by its content: the
   store, whose process runs the settle, never raises on one. A stored change
-  it cannot read reads as none the same way.
+  it cannot read, or one naming a field a heal never changes
+  (`Jobs.HealDecision.change_fields/0`), reads as none the same way.
 
   A job write that belongs to a heal (M106 §5.6, §5.7, decision D5, stage S4;
   the columns migration 74 adds) is one transaction in `Memory.Repo`
@@ -107,6 +108,7 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
 
   alias FermixCore.Jobs.Degraded
   alias FermixCore.Jobs.Failure
+  alias FermixCore.Jobs.HealDecision
   alias FermixCore.Memory.Repo.CuesSql
 
   # A failure of the same subject and kind as a heal closed still failing,
@@ -1538,9 +1540,11 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
   defp card_ref([id, platform, chat_id, user_id]),
     do: %{id: id, origin: %{platform: platform, chat_id: chat_id, user_id: user_id}}
 
-  # A change as `HealDecision` stored it: each field with what it would
-  # become. One this engine cannot read reads as none, logged by the heal's
-  # id: the store's process never raises on a stored row.
+  # A change as `HealDecision` stored it: each field it may name with what it
+  # would become. One this engine cannot read reads as none, logged by the
+  # heal's id: the store's process never raises on a stored row. So does one
+  # naming any other field, such as where the job delivers, which an older
+  # engine could propose: nothing shows it, and no answer applies it.
   defp decode_change(_heal_id, nil), do: nil
 
   defp decode_change(heal_id, json) when is_binary(json) do
@@ -1554,7 +1558,7 @@ defmodule FermixCore.Memory.Repo.JobHealsSql do
   end
 
   defp change_field?({field, value}),
-    do: is_binary(field) and is_map(value) and is_map_key(value, "to")
+    do: field in HealDecision.change_fields() and is_map(value) and is_map_key(value, "to")
 
   defp unreadable_change(heal_id) do
     Logger.warning("Job heal #{heal_id}: its change could not be read, so it shows none")

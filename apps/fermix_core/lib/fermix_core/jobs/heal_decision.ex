@@ -66,6 +66,8 @@ defmodule FermixCore.Jobs.HealDecision do
     :enabled?
   ]
   @run_written_fields [:next_run_at, :state, :updated_at]
+  # The fields a change may name (`change_fields/0`).
+  @change_fields ~w(task schedule skill_name timeout_seconds provider model clear_route_pin)
 
   @type plan :: %{
           decision: String.t(),
@@ -150,6 +152,17 @@ defmodule FermixCore.Jobs.HealDecision do
   """
   @spec run_written_fields() :: [atom()]
   def run_written_fields, do: @run_written_fields
+
+  @doc """
+  The fields a heal's change may name, in `update_job`'s names: what the job
+  does and how long it may run. Never where it delivers (a heal opens at a
+  run's settle, before any delivery, so it never has evidence of a delivery
+  fault), never its tools and never its removal. The tool takes no other
+  field (`Tools.JobHealRespond`), and the store reads a stored change naming
+  any other as none (`Memory.Repo.JobHealsSql`).
+  """
+  @spec change_fields() :: [String.t()]
+  def change_fields, do: @change_fields
 
   @doc """
   Whether `job` may get a proposal, or have one applied: never one a watcher
@@ -299,8 +312,8 @@ defmodule FermixCore.Jobs.HealDecision do
   defp propose(asked, job, checks, plan) do
     change = with_job_provider(asked, job)
 
-    with {:ok, attrs} <- check_change(change, job, checks),
-         {:ok, diff} <- diff(change, attrs, job) do
+    with {:ok, _attrs} <- check_change(change, job, checks),
+         {:ok, diff} <- diff(change, job) do
       %{
         plan
         | decision: "propose",
@@ -324,8 +337,7 @@ defmodule FermixCore.Jobs.HealDecision do
 
   defp with_job_provider(change, _job), do: change
 
-  # An owner's edit made from no chat: a delivery to "the origin" has none to
-  # resolve, so it is refused as one from a context without a conversation.
+  # An owner's edit made from no chat.
   defp validation_context(checks) do
     %{
       source_trust: :operator,
@@ -335,12 +347,13 @@ defmodule FermixCore.Jobs.HealDecision do
     }
   end
 
-  # Each field the change names, as the job has it and as it would be; a
-  # change that would leave every field as it is changes nothing.
-  defp diff(change, attrs, job) do
+  # Each field the change names, as the job has it and as it would be (as
+  # given, which is how `update_job` writes it); a change that would leave
+  # every field as it is changes nothing.
+  defp diff(change, job) do
     diff =
       Map.new(change, fn {field, value} ->
-        {field, %{"from" => current(field, job), "to" => wanted(field, value, attrs)}}
+        {field, %{"from" => current(field, job), "to" => value}}
       end)
 
     if Enum.all?(diff, &unchanged?/1), do: {:error, :no_change}, else: {:ok, diff}
@@ -352,19 +365,11 @@ defmodule FermixCore.Jobs.HealDecision do
   defp current("timeout_seconds", job), do: job.timeout_seconds
   defp current("provider", job), do: job.provider
   defp current("model", job), do: job.model
-  defp current("delivery_mode", job), do: job.delivery_mode
-  defp current("delivery_target", job), do: job.delivery_target
 
   defp current("clear_route_pin", %{provider: provider} = job) when is_binary(provider),
     do: %{"provider" => provider, "model" => job.model}
 
   defp current("clear_route_pin", _job), do: nil
-
-  # A delivery is stored as `update_job` resolves it; every other value
-  # exactly as `update_job` would write it, as given.
-  defp wanted("delivery_mode", _value, attrs), do: Map.get(attrs, :delivery_mode)
-  defp wanted("delivery_target", _value, attrs), do: Map.get(attrs, :delivery_target)
-  defp wanted(_field, value, _attrs), do: value
 
   defp unchanged?({"clear_route_pin", %{"from" => from}}), do: is_nil(from)
   defp unchanged?({_field, %{"from" => from, "to" => to}}), do: from == to

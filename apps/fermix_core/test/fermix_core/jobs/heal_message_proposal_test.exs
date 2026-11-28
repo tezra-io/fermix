@@ -90,26 +90,12 @@ defmodule FermixCore.Jobs.HealMessageProposalTest do
            }, ~s(- Model: "anthropic claude-tide")},
           {"a pin removed",
            %{"clear_route_pin" => %{"from" => %{"provider" => "openai"}, "to" => true}},
-           "- Model: none pinned (the default route)"},
-          {"a delivery",
-           %{
-             "delivery_mode" => %{"from" => "none", "to" => "channel"},
-             "delivery_target" => %{
-               "from" => nil,
-               "to" => %{"platform" => "telegram", "chat_id" => "40017"}
-             }
-           }, ~s(- Delivery: "channel, on telegram")},
-          {"a delivery made silent",
-           %{
-             "delivery_mode" => %{"from" => "channel", "to" => "none"},
-             "delivery_target" => %{"from" => %{"platform" => "telegram"}, "to" => nil}
-           }, ~s(- Delivery: "none")}
+           "- Model: none pinned (the default route)"}
         ] do
       test "#{label} is one line with its new value only" do
         text = ask(unquote(Macro.escape(change)))
 
         assert field_lines(text) == [unquote(line)]
-        refute text =~ "40017"
         refute text =~ "retired-9"
         refute text =~ "job_tides"
       end
@@ -261,7 +247,7 @@ defmodule FermixCore.Jobs.HealMessageProposalTest do
                )
     end
 
-    test "a pin, its removal and a delivery, each whole" do
+    test "a pin and its removal, each whole" do
       pin = %{
         "provider" => %{"from" => "openai", "to" => "anthropic"},
         "model" => %{"from" => "retired-9", "to" => "claude-tide"}
@@ -280,17 +266,6 @@ defmodule FermixCore.Jobs.HealMessageProposalTest do
       assert HealMessage.change_detail(cleared) =~
                "Model now: openai retired-9\n" <>
                  "Model after the change: none pinned (the default route)"
-
-      delivery = %{
-        "delivery_mode" => %{"from" => "none", "to" => "channel"},
-        "delivery_target" => %{
-          "from" => nil,
-          "to" => %{"platform" => "telegram", "chat_id" => "40017"}
-        }
-      }
-
-      assert HealMessage.change_detail(delivery) =~
-               "Delivery now: none\nDelivery after the change: channel, on telegram (40017)"
     end
 
     test "a value written over several lines can never pass for a field of its own" do

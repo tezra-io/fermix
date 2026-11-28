@@ -8,6 +8,8 @@ defmodule FermixCore.Jobs.HealAnswerTest do
   # leave closes the heal skipped. Every value is invented; every time given.
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog, only: [capture_log: 1]
+
   alias FermixCore.Agents.AgentDefinition
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
@@ -198,20 +200,52 @@ defmodule FermixCore.Jobs.HealAnswerTest do
       assert {:ok, %{state: "waiting", answer: nil}} = get_heal(ctx, heal.id)
     end
 
-    # A stored change is drawn from what the edit's checks produce, so only an
-    # older engine's row or a tampered one holds a value they would rewrite:
-    # what is written must be what was stored and shown, or nothing.
+    # A stored change is drawn from what the edit's checks produce, so only a
+    # tampered row holds a value they would write differently: what is written
+    # must be what was stored and shown, or nothing.
     test "a stored value the edit's checks would write differently gets nothing applied", ctx do
-      {job, heal} = waiting!(ctx, %{"delivery_mode" => %{"from" => "none", "to" => " local "}})
+      {job, heal} =
+        waiting!(ctx, Map.put(schedule_change(), "task", %{"from" => @task_from, "to" => 42}))
 
       assert {:error, :unfaithful, sentence} = apply_change(ctx, heal)
 
       assert sentence ==
                ~s(Nothing was applied: the recorded change to job "#{job.name}" would not be ) <>
-                 "written as recorded (delivery_mode), so it was not made."
+                 "written as recorded (task), so it was not made."
 
       assert {:ok, ^job} = get_job(ctx, job.id)
       assert {:ok, %{state: "waiting", answer: nil}} = get_heal(ctx, heal.id)
+    end
+
+    # A heal never changes where a job delivers, but an engine before that
+    # could store a proposal that does. It reads as none, as any stored change
+    # this engine cannot read does, so a yes to it writes nothing.
+    test "a stored change to where the job delivers reads as none and applies nothing", ctx do
+      target = %{"platform" => "telegram", "chat_id" => "99999"}
+
+      delivery = %{
+        "delivery_mode" => %{"from" => "none", "to" => "channel"},
+        "delivery_target" => %{"from" => nil, "to" => target}
+      }
+
+      log =
+        capture_log(fn ->
+          {job, heal} = waiting!(ctx, Map.merge(schedule_change(), delivery))
+          assert %{change: nil} = heal
+
+          assert {:error, :store_error, sentence} = apply_change(ctx, heal)
+
+          assert sentence ==
+                   ~s(Nothing was applied: Fermix holds no readable change for job ) <>
+                     ~s("#{job.name}".)
+
+          assert {:ok, ^job} = get_job(ctx, job.id)
+          assert {:ok, %{state: "waiting", answer: nil}} = get_heal(ctx, heal.id)
+          send(self(), {:heal_id, heal.id})
+        end)
+
+      assert_received {:heal_id, heal_id}
+      assert log =~ "Job heal #{heal_id}: its change could not be read, so it shows none"
     end
 
     test "a job a watcher now wakes gets nothing applied", ctx do
