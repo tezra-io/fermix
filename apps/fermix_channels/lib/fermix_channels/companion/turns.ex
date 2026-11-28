@@ -401,8 +401,8 @@ defmodule FermixChannels.Companion.Turns do
 
   # A call in the chat is told what the owner typed. A report Fermix starts
   # there was typed by nobody, and its text frames words someone else wrote,
-  # so the call is not told it; its answer is the chat's, and is told as any
-  # other.
+  # so the call is not told it, nor its answer, which rests on those words
+  # (`finish/3`).
   defp mirror_typed(%{own?: true}, _message), do: :ok
   defp mirror_typed(turn, message), do: ChatMirror.typed(turn.conversation, message.content)
 
