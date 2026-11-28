@@ -711,12 +711,6 @@
         "raise_limit",
         "rerun",
         "tell"
-      ],
-      "/properties/change/properties/delivery_mode": [
-        "none",
-        "origin",
-        "channel",
-        "local"
       ]
     },
     "model_routing_config": {
