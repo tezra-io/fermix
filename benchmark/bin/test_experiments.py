@@ -231,9 +231,9 @@ def test_a_server_that_cannot_be_reached_or_read_raises_the_writers_own_error(
 # A test that skips by what the machine holds is a different gate on each machine.
 # This file once ran its writes whenever a local Opik answered: the gate then wrote
 # to the developer's own Opik, CI skipped the same tests, and two gates at once
-# collided on its fixed names. The count below only shrinks. The two left read the
-# leaderboard store a capability run leaves under reports/, where one exists.
-SKIPS_ALLOWED = {"test_pricing.py": 2}
+# shared its fixed names. test_pricing.py once read the leaderboard store a
+# capability run leaves under reports/ and skipped where there was none. No developer
+# test skips now; one that must read a store or a service makes its own.
 LIVE_CHECK = os.path.join(HERE, "live_opik_writeback.py")
 # Matched by the call's own name, so an import under another name is caught too.
 SKIP = re.compile(r"\bskipif\(|\.skip\(|\bimportorskip\(|\.skipTest\(|"
@@ -247,7 +247,7 @@ def test_no_developer_test_skips_by_what_the_machine_holds():
             count = len(SKIP.findall(fh.read()))
         if count:
             found[os.path.basename(path)] = count
-    assert found == SKIPS_ALLOWED
+    assert found == {}
 
 
 def test_the_tests_loop_runs_every_test_file_and_nothing_else():

@@ -17,7 +17,7 @@ from live sources rather than hand-listed, the way `Realtime.CostTracker`'s
 """
 from __future__ import annotations
 
-import json
+import math
 import os
 import pathlib
 import re
@@ -30,9 +30,9 @@ sys.path.insert(0, HERE)
 import pytest  # noqa: E402
 
 from evallib import leaderboard, pricing  # noqa: E402
+from evallib.aggregate import ConfigScore  # noqa: E402
 
 REPO_ROOT = pathlib.Path(HERE).resolve().parents[1]
-BENCHMARK_DIR = pathlib.Path(HERE).resolve().parents[0]
 
 
 @dataclass(frozen=True)
@@ -1136,18 +1136,53 @@ def test_every_route_seen_in_live_spans_is_classified():
     assert not unknown, unknown
 
 
-def test_every_leaderboard_row_is_classified():
-    """The rows the $/success column actually renders must all be priceable.
+def _written_store(tmp_path, config_ids) -> tuple[str, dict]:
+    """A leaderboard store as a capability run leaves one, written and read back
+    through the harness's own calls: each config ranked with `upsert`, saved where
+    `store_path` puts it under a report directory of the test's own, then loaded."""
+    identity = {"tasks_hash": "span-census", "hash_version": leaderboard.CURRENT_HASH_VERSION,
+                "k": 3, "threshold": 1.0}
+    store = {"store_version": leaderboard.STORE_VERSION, "rows": {}}
+    for config_id in config_ids:
+        score = ConfigScore(
+            config_id=config_id, n_tasks=4, n_trials=12, mean_task_success=0.75,
+            mean_pass_hat_k=0.5, total_cost=0.0, total_tokens=9000, total_successes=9,
+            cost_per_success=math.inf, tokens_per_success=1000.0, p95_latency_ms=1500.0,
+            safety_violations=0)
+        store = leaderboard.upsert(store, score, identity)
+    path = leaderboard.store_path(str(tmp_path / "reports"))
+    leaderboard.save_store(path, store)
+    return path, leaderboard.load_store(path)
 
-    The store is a run artifact (gitignored), so this skips where no run has
-    happened; the catalog and census invariants above are the always-on gates.
+
+def test_every_row_of_a_store_the_harness_writes_is_classified(tmp_path):
+    """The rows the $/success column renders must all be priceable.
+
+    The store is one this test writes itself, a row for every route seen in live
+    spans and the two rows no model serves, so it runs the same on every machine.
+    It once read the store a capability run leaves under reports/ and skipped where
+    there was none, so the gate's verdict hung on what the machine happened to hold.
     """
-    path = leaderboard.store_path(str(BENCHMARK_DIR / "reports"))
-    if not os.path.exists(path):
-        pytest.skip(f"no leaderboard store at {path} — run the capability tier first")
-    rows = leaderboard.load_store(path).get("rows", {})
+    efforts = ("default", "high", "xhigh")
+    config_ids = [f"{route}/{model}/{efforts[n % len(efforts)]}"
+                  for n, (route, model) in enumerate(_SPAN_CENSUS)]
+    config_ids += [leaderboard.NO_MODEL_CONFIG,
+                   f"{leaderboard.NO_MODEL_CONFIG}:cap_response_quality"]
+    path, store = _written_store(tmp_path, config_ids)
+    rows = store["rows"]
+    # Every config kept its own row, and the card ranks them as one cohort.
+    assert sorted(key.rsplit("@", 1)[0] for key in rows) == sorted(config_ids)
+    assert [len(cohort.ranked) for cohort in leaderboard.cohorts(store)] == [len(config_ids)]
     unknown = _unpriceable(rows, path)
     assert not unknown, f"{path} ranks configs the card cannot price: {sorted(set(unknown))}"
+
+
+def test_a_row_the_card_cannot_price_is_found_in_a_written_store(tmp_path):
+    path, store = _written_store(tmp_path, ["anthropic/claude-opus-4-8/high",
+                                            "vela/unlisted-model-9/high",
+                                            "vela/quarry/unlisted-model-9/default"])
+    assert sorted(_unpriceable(store["rows"], path)) == ["vela/quarry/unlisted-model-9",
+                                                         "vela/unlisted-model-9"]
 
 
 def _unpriceable(rows, path: str) -> list[str]:
@@ -1191,17 +1226,6 @@ def test_config_id_split_keeps_a_vendor_prefixed_model_whole():
     assert _split_config_id("openai/gpt-5.5/xhigh", "x") == ("openai", "gpt-5.5")
     with pytest.raises(ValueError):
         _split_config_id("openai/gpt-5.5", "x")
-
-
-def test_the_leaderboard_store_shape_this_test_reads_is_the_one_on_disk():
-    """Guards the skip above from becoming permanent for the wrong reason: if the
-    store moves or changes shape, fail here instead of quietly skipping forever."""
-    path = leaderboard.store_path(str(BENCHMARK_DIR / "reports"))
-    if not os.path.exists(path):
-        pytest.skip("no leaderboard store on this host")
-    with open(path, "r", encoding="utf-8") as fh:
-        raw = json.load(fh)
-    assert isinstance(raw, dict) and raw, path
 
 
 if __name__ == "__main__":
