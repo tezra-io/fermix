@@ -27,10 +27,12 @@ defmodule FermixCore.Agents.MainAgentTest do
     @calls :main_agent_mock_calls
     @test_pid :main_agent_mock_test_pid
 
+    # The test's own (`NamedAgent`): ExUnit stops them before the next test
+    # starts.
     def init(test_pid \\ self()) do
-      {:ok, _} = Agent.start_link(fn -> [] end, name: @responses)
-      {:ok, _} = Agent.start_link(fn -> [] end, name: @calls)
-      {:ok, _} = Agent.start_link(fn -> test_pid end, name: @test_pid)
+      FermixTestSupport.NamedAgent.start!(@responses, fn -> [] end)
+      FermixTestSupport.NamedAgent.start!(@calls, fn -> [] end)
+      FermixTestSupport.NamedAgent.start!(@test_pid, fn -> test_pid end)
       :ok
     end
 
@@ -44,22 +46,6 @@ defmodule FermixCore.Agents.MainAgentTest do
 
     def reset_calls do
       Agent.update(@calls, fn _ -> [] end)
-    end
-
-    def cleanup do
-      for name <- [@responses, @calls, @test_pid] do
-        case Process.whereis(name) do
-          nil ->
-            :ok
-
-          _pid ->
-            try do
-              Agent.stop(name)
-            catch
-              :exit, _reason -> :ok
-            end
-        end
-      end
     end
 
     @impl FermixCore.Providers.Provider
@@ -186,14 +172,8 @@ defmodule FermixCore.Agents.MainAgentTest do
     @state :main_agent_controlled_provider
 
     def init(test_pid \\ self()) do
-      cleanup()
-
-      {:ok, _} =
-        Agent.start_link(
-          fn -> %{calls: [], plans: %{}, test_pid: test_pid} end,
-          name: @state
-        )
-
+      state = %{calls: [], plans: %{}, test_pid: test_pid}
+      FermixTestSupport.NamedAgent.start!(@state, fn -> state end)
       :ok
     end
 
@@ -203,10 +183,6 @@ defmodule FermixCore.Agents.MainAgentTest do
 
     def get_calls do
       Agent.get(@state, & &1.calls)
-    end
-
-    def cleanup do
-      if Process.whereis(@state), do: Agent.stop(@state)
     end
 
     @impl FermixCore.Providers.Provider
@@ -320,8 +296,10 @@ defmodule FermixCore.Agents.MainAgentTest do
   defmodule LiveCallBridge do
     @name __MODULE__.State
 
-    def start(test_pid, answer),
-      do: Agent.start_link(fn -> %{test_pid: test_pid, answer: answer} end, name: @name)
+    def start(test_pid, answer) do
+      state = %{test_pid: test_pid, answer: answer}
+      FermixTestSupport.NamedAgent.start!(@name, fn -> state end)
+    end
 
     def set(answer), do: Agent.update(@name, &%{&1 | answer: answer})
 
@@ -335,16 +313,11 @@ defmodule FermixCore.Agents.MainAgentTest do
   defmodule ReviewProbe do
     @state :main_agent_review_probe
 
-    # The probe is the calling test's own: ExUnit stops it before the next
-    # test starts, so nothing looks for one an earlier test left.
+    # The probe is the calling test's own (`NamedAgent`): ExUnit stops it
+    # before the next test starts, so nothing looks for one an earlier test left.
     def init(test_pid \\ self()) do
       state = %{test_pid: test_pid, mode: :ok}
-
-      ExUnit.Callbacks.start_supervised!(%{
-        id: @state,
-        start: {Agent, :start_link, [fn -> state end, [name: @state]]}
-      })
-
+      FermixTestSupport.NamedAgent.start!(@state, fn -> state end)
       :ok
     end
 
@@ -657,7 +630,6 @@ defmodule FermixCore.Agents.MainAgentTest do
       Application.put_env(:fermix_core, :memory, previous_memory_config)
       Application.put_env(:fermix_core, :compaction, previous_compaction_config)
       Application.put_env(:fermix_core, :prompt_bootstrap, previous_bootstrap_config)
-      MockProvider.cleanup()
       FermixTestSupport.SafeRm.rm_rf!(skills_dir)
       FermixTestSupport.SafeRm.rm_rf!(journal_dir)
       FermixTestSupport.SafeRm.rm_rf!(prompt_dir)
@@ -1954,7 +1926,7 @@ defmodule FermixCore.Agents.MainAgentTest do
     @call %{started_at: ~U[2026-10-03 14:05:00Z], silence_allowed?: true}
 
     setup ctx do
-      {:ok, _bridge} = LiveCallBridge.start(self(), {:ok, @call})
+      LiveCallBridge.start(self(), {:ok, @call})
       agent_name = :"live_call_main_agent_#{System.unique_integer([:positive])}"
 
       {:ok, _} =

@@ -12,30 +12,16 @@ defmodule FermixCore.Agents.WorkerRunTest do
     @responses :worker_run_mock_responses
     @delay :worker_run_mock_delay
 
+    # The test's own (`NamedAgent`): ExUnit stops them before the next test
+    # starts.
     def init do
-      cleanup()
-      {:ok, _} = Agent.start_link(fn -> [] end, name: @responses)
-      {:ok, _} = Agent.start_link(fn -> 0 end, name: @delay)
+      FermixTestSupport.NamedAgent.start!(@responses, fn -> [] end)
+      FermixTestSupport.NamedAgent.start!(@delay, fn -> 0 end)
       :ok
     end
 
     def set_responses(responses), do: Agent.update(@responses, fn _ -> responses end)
     def set_delay(ms), do: Agent.update(@delay, fn _ -> ms end)
-
-    def cleanup do
-      Enum.each([@responses, @delay], fn name ->
-        case Process.whereis(name) do
-          nil -> :ok
-          pid -> try_stop(pid)
-        end
-      end)
-    end
-
-    defp try_stop(pid) do
-      Agent.stop(pid)
-    catch
-      :exit, _ -> :ok
-    end
 
     @impl FermixCore.Providers.Adapter
     def chat(messages, capabilities, _opts) do
@@ -131,8 +117,6 @@ defmodule FermixCore.Agents.WorkerRunTest do
 
     {:ok, _} = start_supervised({Task.Supervisor, name: task_supervisor_name})
     {:ok, _} = start_supervised({AgentSupervisor, name: agent_supervisor_name})
-
-    on_exit(fn -> MockProvider.cleanup() end)
 
     %{agent_supervisor: agent_supervisor_name, task_supervisor: task_supervisor_name}
   end

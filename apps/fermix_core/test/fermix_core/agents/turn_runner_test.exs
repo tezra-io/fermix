@@ -4340,33 +4340,13 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   defmodule ReviewSpy do
     @state :turn_runner_review_spy
 
+    # The spy is the test's own (`NamedAgent`), so ExUnit stops it before the
+    # next test starts. Linked to the test that started it, it was still
+    # registered, mid-exit, when the next one looked it up (one CI failure on
+    # 2026-09-13).
     def init(test_pid \\ self()) do
-      cleanup()
-      {:ok, _} = Agent.start_link(fn -> test_pid end, name: @state)
+      FermixTestSupport.NamedAgent.start!(@state, fn -> test_pid end)
       :ok
-    end
-
-    # The agent is linked to the test process that started it, so by the time
-    # the next test's `init/1` (or `on_exit`) looks it up it may be mid-exit:
-    # `Agent.stop/1` on a name whose process is already gone raises `:noproc`
-    # (one CI failure on 2026-09-13). Stop it by pid and wait for the exit
-    # instead of trusting the name to stay alive across the call.
-    def cleanup do
-      case Process.whereis(@state) do
-        nil -> :ok
-        pid -> stop_and_wait(pid)
-      end
-    end
-
-    defp stop_and_wait(pid) do
-      ref = Process.monitor(pid)
-      Process.exit(pid, :shutdown)
-
-      receive do
-        {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
-      after
-        5_000 -> raise "review spy #{inspect(pid)} did not stop"
-      end
     end
 
     def start_background(opts) do
@@ -4381,7 +4361,6 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     # restores it.
     Application.put_env(:fermix_core, :compaction, enabled: false)
     :ok = ReviewSpy.init()
-    on_exit(&ReviewSpy.cleanup/0)
 
     store = start_voice_store()
     registry_name = :"tr_review_reg_#{System.unique_integer([:positive])}"

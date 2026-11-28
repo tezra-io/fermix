@@ -4,11 +4,12 @@ defmodule FermixCore.TestLoadSafetyTest do
   AGENTS.md, read off every umbrella test file.
 
   A test that passes alone can still fail when the suite saturates the machine:
-  it slept instead of waiting, gave an arrival a short bound, or saw a global it
-  did not pin. Prose did not stop those; these scans do. Each rule keeps a
-  budget of today's offenders per file in `test/test_load_safety_budget.exs`, so a
-  file may not gain an offender, and a file that loses one must lower its count:
-  the budget only shrinks. A file absent from the budget has a budget of zero.
+  it slept instead of waiting, gave an arrival a short bound, saw a global it
+  did not pin, or left a process for the next test to find. Prose did not stop
+  those; these scans do. Each rule keeps a budget of today's offenders per file
+  in `test/test_load_safety_budget.exs`, so a file may not gain an offender, and
+  a file that loses one must lower its count: the budget only shrinks. A file
+  absent from the budget has a budget of zero.
 
   The work happens once, in `setup_all`: each file is read once, its text rules
   run, and it is parsed once, in parallel with the others, only when its text
@@ -46,7 +47,11 @@ defmodule FermixCore.TestLoadSafetyTest do
     async_stderr_capture:
       "capture stderr only in an async: false module; another async test's output lands in it",
     empty_monitors_assert:
-      "filter the monitors list to the {:process, pid} entries the test owns before asserting"
+      "filter the monitors list to the {:process, pid} entries the test owns before asserting",
+    hand_started_named_agent:
+      "start it as the test's own with FermixTestSupport.NamedAgent.start!/2, or from a " <>
+        "function a child spec under start_supervised! starts; one linked to its test is " <>
+        "still registered, on its way out, when the next test looks for it"
   }
 
   @rules Map.keys(@fixes)
@@ -106,6 +111,10 @@ defmodule FermixCore.TestLoadSafetyTest do
   # Rule 5: own exits from the start.
   test "empty_monitors_assert: no assertion that a whole monitors list is empty", ctx do
     assert_within_budget(:empty_monitors_assert, ctx)
+  end
+
+  test "hand_started_named_agent: no named Agent is linked to the test that started it", ctx do
+    assert_within_budget(:hand_started_named_agent, ctx)
   end
 
   # -- the ratchet ------------------------------------------------------------
@@ -195,12 +204,17 @@ defmodule FermixCore.TestLoadSafetyTest do
     String.contains?(source, "capture_io") and String.contains?(source, "async: true")
   end
 
+  defp spelled?(:hand_started_named_agent, source) do
+    String.contains?(source, "Agent.start_link") and String.contains?(source, "name:")
+  end
+
   defp spelled?(_text_rule, _source), do: false
 
   defp ast_rule(:short_assert_receive, ast), do: lines_where(ast, &short_assert_receive?/1)
   defp ast_rule(:short_wait_helper_default, ast), do: lines_where(ast, &short_wait_default?/1)
   defp ast_rule(:unpinned_telemetry_attach, ast), do: in_async_modules(ast, &telemetry_attach?/1)
   defp ast_rule(:async_stderr_capture, ast), do: in_async_modules(ast, &stderr_capture?/1)
+  defp ast_rule(:hand_started_named_agent, ast), do: hand_started_named_agents(ast)
 
   # -- text rules -------------------------------------------------------------
 
@@ -314,6 +328,50 @@ defmodule FermixCore.TestLoadSafetyTest do
        do: device in @stderr_devices
 
   defp stderr_capture?(_node), do: false
+
+  # A named Agent started where the caller is linked to it. A function a child
+  # spec starts is the other case, and is left out: one named `start_link`
+  # (`{Module, arg}`), or one the file names in a spec's `start:` tuple.
+  defp hand_started_named_agents(ast) do
+    starters = [:start_link | child_start_functions(ast)]
+
+    ast
+    |> Macro.prewalk(fn node -> if defines_any?(node, starters), do: nil, else: node end)
+    |> lines_where(&named_agent_start?/1)
+  end
+
+  defp child_start_functions(ast) do
+    {_ast, names} =
+      Macro.prewalk(ast, [], fn
+        {:start, {:{}, _meta, [_module, fun, _args]}} = node, acc when is_atom(fun) ->
+          {node, [fun | acc]}
+
+        node, acc ->
+          {node, acc}
+      end)
+
+    names
+  end
+
+  defp defines_any?({kind, _meta, [head | _body]}, names) when kind in [:def, :defp],
+    do: defined_name(head) in names
+
+  defp defines_any?(_node, _names), do: false
+
+  defp defined_name({:when, _meta, [call | _guards]}), do: defined_name(call)
+  defp defined_name({name, _meta, _args}) when is_atom(name), do: name
+  defp defined_name(_head), do: nil
+
+  defp named_agent_start?(
+         {{:., _meta, [{:__aliases__, _alias_meta, [:Agent]}, :start_link]}, _call_meta, args}
+       ) do
+    case List.last(args) do
+      opts when is_list(opts) -> Keyword.keyword?(opts) and Keyword.has_key?(opts, :name)
+      _other -> false
+    end
+  end
+
+  defp named_agent_start?(_node), do: false
 
   defp in_async_modules(ast, match?) do
     ast

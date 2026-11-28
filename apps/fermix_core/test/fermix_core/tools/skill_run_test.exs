@@ -12,22 +12,14 @@ defmodule FermixCore.Tools.SkillRunTest do
 
     @responses :skill_run_mock_responses
 
+    # The test's own (`NamedAgent`): ExUnit stops it before the next test
+    # starts.
     def init do
-      cleanup()
-      {:ok, _} = Agent.start_link(fn -> [] end, name: @responses)
+      FermixTestSupport.NamedAgent.start!(@responses, fn -> [] end)
       :ok
     end
 
     def set_responses(responses), do: Agent.update(@responses, fn _ -> responses end)
-
-    def cleanup do
-      case Process.whereis(@responses) do
-        nil -> :ok
-        _pid -> Agent.stop(@responses)
-      end
-    catch
-      :exit, _ -> :ok
-    end
 
     @impl FermixCore.Providers.Provider
     def chat(_messages, _opts), do: pop_response()
@@ -123,7 +115,6 @@ defmodule FermixCore.Tools.SkillRunTest do
       )
 
     on_exit(fn ->
-      MockProvider.cleanup()
       FermixTestSupport.SafeRm.rm_rf!(skills_dir)
       FermixTestSupport.SafeRm.rm_rf!(journal_dir)
     end)

@@ -16,32 +16,18 @@ defmodule FermixCore.Tools.SubagentsTest do
     @caps :subagents_mock_caps
     @models :subagents_mock_models
 
+    # The test's own (`NamedAgent`): ExUnit stops them before the next test
+    # starts.
     def init do
-      cleanup()
-      {:ok, _} = Agent.start_link(fn -> [] end, name: @turns)
-      {:ok, _} = Agent.start_link(fn -> [] end, name: @caps)
-      {:ok, _} = Agent.start_link(fn -> [] end, name: @models)
+      FermixTestSupport.NamedAgent.start!(@turns, fn -> [] end)
+      FermixTestSupport.NamedAgent.start!(@caps, fn -> [] end)
+      FermixTestSupport.NamedAgent.start!(@models, fn -> [] end)
       :ok
     end
 
     def set_turns(turns), do: Agent.update(@turns, fn _ -> turns end)
     def captured_capabilities, do: Agent.get(@caps, & &1)
     def captured_models, do: Agent.get(@models, & &1)
-
-    def cleanup do
-      Enum.each([@turns, @caps, @models], fn name ->
-        case Process.whereis(name) do
-          nil -> :ok
-          pid -> try_stop(pid)
-        end
-      end)
-    end
-
-    defp try_stop(pid) do
-      Agent.stop(pid)
-    catch
-      :exit, _ -> :ok
-    end
 
     @impl true
     def chat(messages, capabilities, opts) do
@@ -166,18 +152,12 @@ defmodule FermixCore.Tools.SubagentsTest do
     task_supervisor = :"subagents_task_sup_#{suffix}"
 
     # The probe's holder is the test's own, started before the supervisors
-    # whose workers write to it: ExUnit stops it after them and before the next
-    # test starts, so the name is free there.
-    start_supervised!(%{
-      id: @probe_ctx,
-      start: {Agent, :start_link, [fn -> nil end, [name: @probe_ctx]]}
-    })
+    # whose workers write to it, so ExUnit stops it after them.
+    FermixTestSupport.NamedAgent.start!(@probe_ctx, fn -> nil end)
 
     {:ok, _} = start_supervised({Task.Supervisor, name: task_supervisor})
     {:ok, _} = start_supervised({AgentSupervisor, name: agent_supervisor})
     {:ok, _} = start_supervised({CapabilityRegistry, name: registry})
-
-    on_exit(fn -> MockAdapter.cleanup() end)
 
     %{registry: registry, agent_supervisor: agent_supervisor, task_supervisor: task_supervisor}
   end

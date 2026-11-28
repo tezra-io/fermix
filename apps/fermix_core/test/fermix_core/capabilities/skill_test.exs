@@ -20,11 +20,12 @@ defmodule FermixCore.Capabilities.SkillTest do
     @captured :skill_capability_mock_captured
     @tools :skill_capability_mock_tools
 
+    # The test's own (`NamedAgent`): ExUnit stops them before the next test
+    # starts.
     def init do
-      cleanup()
-      {:ok, _} = Agent.start_link(fn -> [] end, name: @responses)
-      {:ok, _} = Agent.start_link(fn -> [] end, name: @captured)
-      {:ok, _} = Agent.start_link(fn -> [] end, name: @tools)
+      FermixTestSupport.NamedAgent.start!(@responses, fn -> [] end)
+      FermixTestSupport.NamedAgent.start!(@captured, fn -> [] end)
+      FermixTestSupport.NamedAgent.start!(@tools, fn -> [] end)
       :ok
     end
 
@@ -34,21 +35,6 @@ defmodule FermixCore.Capabilities.SkillTest do
     # The tool names each model call was offered, oldest first; taking them
     # clears the record.
     def take_tools, do: Agent.get_and_update(@tools, &{&1, []})
-
-    def cleanup do
-      Enum.each([@responses, @captured, @tools], fn name ->
-        case Process.whereis(name) do
-          nil -> :ok
-          pid -> try_stop(pid)
-        end
-      end)
-    end
-
-    defp try_stop(pid) do
-      Agent.stop(pid)
-    catch
-      :exit, _ -> :ok
-    end
 
     @impl FermixCore.Providers.Provider
     def chat(_messages, _opts), do: pop_response()
@@ -149,10 +135,7 @@ defmodule FermixCore.Capabilities.SkillTest do
     {:ok, _} = start_supervised({Task.Supervisor, name: task_supervisor_name})
     {:ok, _} = start_supervised({AgentSupervisor, name: agent_supervisor_name})
 
-    on_exit(fn ->
-      MockProvider.cleanup()
-      FermixTestSupport.SafeRm.rm_rf!(journal_dir)
-    end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(journal_dir) end)
 
     %{
       agent_supervisor: agent_supervisor_name,

@@ -54,19 +54,11 @@ defmodule FermixCore.Realtime.SessionServerTest do
     handshake: `RealtimeSocket.finish_close/2` ends it.
     """
 
+    # The queue is the test's own (`NamedAgent`), and a second call in one test
+    # replaces it.
     def configure(behaviors, test_pid) do
-      Agent.start_link(fn -> %{behaviors: behaviors, test_pid: test_pid, attempts: 0} end,
-        name: __MODULE__
-      )
-    end
-
-    def reset do
-      case Process.whereis(__MODULE__) do
-        nil -> :ok
-        _pid -> Agent.stop(__MODULE__)
-      end
-    catch
-      :exit, _reason -> :ok
+      state = %{behaviors: behaviors, test_pid: test_pid, attempts: 0}
+      FermixTestSupport.NamedAgent.start!(__MODULE__, fn -> state end)
     end
 
     def start_link(opts) do
@@ -317,7 +309,6 @@ defmodule FermixCore.Realtime.SessionServerTest do
   # connection stopped the session.
   test "a call_start whose session.update cannot be built opens no socket" do
     configure_sockets([:ok])
-    on_exit(&ProgrammableOpenAIClient.reset/0)
 
     server =
       start_reconnecting_server([10, 10, 10],
@@ -1524,7 +1515,6 @@ defmodule FermixCore.Realtime.SessionServerTest do
   describe "reconnect" do
     setup do
       ProgrammableOpenAIClient.configure([:ok, :ok, :ok, :ok], self())
-      on_exit(&ProgrammableOpenAIClient.reset/0)
       :ok
     end
 
@@ -1607,7 +1597,6 @@ defmodule FermixCore.Realtime.SessionServerTest do
     end
 
     test "exhausting reconnect attempts surfaces error and drops session" do
-      ProgrammableOpenAIClient.reset()
       ProgrammableOpenAIClient.configure([:ok, {:error, :nxdomain}, {:error, :nxdomain}], self())
 
       {:ok, server} =
@@ -2048,7 +2037,6 @@ defmodule FermixCore.Realtime.SessionServerTest do
   describe "an error before the session is configured" do
     setup do
       configure_sockets([:ok, :ok])
-      on_exit(&ProgrammableOpenAIClient.reset/0)
       scope = "session:refused-#{System.unique_integer([:positive])}"
       attach_call_end_telemetry(scope)
       %{scope: scope}
@@ -2355,10 +2343,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
         &match?(%{item: %{type: "function_call_output", call_id: ^call_id}}, &1)
       )
 
-  defp configure_sockets(behaviors) do
-    ProgrammableOpenAIClient.reset()
-    ProgrammableOpenAIClient.configure(behaviors, self())
-  end
+  defp configure_sockets(behaviors),
+    do: ProgrammableOpenAIClient.configure(behaviors, self())
 
   defp start_reconnecting_server(backoff_ms, opts \\ []) do
     defaults = [

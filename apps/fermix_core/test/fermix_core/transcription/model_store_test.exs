@@ -24,7 +24,7 @@ defmodule FermixCore.Transcription.Local.ModelStoreTest do
       FermixTestSupport.SafeRm.rm_rf(home)
     end)
 
-    {:ok, _agent} = Agent.start_link(fn -> [] end, name: :stt_model_store_requests)
+    FermixTestSupport.NamedAgent.start!(:stt_model_store_requests, fn -> [] end)
     %{home: home}
   end
 
