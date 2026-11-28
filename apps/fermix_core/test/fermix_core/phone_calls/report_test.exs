@@ -9,6 +9,7 @@ defmodule FermixCore.PhoneCalls.ReportTest do
   alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Memory.Repo.PhoneCallsSql
   alias FermixCore.PhoneCalls.Brief
+  alias FermixCore.PhoneCalls.Call.Ending
   alias FermixCore.PhoneCalls.Outcome
   alias FermixCore.PhoneCalls.Outcome.Claim
   alias FermixCore.PhoneCalls.Readiness
@@ -590,6 +591,61 @@ defmodule FermixCore.PhoneCalls.ReportTest do
       assert length(String.split(text, "Nobody answered.")) == 2
       assert text =~ "Why it stopped: Nobody answered."
       refute text =~ "could not tell what was agreed"
+    end
+
+    # The end of a call nobody answered can add words of its own to the row
+    # (`Call.Ending.failure_reason/2`): the hang-up that failed, the engine
+    # that was stopping. Why it stopped then says more than that nobody
+    # answered, and the outcome still does not say it a second time.
+    test "a call nobody answered says so once when its end added words of its own" do
+      refused = %{
+        engine_stopping?: false,
+        closed?: false,
+        hangup_error: "rejected, HTTP 502: bad gateway"
+      }
+
+      stopping = %{engine_stopping?: true, closed?: true, hangup_error: nil}
+
+      for {added, status} <- [{refused, "closure_unconfirmed"}, {stopping, "ended"}] do
+        reason = Ending.failure_reason(Ending.new(:no_answer), added)
+        assert reason != "no_answer"
+        facts = %{"reason" => "not_answered"}
+        call = row(%{status: status, failure_reason: reason, outcome_facts: facts})
+
+        for text <- [Report.text(call), Report.notice(call)] do
+          assert length(String.split(text, "Nobody answered.")) == 2, text
+          assert text =~ "Nobody was reached, so nothing was agreed.\n"
+          assert text =~ "Why it stopped: Nobody answered. "
+        end
+
+        assert is_nil(Report.status_view(call, @t0).outcome_reason)
+      end
+    end
+
+    # Only a sentence already said is left out: an outcome's reason that why
+    # the call stopped does not say stays, whatever the reason's parts.
+    test "an outcome's reason stays beside a stop that says something else" do
+      kept = "The recipient did not commit to anything."
+      added = %{engine_stopping?: false, closed?: false, hangup_error: "timeout after 5000 ms"}
+      reason = Ending.failure_reason(Ending.new({:finish, :cannot_proceed}), added)
+      assert reason == "cannot_proceed; hangup timeout after 5000 ms"
+
+      call =
+        row(%{
+          status: "closure_unconfirmed",
+          failure_reason: reason,
+          outcome_facts: %{"reason" => "no_commitment"}
+        })
+
+      for text <- [Report.text(call), Report.notice(call)] do
+        assert length(String.split(text, kept)) == 2, text
+
+        assert text =~
+                 "Why it stopped: The assistant could not go on with the call, so it ended " <>
+                   "it. Fermix's request to end the call failed."
+      end
+
+      assert Report.status_view(call, @t0).outcome_reason == kept
     end
 
     test "a voicemail says it reached nobody, and says the voicemail once" do

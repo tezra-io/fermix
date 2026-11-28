@@ -35,8 +35,8 @@ defmodule FermixCore.PhoneCalls.Report do
   judgement code could not check, and the reading's own note as a note.
   Bookkeeping the owner has no use for (the commitment word, the key lists)
   is not shown. Each fact is said once: a call never placed has no outcome
-  line, a call nobody answered says nothing was agreed, and a note that only
-  repeats why the call stopped is left out.
+  line, a call nobody answered says nothing was agreed, and the outcome's
+  reason is left out where why the call stopped already says it.
 
   The view is truthful about what is known. A call is `placed` `:yes`, `:no`
   (never sent to OpenAI, refused by it, or not yet dialed) or `:unknown`
@@ -311,7 +311,7 @@ defmodule FermixCore.PhoneCalls.Report do
     outcome = Map.get(row, :outcome) || "unknown"
     outcome_facts = Map.get(row, :outcome_facts) || %{}
     code = reason_code(Map.get(row, :failure_reason))
-    why_stopped = why_stopped(Map.get(row, :failure_reason))
+    stopped = stop_sentences(Map.get(row, :failure_reason))
 
     %{
       id: id,
@@ -327,7 +327,7 @@ defmodule FermixCore.PhoneCalls.Report do
       label: label(row, outcome, placed, code, outcome_facts),
       outcome: outcome,
       outcome_sentence: outcome_sentence(outcome, placed, unreached?(code, outcome_facts)),
-      outcome_reason: outcome_reason(outcome_facts, why_stopped),
+      outcome_reason: outcome_reason(outcome_facts, stopped),
       facts: facts(outcome_facts),
       confirmed_how: confirmed_how(outcome_facts),
       not_checked: not_checked(outcome_facts),
@@ -339,7 +339,7 @@ defmodule FermixCore.PhoneCalls.Report do
       slot: slot_sentence(row, now),
       usage: usage(row, placed),
       failure_reason: Map.get(row, :failure_reason),
-      why_stopped: why_stopped,
+      why_stopped: said(stopped),
       provider_words: line(Map.get(row, :vendor_message), Limits.max_report_vendor_bytes()),
       end_request_words: line(Map.get(row, :cleanup_error), Limits.max_report_vendor_bytes()),
       report: Map.get(row, :report_status),
@@ -408,13 +408,14 @@ defmodule FermixCore.PhoneCalls.Report do
   def reasons, do: Map.keys(@reasons) ++ Enum.map(Readiness.reasons(), &Atom.to_string/1)
 
   @doc """
-  Why a call stopped, in one sentence: the sentence of the word `reason`
-  starts with, then, when the reason says a request to end the call failed,
-  that it did. A word with no sentence of its own is said truthfully and
-  claims nothing about it. `nil` for no reason.
+  Why a call stopped: one sentence for each part of `reason`, in its order
+  and none twice (the cause, then what the end added to it: the engine
+  stopping, a request to end the call that failed). A word with no sentence
+  of its own is said truthfully and claims nothing about it. `nil` for no
+  reason.
   """
   @spec reason_sentence(String.t() | nil) :: String.t() | nil
-  def reason_sentence(reason), do: why_stopped(reason)
+  def reason_sentence(reason), do: reason |> stop_sentences() |> said()
 
   @doc "Every sentence the view can say, for the copy gate."
   @spec sentences() :: [String.t(), ...]
@@ -638,20 +639,20 @@ defmodule FermixCore.PhoneCalls.Report do
 
   # --- why it stopped -------------------------------------------------------------
 
-  defp why_stopped(reason) when is_binary(reason) do
+  # One sentence for each part of a reason, none of them twice.
+  defp stop_sentences(reason) when is_binary(reason) do
     reason
     |> String.split(";")
     |> Enum.map(&String.trim/1)
     |> Enum.reject(&(&1 == ""))
     |> Enum.map(&part_sentence/1)
     |> Enum.uniq()
-    |> case do
-      [] -> nil
-      sentences -> Enum.join(sentences, " ")
-    end
   end
 
-  defp why_stopped(_none), do: nil
+  defp stop_sentences(_none), do: []
+
+  defp said([]), do: nil
+  defp said(sentences), do: Enum.join(sentences, " ")
 
   defp part_sentence("hangup" <> _detail), do: @end_request_failed
 
@@ -737,17 +738,16 @@ defmodule FermixCore.PhoneCalls.Report do
 
   defp matched(facts), do: Map.get(@matched, Map.get(facts, "matched"))
 
-  # Why the outcome is what it is, unless it only says again why the call
-  # stopped.
-  defp outcome_reason(facts, why_stopped) do
+  # Why the outcome is what it is, unless one of the sentences of why the
+  # call stopped already says it.
+  defp outcome_reason(facts, stopped) do
     case Map.get(facts, "reason") do
       nil -> nil
-      code -> @outcome_reasons |> Map.get(code, @outcome_reason_other) |> unless_said(why_stopped)
+      code -> @outcome_reasons |> Map.get(code, @outcome_reason_other) |> unless_in(stopped)
     end
   end
 
-  defp unless_said(sentence, sentence), do: nil
-  defp unless_said(sentence, _said), do: sentence
+  defp unless_in(sentence, sentences), do: if(sentence in sentences, do: nil, else: sentence)
 
   # A result never read, by the worker or by a reader that failed
   # (`Outcome.unread_reasons/0`, the one list): its evidence is the call's
