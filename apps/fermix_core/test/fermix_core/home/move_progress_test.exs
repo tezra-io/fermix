@@ -12,7 +12,7 @@ defmodule FermixCore.Home.MoveProgressTest do
 
   alias FermixCore.Application, as: CoreApplication
   alias FermixCore.Home.MoveProgress
-  alias FermixCore.Home.Role
+  alias FermixCore.Net.Egress
 
   @move "2031-05-04T10-00-00Z-4c7e"
   @capture %{move_id: @move, step: :capture, bytes: 0, size: nil}
@@ -152,15 +152,19 @@ defmodule FermixCore.Home.MoveProgressTest do
   end
 
   describe "where the store runs" do
-    test "an engine's tree has it in every role but a candidate's; a test VM's never" do
-      assert CoreApplication.maybe_move_progress(:prod) == [MoveProgress]
-      assert CoreApplication.maybe_move_progress(:test) == []
-
-      children = CoreApplication.maybe_move_progress(:prod)
-      assert Role.children(children, :primary) == [MoveProgress]
-      assert Role.children(children, :device) == [MoveProgress]
-      assert Role.children(children, :candidate) == []
+    test "a daemon's tree has it in every role but a candidate's; no other boot's" do
+      for {role, kept?} <- [primary: true, device: true, candidate: false] do
+        assert MoveProgress in ids(role, true) == kept?, "#{role}"
+        refute MoveProgress in ids(role, false), "#{role}"
+      end
     end
+  end
+
+  # The child ids of the tree a boot starts in `role`, a daemon's or another's.
+  defp ids(role, daemon?) do
+    Egress.new([])
+    |> CoreApplication.supervision_children(role, daemon?)
+    |> Enum.map(&Supervisor.child_spec(&1, []).id)
   end
 
   # The counts a transfer of `size` bytes puts at, handed in 60 KiB chunks.

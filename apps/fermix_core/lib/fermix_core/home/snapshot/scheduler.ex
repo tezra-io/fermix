@@ -93,7 +93,7 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
           config: (-> keyword()),
           targets: (-> [module()]),
           now: (-> DateTime.t()),
-          timer: (term(), non_neg_integer() -> reference()) | nil,
+          timer: (term(), non_neg_integer() -> reference()),
           run: (Path.t(), keyword(), [module()], keyword() ->
                   {:ok, Run.result()} | :not_configured),
           run_opts: keyword(),
@@ -129,8 +129,7 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
 
   @doc """
   Starts the scheduler. `opts`: `:name`, `:home`, `:config` (a 0-arity reader
-  of the section), `:targets`, `:now` (a 0-arity clock), `:timer_enabled`
-  (false keeps it from planning timers: a test tree), `:timer` (a 2-arity
+  of the section), `:targets`, `:now` (a 0-arity clock), `:timer` (a 2-arity
   `send_after` in its place, given the message and the delay in ms), `:run`
   (`Run.run/4` in its place), `:run_opts` (passed to every run: `:profile`,
   `:host`, a target's seams), `:task_supervisor`, `:notify` (a 2-arity
@@ -185,7 +184,7 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
         Keyword.get(opts, :config, fn -> Application.get_env(:fermix_core, :snapshots, []) end),
       targets: targets_reader(opts, home),
       now: now,
-      timer: timer(opts),
+      timer: Keyword.get(opts, :timer, &send_after/2),
       run: Keyword.get(opts, :run, &Run.run/4),
       run_opts: Keyword.get(opts, :run_opts, []),
       task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
@@ -397,10 +396,7 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
   # The next run, from the last attempt (nil: never, not known, or a copy
   # owed: at once, never sooner than the boot delay), planned
   # only while the section turns snapshots on, and recorded in the status
-  # file so a surface reading it without the engine still shows it. A
-  # scheduler with no timer (a test tree) plans nothing and writes nothing.
-  defp plan(%{timer: nil} = state, _last_at), do: %{state | next_run_at: nil, token: nil}
-
+  # file so a surface reading it without the engine still shows it.
   defp plan(state, last_at) do
     next = if configured?(state), do: next_run_at(state, last_at)
     record(state, &%{&1 | next_run_at: next})
@@ -438,8 +434,6 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
   defp owes?(nil), do: true
   defp owes?(%{result: :waiting}), do: true
   defp owes?(%{result: result}) when result in [:verified, :failed], do: false
-
-  defp plan_now(%{timer: nil} = state), do: plan(state, nil)
 
   defp plan_now(state) do
     if configured?(state) do
@@ -502,14 +496,6 @@ defmodule FermixCore.Home.Snapshot.Scheduler do
   end
 
   defp interval_s(state), do: Config.interval_hours(state.config.()) * @hour_s
-
-  defp timer(opts) do
-    cond do
-      Keyword.get(opts, :timer_enabled, true) == false -> nil
-      timer = Keyword.get(opts, :timer) -> timer
-      true -> &send_after/2
-    end
-  end
 
   # A test names its targets; the engine reads its home's when it asks.
   defp targets_reader(opts, home) do

@@ -34,9 +34,8 @@ defmodule FermixCore.Companion.OriginBackfill do
   those rows; nothing is announced.
 
   `:temporary`: under the core tree's `:rest_for_one` a crash restarts nothing
-  after it, and the next start reads again. `start_link/1` takes `:enabled`
-  (off under `mix test`); `run/1` takes `:repo`, `:batch_size` and
-  `:max_batches`.
+  after it, and the next start reads again. `run/1` takes `:repo`,
+  `:batch_size` and `:max_batches`.
   """
 
   use Task, restart: :temporary
@@ -52,12 +51,8 @@ defmodule FermixCore.Companion.OriginBackfill do
 
   @type summary :: %{filled: non_neg_integer(), left: non_neg_integer()}
 
-  @spec start_link(keyword()) :: {:ok, pid()} | :ignore
-  def start_link(opts) when is_list(opts) do
-    if Keyword.fetch!(opts, :enabled),
-      do: Task.start_link(__MODULE__, :run, [opts]),
-      else: :ignore
-  end
+  @spec start_link(keyword()) :: {:ok, pid()}
+  def start_link(opts) when is_list(opts), do: Task.start_link(__MODULE__, :run, [opts])
 
   @doc """
   Fills in the origin of every row it can, at most `:max_batches` batches of

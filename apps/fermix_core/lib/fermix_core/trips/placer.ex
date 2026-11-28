@@ -40,8 +40,7 @@ defmodule FermixCore.Trips.Placer do
   is sent: an early child of a `:rest_for_one` tree must take down nothing
   after it ("Cascade roots"); an unexpected message is logged once each.
 
-  `enabled: false` (`mix test`'s tree, `@compiled_env`) runs nothing and arms
-  nothing. Seams: `:name`, `:enabled`, `:run` (2-arity, `Run.run/2`'s shape),
+  Seams: `:name`, `:run` (2-arity, `Run.run/2`'s shape),
   `:run_opts` (a `:session_id` there names every run's session),
   `:task_supervisor`, `:timer` (2-arity, given the message and the delay,
   answering a reference, in place of `Process.send_after/3` to this process)
@@ -94,7 +93,6 @@ defmodule FermixCore.Trips.Placer do
     Process.flag(:trap_exit, true)
 
     state = %{
-      enabled?: Keyword.get(opts, :enabled, true),
       run: Keyword.get(opts, :run, &Run.run/2),
       run_opts: Keyword.get(opts, :run_opts, []),
       tasks: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
@@ -107,7 +105,7 @@ defmodule FermixCore.Trips.Placer do
     }
 
     true = is_function(state.run, 2) and is_function(state.timer, 2)
-    if state.enabled?, do: {:ok, state, {:continue, :boot}}, else: {:ok, state}
+    {:ok, state, {:continue, :boot}}
   end
 
   @impl true
@@ -115,13 +113,10 @@ defmodule FermixCore.Trips.Placer do
 
   @impl true
   def handle_cast({:trigger, trigger}, state), do: {:noreply, trigger(state, trigger)}
-  def handle_cast(:saved, %{enabled?: true} = state), do: {:noreply, arm(state, @soon_ms)}
-  def handle_cast(:saved, state), do: {:noreply, state}
+  def handle_cast(:saved, state), do: {:noreply, arm(state, @soon_ms)}
 
-  def handle_cast(:towns_unresolved, %{enabled?: true} = state),
+  def handle_cast(:towns_unresolved, state),
     do: {:noreply, arm(state, Waiting.retry_in_s(1) * 1_000)}
-
-  def handle_cast(:towns_unresolved, state), do: {:noreply, state}
 
   @impl true
   def handle_info({ref, result}, %{running: %{ref: ref}} = state) when is_reference(ref) do
@@ -161,7 +156,6 @@ defmodule FermixCore.Trips.Placer do
 
   # -- runs ----------------------------------------------------------------------
 
-  defp trigger(%{enabled?: false} = state, _trigger), do: state
   defp trigger(%{running: nil} = state, trigger), do: start(state, trigger)
   defp trigger(state, trigger), do: %{state | queued: trigger}
 

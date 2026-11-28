@@ -17,33 +17,23 @@ defmodule FermixCore.SkillCuration.ChildGatingTest do
     :ok
   end
 
-  test "the child is absent under mix test regardless of config" do
+  test "the child requires enabled config AND memory" do
     Application.put_env(:fermix_core, :skill_curation, enabled: true)
     Application.put_env(:fermix_core, :memory, enabled: true)
-
-    # The compile-time env gate dominates: `mix test` never starts the clock,
-    # even with everything else switched on (the env-flag-is-not-an-env-gate
-    # lesson).
-    assert CoreApplication.maybe_skill_curation_scheduler() == []
-  end
-
-  test "outside test env the child requires enabled config AND memory" do
-    Application.put_env(:fermix_core, :skill_curation, enabled: true)
-    Application.put_env(:fermix_core, :memory, enabled: true)
-    assert CoreApplication.maybe_skill_curation_scheduler(:prod) == [SkillCurationScheduler]
+    assert CoreApplication.maybe_skill_curation_scheduler() == [SkillCurationScheduler]
 
     Application.put_env(:fermix_core, :skill_curation, enabled: false)
-    assert CoreApplication.maybe_skill_curation_scheduler(:prod) == []
+    assert CoreApplication.maybe_skill_curation_scheduler() == []
 
     Application.put_env(:fermix_core, :skill_curation, enabled: true)
     Application.put_env(:fermix_core, :memory, enabled: false)
-    assert CoreApplication.maybe_skill_curation_scheduler(:prod) == []
+    assert CoreApplication.maybe_skill_curation_scheduler() == []
   end
 
   test "default config is on (absent key means enabled)" do
     Application.put_env(:fermix_core, :skill_curation, [])
     Application.put_env(:fermix_core, :memory, [])
 
-    assert CoreApplication.maybe_skill_curation_scheduler(:prod) == [SkillCurationScheduler]
+    assert CoreApplication.maybe_skill_curation_scheduler() == [SkillCurationScheduler]
   end
 end

@@ -347,8 +347,4 @@ defmodule FermixCore.Companion.OriginBackfillTest do
 
     assert {:ok, %{filled: 0, left: 0}} = backfill(repo)
   end
-
-  test "the boot child does nothing where it is switched off" do
-    assert OriginBackfill.start_link(enabled: false) == :ignore
-  end
 end

@@ -580,14 +580,15 @@ defmodule FermixCore.Application do
       # Says where a scheduled job's or a cue's message came from on the
       # timeline rows written before `metadata.origin` existed, once most of
       # the tree is up, in short batches the boot never waits for.
-      # `:temporary`, so a crash restarts nothing after it; dark under `mix
-      # test`, whose suites run their own pass on their own Repo.
-      {OriginBackfill, enabled: @compiled_env != :test},
+      # `:temporary`, so a crash restarts nothing after it.
+      OriginBackfill,
       # What the move in hand counted (`Home.MoveProgress`), in memory, for
       # the Always On summary. Late, so a crash restarts only the
       # primary-only children after it, which the device a move runs on
-      # never starts; it raises on nothing its guarded callers hand it.
-      maybe_move_progress(),
+      # never starts; it raises on nothing its guarded callers hand it. A
+      # candidate's tree leaves it out (`Role.children/2` keeps only
+      # `candidate_keeps/0`).
+      FermixCore.Home.MoveProgress,
       # What the home knows live of its computers (M97 §3.2), primary-only.
       # A crash restarts the snapshot scheduler and the cue tree, which
       # re-read their state; its own is rebuilt as it starts, by asking each
@@ -602,26 +603,24 @@ defmodule FermixCore.Application do
       # that offers places connects (told by the registry above), at
       # Brave's reset and at boot. After the Repo, the pacer, the registry
       # and the calls it reads; each run is a task of its own, and it
-      # raises on nothing it is sent, so it restarts nothing after it. Its
-      # runs stay dark under `mix test`.
-      {FermixCore.Trips.Placer, enabled: @compiled_env != :test},
+      # raises on nothing it is sent, so it restarts nothing after it.
+      FermixCore.Trips.Placer,
       # The trips index again at a day's turn (M89 D14), primary-only: within
       # minutes of a local midnight that starts or ends a trip, the index goes
       # again to the devices that pulled it, and once at its boot, so a
       # restart of it never swallows a turn. After the Repo it reads; it
       # serves no call, arms one timer and raises on nothing it is sent, so it
-      # restarts nothing after it. Dark under `mix test`, whose tests start
-      # their own with an injected clock and timer.
-      {FermixCore.Trips.DayTurn, enabled: @compiled_env != :test},
+      # restarts nothing after it.
+      FermixCore.Trips.DayTurn,
       # The release table an Always On server's update chooses from (M97
       # §3.4), primary-only and fetching only on an Always On server. It
-      # never raises on a fetch or a table: each fails into a sentence. Its
-      # timer stays dark under `mix test`.
-      {FermixCore.Home.ReleaseTable, release_table_opts()},
+      # never raises on a fetch or a table: each fails into a sentence. An
+      # Always On server reads the table its update chooses from; any other
+      # engine reads none.
+      {FermixCore.Home.ReleaseTable, fetching: always_on_server?()},
       # The primary's snapshots (M75 §8), before the cue tree so a crash of
-      # either restarts nothing but the cue tree. Its timers stay dark under
-      # `mix test`; tests start their own with an injected clock and timer.
-      {SnapshotScheduler, timer_enabled: @compiled_env != :test},
+      # either restarts nothing but the cue tree.
+      SnapshotScheduler,
       # Cue tree (M60 §5.3) LAST, and that order is load-bearing, as it is
       # for the temporal rail above: under `:rest_for_one` a crash of
       # `JobScheduler` or anything before it restarts the cue subsystem,
@@ -807,11 +806,9 @@ defmodule FermixCore.Application do
   # infrastructure boots when computer use is enabled and the sidecar is
   # installed; and on an engine that may drive a computer's screen or have its
   # own driven by its server (M97 §6.4), which spawns no helper until asked.
-  # The second half is gated on the compile-time env, as the scheduler's is:
-  # `mix test` starts the tree it tests itself. Off (the default) starts
-  # nothing — no OS-driver process is ever spawned.
+  # Off (the default) starts nothing — no OS-driver process is ever spawned.
   defp maybe_computer_use_supervisor(role) do
-    if ComputerUse.ready?() or (@compiled_env != :test and computer_screens?(role)) do
+    if ComputerUse.ready?() or computer_screens?(role) do
       [ComputerUseSupervisor]
     else
       []
@@ -822,10 +819,9 @@ defmodule FermixCore.Application do
     do: ComputerUse.drives_computers?(role: role) or ComputerUse.driven?(role: role)
 
   # This computer's screen while its server drives it (M97 §6.4,
-  # `ComputerUse.Seat`): only on a linked computer with the helper installed,
-  # and never under `mix test`, which starts its own with a driver double.
+  # `ComputerUse.Seat`): only on a linked computer with the helper installed.
   defp maybe_screen_seat(role) do
-    if @compiled_env != :test and ComputerUse.driven?(role: role),
+    if ComputerUse.driven?(role: role),
       do: [ComputerUseSeat],
       else: []
   end
@@ -837,8 +833,7 @@ defmodule FermixCore.Application do
   # and otherwise answers `:ignore`, so a plain Linux install runs none of it
   # and creates no store. Where it runs, Retention must always run so a spool
   # left behind by a disable still drains by the 48h horizon (inv. 16). Its
-  # work is tick-gated; the timer is disabled in `:test` (the scheduler
-  # precedent), never by omission. Its machine store failing to open never
+  # work is tick-gated. Its machine store failing to open never
   # stops it or a child after it: the store stays up saying why and the
   # recorder stays off (`ComputerHistory.Spool`). Public (@doc false) with the
   # platform's fact injectable, so the gating test names the system it means.
@@ -847,33 +842,21 @@ defmodule FermixCore.Application do
   def maybe_computer_history_supervisor(role, recorder? \\ ComputerHistory.recorder?())
       when role in [:primary, :device, :candidate] and is_boolean(recorder?) do
     if role == :primary or recorder? do
-      [{ComputerHistorySupervisor, timer_enabled: @compiled_env != :test}]
+      [ComputerHistorySupervisor]
     else
       []
     end
   end
 
-  # The move's count (Always On pane §3.13, P4): child-ABSENT under `mix
-  # test`, so no suite's summary reads another suite's move; a test starts a
-  # store of its own. A candidate's tree leaves it out too (`Role.children/2`
-  # keeps only `candidate_keeps/0`). Public (@doc false) for the gating test.
-  @doc false
-  def maybe_move_progress(compiled_env \\ @compiled_env) do
-    if compiled_env != :test, do: [FermixCore.Home.MoveProgress], else: []
-  end
-
   # Skill-curation clock (MILESTONE_26_SKILL_CURATION §6.1): child-ABSENT when
-  # gated out. Three conditions, all required — the compile-time env gate (the
-  # env-flag-is-not-an-env-gate lesson), the config switch, and memory
+  # gated out. Two conditions, both required — the config switch and memory
   # persistence (every curation surface lives in memory.db; with memory off
   # the scheduler would only churn run_error every cycle). Public (@doc false)
-  # so tests can pin the gating without booting a second app tree; the env
-  # param exists only so tests can exercise the non-test branches — production
-  # callers always use the baked default.
+  # so tests can pin the gating without booting a second app tree.
   @doc false
-  def maybe_skill_curation_scheduler(compiled_env \\ @compiled_env) do
-    if compiled_env != :test and SkillCurationConfig.enabled?() and
-         FermixCore.Memory.Config.enabled?() do
+  @spec maybe_skill_curation_scheduler() :: [Role.child()]
+  def maybe_skill_curation_scheduler do
+    if SkillCurationConfig.enabled?() and FermixCore.Memory.Config.enabled?() do
       [SkillCurationScheduler]
     else
       []
@@ -881,17 +864,15 @@ defmodule FermixCore.Application do
   end
 
   # Open loops (MILESTONE_78 §10): child-ABSENT when gated out, the
-  # skill-curation precedent. The compile-time env gate (so `mix test` never
-  # starts the rail and `config/test.exs` never needs to reach its timers), the
-  # config switch, default off, and memory persistence (every loop lives in
-  # memory.db; with memory off the scheduler would only log a failed scan every
-  # five seconds). Read once at boot: a switch flipped afterwards takes effect
-  # at the next start. Public (@doc false) so tests can pin the gating; the env
-  # param exists only for the non-test branches.
+  # skill-curation precedent. The config switch, on when absent, and memory
+  # persistence (every loop lives in memory.db; with memory off the scheduler
+  # would only log a failed scan every five seconds). Read once at boot: a
+  # switch flipped afterwards takes effect at the next start. Public (@doc
+  # false) so tests can pin the gating.
   @doc false
-  def maybe_open_loops_children(compiled_env \\ @compiled_env) do
-    if compiled_env != :test and OpenLoopsConfig.enabled?() and
-         FermixCore.Memory.Config.enabled?() do
+  @spec maybe_open_loops_children() :: [Role.child()]
+  def maybe_open_loops_children do
+    if OpenLoopsConfig.enabled?() and FermixCore.Memory.Config.enabled?() do
       [{OpenLoopsScheduler, [timer_enabled: true]}, OpenLoopsCheckInSupervisor]
     else
       []
@@ -900,13 +881,12 @@ defmodule FermixCore.Application do
 
   # Cue subsystem (M60 §5.3, §15): child-ABSENT when gated out, like the
   # skill-curation clock above. `Cues.enabled?/0` holds the
-  # `[fermix_core.cues] enabled` switch and memory being on; `mix test` never
-  # starts the tree on top of that, so no suite reaches the door's port or the
-  # sweeps. Public (@doc false) for the gating test; production callers use the
-  # baked default.
+  # `[fermix_core.cues] enabled` switch and memory being on. Public (@doc
+  # false) for the gating test.
   @doc false
-  def maybe_cues_supervisor(compiled_env \\ @compiled_env) do
-    if compiled_env != :test and Cues.enabled?() do
+  @spec maybe_cues_supervisor() :: [Role.child()]
+  def maybe_cues_supervisor do
+    if Cues.enabled?() do
       [CuesSupervisor]
     else
       []
@@ -953,8 +933,9 @@ defmodule FermixCore.Application do
     config.enabled? and RealtimeConfig.api_key_present?(config)
   end
 
-  # Trace's retention passes (M75 L14) stay dark under `mix test`, as the
-  # snapshot scheduler's timers do; tests start their own Trace with a clock.
+  # Trace's retention passes (M75 L14) stay dark under `mix test`: Trace starts
+  # in every boot, the suite's included; tests start their own Trace with a
+  # clock.
   # On an Always On server a trace keeps the bodies of its records about a day
   # (through the previous UTC day; M75 L20), decided once from what this boot
   # recorded.
@@ -970,15 +951,6 @@ defmodule FermixCore.Application do
     ConfigStore.fermix_home()
     |> AlwaysOn.facts(Role.recorded(), HostFacts.current())
     |> AlwaysOn.server?()
-  end
-
-  # An Always On server reads the release table its update chooses from; any
-  # other engine reads none (M97 §3.4).
-  defp release_table_opts do
-    [
-      fetching: always_on_server?(),
-      timer_enabled: @compiled_env != :test
-    ]
   end
 
   defp jobs_scheduler_opts do

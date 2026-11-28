@@ -101,9 +101,9 @@ config :fermix_core, :jobs,
 # own instances with injected repo/supervisor/clock seams.
 config :fermix_core, :temporal, scheduler_enabled: false
 
-# Skill-curation scheduler: belt and braces alongside the @compiled_env child
-# gate in Application — disabled in config, never by omission. Curation tests
-# start their own Scheduler instances with injected seams.
+# Skill curation is off in tests: `/skills` and Doctor read the switch, and the
+# daemon's child list a test reads leaves the curation clock out. Curation
+# tests start their own Scheduler instances with injected seams.
 config :fermix_core, :skill_curation, enabled: false
 
 # Open loops stay off in tests; config.exs never pins the key (its default is off).

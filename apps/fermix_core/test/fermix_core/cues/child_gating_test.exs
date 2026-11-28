@@ -21,31 +21,24 @@ defmodule FermixCore.Cues.ChildGatingTest do
     :ok
   end
 
-  test "the tree is absent under mix test, whatever the config says" do
+  test "it needs the switch on and memory on" do
     Application.put_env(:fermix_core, :cues, enabled: true)
     Application.put_env(:fermix_core, :memory, enabled: true)
-
-    assert CoreApplication.maybe_cues_supervisor() == []
-  end
-
-  test "outside test it needs the switch on and memory on" do
-    Application.put_env(:fermix_core, :cues, enabled: true)
-    Application.put_env(:fermix_core, :memory, enabled: true)
-    assert CoreApplication.maybe_cues_supervisor(:dev) == [CuesSupervisor]
+    assert CoreApplication.maybe_cues_supervisor() == [CuesSupervisor]
 
     Application.put_env(:fermix_core, :cues, enabled: false)
-    assert CoreApplication.maybe_cues_supervisor(:dev) == []
+    assert CoreApplication.maybe_cues_supervisor() == []
 
     Application.put_env(:fermix_core, :cues, enabled: true)
     Application.put_env(:fermix_core, :memory, enabled: false)
-    assert CoreApplication.maybe_cues_supervisor(:dev) == []
+    assert CoreApplication.maybe_cues_supervisor() == []
   end
 
   test "the switch is off when nothing is configured" do
     Application.put_env(:fermix_core, :cues, [])
     Application.put_env(:fermix_core, :memory, enabled: true)
 
-    assert CoreApplication.maybe_cues_supervisor(:dev) == []
+    assert CoreApplication.maybe_cues_supervisor() == []
   end
 
   test "the cue tree is the last child of the core tree" do

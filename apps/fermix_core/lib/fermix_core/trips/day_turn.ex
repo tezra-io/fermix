@@ -43,8 +43,7 @@ defmodule FermixCore.Trips.DayTurn do
   and an unexpected message is logged once each ("Cascade roots": a crash
   of it would restart every child after it).
 
-  `enabled: false` (`mix test`'s tree) reads nothing and arms nothing. Seams:
-  `:name`, `:enabled`, `:repo`, `:clock` (0-arity, the wall clock),
+  Seams: `:name`, `:repo`, `:clock` (0-arity, the wall clock),
   `:personalization` (the home's zone, as `FermixCore.Clock` reads it),
   `:notifier` (`Kept.Notify`'s) and `:timer` (2-arity, given the message and
   the delay, answering a reference, in place of `Process.send_after/3` to
@@ -86,7 +85,6 @@ defmodule FermixCore.Trips.DayTurn do
   @impl true
   def init(opts) do
     state = %{
-      enabled?: Keyword.get(opts, :enabled, true),
       registry_opts:
         [repo: Keyword.get(opts, :repo, Repo), on_timeout: :error, timeout: Timeouts.repo_call()] ++
           Keyword.take(opts, [:personalization]),
@@ -100,15 +98,14 @@ defmodule FermixCore.Trips.DayTurn do
     }
 
     true = is_function(state.clock, 0) and is_function(state.timer, 2)
-    if state.enabled?, do: {:ok, state, {:continue, :boot}}, else: {:ok, state}
+    {:ok, state, {:continue, :boot}}
   end
 
   @impl true
   def handle_continue(:boot, state), do: {:noreply, look(state, :boot)}
 
   @impl true
-  def handle_cast(:changed, %{enabled?: true} = state), do: {:noreply, look(state, :change)}
-  def handle_cast(:changed, state), do: {:noreply, state}
+  def handle_cast(:changed, state), do: {:noreply, look(state, :change)}
 
   @impl true
   def handle_info({:wake, token}, %{wake: %{token: token}} = state),

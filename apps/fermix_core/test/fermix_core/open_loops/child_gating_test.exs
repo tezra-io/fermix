@@ -23,30 +23,23 @@ defmodule FermixCore.OpenLoops.ChildGatingTest do
   defp restore(key, {:ok, value}), do: Application.put_env(:fermix_core, key, value)
   defp restore(key, :error), do: Application.delete_env(:fermix_core, key)
 
-  test "the children are absent under mix test regardless of config" do
+  test "the children require the switch AND memory" do
     Application.put_env(:fermix_core, :open_loops, enabled: true)
     Application.put_env(:fermix_core, :memory, enabled: true)
-
-    assert CoreApplication.maybe_open_loops_children() == []
-  end
-
-  test "outside test env the children require the switch AND memory" do
-    Application.put_env(:fermix_core, :open_loops, enabled: true)
-    Application.put_env(:fermix_core, :memory, enabled: true)
-    assert CoreApplication.maybe_open_loops_children(:prod) == @children
+    assert CoreApplication.maybe_open_loops_children() == @children
 
     Application.put_env(:fermix_core, :open_loops, enabled: false)
-    assert CoreApplication.maybe_open_loops_children(:prod) == []
+    assert CoreApplication.maybe_open_loops_children() == []
 
     Application.put_env(:fermix_core, :open_loops, enabled: true)
     Application.put_env(:fermix_core, :memory, enabled: false)
-    assert CoreApplication.maybe_open_loops_children(:prod) == []
+    assert CoreApplication.maybe_open_loops_children() == []
   end
 
   test "an absent section is on: a home that never set the switch runs open loops" do
     Application.put_env(:fermix_core, :open_loops, [])
     Application.put_env(:fermix_core, :memory, enabled: true)
 
-    assert CoreApplication.maybe_open_loops_children(:prod) == @children
+    assert CoreApplication.maybe_open_loops_children() == @children
   end
 end

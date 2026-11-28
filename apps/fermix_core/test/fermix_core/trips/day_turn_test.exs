@@ -254,12 +254,4 @@ defmodule FermixCore.Trips.DayTurnTest do
     assert_received {:announced, %{trips: []}}
     refute_received {:announced, _changes}
   end
-
-  test "disabled, it reads nothing, sends nothing and arms nothing", ctx do
-    pid = start!(ctx, enabled: false)
-    assert %{wake: nil} = :sys.get_state(pid)
-    DayTurn.trips_changed(pid)
-    assert %{wake: nil} = :sys.get_state(pid)
-    refute_received {:announced, _changes}
-  end
 end

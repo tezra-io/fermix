@@ -71,10 +71,17 @@ defmodule FermixCore.Home.RoleChildrenTest do
   defp full_tree(role), do: CoreApplication.supervision_children(Egress.new([]), role, true)
   defp command_tree(role), do: CoreApplication.supervision_children(Egress.new([]), role, false)
 
-  # The tree less the history rail, the one child whose presence the platform
-  # decides (asserted for both systems below), so the trees compare alike on
-  # any host.
-  defp tree(role), do: Enum.reject(full_tree(role), &(module(&1) == ComputerHistorySupervisor))
+  # The tree less the children whose presence this host decides, so the trees
+  # compare alike on any host: the history rail, where a recorder runs, and on
+  # a linked computer the computer-use rail and its screen seat, where the
+  # helper is installed (each asserted below where a host cannot change it).
+  @host_decided [
+    ComputerHistorySupervisor,
+    FermixCore.ComputerUse.Supervisor,
+    FermixCore.ComputerUse.Seat
+  ]
+
+  defp tree(role), do: Enum.reject(full_tree(role), &(module(&1) in @host_decided))
 
   test "the primary starts the primary-only children this boot declares" do
     primary = modules(tree(:primary))
@@ -150,6 +157,16 @@ defmodule FermixCore.Home.RoleChildrenTest do
 
     assert modules(CoreApplication.maybe_computer_history_supervisor(:device, true)) == rail
     assert CoreApplication.maybe_computer_history_supervisor(:device, false) == []
+  end
+
+  # M97 §6.4: the primary may drive its computers' screens, so it starts the
+  # computer-use rail on any host, and its own screen is never driven, so it
+  # seats nothing.
+  test "the primary starts the computer-use rail and no screen seat" do
+    primary = modules(full_tree(:primary))
+
+    assert FermixCore.ComputerUse.Supervisor in primary
+    refute FermixCore.ComputerUse.Seat in primary
   end
 
   # A device's database is a retired copy, which a return replaces in place
@@ -244,8 +261,8 @@ defmodule FermixCore.Home.RoleChildrenTest do
 
     test "are started for the primary and left out for a device" do
       gated =
-        CoreApplication.maybe_open_loops_children(:prod) ++
-          CoreApplication.maybe_skill_curation_scheduler(:prod) ++
+        CoreApplication.maybe_open_loops_children() ++
+          CoreApplication.maybe_skill_curation_scheduler() ++
           [FermixCore.Cues.Supervisor]
 
       assert modules(gated) == [

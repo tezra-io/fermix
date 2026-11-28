@@ -107,8 +107,8 @@ redacting logger, attaches telemetry, and starts the core tree under
    `RestartState`, `Sandbox.EnvHealth`)
 8. `AgentSupervisor` and `MainAgent`
 9. the job, meeting, and temporal schedulers with their delivery supervisors,
-   `OpenLoops.Scheduler` and `OpenLoops.CheckInSupervisor` (outside
-   `mix test`, on a primary with open loops and memory on),
+   `OpenLoops.Scheduler` and `OpenLoops.CheckInSupervisor` (on a primary
+   with open loops and memory on),
    `Harness.Supervisor`, and `PhoneCalls.Supervisor` (always, primary-only)
 10. children gated by config, platform or role: the daemon socket
     (`Fermix.CLI.Daemon` and the management workers), the native host,
@@ -1145,8 +1145,8 @@ model run that may call exactly `memory_recall`, `open_loop_list` and
 `open_loop_respond`, whose one decision (speak, silent, later, close) only code
 carries out, sending at most one message. `OpenLoops.Reactions` records what
 the owner said next, read back as their own words. The two processes start
-in every boot of the tree outside `mix test`, on a primary with open loops and
-memory on, read once at boot.
+in the home's daemon, on a primary with open loops and memory on, read once at
+boot.
 
 Architecture Invariant: a check-in's model causes only the decisions in
 `open_loop_respond`'s list, and it can never note or settle a loop; the

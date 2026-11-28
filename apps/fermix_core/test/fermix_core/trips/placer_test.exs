@@ -723,7 +723,6 @@ defmodule FermixCore.Trips.PlacerTest do
         Keyword.merge(
           [
             name: nil,
-            enabled: true,
             task_supervisor: ctx.tasks,
             timer: fn message, delay -> send(test, {:armed, message, delay}) && make_ref() end,
             now_ms: fn -> 0 end
@@ -1034,7 +1033,6 @@ defmodule FermixCore.Trips.PlacerTest do
       children = [
         {Placer,
          name: nil,
-         enabled: true,
          run: run,
          task_supervisor: ctx.tasks,
          timer: fn message, delay -> send(test, {:armed, message, delay}) && make_ref() end,
@@ -1064,15 +1062,5 @@ defmodule FermixCore.Trips.PlacerTest do
 
     defp children(parent),
       do: Map.new(Supervisor.which_children(parent), fn {id, pid, _type, _mods} -> {id, pid} end)
-
-    test "dark when not enabled: it runs nothing and arms nothing", ctx do
-      test = self()
-      placer = start_placer!(ctx, enabled: false, run: fn t, _o -> send(test, {:ran, t, nil}) end)
-      :ok = Placer.places_offered(placer, "a")
-      :ok = Placer.waits_saved(placer)
-      :sys.get_state(placer)
-      refute_received {:ran, _trigger, _result}
-      refute_received {:armed, _message, _delay}
-    end
   end
 end
