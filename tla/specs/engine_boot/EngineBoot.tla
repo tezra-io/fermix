@@ -24,11 +24,10 @@
 (*    take_home_lock/2) and only then runs start_tree/0: the role,         *)
 (*    prepare_home/2 and the ownership marker (maybe_daemon_socket/0,      *)
 (*    EngineOwner.record/0), which write the home, and                     *)
-(*    supervision_children/2, whose order puts every rail before the       *)
-(*    control socket; stop/1, which lets go of the lock; and the options   *)
-(*    that decide where a rail reconciles (phone_calls_opts/2,             *)
-(*    jobs_scheduler_opts/0, temporal_scheduler_opts/0,                    *)
-(*    harness_worker_opts/0).                                              *)
+(*    supervision_children/3, whose order puts every rail before the       *)
+(*    control socket and which starts the rails in a daemon's boot alone   *)
+(*    (daemon_children/2: any other boot ends at MainAgent); stop/1,       *)
+(*    which lets go of the lock.                                           *)
 (*  - Fermix.CLI.Daemon.Lock: acquire/2 (the file beside the socket, held  *)
 (*    in SQLite's exclusive mode), released when its process ends however  *)
 (*    it ends.                                                             *)
@@ -54,8 +53,8 @@
 (*    boots nothing and reads the lock through Daemon.Client;              *)
 (*  - a home's role (primary, device, candidate): every role's daemon      *)
 (*    takes the same lock at the same step;                                *)
-(*  - the timers a command's tree arms beside its sweeps (a due job        *)
-(*    claimed and run there): the sweep stands for both;                   *)
+(*  - the timers a daemon's rails arm beside their sweeps (a due job       *)
+(*    claimed and run): the sweep stands for both;                         *)
 (*  - two homes: a lock is per home, and nothing here is shared between    *)
 (*    homes.                                                               *)
 (*                                                                         *)
@@ -65,7 +64,7 @@
 (* worker, or the end of a process.                                        *)
 (***************************************************************************)
 
-\* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,start_holding_home_lock,take_home_lock,acquire_home_lock,start_holding,release_home_lock,start_tree,stop,supervision_children,maybe_daemon_socket,daemon_boot?,phone_calls_opts,jobs_scheduler_opts,temporal_scheduler_opts,harness_worker_opts @ 24f5eb5f14c2
+\* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,start_holding_home_lock,take_home_lock,acquire_home_lock,start_holding,release_home_lock,start_tree,stop,supervision_children,every_boot_children,daemon_children,maybe_daemon_socket,daemon_boot? @ 24f5eb5f14c2
 \* SOURCE: apps/fermix_core/lib/fermix/cli/daemon/lock.ex @ c68d18c190c1
 \* SOURCE: apps/fermix_core/lib/fermix/cli/daemon.ex#init,bind,clear_stale_socket,terminate @ 851bd39720d1
 
@@ -76,9 +75,6 @@ CONSTANTS
     Rails,            \* the rails that keep claimed rows, e.g. {calls, jobs}:
                       \* `jobs` stands for the jobs, reminder, coding-run and
                       \* meeting rails, which reconcile alike
-    EngineOnly,       \* the rails whose reconciliation is asked for only in
-                      \* the home's daemon. The code: {calls}
-                      \* (Application.phone_calls_opts/2, `reconcile: daemon?`)
     MaxStarts,        \* how many times each process starts (a bound)
     MaxClaims,        \* how many rows the engines take in all (a bound)
     \* Environment switches: what may happen.
@@ -94,10 +90,10 @@ CONSTANTS
                       \* prepared and every rail swept
     SweepsAtBoot,     \* each rail settles, as it starts, the rows no worker
                       \* of its VM holds (Jobs.Scheduler.init/1 and the rest)
-    SweepNeedsEngine  \* an engine-only rail does not reconcile in a
-                      \* command's tree (PhoneCalls.Manager's
-                      \* handle_continue with `reconcile?: false`); FALSE
-                      \* reconciles it in any tree boot
+    SweepNeedsEngine  \* a command's tree starts no rail
+                      \* (Application.supervision_children/3 ends a boot
+                      \* that is not a daemon's at MainAgent); FALSE starts
+                      \* every rail, each reconciling, in any tree boot
 
 Kinds == {"daemon", "command"}
 Pcs == {"off", "lock", "home", "rails", "socket", "serving", "command"}
@@ -196,16 +192,17 @@ PrepareHome(b) ==
     /\ UNCHANGED <<home_vars, kind, starts, hist_vars>>
 
 \* Whether this boot reconciles the rail: a daemon's always does; a
-\* command's does unless the rail is engine-only.
+\* command's starts no rail, so reconciles none.
 Sweeps(b, r) ==
     /\ SweepsAtBoot
-    /\ kind[b] = "daemon" \/ ~(SweepNeedsEngine /\ r \in EngineOnly)
+    /\ kind[b] = "daemon" \/ ~SweepNeedsEngine
 
 \* The rows this boot's rails settle as they start: every claim, since a
 \* VM that has just started holds none.
 Swept(b) == {r \in Rails : Sweeps(b, r) /\ row[r] = "claimed"}
 
-\* The rails start (supervision_children/2), each with its reconciliation.
+\* The rails start (supervision_children/3), each with its reconciliation;
+\* a command's tree ends before them (daemon_children/2).
 StartRails(b) ==
     /\ pc[b] = "rails"
     /\ Goto(b, IF kind[b] = "daemon" THEN "socket" ELSE "command")
@@ -292,14 +289,9 @@ Spec == Init /\ [][Next]_vars
 \* authority on which runs still exist" (Jobs.Scheduler); "no worker
 \* outlives the scheduler" (Temporal.Scheduler). The sweep's own VM is the
 \* authority only while no other engine serves the home: no boot settles a
-\* row a running engine's worker holds.
+\* row a running engine's worker holds, a command's beside it included
+\* ("Any other boot ... ends at `MainAgent`", Application).
 OnlyGoneWorkIsSwept == \A r \in Rails : ~sweptLive[r]
-
-\* "a command that boots the tree in a process of its own ... must not
-\* settle the daemon's live call as unowned or hang it up"
-\* (Application.phone_calls_opts/2): the same rule, for the rails that ask
-\* for it.
-EngineOnlyWorkSpared == \A r \in EngineOnly : ~sweptLive[r]
 
 \* "a second daemon that finds it held does not start" (Fermix.CLI.Daemon):
 \* a refused boot leaves the home as it found it.

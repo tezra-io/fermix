@@ -322,7 +322,11 @@ defmodule FermixChannels.PhoneCalls.EndToEndTest do
 
     # The in-call tools reach the worker the way production does, through the
     # default call registry (`CallControls`), so the
-    # worker registers there and not in this subtree's own.
+    # worker registers there and not in this subtree's own. Only the home's
+    # daemon's tree starts that registry (`Application.supervision_children/3`),
+    # so the test starts it.
+    start_supervised!({Registry, keys: :unique, name: CallControls.registry_name()})
+
     Fakes.script(
       :seams,
       Map.merge(Fakes.seams(clock), %{

@@ -14,7 +14,6 @@ defmodule FermixCore.PhoneCalls.CallLifecycleTest do
   alias FermixCore.PhoneCalls.Ledger
   alias FermixCore.PhoneCalls.Manager
   alias FermixCore.PhoneCalls.Outcome
-  alias FermixCore.PhoneCalls.Readiness
   alias FermixTestSupport.PhoneCallFakes, as: Fakes
   alias FermixTestSupport.TelemetryCapture
 
@@ -157,9 +156,8 @@ defmodule FermixCore.PhoneCalls.CallLifecycleTest do
     TelemetryCapture.attach(@closers, parent_session: request.parent_session)
     assert {:ok, %{call_id: id, reused: false}} = Manager.start_call(request, names.manager)
     assert_receive {:create, task, _create_request}
-    # The worker registers in its own subtree's registry, never the app's.
+    # The worker registers in its own subtree's registry.
     [{worker, _value}] = Registry.lookup(names.call_registry, id)
-    assert Registry.lookup(FermixCore.PhoneCalls.CallRegistry, id) == []
     %{id: id, worker: worker, create: task}
   end
 
@@ -225,10 +223,6 @@ defmodule FermixCore.PhoneCalls.CallLifecycleTest do
     assert self() in monitors
     ref
   end
-
-  # A second engine's subtree, under names of its own.
-  defp second_names(ctx),
-    do: Map.new(names(ctx), fn {key, name} -> {key, :"#{name}_second"} end)
 
   defp row!(repo, id) do
     {:ok, row} = Ledger.get(id, server: repo)
@@ -383,82 +377,19 @@ defmodule FermixCore.PhoneCalls.CallLifecycleTest do
   end
 
   describe "booting the subtree" do
-    test "the app tree runs it with the worker, with phone calls off and memory off", _ctx do
-      assert is_pid(Process.whereis(FermixCore.PhoneCalls.Manager))
-      assert is_pid(Process.whereis(FermixCore.PhoneCalls.CallRegistry))
-      assert Readiness.current() == :disabled
-      assert {:error, :disabled} = Manager.start_call(request())
-      refute_received {:create, _task, _request}
-    end
-
     test "the production options name the worker and a one-attempt hangup", _ctx do
       opts = CoreApplication.phone_calls_opts()
       assert Keyword.fetch!(opts, :call_module) == Call
       assert is_function(Keyword.fetch!(opts, :hangup), 1)
-      # `mix test` is never the home's daemon: the app tree's reconciliation
-      # and timers stay dark, its transport refuses every call, and the test
-      # build configures no backend.
-      assert Keyword.fetch!(opts, :reconcile) == false
-      assert Keyword.fetch!(opts, :timer_enabled) == false
 
+      # The test build's transport refuses every call, and it configures no
+      # backend.
       assert Keyword.fetch!(opts, :call_args) == %{
                transport_opts: [refused: :test_build],
                delegate: nil
              }
 
       assert {:error, {:not_sent, :test_build}} = Keyword.fetch!(opts, :hangup).(@session)
-    end
-
-    test "only the home's daemon reconciles, prunes and ticks", _ctx do
-      for build <- [:prod, :dev, :test] do
-        daemon = CoreApplication.phone_calls_opts(true, build)
-        other = CoreApplication.phone_calls_opts(false, build)
-        assert {daemon[:reconcile], daemon[:timer_enabled]} == {true, true}, "#{build}"
-        assert {other[:reconcile], other[:timer_enabled]} == {false, false}, "#{build}"
-      end
-    end
-
-    # A second engine process on the home (`fermix memory`, a supervised
-    # `fermix setup`, a mix task) boots the tree with the composition root's
-    # options for a process that is not the daemon, over the same ledger,
-    # while the daemon's call is live.
-    test "a second engine process on the same home leaves the daemon's live call alone", ctx do
-      repo = repo!(ctx, true)
-      names = subtree!(ctx, repo, reconcile: true)
-      call = names |> start_call!() |> live!()
-      live_row = row!(repo, call.id)
-      assert live_row.status not in ["ended", "failed", "closure_unconfirmed"]
-      test = self()
-      second = second_names(ctx)
-
-      opts =
-        false
-        |> CoreApplication.phone_calls_opts(:test)
-        |> Keyword.merge(
-          names: second,
-          repo: repo,
-          hangup: fn session_id ->
-            send(test, {:second_engine_hangup, session_id})
-            :ok
-          end,
-          readiness: fn -> :ready end,
-          config: &Fakes.config/0,
-          now_fn: fn -> @t0 end,
-          continuation_dispatcher: SinkDispatcher
-        )
-
-      start_supervised!(
-        Supervisor.child_spec({FermixCore.PhoneCalls.Supervisor, opts}, id: :second)
-      )
-
-      # The second Manager's boot has run once it answers.
-      _state = :sys.get_state(GenServer.whereis(second.manager))
-
-      assert row!(repo, call.id) == live_row
-      assert Process.alive?(call.worker)
-      refute_received {:second_engine_hangup, _session}
-      refute_received {:manager_hangup, _session}
-      refute_received {:hangup, _task, _session}
     end
 
     test "a fresh home with phone calls off and no rows: it boots and refuses a start", ctx do

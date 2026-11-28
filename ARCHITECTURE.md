@@ -122,6 +122,13 @@ redacting logger, attaches telemetry, and starts the core tree under
 12. `Cues.Supervisor`, last, only with cues enabled (see `FermixCore.Cues`
     below)
 
+Items 9 to 12 are the daemon's own: they settle at their start the rows no
+worker of their VM holds, tick, claim work or serve, which only the home's one
+engine may do. So a boot that is not a daemon's, and holds no lock (`fermix
+memory`, a supervised `fermix setup`, `iex -S mix`, `mix run`, `mix test`),
+stops after `MainAgent` (`FermixCore.Application.supervision_children/3`),
+whether or not a daemon serves the home beside it.
+
 Architecture Invariant: core is the only place where agent runtime state, memory
 state, prompt composition, capability state, and provider calls meet. Channels
 and controllers normalize input and delegate. Turn scheduling, delivery, and

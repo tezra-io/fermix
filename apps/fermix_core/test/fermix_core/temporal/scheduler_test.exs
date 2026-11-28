@@ -3,8 +3,9 @@ defmodule FermixCore.Temporal.SchedulerTest do
 
   import ExUnit.CaptureLog
 
-  alias FermixCore.Agents.MainAgent
+  alias FermixCore.Application, as: CoreApplication
   alias FermixCore.Memory.Repo
+  alias FermixCore.Net.Egress
   alias FermixCore.Temporal.Defaults
   alias FermixCore.Temporal.Delivery
   alias FermixCore.Temporal.DeliverySupervisor
@@ -240,7 +241,7 @@ defmodule FermixCore.Temporal.SchedulerTest do
 
   defp child_index(order, module) do
     index = Enum.find_index(order, &(&1 == module))
-    assert index, "#{inspect(module)} is not a child of the application supervisor"
+    assert index, "#{inspect(module)} is not a child of the daemon's tree"
     index
   end
 
@@ -513,17 +514,15 @@ defmodule FermixCore.Temporal.SchedulerTest do
       assert spec.restart == :temporary
     end
 
+    # The daemon's tree, in start order: only a daemon boot starts the rail
+    # (`Application.supervision_children/3`), and this suite's boot is not one.
     test "the scheduler starts before its delivery supervisor in the application tree", _ctx do
       order =
-        FermixCore.Supervisor |> Supervisor.which_children() |> Enum.map(&elem(&1, 0))
+        Egress.new([])
+        |> CoreApplication.supervision_children(:primary, true)
+        |> Enum.map(&Supervisor.child_spec(&1, []).id)
 
-      # `which_children/1` reports one fixed order per OTP release, but whether
-      # that order is start order or its reverse is an implementation detail.
-      # `Repo` provably starts before `MainAgent` in the same list, so it
-      # calibrates the direction for the assertion that matters.
-      forward? = child_index(order, Repo) < child_index(order, MainAgent)
-
-      assert child_index(order, Scheduler) < child_index(order, DeliverySupervisor) == forward?
+      assert child_index(order, Scheduler) < child_index(order, DeliverySupervisor)
     end
   end
 
@@ -706,17 +705,6 @@ defmodule FermixCore.Temporal.SchedulerTest do
 
       assert log =~ "boot sweep failed"
       assert log =~ "due scan failed"
-    end
-  end
-
-  describe "application tree" do
-    test "the app-tree scheduler is dark under mix test", _ctx do
-      state = :sys.get_state(Scheduler)
-
-      refute state.enabled?
-      assert is_nil(state.due_timer)
-      assert is_nil(state.reconciliation_timer)
-      assert state.monitors == %{}
     end
   end
 

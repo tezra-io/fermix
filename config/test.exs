@@ -95,17 +95,10 @@ config :fermix_core, :jobs,
   delivery_timeout_ms: 60_000,
   delivery_channels: %{}
 
-# Coding-harness workers (Manager + DeliveryWorker) are always in the tree, but
-# their timers, boot reconciliation, and artifact GC must stay dark in tests so
-# the app-tree instances never touch the real Memory.Repo or FERMIX_HOME. Tests
-# that exercise these workers start their own instances with `timer_enabled: true`
-# and injected repo/runs_root seams.
-config :fermix_core, :harness_workers_enabled, false
-
-# Temporal reminder scheduler: the app-tree instance stays dark in tests (the
-# jobs `scheduler_enabled` precedent), so `mix test` never runs the boot sweep,
-# a due claim, or reconciliation against the real Memory.Repo. Scheduler tests
-# start their own instances with injected repo/supervisor/clock seams.
+# Temporal reminder scheduler: a scheduler a test starts is dark unless it says
+# otherwise (the jobs `scheduler_enabled` precedent), so no test runs the boot
+# sweep, a due claim, or reconciliation by accident. Scheduler tests start their
+# own instances with injected repo/supervisor/clock seams.
 config :fermix_core, :temporal, scheduler_enabled: false
 
 # Skill-curation scheduler: belt and braces alongside the @compiled_env child

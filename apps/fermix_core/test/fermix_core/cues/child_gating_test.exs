@@ -50,7 +50,11 @@ defmodule FermixCore.Cues.ChildGatingTest do
 
   test "the cue tree is the last child of the core tree" do
     source = File.read!(Path.expand("../../../lib/fermix_core/application.ex", __DIR__))
-    [children] = Regex.run(~r/children =\s*\[(.*?)\n      \]/s, source, capture: :all_but_first)
+
+    [children] =
+      Regex.run(~r/defp daemon_children\(role, true\) do\s*\[(.*?)\n    \]/s, source,
+        capture: :all_but_first
+      )
 
     assert children |> String.trim_trailing() |> String.ends_with?("maybe_cues_supervisor()")
   end

@@ -41,7 +41,7 @@ defmodule FermixCore.Home.RoleCandidateTest do
   end
 
   test "the core tree of a candidate keeps only what it needs" do
-    candidate = modules(CoreApplication.supervision_children(Egress.new([]), :candidate))
+    candidate = modules(CoreApplication.supervision_children(Egress.new([]), :candidate, true))
     kept = Enum.map(Role.candidate_keeps(), &elem(&1, 0))
 
     # The offer's free-space check and the restore's keyring probe run

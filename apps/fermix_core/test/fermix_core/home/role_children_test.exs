@@ -4,6 +4,7 @@ defmodule FermixCore.Home.RoleChildrenTest do
   # case below sets two of those keys itself.
   use ExUnit.Case, async: false
 
+  alias FermixCore.Agents.MainAgent
   alias FermixCore.Application, as: CoreApplication
   alias FermixCore.ComputerHistory.Controller, as: ComputerHistoryController
   alias FermixCore.ComputerHistory.Supervisor, as: ComputerHistorySupervisor
@@ -64,7 +65,11 @@ defmodule FermixCore.Home.RoleChildrenTest do
   defp module({module, _arg}), do: module
   defp module(module) when is_atom(module), do: module
 
-  defp full_tree(role), do: CoreApplication.supervision_children(Egress.new([]), role)
+  defp ids(children), do: Enum.map(children, &Supervisor.child_spec(&1, []).id)
+
+  # The tree the home's daemon starts, and the one any other boot starts.
+  defp full_tree(role), do: CoreApplication.supervision_children(Egress.new([]), role, true)
+  defp command_tree(role), do: CoreApplication.supervision_children(Egress.new([]), role, false)
 
   # The tree less the history rail, the one child whose presence the platform
   # decides (asserted for both systems below), so the trees compare alike on
@@ -92,6 +97,39 @@ defmodule FermixCore.Home.RoleChildrenTest do
     end
 
     assert device == Enum.reject(primary, &(module(&1) in Role.primary_only()))
+  end
+
+  # BOOT-1 (`tla/specs/engine_boot`): every child after `MainAgent` reconciles
+  # rows at its start, ticks, or serves, which only the home's daemon may do. A
+  # boot that is not it (`fermix memory`, a supervised `fermix setup`, a source
+  # run, this suite) ends its tree at `MainAgent`, which a memory review tells
+  # that the runtime context changed.
+  test "a boot that is not the home's daemon starts no child after MainAgent" do
+    order = modules(full_tree(:primary))
+    last = Enum.find_index(order, &(&1 == MainAgent))
+
+    for role <- [:primary, :device, :candidate], module <- modules(command_tree(role)) do
+      assert Enum.find_index(order, &(&1 == module)) <= last,
+             "a #{role} boot that is not the daemon starts #{inspect(module)} after MainAgent"
+    end
+
+    assert MainAgent in modules(command_tree(:primary))
+    assert MainAgent in modules(command_tree(:device))
+  end
+
+  # The tree this suite's boot really started, which no daemon boot started,
+  # not only the list it was built from.
+  test "this suite's own tree runs none of the daemon's children" do
+    daemon_only = ids(full_tree(:primary)) -- ids(command_tree(:primary))
+
+    started =
+      for {id, _pid, _type, _mods} <- Supervisor.which_children(FermixCore.Supervisor), do: id
+
+    assert FermixCore.Jobs.Scheduler in daemon_only
+
+    for id <- started do
+      refute id in daemon_only, "this suite's tree runs the daemon's #{inspect(id)}"
+    end
   end
 
   test "every daemon-only and switched child a device keeps is kept" do

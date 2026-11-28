@@ -149,6 +149,11 @@ defmodule FermixCore.PhoneCalls.SecretLeakTest do
     names = subtree!(unique, repo)
     clock = :atomics.new(1, [])
 
+    # The worker registers in the production call registry, which only the
+    # home's daemon's tree starts (`Application.supervision_children/3`), so
+    # the test starts it.
+    start_supervised!({Registry, keys: :unique, name: CallControls.registry_name()})
+
     Fakes.script(
       :seams,
       clock

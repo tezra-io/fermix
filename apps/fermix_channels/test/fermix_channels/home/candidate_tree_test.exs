@@ -2,7 +2,7 @@ defmodule FermixChannels.Home.CandidateTreeTest do
   @moduledoc """
   A candidate's side of a move, run in the world a candidate runs in (M75 §2):
   a VM of its own (`:peer`) that starts only the core children
-  `FermixCore.Application.supervision_children/2` lists for the candidate role,
+  `FermixCore.Application.supervision_children/3` lists for the candidate role,
   then the candidate process. Nothing that reaches the host is stood in for:
   the offer reads the free space with `df` through `CommandRunner`, the restore
   asks the keyring through `SecretWriter.probe/1` on a host that is not a Mac
@@ -209,7 +209,7 @@ defmodule FermixChannels.Home.CandidateTreeTest do
   # written under the candidate's home.
   defp core_children(home) do
     Egress.new([])
-    |> CoreApplication.supervision_children(:candidate)
+    |> CoreApplication.supervision_children(:candidate, true)
     |> Enum.map(fn
       {FermixCore.Trace, _opts} -> {FermixCore.Trace, base_dir: Path.join(home, "traces")}
       child -> child

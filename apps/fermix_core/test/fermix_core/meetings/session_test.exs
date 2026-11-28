@@ -324,6 +324,11 @@ defmodule FermixCore.Meetings.SessionTest do
     db_path = Path.join(System.tmp_dir!(), "fermix-meetings-session-#{unique}.db")
     repo_name = :"memory_repo_meetings_session_#{unique}"
     start_supervised!({Repo, name: repo_name, enabled: true, database_path: db_path})
+    # A session claims its capacity slot in the meetings registry, which only
+    # the home's daemon's tree holds (`Application.supervision_children/3`), so
+    # each test starts the meetings tree; its boot sweep reads the suite's
+    # store, whose memory is off.
+    start_supervised!(FermixCore.Meetings.Supervisor)
 
     root = FermixTestSupport.SafeRm.make_tmp_dir!("meetings-session")
 
@@ -1083,7 +1088,18 @@ defmodule FermixCore.Meetings.SessionTest do
   defp start!(ctx, opts \\ []) do
     {platform, opts} = Keyword.pop(opts, :platform, "meet")
     {:ok, meeting} = Store.insert(attrs(platform), server: ctx.repo)
-    {:ok, pid} = Session.start_link(Keyword.merge(defaults(ctx, meeting, platform), opts))
+
+    # A `:temporary` child, as under the meetings tree's own supervisor, and
+    # started after that tree, so the test's end stops it, and it gives its
+    # capacity slot back, before the tree's registry goes.
+    pid =
+      start_supervised!(
+        Supervisor.child_spec(
+          {Session, Keyword.merge(defaults(ctx, meeting, platform), opts)},
+          id: meeting.id,
+          restart: :temporary
+        )
+      )
 
     # Monitored here, while the session is certainly alive, because
     # `Process.monitor/1` on a process that has already exited answers
@@ -1096,10 +1112,10 @@ defmodule FermixCore.Meetings.SessionTest do
     %{id: meeting.id, pid: pid, ref: Process.monitor(pid)}
   end
 
-  # The capacity slot is claimed in `init/1` against the application's meetings
-  # registry, so a session started without a key of its own would compete with
-  # every other session in this async file. One key per session leaves the claim
-  # itself under test only where two sessions are given the same key.
+  # The capacity slot is claimed in `init/1` against the meetings registry the
+  # test's setup starts, so a session started without a key of its own would
+  # compete with every other session of its test. One key per session leaves
+  # the claim itself under test only where two sessions are given the same key.
   defp capacity_key, do: {:capacity_slot, System.unique_integer([:positive])}
 
   # `Session.init/1` returns `{:continue, :start}`, and a gen_server runs its

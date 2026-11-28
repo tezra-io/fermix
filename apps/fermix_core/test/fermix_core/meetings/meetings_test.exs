@@ -60,6 +60,10 @@ defmodule FermixCore.MeetingsTest do
     db_path = Path.join(System.tmp_dir!(), "fermix-meetings-api-#{unique}.db")
     repo_name = :"memory_repo_meetings_api_#{unique}"
     start_supervised!({Repo, name: repo_name, enabled: true, database_path: db_path})
+    # Sessions start and are found in the meetings tree, which only the home's
+    # daemon's tree holds (`Application.supervision_children/3`), so each test
+    # starts it; its boot sweep reads the suite's store, whose memory is off.
+    start_supervised!(MeetingsSupervisor)
 
     dev_local = FermixTestSupport.SafeRm.make_tmp_dir!("meetings-dev-local")
     home = FermixTestSupport.SafeRm.make_tmp_dir!("meetings-home")

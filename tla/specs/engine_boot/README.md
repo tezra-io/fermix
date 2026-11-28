@@ -13,8 +13,9 @@ tell that only while no other engine serves the home. The daemon lock
 What it is about: the lock is taken before anything it protects. A daemon
 boot takes it first, before it reads or writes the home and before any child
 starts; a boot that finds it held starts nothing and leaves the home as it
-found it. The spec also records what the lock does not cover: a command that
-boots the tree in a process of its own beside the daemon.
+found it. A command that boots the tree in a process of its own beside the
+daemon takes no lock, since it is not the home's engine, and starts no rail:
+its tree ends before the first one.
 
 The other specs that model a boot sweep (`job_runs`, `reminder_delivery`,
 `harness_delivery`, `open_loop_lifecycle`, `cue_inbox`) each assume one
@@ -26,8 +27,10 @@ The modules it describes:
   boot takes the lock first (`start_holding_home_lock/3`) and only then remembers
   the role, prepares the home (`prepare_home/2`), writes the ownership marker
   (`maybe_daemon_socket/0`, `EngineOwner.record/0`) and starts the children
-  (`supervision_children/2`); `stop/1`, which lets go of the lock once the
-  tree is down.
+  (`supervision_children/3`: a daemon boot's every child, any other boot's
+  only those through `MainAgent`, `every_boot_children/2`, and so none of
+  the rails in `daemon_children/2`); `stop/1`, which lets go of the lock once
+  the tree is down.
 - `Fermix.CLI.Daemon.Lock`: `acquire/2`, a SQLite file beside the control
   socket held in exclusive mode. The operating system lets go of it when its
   process ends, however it ends.
@@ -48,9 +51,8 @@ not by line, since the application's pins are by function:
 - `apps/fermix_core/lib/fermix_core/application.ex`, by function:
   `start_supervision_tree`, `start_holding_home_lock`, `take_home_lock`,
   `acquire_home_lock`, `start_holding`, `release_home_lock`, `start_tree`,
-  `stop`, `supervision_children`, `maybe_daemon_socket`, `daemon_boot?`,
-  `phone_calls_opts`, `jobs_scheduler_opts`, `temporal_scheduler_opts`,
-  `harness_worker_opts`;
+  `stop`, `supervision_children`, `every_boot_children`, `daemon_children`,
+  `maybe_daemon_socket`, `daemon_boot?`;
 - `apps/fermix_core/lib/fermix/cli/daemon/lock.ex`, whole;
 - `apps/fermix_core/lib/fermix/cli/daemon.ex`, by function: `init`, `bind`,
   `clear_stale_socket`, `terminate`.
@@ -65,28 +67,23 @@ The rails' own sweeps are pinned by the specs that model them.
 | `CommandsCanBoot` | environment | a command boots the tree in its own process beside a daemon (`fermix memory`, a supervised `fermix setup`) |
 | `LockFirst` | mechanism | a daemon boot takes the lock before it reads or writes the home and before any child starts (`start_holding_home_lock/3`); `FALSE` takes it where the control socket binds, after the home was prepared and every rail swept |
 | `SweepsAtBoot` | mechanism | each rail settles, as it starts, the rows no worker of its VM holds |
-| `SweepNeedsEngine` | mechanism | an engine-only rail does not reconcile in a command's tree (`PhoneCalls.Manager` with `reconcile?: false`); `FALSE` reconciles it in any tree boot |
+| `SweepNeedsEngine` | mechanism | a command's tree starts no rail: `Application.supervision_children/3` ends a boot that is not a daemon's at `MainAgent`; `FALSE` starts every rail, each reconciling, in any tree boot |
 
-`EngineOnly` is not a switch: it names the rails whose reconciliation is
-asked for only in the home's daemon. In the code that is the phone-call rail
-alone (`Application.phone_calls_opts/2`, `reconcile: daemon?`), so every
-check sets `EngineOnly = {calls}`. The `jobs` rail stands for the jobs,
-reminder, coding-run and meeting rails, whose options are gated on the build
-and not on the daemon (`jobs_scheduler_opts/0`, `temporal_scheduler_opts/0`,
-`harness_worker_opts/0`, and `Meetings.Sweep`, which always runs).
+The `calls` rail is the phone-call rail; `jobs` stands for the jobs,
+reminder, coding-run and meeting rails, and for every other child after
+`MainAgent` that settles, ticks or claims (`Application.daemon_children/2`).
 
 ## What holds
 
 Two `holds` checks. `01_one_engine_sweeps` is two daemons on one home, with
-engines that end with work in flight. `07_command_spares_engine_only_rail`
-adds a command's tree beside the daemon.
+engines that end with work in flight. `07_command_spares_engine_work` adds a
+command's tree beside the daemon.
 
 | Rule | Claim it checks | Needs |
 |---|---|---|
-| `OnlyGoneWorkIsSwept` | no boot settles a row a running engine's worker holds: the claim every rail's reconciliation rests on | `LockFirst` |
+| `OnlyGoneWorkIsSwept` | no boot settles a row a running engine's worker holds, a command's tree beside the daemon included: the claim every rail's reconciliation rests on | `LockFirst` (01), `SweepNeedsEngine` (07) |
 | `RefusedBootWritesNothing` | "a second daemon that finds it held does not start" (`Fermix.CLI.Daemon`): a refused boot leaves the home unwritten, its ownership marker included | `LockFirst` |
 | `ServingEngineOwnsClaims` | once an engine serves, every claim in the database is one of its own workers', so what an ended engine left never stands in the way | `SweepsAtBoot` |
-| `EngineOnlyWorkSpared` | "a command that boots the tree in a process of its own ... must not settle the daemon's live call as unowned or hang it up" (`Application.phone_calls_opts/2`) | `SweepNeedsEngine` |
 
 Witnesses: `Witness_RefusedBesideWork` (a second daemon is refused while the
 first engine's work is in flight), `Witness_GoneWorkSwept` (an engine ends
@@ -119,40 +116,37 @@ it.
 
 ## Findings
 
-### BOOT-1: a command that boots the tree sweeps the running engine's work
+### BOOT-1: a command that boots the tree sweeps the running engine's work (fixed)
 
-Open. `fermix memory` and a supervised `fermix setup` start the whole core
-tree in a process of their own (`Application.cli_dispatch/2`), take no lock,
-which is right since they are not the home's engine, and then run the rails'
-boot reconciliation anyway. `10_command_sweeps_engine_work` is the
-counterexample, in ten states: the daemon serves and holds a job's row; the
-command's tree starts and its rails settle that row.
+Found by `10_command_sweeps_engine_work` (ten states), in v0.20.0 and wider in
+0.21. `fermix memory` and a supervised `fermix setup` start the core tree in
+a process of their own (`Application.cli_dispatch/2`) and take no lock, which
+is right since they are not the home's engine, and then ran the rails' boot
+reconciliation anyway: the daemon serves and holds a job's row, the command's
+tree starts, and its rails settle that row. In the code, with a daemon
+running and the command run beside it, `Jobs.Scheduler.init/1` failed every
+unsettled run whose runner was not in its own VM (`reap_orphaned_run/2`) and
+armed timers that claim due jobs, retries and heal runs;
+`Temporal.Scheduler.init/1` returned every `delivering` reminder to
+`pending`; `Harness.Manager` ended every active local coding run
+`interrupted`; `Meetings.Sweep` failed every live meeting; and the open-loop,
+cue, skill-curation, snapshot, trip and release-table timers ran beside the
+daemon's. Each was gated on the build and not on the boot being the home's
+engine; only the phone-call rail asked (`phone_calls_opts/2`,
+`reconcile: daemon?`).
 
-In the code, with a daemon running and the command run beside it:
-- `Jobs.Scheduler.init/1` reads every unsettled run and fails each one whose
-  runner is not in its own VM (`reap_orphaned_run/2`), so a job the daemon is
-  running is recorded failed. Its timers are armed as well, so a command that
-  runs long enough can claim and run a due job.
-- `Temporal.Scheduler.init/1` returns every `delivering` reminder to
-  `pending`, so one the daemon is sending is sent again.
-- `Harness.Manager` ends every active local coding run `interrupted` and
-  queues its report.
-- `Meetings.Sweep` fails every live meeting row.
-
-Each is gated on the build (`config/test.exs` turns it off) and not on the
-boot being the home's engine. `PhoneCalls.Manager` is the one rail that asks:
-`phone_calls_opts/2` hands it `reconcile: daemon?`, which
-`07_command_spares_engine_only_rail` holds and `08_needs_sweep_needs_engine`
-shows it depends on.
-
-It needs a command run while the daemon has work in flight: seconds for a
-reminder, minutes for a job, up to hours for a coding run or a meeting.
-
-The fix is a decision between two shapes, and either makes `EngineOnly` every
-rail and flips this check to `holds`: every rail takes the phone-call rail's
-option, or a command's tree stops before the first rail (it needs the Repo
-and the registries, and no scheduler). A source run with no daemon flag
-(`iex -S mix`, `mix run`) is the same boot and would change with it.
+Fixed for 0.21.0 by stopping a command's tree before the first rail, the
+owner's choice over handing every rail the phone-call rail's option.
+`Application.supervision_children/3`
+starts the children after `MainAgent` (`daemon_children/2`) only in a daemon
+boot (`daemon_boot?/0`, the boot that holds the home's lock), and every other
+boot (`fermix memory`, a supervised `fermix setup`, `iex -S mix`, `mix run`,
+`mix test`) ends at `MainAgent`, which a memory review tells that the runtime
+context changed. The phone-call rail's own option went with it. The spec lost
+`EngineOnly`, the rails that asked for the daemon, since every rail now does:
+`07_command_spares_engine_work` holds `OnlyGoneWorkIsSwept` with a command
+beside the daemon, and `08_needs_sweep_needs_engine`, with the rails in every
+tree again, is the old counterexample, in the same ten states.
 
 ## Done
 
@@ -164,8 +158,8 @@ an end.
 
 Two processes, three starts each, two rails, two claims in all. With three
 processes, four starts and three claims, `01_one_engine_sweeps` holds over
-59,100 distinct states and `07_command_spares_engine_only_rail` over
-567,320.
+59,100 distinct states and `07_command_spares_engine_work` over
+365,778.
 
 ## Not modelled
 
@@ -180,4 +174,7 @@ processes, four starts and three claims, `01_one_engine_sweeps` holds over
   A home whose engine runs already has the key, so a refused boot writes
   nothing there either.
 - The channels application, which starts after the core tree and has its own
-  boot steps (`Voice.CallRowSweep`): a refused core boot never reaches it.
+  boot steps (`Voice.CallRowSweep`): a refused core boot never reaches it, and
+  neither does a packaged command, which halts inside the core's start. A
+  source run (`iex -S mix`, `mix run`) does start it, its transports and
+  settlement included.

@@ -265,6 +265,11 @@ defmodule FermixCore.Tools.MeetingsToolsTest do
   describe "leave_meeting" do
     setup do
       meetings([enabled: true] ++ @rtms_credentials)
+      # A leave looks its id up among the live sessions, which only the
+      # home's daemon's tree holds (`Application.supervision_children/3`), so
+      # the test starts the meetings tree; its boot sweep reads the suite's
+      # store, whose memory is off.
+      start_supervised!(FermixCore.Meetings.Supervisor)
       %{repo: start_repo()}
     end
 

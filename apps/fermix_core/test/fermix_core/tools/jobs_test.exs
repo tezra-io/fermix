@@ -1671,8 +1671,10 @@ defmodule FermixCore.Tools.JobsTest do
       Jason.decode!(created.output)["id"]
     end
 
-    # No scheduler runs here, so a run-now the gate let through ends at it.
-    defp past_the_gate?({:ok, %{success: false, error: error}}), do: error == ":disabled"
+    # No scheduler runs in this suite's tree, which no daemon boot started, so
+    # a run-now the gate let through ends where the tool asks for one.
+    defp past_the_gate?({:ok, %{success: false, error: error}}),
+      do: String.starts_with?(error, "scheduler_unavailable: {:noproc,")
 
     defp signs_in_refusal?(%{success: false, error: error}) do
       assert error =~ "A scheduled job that names browser signs in to websites"

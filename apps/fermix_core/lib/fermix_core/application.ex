@@ -289,7 +289,10 @@ defmodule FermixCore.Application do
 
     opts = [strategy: :rest_for_one, name: FermixCore.Supervisor]
 
-    Supervisor.start_link(supervision_children(Egress.activate(), Role.current()), opts)
+    Supervisor.start_link(
+      supervision_children(Egress.activate(), Role.current(), daemon_boot?()),
+      opts
+    )
   end
 
   # The call in progress is drained by the FIRST application an orderly stop
@@ -413,204 +416,219 @@ defmodule FermixCore.Application do
   end
 
   # The children this boot starts, in order, for the engine `role`:
-  # `Role.children/2` leaves a device's primary-only ones out. Public (@doc
-  # false) so tests read the real list for a role without booting a second tree.
+  # `Role.children/2` leaves a device's primary-only ones out. The children
+  # after `MainAgent` (`daemon_children/2`) are the engine's own: they settle at
+  # their start the rows no worker of their VM holds, tick, claim work or
+  # serve, which is right only in the home's one engine, so only a daemon boot
+  # (`daemon?`, `daemon_boot?/0`, which holds the home's lock) starts them. Any
+  # other boot (`fermix memory`, a supervised `fermix setup`, a source run,
+  # `mix test`) ends at `MainAgent`, which a memory review tells that the
+  # runtime context changed, whether or not a daemon serves the home beside it
+  # (BOOT-1, `tla/specs/engine_boot`). Public (@doc false) so tests read the
+  # real list for a role without booting a second tree.
   @doc false
-  @spec supervision_children(Egress.t(), Role.role()) :: [Role.child()]
-  def supervision_children(%Egress{} = egress, role)
-      when role in [:primary, :device, :candidate] do
-    children =
-      [
-        # First child (`:rest_for_one`): every process that can run an external
-        # command starts after its owner supervisor exists. `:temporary` hosts
-        # add no restart intensity to the tree.
-        CommandHostSupervisor,
-        {Task.Supervisor, name: FermixCore.TaskSupervisor},
-        # Which files `home.status` reads cannot be read now, so each is
-        # logged once a stretch however often the apps poll; in every role,
-        # before anything that answers `home.status`.
-        FermixCore.Home.UnreadableFiles,
-        # The OAuth loopback listeners open now (M75 D17), before anything
-        # that runs a sign-in: a desktop's sign-in is forwarded from it.
-        FermixCore.Auth.LoopbackRegistry,
-        finch_children(egress),
-        {Trace, trace_opts()},
-        TokenSupervisor,
-        # The browser bridge listens on a socket the browser extension's pump
-        # connects to, so it starts in a daemon and nowhere else — the same
-        # question `maybe_daemon_socket/0` answers below.
-        {FermixCore.Browser.Supervisor, bridge: daemon_boot?()},
-        CapabilityRegistry,
-        BuiltinSeeder,
-        {CommandCapabilities, capability_registry: CapabilityRegistry},
-        PluginInstaller,
-        # After a move from another system, installs its plugins again for
-        # this computer once the installer's boot sweep is done; `:temporary`,
-        # so it restarts nothing after it, and it ends at once when nothing
-        # waits.
-        PluginReinstall,
-        {PluginCapabilitySeeder, capability_registry: CapabilityRegistry},
-        {SkillRegistry, capability_registry: CapabilityRegistry},
-        # Outside the MCP tree on purpose (M27 §7.8): a remote server's subtree
-        # is `:temporary`, so a status table living inside it would vanish
-        # exactly when it holds the only explanation of why the client is gone.
-        McpRuntimeStatus,
-        # The login shell's PATH, read the first time an operator stdio server
-        # starts, never at boot: most homes have none.
-        McpLoginPath,
-        {McpSupervisor, capability_registry: CapabilityRegistry},
-        Repo,
-        # Prompt-template reconciliation (M43 §9.3) runs here and nowhere else:
-        # it needs the resource registry, so it cannot join `BootstrapRename` and
-        # `IdentityName` above `Repo`, and it must finish before `MainAgent` or
-        # the realtime supervisor composes a prompt — one pass, before any turn,
-        # so nothing can read a half-migrated set and no cache needs invalidating.
-        TemplateReconciler,
-        # A home with no config yet is seeded here (owner rule of 2026-09-27):
-        # after the registry and the repo the prompt seed needs, before the
-        # restart state and the boot report so both read the seeded file as
-        # the baseline rather than as a change made behind their backs.
-        HomeSeeder,
-        ConversationStore,
-        Store,
-        # Before the boot report and the restart state, because both of those
-        # start by reading state a secret write can change, and a write that
-        # landed before this process exists is a rotation nothing recorded.
-        SecretWriteLog,
-        # The record of the last keychain-ACL measurement. Measuring prompts,
-        # so only Doctor measures; `setup.state.get` publishes what is recorded
-        # here and never shells out.
-        SecretAclState,
-        BootReport,
-        # Beside `BootReport` rather than inside it: the boot report is the boot
-        # artifact its name promises, while restart and external-change truth is
-        # read live by `/health`, `overview.get` and `setup.state.get`. One read
-        # path, no cache plus an invalidation rule.
-        RestartState,
-        # The daemon's record of which allowed sandbox variables it can read
-        # (boot probe, every config apply, every shell command). Before every
-        # process that runs shell commands, so readiness has an answer before
-        # the first command; after the command host, because a `command`
-        # source spawns its helper through it.
-        FermixCore.Sandbox.EnvHealth,
-        # Access-sensitive calls parked for the owner's confirmation
-        # (`Capabilities.AccessGate`). Before every process that dispatches a
-        # tool; a restart forgets them, which asks the owner again.
-        FermixCore.Capabilities.AccessGate.Pending,
-        # The place records a conversation's searches returned, kept for the
-        # reply that links them (M72). Before every process that dispatches a
-        # tool; a restart forgets them, and a reply then carries its text alone.
-        FermixCore.ReplyBlocks,
-        # The home's one door to Brave's place search (`PlaceSearch.Brave.Pacer`):
-        # its requests one at a time, paced by Brave's rate headers. Before every
-        # process that dispatches a tool; it holds only who waits and when the
-        # next may send, so a restart forgets that, and it raises on nothing its
-        # guarded callers hand it.
-        FermixCore.Tools.PlaceSearch.Brave.Pacer,
-        AgentSupervisor,
-        MainAgent,
-        JobRunnerSupervisor,
-        # Meetings tree (M21 C2 §2.9), unconditionally: it holds no OS process
-        # and spawns nothing until `Meetings.join/2`, so an always-on tree lets
-        # web setup enable meetings without a daemon restart, and lets the boot
-        # sweep reconcile rows stranded by an install that has since been
-        # turned off. The enable gate lives in `join/2` and the tool seeder.
-        MeetingsSupervisor,
-        {JobScheduler, jobs_scheduler_opts()},
-        # Temporal reminder rail (M30 §6.3): the scheduler starts BEFORE its
-        # delivery supervisor, and that order is load-bearing — under
-        # `:rest_for_one` a scheduler crash tears down the supervisor and every
-        # in-flight worker first, so no delivery worker can outlive the
-        # scheduler. That invariant is what replaces lease tokens and fenced
-        # settlement. Timers are gated by an init-time flag (the jobs-scheduler
-        # precedent), disabled in `config/test.exs`, never by omission.
-        {TemporalScheduler, temporal_scheduler_opts()},
-        TemporalDeliverySupervisor,
-        # Open-loop check-ins (M78 §04 stage 3), the temporal shape: the
-        # scheduler starts BEFORE its check-in supervisor, so under
-        # `:rest_for_one` a scheduler crash tears down every in-flight check-in
-        # (and every later child) before it restarts, and its boot sweep then
-        # returns the claims those runs held. Absent unless enabled.
-        maybe_open_loops_children(),
-        # Coding-harness local rail (design §6.4 / spec §5): one `:rest_for_one`
-        # supervisor (Manager → RunSupervisor → DeliveryWorker) so a Manager crash
-        # tears down and re-reconciles live runs instead of orphaning them. Always
-        # in the tree so boot reconciliation + the delivery drain run even when the
-        # feature is disabled; timers are gated by an init-time flag (the scheduler
-        # precedent), disabled in `config/test.exs`, never by omission.
-        {HarnessSupervisor, harness_worker_opts()},
-        # Phone calls (M94 §04), the harness rail's shape and, like it, always
-        # in the tree: cleanup, status, recovery and report delivery stay
-        # alive while phone calls are off, and the off switch takes effect
-        # with no restart. Admission re-reads readiness on every start, so a
-        # home with phone calls off, or durable memory off, dials nothing.
-        # Primary-only (`Home.Role`). Its boot reconciliation, prune and
-        # delivery ticks run only in a daemon boot (`phone_calls_opts/0`), and
-        # a daemon boot gets here only holding the home's lock, so only in the
-        # home's one daemon.
-        {PhoneCallsSupervisor, phone_calls_opts()},
-        maybe_daemon_socket(),
-        maybe_native_host(),
-        maybe_realtime_supervisor(),
-        maybe_computer_use_supervisor(role),
-        maybe_screen_seat(role),
-        maybe_computer_history_supervisor(role),
-        maybe_skill_curation_scheduler(),
-        # Says where a scheduled job's or a cue's message came from on the
-        # timeline rows written before `metadata.origin` existed, once most of
-        # the tree is up, in short batches the boot never waits for.
-        # `:temporary`, so a crash restarts nothing after it; dark under `mix
-        # test`, whose suites run their own pass on their own Repo.
-        {OriginBackfill, enabled: @compiled_env != :test},
-        # What the move in hand counted (`Home.MoveProgress`), in memory, for
-        # the Always On summary. Late, so a crash restarts only the
-        # primary-only children after it, which the device a move runs on
-        # never starts; it raises on nothing its guarded callers hand it.
-        maybe_move_progress(),
-        # What the home knows live of its computers (M97 §3.2), primary-only.
-        # A crash restarts the snapshot scheduler and the cue tree, which
-        # re-read their state; its own is rebuilt as it starts, by asking each
-        # open session to say its facts again (`Home.Link`'s
-        # `announce_computers/1`), the records holding the last offers meanwhile.
-        FermixCore.Computers.Registry,
-        # The invocations the server waits on (M97 §6.1), primary-only: a
-        # crash loses only its waiters' routing, and they time out.
-        FermixCore.Computers.Calls,
-        # The trip placer (M89 D13 B), primary-only: places the stops a trip
-        # keeps waiting for a place search that could not run, when a Mac
-        # that offers places connects (told by the registry above), at
-        # Brave's reset and at boot. After the Repo, the pacer, the registry
-        # and the calls it reads; each run is a task of its own, and it
-        # raises on nothing it is sent, so it restarts nothing after it. Its
-        # runs stay dark under `mix test`.
-        {FermixCore.Trips.Placer, enabled: @compiled_env != :test},
-        # The trips index again at a day's turn (M89 D14), primary-only: within
-        # minutes of a local midnight that starts or ends a trip, the index goes
-        # again to the devices that pulled it, and once at its boot, so a
-        # restart of it never swallows a turn. After the Repo it reads; it
-        # serves no call, arms one timer and raises on nothing it is sent, so it
-        # restarts nothing after it. Dark under `mix test`, whose tests start
-        # their own with an injected clock and timer.
-        {FermixCore.Trips.DayTurn, enabled: @compiled_env != :test},
-        # The release table an Always On server's update chooses from (M97
-        # §3.4), primary-only and fetching only on an Always On server. It
-        # never raises on a fetch or a table: each fails into a sentence. Its
-        # timer stays dark under `mix test`.
-        {FermixCore.Home.ReleaseTable, release_table_opts()},
-        # The primary's snapshots (M75 §8), before the cue tree so a crash of
-        # either restarts nothing but the cue tree. Its timers stay dark under
-        # `mix test`; tests start their own with an injected clock and timer.
-        {SnapshotScheduler, timer_enabled: @compiled_env != :test},
-        # Cue tree (M60 §5.3) LAST, and that order is load-bearing, as it is
-        # for the temporal rail above: under `:rest_for_one` a crash of
-        # `JobScheduler` or anything before it restarts the cue subsystem,
-        # which re-reads its rows, and a crash inside it restarts nothing
-        # outside it. Present only where `Cues.enabled?/0` admits it.
-        maybe_cues_supervisor()
-      ]
-      |> List.flatten()
+  @spec supervision_children(Egress.t(), Role.role(), boolean()) :: [Role.child()]
+  def supervision_children(%Egress{} = egress, role, daemon?)
+      when role in [:primary, :device, :candidate] and is_boolean(daemon?) do
+    [every_boot_children(egress, daemon?), daemon_children(role, daemon?)]
+    |> List.flatten()
+    |> Role.children(role)
+  end
 
-    Role.children(children, role)
+  # The children every boot starts, through `MainAgent`.
+  defp every_boot_children(egress, daemon?) do
+    [
+      # First child (`:rest_for_one`): every process that can run an external
+      # command starts after its owner supervisor exists. `:temporary` hosts
+      # add no restart intensity to the tree.
+      CommandHostSupervisor,
+      {Task.Supervisor, name: FermixCore.TaskSupervisor},
+      # Which files `home.status` reads cannot be read now, so each is
+      # logged once a stretch however often the apps poll; in every role,
+      # before anything that answers `home.status`.
+      FermixCore.Home.UnreadableFiles,
+      # The OAuth loopback listeners open now (M75 D17), before anything
+      # that runs a sign-in: a desktop's sign-in is forwarded from it.
+      FermixCore.Auth.LoopbackRegistry,
+      finch_children(egress),
+      {Trace, trace_opts()},
+      TokenSupervisor,
+      # The browser bridge listens on a socket the browser extension's pump
+      # connects to, so it starts in a daemon and nowhere else.
+      {FermixCore.Browser.Supervisor, bridge: daemon?},
+      CapabilityRegistry,
+      BuiltinSeeder,
+      {CommandCapabilities, capability_registry: CapabilityRegistry},
+      PluginInstaller,
+      # After a move from another system, installs its plugins again for
+      # this computer once the installer's boot sweep is done; `:temporary`,
+      # so it restarts nothing after it, and it ends at once when nothing
+      # waits.
+      PluginReinstall,
+      {PluginCapabilitySeeder, capability_registry: CapabilityRegistry},
+      {SkillRegistry, capability_registry: CapabilityRegistry},
+      # Outside the MCP tree on purpose (M27 §7.8): a remote server's subtree
+      # is `:temporary`, so a status table living inside it would vanish
+      # exactly when it holds the only explanation of why the client is gone.
+      McpRuntimeStatus,
+      # The login shell's PATH, read the first time an operator stdio server
+      # starts, never at boot: most homes have none.
+      McpLoginPath,
+      {McpSupervisor, capability_registry: CapabilityRegistry},
+      Repo,
+      # Prompt-template reconciliation (M43 §9.3) runs here and nowhere else:
+      # it needs the resource registry, so it cannot join `BootstrapRename` and
+      # `IdentityName` above `Repo`, and it must finish before `MainAgent` or
+      # the realtime supervisor composes a prompt — one pass, before any turn,
+      # so nothing can read a half-migrated set and no cache needs invalidating.
+      TemplateReconciler,
+      # A home with no config yet is seeded here (owner rule of 2026-09-27):
+      # after the registry and the repo the prompt seed needs, before the
+      # restart state and the boot report so both read the seeded file as
+      # the baseline rather than as a change made behind their backs.
+      HomeSeeder,
+      ConversationStore,
+      Store,
+      # Before the boot report and the restart state, because both of those
+      # start by reading state a secret write can change, and a write that
+      # landed before this process exists is a rotation nothing recorded.
+      SecretWriteLog,
+      # The record of the last keychain-ACL measurement. Measuring prompts,
+      # so only Doctor measures; `setup.state.get` publishes what is recorded
+      # here and never shells out.
+      SecretAclState,
+      BootReport,
+      # Beside `BootReport` rather than inside it: the boot report is the boot
+      # artifact its name promises, while restart and external-change truth is
+      # read live by `/health`, `overview.get` and `setup.state.get`. One read
+      # path, no cache plus an invalidation rule.
+      RestartState,
+      # The daemon's record of which allowed sandbox variables it can read
+      # (boot probe, every config apply, every shell command). Before every
+      # process that runs shell commands, so readiness has an answer before
+      # the first command; after the command host, because a `command`
+      # source spawns its helper through it.
+      FermixCore.Sandbox.EnvHealth,
+      # Access-sensitive calls parked for the owner's confirmation
+      # (`Capabilities.AccessGate`). Before every process that dispatches a
+      # tool; a restart forgets them, which asks the owner again.
+      FermixCore.Capabilities.AccessGate.Pending,
+      # The place records a conversation's searches returned, kept for the
+      # reply that links them (M72). Before every process that dispatches a
+      # tool; a restart forgets them, and a reply then carries its text alone.
+      FermixCore.ReplyBlocks,
+      # The home's one door to Brave's place search (`PlaceSearch.Brave.Pacer`):
+      # its requests one at a time, paced by Brave's rate headers. Before every
+      # process that dispatches a tool; it holds only who waits and when the
+      # next may send, so a restart forgets that, and it raises on nothing its
+      # guarded callers hand it.
+      FermixCore.Tools.PlaceSearch.Brave.Pacer,
+      AgentSupervisor,
+      MainAgent
+    ]
+  end
+
+  # The home's daemon's own children, after `MainAgent`; no other boot starts
+  # one of them.
+  defp daemon_children(_role, false), do: []
+
+  defp daemon_children(role, true) do
+    [
+      JobRunnerSupervisor,
+      # Meetings tree (M21 C2 §2.9), unconditionally: it holds no OS process
+      # and spawns nothing until `Meetings.join/2`, so an always-on tree lets
+      # web setup enable meetings without a daemon restart, and lets the boot
+      # sweep reconcile rows stranded by an install that has since been
+      # turned off. The enable gate lives in `join/2` and the tool seeder.
+      MeetingsSupervisor,
+      {JobScheduler, jobs_scheduler_opts()},
+      # Temporal reminder rail (M30 §6.3): the scheduler starts BEFORE its
+      # delivery supervisor, and that order is load-bearing — under
+      # `:rest_for_one` a scheduler crash tears down the supervisor and every
+      # in-flight worker first, so no delivery worker can outlive the
+      # scheduler. That invariant is what replaces lease tokens and fenced
+      # settlement. Timers are gated by an init-time flag (the jobs-scheduler
+      # precedent), disabled in `config/test.exs`, never by omission.
+      {TemporalScheduler, temporal_scheduler_opts()},
+      TemporalDeliverySupervisor,
+      # Open-loop check-ins (M78 §04 stage 3), the temporal shape: the
+      # scheduler starts BEFORE its check-in supervisor, so under
+      # `:rest_for_one` a scheduler crash tears down every in-flight check-in
+      # (and every later child) before it restarts, and its boot sweep then
+      # returns the claims those runs held. Absent unless enabled.
+      maybe_open_loops_children(),
+      # Coding-harness local rail (design §6.4 / spec §5): one `:rest_for_one`
+      # supervisor (Manager → RunSupervisor → DeliveryWorker) so a Manager crash
+      # tears down and re-reconciles live runs instead of orphaning them. Always
+      # in the daemon's tree so boot reconciliation + the delivery drain run
+      # even when the feature is disabled.
+      HarnessSupervisor,
+      # Phone calls (M94 §04), the harness rail's shape and, like it, always
+      # in the tree: cleanup, status, recovery and report delivery stay
+      # alive while phone calls are off, and the off switch takes effect
+      # with no restart. Admission re-reads readiness on every start, so a
+      # home with phone calls off, or durable memory off, dials nothing.
+      # Primary-only (`Home.Role`).
+      {PhoneCallsSupervisor, phone_calls_opts()},
+      maybe_daemon_socket(),
+      maybe_native_host(),
+      maybe_realtime_supervisor(),
+      maybe_computer_use_supervisor(role),
+      maybe_screen_seat(role),
+      maybe_computer_history_supervisor(role),
+      maybe_skill_curation_scheduler(),
+      # Says where a scheduled job's or a cue's message came from on the
+      # timeline rows written before `metadata.origin` existed, once most of
+      # the tree is up, in short batches the boot never waits for.
+      # `:temporary`, so a crash restarts nothing after it; dark under `mix
+      # test`, whose suites run their own pass on their own Repo.
+      {OriginBackfill, enabled: @compiled_env != :test},
+      # What the move in hand counted (`Home.MoveProgress`), in memory, for
+      # the Always On summary. Late, so a crash restarts only the
+      # primary-only children after it, which the device a move runs on
+      # never starts; it raises on nothing its guarded callers hand it.
+      maybe_move_progress(),
+      # What the home knows live of its computers (M97 §3.2), primary-only.
+      # A crash restarts the snapshot scheduler and the cue tree, which
+      # re-read their state; its own is rebuilt as it starts, by asking each
+      # open session to say its facts again (`Home.Link`'s
+      # `announce_computers/1`), the records holding the last offers meanwhile.
+      FermixCore.Computers.Registry,
+      # The invocations the server waits on (M97 §6.1), primary-only: a
+      # crash loses only its waiters' routing, and they time out.
+      FermixCore.Computers.Calls,
+      # The trip placer (M89 D13 B), primary-only: places the stops a trip
+      # keeps waiting for a place search that could not run, when a Mac
+      # that offers places connects (told by the registry above), at
+      # Brave's reset and at boot. After the Repo, the pacer, the registry
+      # and the calls it reads; each run is a task of its own, and it
+      # raises on nothing it is sent, so it restarts nothing after it. Its
+      # runs stay dark under `mix test`.
+      {FermixCore.Trips.Placer, enabled: @compiled_env != :test},
+      # The trips index again at a day's turn (M89 D14), primary-only: within
+      # minutes of a local midnight that starts or ends a trip, the index goes
+      # again to the devices that pulled it, and once at its boot, so a
+      # restart of it never swallows a turn. After the Repo it reads; it
+      # serves no call, arms one timer and raises on nothing it is sent, so it
+      # restarts nothing after it. Dark under `mix test`, whose tests start
+      # their own with an injected clock and timer.
+      {FermixCore.Trips.DayTurn, enabled: @compiled_env != :test},
+      # The release table an Always On server's update chooses from (M97
+      # §3.4), primary-only and fetching only on an Always On server. It
+      # never raises on a fetch or a table: each fails into a sentence. Its
+      # timer stays dark under `mix test`.
+      {FermixCore.Home.ReleaseTable, release_table_opts()},
+      # The primary's snapshots (M75 §8), before the cue tree so a crash of
+      # either restarts nothing but the cue tree. Its timers stay dark under
+      # `mix test`; tests start their own with an injected clock and timer.
+      {SnapshotScheduler, timer_enabled: @compiled_env != :test},
+      # Cue tree (M60 §5.3) LAST, and that order is load-bearing, as it is
+      # for the temporal rail above: under `:rest_for_one` a crash of
+      # `JobScheduler` or anything before it restarts the cue subsystem,
+      # which re-reads its rows, and a crash inside it restarts nothing
+      # outside it. Present only where `Cues.enabled?/0` admits it.
+      maybe_cues_supervisor()
+    ]
   end
 
   # Shared outbound HTTP pool for `FermixCore.Net.HttpClient`. Finch's
@@ -772,7 +790,7 @@ defmodule FermixCore.Application do
   # provider is the app, the one build an app attaches to for this Mac's own
   # services. Every other build serves nothing an app could attach to.
   defp maybe_native_host do
-    if daemon_boot?() and NativeProvider.current() == :mac_app,
+    if NativeProvider.current() == :mac_app,
       do: [NativeHostSupervisor],
       else: []
   end
@@ -918,7 +936,8 @@ defmodule FermixCore.Application do
   # A real in-process daemon run (`fermix run` / `mix fermix.dev`) — both enable
   # the daemon control socket before the tree builds — and never `mix test`,
   # `fermix setup`, or `fermix memory`. Only this boot takes the home's lock
-  # (`start_holding_home_lock/3`).
+  # (`start_holding_home_lock/3`), and only this boot starts the children after
+  # `MainAgent` (`supervision_children/3`).
   defp daemon_boot? do
     @compiled_env != :test and
       Application.get_env(:fermix_core, :daemon_socket_enabled, false)
@@ -966,15 +985,6 @@ defmodule FermixCore.Application do
     Application.get_env(:fermix_core, :jobs, [])
   end
 
-  # The harness `Manager`/`DeliveryWorker` are permanent, but their timers + boot
-  # reconciliation + artifact GC must stay dark under `mix test` (the scheduler's
-  # `scheduler_enabled` precedent). One init-time flag, defaulting on, gates both
-  # workers; `config/test.exs` sets it false so the app tree touches neither the
-  # real `Memory.Repo` nor the real `FERMIX_HOME` on boot.
-  defp harness_worker_opts do
-    [timer_enabled: Application.get_env(:fermix_core, :harness_workers_enabled, true)]
-  end
-
   # The phone-call subtree's wiring, decided here once (M94 §04): the
   # per-call worker; what every call's worker is handed beside the Manager's
   # own args (the transport's wiring, `phone_call_transport_opts/2`, and the
@@ -984,20 +994,16 @@ defmodule FermixCore.Application do
   # worker owns, one single-attempt hangup over the same wiring, its key
   # resolved when it runs.
   #
-  # Boot reconciliation, the retention prune and the delivery ticks belong to
-  # the home's running engine only (`daemon_boot?/0`; a second daemon on a home
-  # whose engine runs is refused at the home's lock before any child starts):
-  # a command that boots the tree in a process of its own (`fermix memory`, a
-  # supervised `fermix setup`, a mix task) must not settle the daemon's live
-  # call as unowned or hang it up, and its stop, its off switch and the owner's
-  # word leave the daemon's calls to the daemon (`daemon:`).
+  # Only the home's daemon starts the subtree (`daemon_children/2`), so its
+  # boot reconciliation, retention prune and delivery ticks run in the home's
+  # one engine.
   @doc false
   @spec phone_calls_opts() :: keyword()
-  def phone_calls_opts, do: phone_calls_opts(daemon_boot?(), @compiled_env)
+  def phone_calls_opts, do: phone_calls_opts(@compiled_env)
 
   @doc false
-  @spec phone_calls_opts(boolean(), atom()) :: keyword()
-  def phone_calls_opts(daemon?, build) when is_boolean(daemon?) and is_atom(build) do
+  @spec phone_calls_opts(atom()) :: keyword()
+  def phone_calls_opts(build) when is_atom(build) do
     transport_opts = phone_call_transport_opts(build)
 
     delegate =
@@ -1009,10 +1015,7 @@ defmodule FermixCore.Application do
     [
       call_module: PhoneCallWorker,
       call_args: %{transport_opts: transport_opts, delegate: delegate},
-      hangup: fn session_id -> PhoneCallTransport.manager_hangup(session_id, transport_opts) end,
-      reconcile: daemon?,
-      timer_enabled: daemon?,
-      daemon: daemon?
+      hangup: fn session_id -> PhoneCallTransport.manager_hangup(session_id, transport_opts) end
     ]
   end
 
@@ -1052,9 +1055,8 @@ defmodule FermixCore.Application do
     ]
 
   # The temporal scheduler has no operator TOML surface: reminder timing is
-  # internal constants (M30 §6.3). This key exists so `config/test.exs` can keep
-  # the app-tree instance dark the way `[:jobs] scheduler_enabled` does, so
-  # `mix test` never sweeps or claims against the real `Memory.Repo`.
+  # internal constants (M30 §6.3). The key holds the scheduler's own defaults,
+  # which `config/test.exs` turns dark for the schedulers tests start.
   defp temporal_scheduler_opts do
     Application.get_env(:fermix_core, :temporal, [])
   end
