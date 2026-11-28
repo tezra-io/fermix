@@ -136,8 +136,9 @@ defmodule FermixChannels.Channels.Discord do
   @impl true
   @spec build_text_reply(FermixChannels.Gateway.Channel.message()) :: (String.t() ->
                                                                          :ok | {:error, term()})
-  def build_text_reply(%Message{id: message_id, reply_target: reply_target}) do
-    fn text -> send_message(reply_target, text, reply_to: message_id) end
+  def build_text_reply(%Message{id: message_id, reply_target: reply_target} = message) do
+    opts = [reply_to: message_id] ++ Message.reply_preview_opts(message)
+    fn text -> send_message(reply_target, text, opts) end
   end
 
   @impl true
@@ -596,8 +597,8 @@ defmodule FermixChannels.Channels.Discord do
     end
   end
 
-  # `link_previews: false` (a cue run's message, M60 §9.5): no embed for any
-  # link the text names.
+  # `link_previews: false` (a cue run's message, M60 §9.5, or a phone call's
+  # report, M94 D23): no embed for any link the text names.
   defp maybe_suppress_embeds(body, opts) do
     case Keyword.get(opts, :link_previews) do
       false -> Map.put(body, :flags, @suppress_embeds)

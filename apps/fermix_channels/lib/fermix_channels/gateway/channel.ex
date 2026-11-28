@@ -26,7 +26,8 @@ defmodule FermixChannels.Gateway.Channel do
           blocks: [map()],
           # `false` asks the channel to fetch nothing the text links to: no
           # embed, unfurl or preview card (every message a cue run causes,
-          # M60 §9.5). Absent means the channel's own default.
+          # M60 §9.5, and a phone call's report, M94 D23). Absent means the
+          # channel's own default.
           link_previews: boolean(),
           # Where a scheduled job's or a cue's message came from,
           # `%{"kind" => "job" | "cue", "name" => name}`: the Mac's and the

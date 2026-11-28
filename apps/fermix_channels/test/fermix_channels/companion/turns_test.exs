@@ -36,6 +36,7 @@ defmodule FermixChannels.Companion.TurnsTest do
   alias FermixCore.Companion.Timeline
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
+  alias FermixCore.PhoneCalls.Continuation, as: PhoneCallContinuation
   alias FermixCore.Realtime.CallRegistry
   alias FermixCore.Realtime.DeviceIdentity
   alias FermixCore.ReplyBlocks
@@ -1835,20 +1836,11 @@ defmodule FermixChannels.Companion.TurnsTest do
 
   defp request(id), do: RepoTimeline.get_client_request("main", id, [])
 
-  # A finished phone call's notice for the Mac chat, as core hands it over.
+  # A finished phone call's notice for the Mac chat, as core builds it.
   defp report_notice do
-    %{
-      platform: "companion",
-      destination: "main",
-      thread: nil,
-      client_origin: nil,
-      content: "[phone call pc_1 finished]\nanswered",
-      metadata: %{
-        harness_continuation: true,
-        harness_continuation_depth: 1,
-        phone_call_result: "pc_1"
-      }
-    }
+    row = %{id: "pc_1", status: "ended", platform: "companion", destination: "main", thread: nil}
+    {:ok, notice} = PhoneCallContinuation.notice(row)
+    notice
   end
 
   # A finished coding run's notice for the Mac chat.

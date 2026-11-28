@@ -22,9 +22,10 @@ defmodule FermixCore.PhoneCalls.Continuation do
   reply-only profile (`Agents.TurnRunner`, `RuntimeContext.reply_only_profile/1`):
   no tool is offered and none can be dispatched, so it can start no call, run
   no command and reach no service, and what should happen next is the owner's
-  own new request. Its reply previews no link in the Mac app's chat
-  (`Companion.Turns`), a fetch of an address the recipient could have
-  dictated. Were a tool ever to reach it, the turn is still not attended
+  own new request. Its reply asks every channel for no link preview, a fetch
+  of an address the recipient could have dictated: the notice says so
+  (`link_previews: false`), and the dispatcher carries it to the reply. Were a
+  tool ever to reach it, the turn is still not attended
   (`Temporal.Access.attended_operator_turn?/1`), so the access gate refuses it
   every call it decides. The gateway keeps the marker only on what the
   continuation dispatcher hands it, as it keeps the coding run's; the notice
@@ -92,7 +93,8 @@ defmodule FermixCore.PhoneCalls.Continuation do
              harness_continuation: true,
              harness_continuation_depth: @depth,
              phone_call_result: id
-           }
+           },
+           link_previews: false
          }}
 
       other ->

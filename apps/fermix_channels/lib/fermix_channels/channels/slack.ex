@@ -150,8 +150,9 @@ defmodule FermixChannels.Channels.Slack do
   @impl true
   @spec build_text_reply(FermixChannels.Gateway.Channel.message()) :: (String.t() ->
                                                                          :ok | {:error, term()})
-  def build_text_reply(%Message{reply_target: reply_target, thread_ts: thread_ts}) do
+  def build_text_reply(%Message{reply_target: reply_target, thread_ts: thread_ts} = message) do
     opts = if thread_ts, do: [thread_ts: thread_ts], else: []
+    opts = opts ++ Message.reply_preview_opts(message)
 
     fn text -> send_message(reply_target, text, opts) end
   end
@@ -526,8 +527,8 @@ defmodule FermixChannels.Channels.Slack do
     end
   end
 
-  # `link_previews: false` (a cue run's message, M60 §9.5): Slack unfurls no
-  # link and no media the text names.
+  # `link_previews: false` (a cue run's message, M60 §9.5, or a phone call's
+  # report, M94 D23): Slack unfurls no link and no media the text names.
   defp maybe_disable_unfurls(body, opts) do
     case Keyword.get(opts, :link_previews) do
       false -> Map.merge(body, %{unfurl_links: false, unfurl_media: false})

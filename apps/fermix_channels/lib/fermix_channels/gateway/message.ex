@@ -43,6 +43,12 @@ defmodule FermixChannels.Gateway.Message do
     # the turn seeds it as its starting outside sources. Turn-local: the
     # message's metadata, not this, is stored.
     :resumed_sources,
+    # `false` when the reply to this message must preview no link it names (a
+    # phone call's report, M94 D23), set ONLY by the continuation dispatcher
+    # from core's notice, never from channel input. `nil` keeps the channel's
+    # own default. An adapter's text reply passes it on as the send option of
+    # the same name (`reply_preview_opts/1`). Turn-local, never stored.
+    :link_previews,
     thread_scope: :root,
     metadata: %{},
     # What the channel declared (`FermixCore.Attachments.declared/0`).
@@ -68,6 +74,7 @@ defmodule FermixChannels.Gateway.Message do
           session_env: %{String.t() => String.t()} | nil,
           conversation_key: FermixCore.Agents.ConversationKey.t() | nil,
           resumed_sources: MapSet.t() | nil,
+          link_previews: false | nil,
           thread_scope: thread_scope(),
           metadata: map(),
           attachments: [FermixCore.Attachments.declared()],
@@ -80,6 +87,16 @@ defmodule FermixChannels.Gateway.Message do
     |> Map.put(:thread_scope, thread_scope(attrs))
     |> then(&struct!(__MODULE__, &1))
   end
+
+  @doc """
+  The send options a reply to `message` adds for its link previews:
+  `link_previews: false` when the message asks that its reply preview none
+  (`link_previews`), and none otherwise, so the channel keeps its own default.
+  Takes the struct or the map the gateway hands a turn's agent.
+  """
+  @spec reply_preview_opts(t() | map()) :: keyword()
+  def reply_preview_opts(%{link_previews: false}), do: [link_previews: false]
+  def reply_preview_opts(message) when is_map(message), do: []
 
   @forwarded_label "[forwarded message]"
 

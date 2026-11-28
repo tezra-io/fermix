@@ -30,14 +30,20 @@ defmodule FermixCore.Harness.ContinuationDispatcher do
   The implementation reads `identity` and `cwd` only: `reply_context` is for the
   continuation turn's model, and `content` already carries it rendered inside its
   untrusted frame (§17.6(c)). Nothing on this path parses it.
+
+  `link_previews` `false` says the turn's reply previews no link it names, on
+  whichever channel it goes to (a phone call's report, M94 D23); absent, each
+  channel keeps its own default. The implementation carries it to the reply as
+  it carries `thread`.
   """
   @type notice :: %{
-          platform: String.t(),
-          destination: String.t(),
-          thread: String.t() | nil,
-          client_origin: map() | nil,
-          content: String.t(),
-          metadata: map()
+          required(:platform) => String.t(),
+          required(:destination) => String.t(),
+          required(:thread) => String.t() | nil,
+          required(:client_origin) => map() | nil,
+          required(:content) => String.t(),
+          required(:metadata) => map(),
+          optional(:link_previews) => false
         }
 
   @doc """

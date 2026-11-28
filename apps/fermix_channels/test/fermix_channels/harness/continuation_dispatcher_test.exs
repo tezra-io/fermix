@@ -6,19 +6,38 @@ defmodule FermixChannels.Harness.ContinuationDispatcherTest do
   import ExUnit.CaptureLog, only: [capture_log: 1]
 
   alias FermixChannels.Channels.Acp
+  alias FermixChannels.Channels.Discord
+  alias FermixChannels.Channels.Slack
+  alias FermixChannels.Gateway
   alias FermixChannels.Gateway.Authorizer
+  alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.Source
   alias FermixChannels.Harness.ContinuationDispatcher
   alias FermixCore.Acp.Identity
   alias FermixCore.Acp.IdentityStore
   alias FermixCore.Agents.ConversationKey
   alias FermixCore.Agents.TurnRunner
+  alias FermixCore.PhoneCalls.Continuation, as: PhoneCallContinuation
   alias FermixTestSupport.SafeRm
 
   # Published NIP-19 test vectors (see `nostr/key_test.exs`) — never live keys.
   @nsec "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5"
   @public_hex "7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e"
   @npub "npub10elfcs4fr0l0r8af98jlmgdh9c8tcxjvz9qkw038js35mp4dma8qzvjptg"
+
+  # A reply that names an address the called person could have dictated.
+  # Every name and address here is invented.
+  @dictated "They said the intake forms are at https://clinic.example/forms."
+
+  # Stands in for the agent a channel hands its turns to: each turn the
+  # gateway builds comes back to the test, which plays the turn's reply.
+  defmodule TurnSink do
+    @moduledoc false
+    def handle_message(turn, server) do
+      send(server, {:turn, turn})
+      :ok
+    end
+  end
 
   setup do
     prior = Application.get_env(:fermix_channels, :telegram)
@@ -291,6 +310,42 @@ defmodule FermixChannels.Harness.ContinuationDispatcherTest do
     end
   end
 
+  # A phone call's report quotes words the called person said, and a link
+  # preview is a fetch of an address they could have dictated (M94 D23).
+  # Core's notice asks for none, and the reply path every turn takes carries
+  # that to the channel's send. A reply to the owner's own message on the same
+  # channel previews as it always did.
+  describe "dispatch/2 — a phone call's report previews no link" do
+    setup :chat_channels
+
+    test "on Slack its reply unfurls nothing, and an owner's reply is unchanged" do
+      stub_posts(:report_previews_slack, %{"ok" => true, "ts" => "1.2"})
+      report = call_notice(%{platform: "slack", destination: "C0REPORT1"})
+
+      assert :ok = ContinuationDispatcher.dispatch(report, turn_opts())
+      assert %{"unfurl_links" => false, "unfurl_media" => false} = reply_posted()
+
+      owners = owner_message("slack", "C0REPORT1", "U0OWNER1")
+      assert :ok = Gateway.ingest([owners], ingest_opts(Slack))
+      body = reply_posted()
+      refute Map.has_key?(body, "unfurl_links")
+      refute Map.has_key?(body, "unfurl_media")
+    end
+
+    test "on Discord its reply suppresses embeds, and an owner's reply is unchanged" do
+      stub_posts(:report_previews_discord, %{"id" => "40001"})
+      report = call_notice(%{platform: "discord", destination: "40017"})
+
+      assert :ok = ContinuationDispatcher.dispatch(report, turn_opts())
+      # 4 is Discord's SUPPRESS_EMBEDS message flag.
+      assert %{"flags" => 4} = reply_posted()
+
+      owners = owner_message("discord", "40017", "111")
+      assert :ok = Gateway.ingest([owners], ingest_opts(Discord))
+      refute Map.has_key?(reply_posted(), "flags")
+    end
+  end
+
   defp notice(overrides \\ %{}) do
     Map.merge(
       %{
@@ -325,6 +380,83 @@ defmodule FermixChannels.Harness.ContinuationDispatcherTest do
       )
     )
   end
+
+  # A finished phone call's notice, as core builds it for the chat the call
+  # was asked from.
+  defp call_notice(target) do
+    row = Map.merge(%{id: "pc_1", status: "ended", origin_kind: "chat", thread: nil}, target)
+    {:ok, notice} = PhoneCallContinuation.notice(row)
+    notice
+  end
+
+  # The owner's own message on a chat channel, as its adapter parses it.
+  defp owner_message(channel, chat_id, owner) do
+    Message.new!(%{
+      id: "#{channel}-owner-1",
+      content: "Anything new from the clinic?",
+      sender: owner,
+      channel: channel,
+      chat_id: chat_id,
+      reply_target: chat_id,
+      metadata: %{user_id: owner}
+    })
+  end
+
+  # The real gateway, with this test as the agent its turns are handed to.
+  defp turn_opts, do: [agent: TurnSink, agent_server: self()]
+
+  defp ingest_opts(channel), do: [channel: channel, agent: TurnSink, agent_server: self()]
+
+  # The turn the gateway handed off replies; what its channel posted for it.
+  defp reply_posted do
+    assert_receive {:turn, turn}
+    assert :ok = turn.reply_fn.({:text, @dictated})
+    assert_receive {:posted, body}
+    body
+  end
+
+  defp stub_posts(name, response) do
+    test_pid = self()
+
+    Req.Test.stub(name, fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      send(test_pid, {:posted, Jason.decode!(body)})
+
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(200, Jason.encode!(response))
+    end)
+  end
+
+  # Slack and Discord with an owner to re-enter as, their sends answered by
+  # this test.
+  defp chat_channels(_ctx) do
+    previous = Map.new([:slack, :discord], &{&1, Application.fetch_env(:fermix_channels, &1)})
+
+    Application.put_env(:fermix_channels, :slack,
+      enabled: true,
+      mode: :webhook,
+      bot_token: "xoxb-test-token",
+      signing_secret: "slack-signing-secret",
+      owner_user_id: "U0OWNER1",
+      req_options: [plug: {Req.Test, :report_previews_slack}]
+    )
+
+    Application.put_env(:fermix_channels, :discord,
+      enabled: true,
+      mode: :gateway,
+      bot_token: "discord-bot-token",
+      bot_user_id: "999",
+      owner_user_id: "111",
+      req_options: [plug: {Req.Test, :report_previews_discord}]
+    )
+
+    on_exit(fn -> Enum.each(previous, &restore_channel/1) end)
+    :ok
+  end
+
+  defp restore_channel({key, {:ok, value}}), do: Application.put_env(:fermix_channels, key, value)
+  defp restore_channel({key, :error}), do: Application.delete_env(:fermix_channels, key)
 
   defp persist_identity do
     identity =

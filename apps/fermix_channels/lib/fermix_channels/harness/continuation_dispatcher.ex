@@ -14,7 +14,10 @@ defmodule FermixChannels.Harness.ContinuationDispatcher do
   own transport hands its turns to (`ChannelRegistry.agent/1`): in the Mac
   app's chat that is `Companion.Turns`, which knows every queue turn of that
   chat and decides what each one shows on its wire. A report is shown as no
-  turn there, only as the row of its reply (`Turns.own?/1`).
+  turn there, only as the row of its reply (`Turns.own?/1`). A notice that
+  asks for no link previews (a phone call's report) puts that on the message
+  as its thread is put there (`Message.link_previews`), so the reply each
+  channel sends for it previews none.
 
   The ingest runs **inline** and its result is the return value — the grant
   resume's async hop exists because it re-enters the same `Gateway.ingest`
@@ -216,6 +219,7 @@ defmodule FermixChannels.Harness.ContinuationDispatcher do
       chat_id: destination,
       reply_target: destination,
       thread_ts: Map.get(notice, :thread),
+      link_previews: Map.get(notice, :link_previews),
       session_env: origin && origin.env,
       request_cwd: origin && origin.cwd,
       metadata: metadata(notice, sender_id, origin)

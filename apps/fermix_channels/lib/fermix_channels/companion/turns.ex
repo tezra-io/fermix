@@ -47,12 +47,13 @@ defmodule FermixChannels.Companion.Turns do
   dispatcher, through the agent the channel names (`ChannelRegistry.agent/1`).
   No client started that turn, so none is shown one: the Mac's adapter streams
   and announces nothing of it, and when it completes each reply is written as
-  a delivery, the row every watcher hears and an away phone is pushed for. One
-  that fails is not lost in silence: one row says the report could not be
-  written and why, so the owner knows to ask for it. One that was stopped
-  writes nothing. The dispatcher re-enters a channel as its owner, and the
-  phone's channel names none to re-enter as, so no such turn runs on the
-  phone's transport.
+  a delivery, the row every watcher hears and an away phone is pushed for,
+  with no link preview when its message asks for none (a phone call's report,
+  `Message.reply_preview_opts/1`). One that fails is not lost in silence: one
+  row says the report could not be written and why, so the owner knows to ask
+  for it. One that was stopped writes nothing. The dispatcher re-enters a
+  channel as its owner, and the phone's channel names none to re-enter as, so
+  no such turn runs on the phone's transport.
 
   During a Live call in the chat, a turn of the chat's own conversation is
   told to the call as it is handed off, and its answer as it completes
@@ -472,21 +473,12 @@ defmodule FermixChannels.Companion.Turns do
       attempt: message_attempt(message),
       turn_id: turn_id(message),
       own?: own?(message),
-      delivery_opts: delivery_opts(metadata),
+      delivery_opts: Message.reply_preview_opts(message),
       queue: queue,
       replies: [],
       silent?: false
     }
   end
-
-  # What the delivery of a turn Fermix started itself is sent with. A finished
-  # phone call's report previews no link it names (M94 D23): the words that
-  # led to it are the called person's, and a preview is a fetch of an address
-  # they could have dictated.
-  defp delivery_opts(%{phone_call_result: call_id}) when is_binary(call_id),
-    do: [link_previews: false]
-
-  defp delivery_opts(_metadata), do: []
 
   defp track(state, turn) do
     %{
@@ -741,11 +733,10 @@ defmodule FermixChannels.Companion.Turns do
   # delivery is.
   defp write_untracked(state, message, text) do
     records = take_records(state, message.id, ConversationKey.from(message))
-    metadata = Map.get(message, :metadata) || %{}
 
     opts =
       [blocks: ReplyBlocks.build(text, records)] ++
-        Companion.reply_opts(message) ++ delivery_opts(metadata)
+        Companion.reply_opts(message) ++ Message.reply_preview_opts(message)
 
     write = fn -> Companion.send_message(message.reply_target, text, opts) end
 
