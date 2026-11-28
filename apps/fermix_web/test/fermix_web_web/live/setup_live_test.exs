@@ -6102,51 +6102,58 @@ defmodule FermixWebWeb.SetupLiveTest do
       refute File.read!(Path.join(tmp_home, "config.toml")) =~ "[fermix_core.skill_curation]"
     end
 
-    test "the open-loops toggle renders on by default and names where check-ins land", %{
-      conn: conn
-    } do
+    test "the Personalization card draws no open-loops switch", %{conn: conn} do
       Application.put_env(:fermix_core, :open_loops, [])
 
       {:ok, view, _html} = live(conn, "/setup")
       html = view |> element("button[phx-value-tab=\"personalization\"]") |> render_click()
 
-      assert html =~ "Check in on things you plan to do by a date"
-      assert html =~ ~s(name="personalization_form[open_loops_enabled]")
-      assert html =~ ~s(data-open-loops="true")
-      assert html =~ "A check-in arrives in the chat where you mentioned it."
+      # The switch is the app's (Settings, Personality) and the terminal setup
+      # question's. This page draws neither the switch nor its sentence.
+      assert html =~ "Suggest new skills from tasks you repeat"
+      refute html =~ "open_loops"
+      refute html =~ "data-open-loops"
+      refute html =~ "Check in on things you plan to do by a date"
     end
 
-    test "turning open loops off persists enabled=false; turning it on removes the key", %{
+    test "a save of Personalization leaves open loops off when they were off", %{
       conn: conn,
       tmp_home: tmp_home
     } do
-      Application.put_env(:fermix_core, :open_loops, [])
+      Application.put_env(:fermix_core, :open_loops, enabled: false)
 
       {:ok, view, _html} = live(conn, "/setup")
       view |> element("button[phx-value-tab=\"personalization\"]") |> render_click()
 
       view
       |> form("form[phx-submit=\"save_personalization\"]",
-        personalization_form: %{open_loops_enabled: "false"}
+        personalization_form: %{user_name: "Ilse Varga"}
       )
       |> render_submit()
 
-      html = render(view)
-      assert html =~ "Personalization saved."
-      # The scheduler is a child-absent gate, so the change offers a restart.
-      assert html =~ "Apply &amp; restart"
-      assert html =~ ~s(data-open-loops="false")
+      assert render(view) =~ "Personalization saved."
 
       contents = File.read!(Path.join(tmp_home, "config.toml"))
       assert contents =~ "[fermix_core.open_loops]\nenabled = false"
+    end
 
-      # Turning it on writes NOTHING: the default is already on.
-      view
-      |> form("form[phx-submit=\"save_personalization\"]",
-        personalization_form: %{open_loops_enabled: "true"}
-      )
-      |> render_submit()
+    test "a posted open-loops value is not read", %{conn: conn, tmp_home: tmp_home} do
+      Application.put_env(:fermix_core, :open_loops, [])
 
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element("button[phx-value-tab=\"personalization\"]") |> render_click()
+
+      html =
+        render_submit(view, "save_personalization", %{
+          "personalization_form" => %{
+            "user_name" => "Ilse Varga",
+            "open_loops_enabled" => "false"
+          }
+        })
+
+      assert html =~ "Personalization saved."
+      # Nothing that needs a restart changed, so none is offered.
+      refute html =~ "Apply &amp; restart"
       refute File.read!(Path.join(tmp_home, "config.toml")) =~ "[fermix_core.open_loops]"
     end
   end

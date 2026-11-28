@@ -4,7 +4,7 @@ An open loop is something in the owner's own life, told in their own words, that
 
 ## Turning it off
 
-- One key, `[fermix_core.open_loops] enabled`, on by default: a home that never set it runs open loops. The switch ("Check in on things you plan to do by a date") is under About you in the Mac and Linux apps' settings and on browser setup's Personalization page, beside skill curation; `enabled = false` in `config.toml` does the same. Restart after changing it: the part that raises loops on its own starts only when Fermix starts.
+- One key, `[fermix_core.open_loops] enabled`, on by default: a home that never set it runs open loops. The switch ("Check in on things you plan to do by a date") is under About you in the Mac and Linux apps' settings, beside skill curation; `fermix settings set personalization open_loops_enabled=false` on an install with no app, or `enabled = false` in `config.toml`, does the same. Browser setup has no switch for it. Restart after changing it: the part that raises loops on its own starts only when Fermix starts.
 - Everything else (checks, windows, caps, active hours) is a fixed constant, not a setting.
 - Off, no open-loop tool is offered anywhere, the prompt says nothing about loops, and stored loops are neither noted nor raised.
 
