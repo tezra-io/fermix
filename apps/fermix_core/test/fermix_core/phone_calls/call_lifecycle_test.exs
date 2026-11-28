@@ -184,12 +184,9 @@ defmodule FermixCore.PhoneCalls.CallLifecycleTest do
 
   # Moves the monotonic clock past any speech the worker has taken in, so an
   # end does not wait for it. The worker stamps a line as said only once it has
-  # left, after this test has heard it leave, so the clock moves only once the
-  # worker has answered a call of its own: the stamp is then behind it.
-  defp quiet!(ctx, call) do
-    _state = :sys.get_state(call.worker)
-    :atomics.add(ctx.clock, 1, 60_000)
-  end
+  # left, after this test has heard it leave: `Fakes.advance_clock!/3` puts
+  # that stamp behind the move.
+  defp quiet!(ctx, call), do: Fakes.advance_clock!(ctx.clock, call.worker, 60_000)
 
   # What the Manager did not do is read only once it has answered a call of
   # its own: it emits a call's closer before it asks for that call's cleanup,

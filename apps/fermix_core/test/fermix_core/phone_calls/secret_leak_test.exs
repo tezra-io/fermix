@@ -365,8 +365,7 @@ defmodule FermixCore.PhoneCalls.SecretLeakTest do
     fire!(worker, :opening)
 
     fire!(worker, :deadline)
-    _state = :sys.get_state(worker)
-    :atomics.add(ctx.clock, 1, 60_000)
+    Fakes.advance_clock!(ctx.clock, worker, 60_000)
     fire!(worker, :speech)
     assert_receive {:vendor_hangup, hangup_headers}, @arrival_ms
     assert {"authorization", "Bearer " <> @api_key} in hangup_headers
@@ -470,8 +469,7 @@ defmodule FermixCore.PhoneCalls.SecretLeakTest do
 
     # The failure reached the worker once it waits for the opening to finish.
     assert_receive {:scheduled, {:phone_call_timer, :speech, _token} = speech, _ms}, @arrival_ms
-    _state = :sys.get_state(call.worker)
-    :atomics.add(ctx.clock, 1, 60_000)
+    Fakes.advance_clock!(ctx.clock, call.worker, 60_000)
     send(call.worker, speech)
     assert_receive {:vendor_hangup, _headers}, @arrival_ms
     assert_receive {:scheduled, {:phone_call_timer, :drain, _token}, _ms}, @arrival_ms

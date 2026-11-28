@@ -264,8 +264,7 @@ defmodule FermixCore.PhoneCalls.CallTransportTest do
 
     # The voice's own goodbye goes quiet; then one hangup, and the vendor's
     # close. The clock moves only once the worker has taken the answer in.
-    _state = :sys.get_state(call.pid)
-    :atomics.add(ctx.clock, 1, 60_000)
+    Fakes.advance_clock!(ctx.clock, call.pid, 60_000)
     fire!(call, :speech)
     assert_receive {:vendor_hangup, hangup_headers}, @arrival_ms
     assert {"authorization", "Bearer sk-invented-phone-key"} in hangup_headers

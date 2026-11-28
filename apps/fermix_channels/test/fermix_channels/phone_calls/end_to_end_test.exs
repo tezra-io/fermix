@@ -577,10 +577,9 @@ defmodule FermixChannels.PhoneCalls.EndToEndTest do
   # The voice's own goodbye goes quiet: then the one hangup.
   defp hang_up!(call, closed_reason) do
     assert_receive {:scheduled, {:phone_call_timer, :speech, _token} = speech, _ms}, @arrival
-    # The clock is shared memory, not a message: every fragment this test sent
-    # the worker is handled before the clock moves past the reply's last word.
-    _state = :sys.get_state(call.worker)
-    :atomics.put(call.clock, 1, 10_000)
+    # Every fragment this test sent the worker is handled before the clock
+    # moves past the reply's last word.
+    Fakes.advance_clock!(call.clock, call.worker, 10_000)
     send(call.worker, speech)
 
     assert_receive {:hangup, _task, @session}, @arrival

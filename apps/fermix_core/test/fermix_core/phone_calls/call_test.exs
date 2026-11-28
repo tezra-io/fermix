@@ -216,10 +216,7 @@ defmodule FermixCore.PhoneCalls.CallTest do
 
   # Moves the monotonic clock past any speech the worker has taken in, so an
   # end does not wait for it.
-  defp quiet!(ctx, call) do
-    sync!(call)
-    :atomics.add(ctx.clock, 1, 60_000)
-  end
+  defp quiet!(ctx, call), do: Fakes.advance_clock!(ctx.clock, call.pid, 60_000)
 
   defp ended!(call) do
     pid = call.pid
@@ -1659,7 +1656,7 @@ defmodule FermixCore.PhoneCalls.CallTest do
       Call.cancel(call.pid, :owner)
       assert_receive {:hangup, task, @session}
 
-      :atomics.add(ctx.clock, 1, 29_000)
+      Fakes.advance_clock!(ctx.clock, call.pid, 29_000)
       Fakes.answer(task, {:error, {:not_sent, {:transport, :nxdomain}}})
       fire!(call, :drain)
 

@@ -132,7 +132,7 @@ defmodule FermixTestSupport.PhoneCallFakes do
 
   @doc """
   The worker's seams over these fakes; `clock` is an `:atomics` counter the
-  test moves for the monotonic clock.
+  test moves for the monotonic clock, with `advance_clock!/3`.
   """
   @spec seams(:atomics.atomics_ref()) :: map()
   def seams(clock) do
@@ -147,6 +147,27 @@ defmodule FermixTestSupport.PhoneCallFakes do
       schedule: &schedule/2,
       monotonic: fn -> :atomics.get(clock, 1) end
     }
+  end
+
+  @doc """
+  Moves `clock`, the counter `seams/1` was given, on by `ms`, once `worker`
+  has handled everything sent to it so far.
+
+  The clock is shared memory, not a message, so no message order covers a
+  move. A fake the worker calls in its own process (a line said, a key sent)
+  tells the sink before it returns, and the worker may read the clock only
+  after that, for a stamp the test means to be older than the move. One
+  synchronous question to the worker puts that callback behind the move.
+
+  It does not wait for a fake that runs in a task of the worker's (the
+  create, the hangup, the outcome's reading): that answer reaches the worker
+  as a later message. Where the worker reads the clock on such an answer,
+  script the fake `:wait`, move the clock, then `answer/2`.
+  """
+  @spec advance_clock!(:atomics.atomics_ref(), pid(), pos_integer()) :: :ok
+  def advance_clock!(clock, worker, ms) when is_pid(worker) and is_integer(ms) and ms > 0 do
+    _state = :sys.get_state(worker)
+    :atomics.add(clock, 1, ms)
   end
 
   @doc false
