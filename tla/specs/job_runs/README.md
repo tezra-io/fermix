@@ -2508,6 +2508,21 @@ new kind's `effect_decision/2` beside them.
 changed none of the pinned functions; the `application.ex` citations below it
 moved up by two with the code.
 
+## Re-read for a job's validity checked before it is created (M84, 2026-11-28)
+
+The commit that asks the owner before a job that signs in is set up staled
+the `registry.ex` pin. The file gains one public function, `check_create/2`,
+at its end, below every line this spec cites: it runs `create_job/2`'s own
+checks (`normalize_create_attrs/2`) and writes nothing, so `schedule_job`
+can refuse an invalid job before the owner is asked anything. `create_job/2`
+itself is as it was, and no row is read or written by the new function. The
+question is asked inside the owner's own turn, before `create_job/2` or
+`update_job/3` is called, and never from a job's run, so no step of a run,
+of the Scheduler or of an owner's request changed, and a scheduled run still
+never parks a call for the owner. No modelled step changed and no
+`registry.ex` citation moved. The access gate's citations above Findings
+moved with the code.
+
 ## Assumptions
 
 - Every Repo call completes, or its caller dies, or, for the Scheduler, it
@@ -2547,9 +2562,9 @@ moved up by two with the code.
   AgentLoop survives it (JOB-8).
 - The access gate is outside the model. A run's access-sensitive tool call
   that its job row does not name is refused inside the one `Loop` step; a
-  scheduled run never parks a call for the owner (`access_gate.ex:328-338`,
-  `:937-949`), nor a phone call's start, the gate's external effect
-  (`:738-748`).
+  scheduled run never parks a call for the owner (`access_gate.ex:335-345`,
+  `:1113-1125`), nor a phone call's start, the gate's external effect
+  (`:914-924`).
   An owner edit, resume or run now of a job naming such a tool, from a turn
   that could not run it directly, is refused by the tool before any registry
   write or Scheduler call (`job_registry_support.ex:36-41`): a request the owner
