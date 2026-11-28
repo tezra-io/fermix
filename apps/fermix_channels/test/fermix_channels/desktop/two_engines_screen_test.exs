@@ -149,7 +149,7 @@ defmodule FermixChannels.Desktop.TwoEnginesScreenTest do
       {:ok, _result} = ComputerUse.execute(%{"action" => "screenshot"}, turn(ctx))
       assert_received {:screen_helper, "screenshot", _first}
       {:ok, session} = SessionManager.lookup(turn(ctx))
-      ref = Process.monitor(session)
+      ref = monitored!(session)
 
       assert {:ok, %{"stopped" => true}} = ComputerMethods.screen_stop(%{})
 
@@ -183,7 +183,7 @@ defmodule FermixChannels.Desktop.TwoEnginesScreenTest do
       {:ok, _result} = ComputerUse.execute(%{"action" => "screenshot"}, turn(ctx))
       assert_received {:screen_helper, "screenshot", _first}
       {:ok, session} = SessionManager.lookup(turn(ctx))
-      ref = Process.monitor(session)
+      ref = monitored!(session)
 
       Agent.update(ctx.engines.switch_agent, fn _on -> Switches.only([]) end)
       GenServer.cast(Switches.screen_listener(), :switches_changed)
@@ -339,6 +339,19 @@ defmodule FermixChannels.Desktop.TwoEnginesScreenTest do
     after
       0 -> last || flunk("the seat armed no lapse")
     end
+  end
+
+  # A monitor of `pid` that `pid` has taken in. ERTS holds this process's new
+  # monitor on its scheduler until it signals `pid` again or is scheduled
+  # out, while a signal to anyone else goes at once: so when another process
+  # ends `pid` (the seat's Stop, the switch listener), the monitor can reach
+  # it only after it has ended, and answers `:noproc`. `:monitored_by` is
+  # asked through `pid`'s own queue, behind the monitor.
+  defp monitored!(pid) do
+    ref = Process.monitor(pid)
+    assert {:monitored_by, watchers} = Process.info(pid, :monitored_by)
+    assert self() in watchers
+    ref
   end
 
   # The server's watch over the computer's screen, which the session's

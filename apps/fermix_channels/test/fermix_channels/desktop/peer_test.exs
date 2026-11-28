@@ -113,7 +113,7 @@ defmodule FermixChannels.Desktop.PeerTest do
     assert [%{device_id: @device, connected_since: @since}] = Peer.connected(ctx.registry)
     assert {:ok, ^peer, %{session: ^session}} = Peer.lookup(ctx.registry, @device)
 
-    ref = Process.monitor(peer)
+    ref = monitored!(peer)
     Process.unlink(session)
     Process.exit(session, :kill)
     assert_receive {:DOWN, ^ref, :process, ^peer, :normal}
@@ -283,7 +283,7 @@ defmodule FermixChannels.Desktop.PeerTest do
   test "a newer session of the same desktop replaces the older peer", ctx do
     older_session = forwarder()
     older = start_peer!(ctx, older_session)
-    ref = Process.monitor(older)
+    ref = monitored!(older)
 
     newer_session = forwarder()
     newer = start_peer!(ctx, newer_session, connected_since: ~U[2026-10-21 09:30:00Z])
@@ -396,6 +396,19 @@ defmodule FermixChannels.Desktop.PeerTest do
 
     {:ok, peer} = Peer.start(ctx.supervisor, opts)
     peer
+  end
+
+  # A monitor of `pid` that `pid` has taken in. ERTS holds this process's new
+  # monitor on its scheduler until it signals `pid` again or is scheduled
+  # out, while a signal to anyone else goes at once: so when another process
+  # ends `pid` (its session's end, a newer peer's stop), the monitor can reach
+  # it only after it has ended, and answers `:noproc`. `:monitored_by` is
+  # asked through `pid`'s own queue, behind the monitor.
+  defp monitored!(pid) do
+    ref = Process.monitor(pid)
+    assert {:monitored_by, watchers} = Process.info(pid, :monitored_by)
+    assert self() in watchers
+    ref
   end
 
   # A stand-in for the desktop's session: whatever reaches it reaches the test.
