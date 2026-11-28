@@ -113,6 +113,16 @@ defmodule FermixCore.PhoneCalls.OpenAILive.EventsTest do
 
       assert {:malformed, "session.output_transcript.delta", ^event} = Events.normalize(event)
     end
+
+    # An empty fragment is no speech: it would grow the transcript by an entry
+    # of no bytes, and on the remote side count as the person speaking.
+    test "a fragment whose text is empty is no text, either side" do
+      for type <- ["session.input_transcript.delta", "session.output_transcript.delta"] do
+        event = %{"type" => type, "event_id" => "event_transcript_5", "delta" => ""}
+
+        assert {:malformed, ^type, ^event} = Events.normalize(event)
+      end
+    end
   end
 
   describe "delegation" do

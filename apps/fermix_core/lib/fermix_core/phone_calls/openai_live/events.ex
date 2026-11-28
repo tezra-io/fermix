@@ -58,7 +58,7 @@ defmodule FermixCore.PhoneCalls.OpenAILive.Events do
       sideband process discards it; it never reaches the call worker.
     * `{:malformed, type, event}` — a documented type without the field needed
       to act on it (a delegation with no id, usage with no number, a transcript
-      with no text), or an object with no `type`.
+      with no text, an empty one included), or an object with no `type`.
     * `{:unknown, type, event}` — every other type, documented or future: kept
       observable, never a transition.
 
@@ -183,7 +183,7 @@ defmodule FermixCore.PhoneCalls.OpenAILive.Events do
     }
   end
 
-  defp transcript(speaker, %{"delta" => text} = event) when is_binary(text) do
+  defp transcript(speaker, %{"delta" => text} = event) when is_binary(text) and text != "" do
     {:transcript,
      %{
        speaker: speaker,
