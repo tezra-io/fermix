@@ -1,0 +1,22 @@
+{
+  "jobs": [
+    {
+      "key": "ferry",
+      "name": "Dunmere ferry sailings digest",
+      "description": "Tomorrow's sailings on the Dunmere ferry",
+      "schedule": "40 18 * * *",
+      "task_prompt": "Read tomorrow's sailings from the Dunmere ferry timetable at dunmere-ferry.example/sailings and send me the times, with any cancelled sailing first.",
+      "provider": "anthropic",
+      "model": "claude-quill-3",
+      "timeout_seconds": 300,
+      "runs": [
+        {
+          "fires_ago": 1,
+          "duration_seconds": 19,
+          "status": "error",
+          "error": "Tomorrow's sailings were read, but the digest could not be posted: the chat this job reports to has been closed and takes no more messages. Its replacement is the Slack channel C07DUNMERE4, and a job that reports to it posts normally."
+        }
+      ]
+    }
+  ]
+}
