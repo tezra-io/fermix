@@ -63,6 +63,16 @@ defmodule FermixCore.PhoneCalls.ManagerTest do
     def cancel(_pid, _why), do: :ok
   end
 
+  # A worker whose start crashes as a function clause does: the top frame
+  # carries its argument, here the number the brief dials.
+  defmodule CrashingStart do
+    def start_link(args),
+      do: {:error, {:function_clause, [{__MODULE__, :init, [args.brief.destination], [line: 1]}]}}
+
+    def prompt_version, do: "phone-test-1"
+    def cancel(_pid, _why), do: :ok
+  end
+
   # A store that answers the ledger's requests with `{:error, :busy}` while
   # its script says so, then as an empty store would: the Repo's own reply
   # shapes, for the requests the Manager's boot and prune make.
@@ -956,6 +966,76 @@ defmodule FermixCore.PhoneCalls.ManagerTest do
       assert row.failure_reason == "worker_lost"
       refute Ledger.holds_slot?(row, @t0)
       refute Manager.slot_held?(@t0, manager.manager)
+    end
+  end
+
+  # The general log keeps codes, never a call's words (the rule at the
+  # Manager's `log_call_end/1`): a worker's exit by its shape, every frame by
+  # arity, and a refused hang-up by its kind and HTTP status. The row keeps
+  # the vendor's words.
+  describe "the general log" do
+    @dialed "5550101"
+
+    test "a worker lost to a crash is logged by its shape, never its frames' arguments", ctx do
+      manager = start_manager(ctx)
+      call = start_call!(manager)
+      frame = {FakeCall, :handle_info, [{:dial, "+12125550101"}, %{}], [file: ~c"x.ex", line: 7]}
+
+      log =
+        capture_log(fn ->
+          assert {:monitored_by, monitors} = Process.info(call.pid, :monitored_by)
+          assert manager.pid in monitors
+          Process.exit(call.pid, {:function_clause, [frame]})
+          assert_receive {:telemetry, [:fermix, :phone_call, :run_error], _measurements, _meta}
+        end)
+
+      assert log =~ "worker ended without its report: {:function_clause, [{"
+      assert log =~ ":handle_info, 2,"
+      refute log =~ @dialed
+    end
+
+    test "a worker whose start crashed is logged by its shape", ctx do
+      manager = start_manager(ctx, call_module: CrashingStart)
+
+      log =
+        capture_log(fn ->
+          assert {:error, {:call_start_failed, _reason}} =
+                   Manager.start_call(request(), manager.manager)
+        end)
+
+      assert log =~ "worker did not start: {:function_clause, [{"
+      assert log =~ ":init, 1,"
+      refute log =~ @dialed
+    end
+
+    test "a refused hang-up is logged by its kind and status; the row keeps the words", ctx do
+      test = self()
+      vendor = %{message: "Number +1 212 555 0101 is not on this call", code: nil, type: nil}
+
+      manager =
+        start_manager(ctx,
+          hangup: fn session_id ->
+            send(test, {:hangup, session_id, self()})
+            {:error, {:rejected, 422, vendor}}
+          end
+        )
+
+      call = start_call!(manager)
+      {:ok, _row} = session!(call, "sess_refused_1")
+
+      log =
+        capture_log(fn ->
+          assert kill!(call, manager).status == "closure_unconfirmed"
+          assert_receive {:hangup, "sess_refused_1", task}
+          # The task hands the Manager its answer before it exits.
+          ref = Process.monitor(task)
+          assert_receive {:DOWN, ^ref, :process, ^task, _why}
+          _state = :sys.get_state(manager.pid)
+        end)
+
+      assert log =~ "hang-up request failed: rejected, HTTP 422"
+      refute log =~ "555 0101"
+      assert row!(ctx, call.id).cleanup_error =~ "Number +1 212 555 0101 is not on this call"
     end
   end
 

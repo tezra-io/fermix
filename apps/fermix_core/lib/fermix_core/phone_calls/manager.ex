@@ -142,6 +142,7 @@ defmodule FermixCore.PhoneCalls.Manager do
 
   alias FermixCore.Memory.Repo
   alias FermixCore.PhoneCalls.Brief
+  alias FermixCore.PhoneCalls.Call.Printable
   alias FermixCore.PhoneCalls.CarrierProfile
   alias FermixCore.PhoneCalls.Config
   alias FermixCore.PhoneCalls.Delivery
@@ -638,7 +639,10 @@ defmodule FermixCore.PhoneCalls.Manager do
         Limits.result_extraction_timeout_ms()
 
   defp start_failed(row, reason, state) do
-    Logger.error("phone call #{row.id} worker did not start: #{inspect(reason)}")
+    Logger.error(
+      "phone call #{row.id} worker did not start: #{inspect(Printable.reason(reason))}"
+    )
+
     state = fail_undispatched(row.id, "worker_start_failed", state)
     {{:error, {:call_start_failed, reason}}, state}
   end
@@ -914,7 +918,8 @@ defmodule FermixCore.PhoneCalls.Manager do
   # row is the next boot's to settle, by what it proves then.
   defp worker_gone(%{stopping?: true} = state, call_id, reason) do
     Logger.warning(
-      "phone call #{call_id} worker ended by the engine's stop (#{inspect(reason)}); " <>
+      "phone call #{call_id} worker ended by the engine's stop " <>
+        "(#{inspect(Printable.reason(reason))}); " <>
         "its row is left for the next boot"
     )
 
@@ -924,7 +929,11 @@ defmodule FermixCore.PhoneCalls.Manager do
   defp worker_gone(state, call_id, reason), do: lost_worker(call_id, reason, state)
 
   defp lost_worker(call_id, reason, state) do
-    Logger.warning("phone call #{call_id} worker ended without its report: #{inspect(reason)}")
+    Logger.warning(
+      "phone call #{call_id} worker ended without its report: " <>
+        inspect(Printable.reason(reason))
+    )
+
     settle_id(call_id, "worker_lost", state)
   end
 
@@ -1073,13 +1082,20 @@ defmodule FermixCore.PhoneCalls.Manager do
   end
 
   defp record_cleanup_error(call_id, reason, state) do
-    Logger.warning("phone call #{call_id} hang-up request failed: #{inspect(reason)}")
+    Logger.warning("phone call #{call_id} hang-up request failed: #{cleanup_failure(reason)}")
 
     case Ledger.record_cleanup_error(call_id, Delivery.bounded_error(reason), server: state.repo) do
       {:ok, _row} -> state
       {:error, other} -> log_terminal_error(call_id, other, state)
     end
   end
+
+  # The log keeps a failed hang-up's kind and, when an answer came back, its
+  # HTTP status (the rule at `log_call_end/1`), and any other reason by its
+  # shape; the vendor's words stay on the row's `cleanup_error`.
+  defp cleanup_failure({:rejected, status, _vendor}), do: "rejected, HTTP #{status}"
+  defp cleanup_failure({:unknown, {:http_status, status, _vendor}}), do: "unknown, HTTP #{status}"
+  defp cleanup_failure(reason), do: inspect(Printable.reason(reason))
 
   # --- cancel and the off switch ----------------------------------------------------
 
