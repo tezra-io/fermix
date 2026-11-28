@@ -222,8 +222,6 @@ defmodule FermixCore.PhoneCalls.Report do
   @stop_before_dial "Fermix told the call to stop before it is placed." <> @stop_follows
   @stop_told "Fermix told the call to stop." <> @stop_follows
   @stop_ended "That call has already ended."
-  # A process that is not the home's running engine (a setup page served from
-  # another tree, a command that booted one) owns no worker of the daemon's.
   @slot_ways_out " It holds the call slot until it is confirmed ended, in the recovery view " <>
                    "or with the settings command, or until OpenAI's own limit on " <>
                    "a call passes."

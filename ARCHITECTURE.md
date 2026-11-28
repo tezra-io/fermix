@@ -1680,11 +1680,11 @@ Where a build's calls go is decided once, at the composition root
 (`FermixCore.Application.phone_call_transport_opts/2`, handed to every worker and
 to the Manager's cleanup): the vendor in a release, a development build's eval
 fixture origin when it is set and honoured, and a refusal of every call in a
-test build. The transport reads no environment. Boot reconciliation, pruning
-and the delivery ticks run only in the home's daemon process, and a Manager in
-any other process (a command that booted the tree) stops only the calls it
-tracks itself and releases no slot, answering `:owned_by_running_engine` for
-the daemon's.
+test build. The transport reads no environment. The subtree runs only in the
+home's daemon (`Application.daemon_children/2`), so boot reconciliation,
+pruning and the delivery ticks run there and nowhere else; where no Manager
+runs, `Management.PhoneCalls` answers a stop or a confirmation `unavailable`
+with its own sentence and changes nothing.
 
 Architecture Invariant: a mandate dials at most once. The row is written before
 any network I/O, the create is `Net.HttpClient.request_once/3` and is never

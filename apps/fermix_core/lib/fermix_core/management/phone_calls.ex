@@ -107,7 +107,7 @@ defmodule FermixCore.Management.PhoneCalls do
   ]
 
   @not_found_sentence "No phone call of yours has that id."
-  @not_running_sentence "Phone calls are not running here, so no call is in progress to stop."
+  @not_running_sentence "Phone calls are not running here, so Fermix could not stop the call."
   @manager_unreachable_sentence "Fermix could not reach the part of it that places calls. " <>
                                   "See the daemon log."
   @unreadable_sentence "Fermix could not read its phone call records. See the daemon log."
@@ -503,7 +503,8 @@ defmodule FermixCore.Management.PhoneCalls do
   to end (`PhoneCalls.Manager.disable/1`); on reopens admission and nothing
   else (`enable/1`), so an unresolved call keeps its slot and nothing is
   redialed. Answers what the owner did not type, in their words. Where no call
-  manager runs, no call is in progress, and there is nothing to say.
+  manager runs (only the home's daemon runs one), this process stops nothing,
+  and there is nothing to say.
   """
   @spec apply_enabled(boolean(), keyword()) :: [String.t()]
   def apply_enabled(on?, opts \\ [])

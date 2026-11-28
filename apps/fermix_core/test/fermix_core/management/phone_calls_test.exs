@@ -676,7 +676,7 @@ defmodule FermixCore.Management.PhoneCallsTest do
       assert {:error, :unavailable, %{"sentence" => sentence}} =
                route(ctx, "phone_calls.stop", %{"call_id" => id})
 
-      assert sentence == "Phone calls are not running here, so no call is in progress to stop."
+      assert sentence == "Phone calls are not running here, so Fermix could not stop the call."
     end
   end
 

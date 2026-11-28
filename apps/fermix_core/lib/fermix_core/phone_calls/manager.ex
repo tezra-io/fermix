@@ -151,8 +151,8 @@ defmodule FermixCore.PhoneCalls.Manager do
   alias FermixCore.PhoneCalls.Telemetry
 
   @end_statuses ~w(ended failed dispatch_unknown closure_unconfirmed)
-  # What the off switch did: calls it ended with nothing dialed, calls it asked
-  # to stop, and calls it left to the home's running engine.
+  # What the off switch did: calls it ended with nothing dialed, and calls it
+  # asked to stop.
   @no_stops %{cancelled: 0, stopping: 0}
   @cleanup_resends Limits.max_cleanup_retries()
   # The uncertainty note of a call settled by its recorded closure.
