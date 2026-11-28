@@ -587,9 +587,10 @@ defmodule FermixCore.PhoneCalls.SecretLeakTest do
     assert for({where, text} <- texts, form <- [@basic, @masked], text =~ form, do: {where, form}) ==
              []
 
-    # The vendor's words did reach the record and the log, so the checks above
-    # read real vendor text, scrubbed; a failure that names the key, even
-    # masked, is withheld in the engine's own words.
+    # The vendor's words did reach the record and the log (an event's type), so
+    # the checks above read real vendor text, scrubbed; a failure that names
+    # the key, even masked, is withheld in the engine's own words. The log
+    # keeps a close by its code alone (`Call.Printable.reason/1`).
     {:ok, failed_row} = Ledger.get(failed, server: ctx.repo)
     {:ok, lost_row} = Ledger.get(lost, server: ctx.repo)
     assert failed_row.status == "failed"
@@ -598,6 +599,6 @@ defmodule FermixCore.PhoneCalls.SecretLeakTest do
     assert lost_row.status == "closure_unconfirmed"
     assert lost_row.vendor_message =~ "[REDACTED]"
     assert log =~ "vendor.future.[REDACTED]"
-    assert log =~ "dropped: Bearer [REDACTED]"
+    assert log =~ "sideband lost: {:remote_close, 4000, :redacted}"
   end
 end

@@ -33,6 +33,7 @@ defmodule FermixCore.PhoneCalls.Outcome.Extraction do
   alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.PhoneCalls.Brief
   alias FermixCore.PhoneCalls.BriefText
+  alias FermixCore.PhoneCalls.Call.Printable
   alias FermixCore.PhoneCalls.Limits
   alias FermixCore.PhoneCalls.Outcome.Claim
   alias FermixCore.PhoneCalls.Transcript
@@ -160,13 +161,14 @@ defmodule FermixCore.PhoneCalls.Outcome.Extraction do
   end
 
   # The whole call inside one bound. One that raises or exits is a failed
-  # extraction, never a crash of the worker that asked for it.
+  # extraction, never a crash of the worker that asked for it; its reason,
+  # which carries what the reading held (what was said), is kept as its codes.
   defp bounded(fun, timeout_ms) do
     task = Task.Supervisor.async_nolink(FermixCore.TaskSupervisor, fun)
 
     case Task.yield(task, timeout_ms) || Task.shutdown(task, :brutal_kill) do
       {:ok, result} -> result
-      {:exit, reason} -> failed(:crashed, reason)
+      {:exit, reason} -> failed(:crashed, Printable.reason(reason))
       nil -> failed(:timeout, "no answer within #{timeout_ms} ms")
     end
   end

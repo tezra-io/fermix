@@ -330,7 +330,12 @@ defmodule FermixCore.PhoneCalls.Manager do
     do: Logger.info("engine stop: the phone call in progress ended before the stop")
 
   defp log_stop_drain(other),
-    do: Logger.warning("engine stop: phone calls not drained (#{inspect(other)})")
+    do:
+      Logger.warning("engine stop: phone calls not drained (#{inspect(printable_drain(other))})")
+
+  # A Manager that died under the drain left its crash reason.
+  defp printable_drain({:no_answer, reason}), do: {:no_answer, Printable.reason(reason)}
+  defp printable_drain(other), do: other
 
   defp await_drain(pid) do
     ref = Process.monitor(pid)
@@ -452,6 +457,34 @@ defmodule FermixCore.PhoneCalls.Manager do
   end
 
   def handle_info(_other, state), do: {:noreply, state}
+
+  # A crash report, and `:sys.get_status/1`, print the state, the message being
+  # handled (a call's bare request) and the reason. The state holds no call's
+  # words; a start's request carries the brief, an end report and a retried
+  # write what was said, a task's answer the vendor's words, and a crash's
+  # exception the value it quotes, so each prints as its codes
+  # (`Call.Printable.reason/1`). OTP reports a crash's stack past this
+  # callback, with the top frame's arguments of a function clause it fails.
+  @impl true
+  def format_status(status) when is_map(status) do
+    status
+    |> Map.replace_lazy(:message, &printable_message/1)
+    |> Map.replace_lazy(:reason, &Printable.reason/1)
+  end
+
+  defp printable_message({:start_call, _request}), do: {:start_call, :redacted}
+
+  defp printable_message({:phone_call_ended, call_id, _report}),
+    do: {:phone_call_ended, call_id, :redacted}
+
+  defp printable_message({:phone_call_retry_write, call_id, op, attempt}),
+    do: {:phone_call_retry_write, call_id, Printable.reason(op), attempt}
+
+  defp printable_message({:DOWN, ref, :process, pid, reason}),
+    do: {:DOWN, ref, :process, pid, Printable.reason(reason)}
+
+  defp printable_message({ref, _result}) when is_reference(ref), do: {ref, :redacted}
+  defp printable_message(message), do: message
 
   # --- admission ------------------------------------------------------------------
 
@@ -831,7 +864,8 @@ defmodule FermixCore.PhoneCalls.Manager do
 
   defp log_rejected(state, call_id, reason) do
     Logger.error(
-      "phone call #{call_id} settlement refused by the ledger (#{inspect(reason)}); " <>
+      "phone call #{call_id} settlement refused by the ledger " <>
+        "(#{inspect(Printable.reason(reason))}); " <>
         "its row is left for the next boot"
     )
 
@@ -840,7 +874,8 @@ defmodule FermixCore.PhoneCalls.Manager do
 
   defp refused_end_report(call_id, reason, state) do
     Logger.error(
-      "phone call #{call_id} end report refused (#{inspect(reason)}); settling by its row"
+      "phone call #{call_id} end report refused (#{inspect(Printable.reason(reason))}); " <>
+        "settling by its row"
     )
 
     settle_id(call_id, "invalid_end_report", state)
@@ -1095,6 +1130,7 @@ defmodule FermixCore.PhoneCalls.Manager do
   # shape; the vendor's words stay on the row's `cleanup_error`.
   defp cleanup_failure({:rejected, status, _vendor}), do: "rejected, HTTP #{status}"
   defp cleanup_failure({:unknown, {:http_status, status, _vendor}}), do: "unknown, HTTP #{status}"
+  defp cleanup_failure({:unknown, {:unexpected_status, status}}), do: "unknown, HTTP #{status}"
   defp cleanup_failure(reason), do: inspect(Printable.reason(reason))
 
   # --- cancel and the off switch ----------------------------------------------------

@@ -1009,34 +1009,112 @@ defmodule FermixCore.PhoneCalls.ManagerTest do
     end
 
     test "a refused hang-up is logged by its kind and status; the row keeps the words", ctx do
-      test = self()
       vendor = %{message: "Number +1 212 555 0101 is not on this call", code: nil, type: nil}
-
-      manager =
-        start_manager(ctx,
-          hangup: fn session_id ->
-            send(test, {:hangup, session_id, self()})
-            {:error, {:rejected, 422, vendor}}
-          end
-        )
-
-      call = start_call!(manager)
-      {:ok, _row} = session!(call, "sess_refused_1")
-
-      log =
-        capture_log(fn ->
-          assert kill!(call, manager).status == "closure_unconfirmed"
-          assert_receive {:hangup, "sess_refused_1", task}
-          # The task hands the Manager its answer before it exits.
-          ref = Process.monitor(task)
-          assert_receive {:DOWN, ^ref, :process, ^task, _why}
-          _state = :sys.get_state(manager.pid)
-        end)
+      {call, log} = failed_hangup!(ctx, {:rejected, 422, vendor}, "sess_refused_1")
 
       assert log =~ "hang-up request failed: rejected, HTTP 422"
       refute log =~ "555 0101"
       assert row!(ctx, call.id).cleanup_error =~ "Number +1 212 555 0101 is not on this call"
     end
+
+    test "a hang-up answered with a status it does not expect is logged with that status", ctx do
+      {_call, log} = failed_hangup!(ctx, {:unknown, {:unexpected_status, 302}}, "sess_moved_1")
+
+      assert log =~ "hang-up request failed: unknown, HTTP 302"
+    end
+
+    test "an end report the ledger refuses is logged by its codes, never the refused value",
+         ctx do
+      manager = start_manager(ctx)
+      call = start_call!(manager)
+      facts = "agreed with Calloway Bistro, call back on +1 212 555 0101"
+      report = %{status: "ended", outcome: "unknown", outcome_facts: facts}
+
+      log =
+        capture_log(fn ->
+          :ok = in_worker(call, &Manager.report_end(&1.manager, &1.call_id, report))
+          assert_receive {:telemetry, [:fermix, :phone_call, _closer], _measurements, _meta}
+        end)
+
+      assert log =~ "end report refused ({:invalid, :outcome_facts, :redacted})"
+      refute log =~ "Calloway"
+      refute log =~ "555 0101"
+    end
+
+    # The engine's stop drains through this seam, which the test points at a
+    # Manager that dies on the drain with a crash's frames in its reason.
+    test "a stop's drain the Manager died on is logged by the exit's codes", ctx do
+      reason = {:function_clause, [{Manager, :begin_drain, [%{destination: "+12125550101"}], []}]}
+      name = :"phone_stop_manager_#{ctx.unique}"
+      pid = spawn(fn -> receive do: ({:phone_call_drain, _from, _ref} -> exit(reason)) end)
+      Process.register(pid, name)
+      previous = Application.fetch_env(:fermix_core, :phone_calls_stop_manager)
+      Application.put_env(:fermix_core, :phone_calls_stop_manager, name)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, value} -> Application.put_env(:fermix_core, :phone_calls_stop_manager, value)
+          :error -> Application.delete_env(:fermix_core, :phone_calls_stop_manager)
+        end
+      end)
+
+      log = capture_log(fn -> assert {:no_answer, _reason} = Manager.drain_for_stop() end)
+
+      assert log =~ "phone calls not drained ({:no_answer, {:function_clause, [{"
+      assert log =~ ":begin_drain, 1,"
+      refute log =~ @dialed
+    end
+
+    # A crash report prints the message being handled and the reason: here a
+    # start's request, which carries the brief, and an exception whose message
+    # quotes a value of it. (A crash's frames, which OTP reports past
+    # `format_status/1`, carry arities here: the exception was raised.)
+    test "a crash report of the Manager prints none of a call's words", ctx do
+      manager = start_manager(ctx)
+      brief = %{brief!() | tool_grants: [%{"note" => "Calloway Bistro, +1 212 555 0101"}]}
+      request = request(%{brief: brief, brief_hash: Brief.hash(brief)})
+
+      log =
+        capture_log(fn ->
+          assert {{%ArgumentError{}, _stack}, _call} =
+                   catch_exit(Manager.start_call(request, manager.manager))
+        end)
+
+      assert log =~ "terminating"
+      assert log =~ "{:start_call, :redacted}"
+      refute log =~ @dialed
+      refute log =~ "555 0101"
+      refute log =~ "Calloway"
+    end
+  end
+
+  # A cleanup hang-up for a lost worker's known session that fails with
+  # `result`, and the log of the Manager handling its answer.
+  defp failed_hangup!(ctx, result, session) do
+    test = self()
+
+    manager =
+      start_manager(ctx,
+        hangup: fn session_id ->
+          send(test, {:hangup, session_id, self()})
+          {:error, result}
+        end
+      )
+
+    call = start_call!(manager)
+    {:ok, _row} = session!(call, session)
+
+    log =
+      capture_log(fn ->
+        assert kill!(call, manager).status == "closure_unconfirmed"
+        assert_receive {:hangup, ^session, task}
+        # The task hands the Manager its answer before it exits.
+        ref = Process.monitor(task)
+        assert_receive {:DOWN, ^ref, :process, ^task, _why}
+        _state = :sys.get_state(manager.pid)
+      end)
+
+    {call, log}
   end
 
   describe "cancel/3" do

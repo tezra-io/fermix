@@ -57,6 +57,11 @@ defmodule FermixCore.PhoneCalls.DeliveryTest do
     def dispatch(_notice), do: {:error, {:no_owner_configured, "telegram"}}
   end
 
+  # A refusal that quotes the notice it refused: the report, what was said.
+  defmodule EchoingDispatcher do
+    def dispatch(notice), do: {:error, {:refused, notice.content}}
+  end
+
   setup do
     Process.register(self(), @sink)
     unique = System.unique_integer([:positive])
@@ -267,6 +272,22 @@ defmodule FermixCore.PhoneCalls.DeliveryTest do
       assert {:ok, %{report_status: "written"}} = Ledger.get(row.id, server: ctx.repo)
     end
 
+    test "a continuation's failure is logged by its codes, never the report it carried", ctx do
+      row = terminal_row!(ctx)
+
+      opts =
+        hand_off_opts(ctx,
+          continuation_opts: [dispatcher: EchoingDispatcher],
+          delivery_opts: [adapter: SinkAdapter]
+        )
+
+      log = capture_log(fn -> :ok = Delivery.hand_off(row, opts) end)
+
+      assert_receive {:sent, "40017", _text, _opts}
+      assert log =~ "continuation failed: {:refused, :redacted}; sending text"
+      refute log =~ "Calloway"
+    end
+
     test "a voice origin is sent as text to the frozen inbox", ctx do
       row =
         terminal_row!(ctx, %{
@@ -309,6 +330,30 @@ defmodule FermixCore.PhoneCalls.DeliveryTest do
   end
 
   describe "the delivery worker" do
+    # A crash report prints the reason: a tick's exception can quote the row it
+    # was sending (here a `KeyError`'s term). What the callback hands on holds
+    # none of it in its very bytes, however a consumer prints it.
+    test "its crash report's reason prints by its codes, never the row it held" do
+      row = %{
+        id: "pc_0a1b2c3d4e5f",
+        destination: "+12125550101",
+        mandate: %{"goal" => "Calloway"}
+      }
+
+      frame = {Delivery, :deliver, [row, []], [file: ~c"delivery.ex", line: 1]}
+
+      for reason <- [{%KeyError{key: :status, term: row}, [frame]}, {:function_clause, [frame]}] do
+        status = DeliveryWorker.format_status(%{state: %{}, message: :tick, reason: reason})
+        bytes = :erlang.term_to_binary(status)
+
+        assert :binary.match(bytes, "5550101") == :nomatch
+        assert :binary.match(bytes, "Calloway") == :nomatch
+
+        assert {_kind, [{Delivery, :deliver, 2, [file: ~c"delivery.ex", line: 1]}]} =
+                 status.reason
+      end
+    end
+
     # The worker's clock: an Agent the test moves forward between ticks.
     defp start_worker(ctx, adapter, now) do
       clock = start_supervised!({Agent, fn -> now end}, id: :phone_worker_clock)

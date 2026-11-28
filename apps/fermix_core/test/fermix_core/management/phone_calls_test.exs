@@ -103,6 +103,24 @@ defmodule FermixCore.Management.PhoneCallsTest do
     end
   end
 
+  # A call manager that stops under any request, its reason a crash whose
+  # frame holds a call's number. A stop for shutdown leaves no crash report of
+  # its own, so the only line that can print the reason is the caller's.
+  defmodule StoppingManager do
+    use GenServer
+
+    def start_link(name), do: GenServer.start_link(__MODULE__, nil, name: name)
+
+    @impl true
+    def init(nil), do: {:ok, nil}
+
+    @impl true
+    def handle_call(_request, _from, state) do
+      frame = {Manager, :cancel_row, [%{destination: "+12125550101"}], [line: 1]}
+      {:stop, {:shutdown, {:function_clause, [frame]}}, state}
+    end
+  end
+
   setup do
     Process.register(self(), @sink)
     envs = for app <- @apps, do: {app, Application.get_all_env(app)}
@@ -630,6 +648,25 @@ defmodule FermixCore.Management.PhoneCallsTest do
 
       # Nothing here marks the call ended: it still holds the slot.
       assert {:ok, [%{id: ^unresolved}]} = Ledger.unresolved(@t0, server: ctx.repo)
+    end
+
+    test "a call manager that exits under the stop is said, and logged by its codes", ctx do
+      seed!(ctx, phone_calls: phone(true))
+      id = seed_call!(ctx, "main-stop-5", [:claim])
+      name = :"management_phone_stopping_#{ctx.unique}"
+      start_supervised!(Supervisor.child_spec({StoppingManager, name}, restart: :temporary))
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, :unavailable, %{"sentence" => sentence}} =
+                   route(ctx, "phone_calls.stop", %{"call_id" => id}, %{name: name})
+
+          assert sentence =~ "could not reach the part of it that places calls"
+        end)
+
+      assert log =~ "the call manager exited: {{:shutdown, {:function_clause, [{"
+      assert log =~ ":cancel_row, 1,"
+      refute log =~ "5550101"
     end
 
     test "a call in progress with no call manager running says so", ctx do

@@ -65,6 +65,7 @@ defmodule FermixCore.Management.PhoneCalls do
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.PhoneCallsSql
+  alias FermixCore.PhoneCalls.Call.Printable
   alias FermixCore.PhoneCalls.CallHold
   alias FermixCore.PhoneCalls.CarrierProfile
   alias FermixCore.PhoneCalls.Config
@@ -635,7 +636,8 @@ defmodule FermixCore.Management.PhoneCalls do
   # -- helpers -------------------------------------------------------------------------
 
   # The call manager, where it runs. One that exits under the call is said, and
-  # logged with what it answered.
+  # logged by the exit's codes (`Call.Printable.reason/1`): a crash's frames
+  # carry their arguments.
   defp manager_call(opts, fun) do
     server = Keyword.get(opts, :manager, Manager)
 
@@ -645,7 +647,10 @@ defmodule FermixCore.Management.PhoneCalls do
     end
   catch
     :exit, reason ->
-      Logger.error("management phone calls: the call manager exited: #{Redaction.format(reason)}")
+      Logger.error(
+        "management phone calls: the call manager exited: #{inspect(Printable.reason(reason))}"
+      )
+
       {:error, @manager_unreachable_sentence}
   end
 

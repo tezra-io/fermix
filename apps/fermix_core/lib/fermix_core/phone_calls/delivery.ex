@@ -35,6 +35,7 @@ defmodule FermixCore.PhoneCalls.Delivery do
   alias FermixCore.Delivery.FrozenOrigin
   alias FermixCore.Delivery.FrozenSend
   alias FermixCore.Delivery.OwnerInbox
+  alias FermixCore.PhoneCalls.Call.Printable
   alias FermixCore.PhoneCalls.Continuation
   alias FermixCore.PhoneCalls.DeliveryWorker
   alias FermixCore.PhoneCalls.Ledger
@@ -166,9 +167,12 @@ defmodule FermixCore.PhoneCalls.Delivery do
         Logger.info("phone call #{row.id} reported into its conversation")
         mark(row, %{report_status: "written", delivered_at: now(opts)}, opts)
 
+      # The dispatcher's error can quote the notice it carried (the report),
+      # or a crash's frames: the log keeps its codes.
       {:error, reason} ->
         Logger.warning(
-          "phone call #{row.id} continuation failed: #{inspect(reason)}; sending text"
+          "phone call #{row.id} continuation failed: " <>
+            "#{inspect(Printable.reason(reason))}; sending text"
         )
 
         send_inline(row, opts)

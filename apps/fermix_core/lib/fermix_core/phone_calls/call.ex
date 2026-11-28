@@ -321,7 +321,7 @@ defmodule FermixCore.PhoneCalls.Call do
     do: state |> task_message(ref, {:down, reason}) |> noreply()
 
   def handle_info({:EXIT, pid, reason}, %{sideband: pid} = state) when is_pid(pid),
-    do: state |> sideband_closed({:exited, describe(reason)}) |> noreply()
+    do: state |> sideband_closed({:exited, reason}) |> noreply()
 
   def handle_info({:EXIT, _pid, _reason}, state), do: noreply(state)
   def handle_info(_other, state), do: noreply(state)
@@ -436,7 +436,7 @@ defmodule FermixCore.PhoneCalls.Call do
       |> arm(:attach, state.transport.attach_deadline_ms())
     else
       {:error, reason} ->
-        Logger.warning("phone call #{state.call_id} sideband not started: #{describe(reason)}")
+        Logger.warning("phone call #{state.call_id} sideband not started: #{printable(reason)}")
         begin_end(state, :attach_failed)
     end
   end
@@ -452,14 +452,14 @@ defmodule FermixCore.PhoneCalls.Call do
   defp sideband(state, :attached), do: %{disarm(state, :attach) | phase: :live, attached?: true}
 
   defp sideband(state, {:attach_failed, reason}) do
-    Logger.warning("phone call #{state.call_id} attach failed: #{describe(reason)}")
+    Logger.warning("phone call #{state.call_id} attach failed: #{printable(reason)}")
     begin_end(%{state | sideband: nil}, :attach_failed)
   end
 
   defp sideband(state, {:event, event}), do: event(event, state)
 
   defp sideband(state, {:invalid_frame, description}) do
-    Logger.debug("phone call #{state.call_id} invalid sideband frame: #{describe(description)}")
+    Logger.debug("phone call #{state.call_id} invalid sideband frame: #{printable(description)}")
     state
   end
 
@@ -477,7 +477,7 @@ defmodule FermixCore.PhoneCalls.Call do
   end
 
   defp lost_sideband(state, reason) do
-    Logger.warning("phone call #{state.call_id} sideband lost: #{describe(reason)}")
+    Logger.warning("phone call #{state.call_id} sideband lost: #{printable(reason)}")
     begin_end(state, :sideband_lost)
   end
 
@@ -637,7 +637,7 @@ defmodule FermixCore.PhoneCalls.Call do
   end
 
   defp started(state, id, _handle, {:error, reason}) do
-    Logger.warning("phone call #{state.call_id} backend turn not started: #{describe(reason)}")
+    Logger.warning("phone call #{state.call_id} backend turn not started: #{printable(reason)}")
     state |> say(id, @failed_line) |> retire(id) |> next_delegation()
   end
 
@@ -687,7 +687,7 @@ defmodule FermixCore.PhoneCalls.Call do
   end
 
   defp answer_turn(state, id, {:error, reason}) do
-    Logger.warning("phone call #{state.call_id} backend turn failed: #{describe(reason)}")
+    Logger.warning("phone call #{state.call_id} backend turn failed: #{printable(reason)}")
     state |> add_backend(nil) |> say(id, @failed_line)
   end
 
@@ -784,7 +784,7 @@ defmodule FermixCore.PhoneCalls.Call do
   defp say(state, _delegation_id, _text), do: state
 
   defp log_unsaid(state, reason) do
-    Logger.warning("phone call #{state.call_id} could not reach the voice: #{describe(reason)}")
+    Logger.warning("phone call #{state.call_id} could not reach the voice: #{printable(reason)}")
     state
   end
 
@@ -1130,7 +1130,7 @@ defmodule FermixCore.PhoneCalls.Call do
     do: {:not_read, Outcome.unread_report(:extraction_timeout)}
 
   defp reading(state, failed) do
-    Logger.warning("phone call #{state.call_id} outcome not read: #{describe(failed)}")
+    Logger.warning("phone call #{state.call_id} outcome not read: #{printable(failed)}")
     {:not_read, Outcome.unread_report(:extraction_crashed)}
   end
 
@@ -1224,7 +1224,7 @@ defmodule FermixCore.PhoneCalls.Call do
   # A turn's stop has answered, or ended without answering; either way the
   # call goes on as it was (the fencing already holds).
   defp stop_answered(state, {:down, reason}) do
-    Logger.warning("phone call #{state.call_id} turn stop ended early: #{describe(reason)}")
+    Logger.warning("phone call #{state.call_id} turn stop ended early: #{printable(reason)}")
     state
   end
 
@@ -1250,16 +1250,19 @@ defmodule FermixCore.PhoneCalls.Call do
   # A task that crashed, or was stopped at its watchdog, answered nothing.
   defp task_result(_kind, {:result, result}), do: result
 
+  # A crash's reason carries what the task held (the create's request, the
+  # key and the trunk password in it; what was said), so the words kept of it
+  # are its codes (`Call.Printable.reason/1`).
   defp task_result(:create, {:down, reason}),
-    do: {:error, {:unknown, {:create_stopped, describe(reason)}}}
+    do: {:error, {:unknown, {:create_stopped, Printable.reason(reason)}}}
 
   defp task_result(:hangup, {:down, reason}),
-    do: {:error, {:unknown, {:hangup_stopped, describe(reason)}}}
+    do: {:error, {:unknown, {:hangup_stopped, Printable.reason(reason)}}}
 
   defp task_result(:extract, {:down, :watchdog}), do: {:error, :extraction_timeout}
 
   defp task_result(:extract, {:down, reason}),
-    do: {:error, {:extraction_stopped, describe(reason)}}
+    do: {:error, {:extraction_stopped, Printable.reason(reason)}}
 
   # --- the ledger -------------------------------------------------------------------------
 
@@ -1366,4 +1369,9 @@ defmodule FermixCore.PhoneCalls.Call do
   defp compact(map), do: map |> Enum.reject(fn {_key, value} -> is_nil(value) end) |> Map.new()
 
   defp describe(term), do: inspect(term, limit: 8, printable_limit: 200)
+
+  # What the log keeps of a reason that can carry a call's words (the
+  # vendor's, a crash's frames, a task's answer): its codes. A store's own
+  # errors are printed by `describe/1`.
+  defp printable(reason), do: inspect(Printable.reason(reason))
 end

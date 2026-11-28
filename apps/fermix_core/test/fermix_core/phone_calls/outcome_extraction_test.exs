@@ -466,6 +466,18 @@ defmodule FermixCore.PhoneCalls.OutcomeExtractionTest do
                Outcome.extract(brief(), call(), @answered, opts({:raise, "boom"}))
     end
 
+    # A crash's reason carries what the reading held (the exception's own
+    # message, a frame's arguments: what was said), and the detail is logged.
+    test "a crashed reading keeps the crash's codes, never what it held" do
+      said = "Sure, four on Saturday December 5th at 7:30 works."
+
+      assert {:ok, %Outcome{extraction: {:failed, :crashed, detail}}} =
+               Outcome.extract(brief(), call(), @answered, opts({:raise, said}))
+
+      assert detail =~ "RuntimeError"
+      refute detail =~ "Saturday"
+    end
+
     test "a failed reading carries its code, and no sentence" do
       assert {:ok, outcome} = Outcome.extract(brief(), call(), @answered, opts(turn("not json")))
 

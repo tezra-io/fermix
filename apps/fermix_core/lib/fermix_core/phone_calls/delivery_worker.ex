@@ -33,6 +33,7 @@ defmodule FermixCore.PhoneCalls.DeliveryWorker do
   require Logger
 
   alias FermixCore.Memory.Repo
+  alias FermixCore.PhoneCalls.Call.Printable
   alias FermixCore.PhoneCalls.Delivery
   alias FermixCore.PhoneCalls.Ledger
   alias FermixCore.PhoneCalls.Limits
@@ -67,6 +68,15 @@ defmodule FermixCore.PhoneCalls.DeliveryWorker do
   end
 
   def handle_info(_other, state), do: {:noreply, state}
+
+  # A crash report prints the reason: a tick's exception can quote the report
+  # row it was sending (the destination, the brief, what was said), so it
+  # prints as its codes (`Call.Printable.reason/1`). The state and the `:tick`
+  # message hold no call's words. OTP reports the crash's stack past this
+  # callback, with the top frame's arguments of a function clause it fails.
+  @impl true
+  def format_status(status) when is_map(status),
+    do: Map.replace_lazy(status, :reason, &Printable.reason/1)
 
   # --- state ---------------------------------------------------------------------
 

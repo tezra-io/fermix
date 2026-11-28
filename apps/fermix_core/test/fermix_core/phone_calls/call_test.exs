@@ -435,6 +435,29 @@ defmodule FermixCore.PhoneCalls.CallTest do
       refute_received {:create, _task, _request}
     end
 
+    # A crash's top frame carries its arguments: here the create request, with
+    # the key, the trunk password, the number and the brief. The words the row
+    # keeps of it, which the owner's report and the call's trace read, are the
+    # crash's codes alone.
+    test "a create task that crashes is recorded by the crash's codes, never its request", ctx do
+      crash = fn request ->
+        args = [request.api_key, request.trunk.password, request.destination]
+        exit({:shutdown, {:function_clause, [{Fakes.Transport, :create_session, args, []}]}})
+      end
+
+      Fakes.script(:create, {:by, crash})
+      call = start!(ctx)
+      assert_receive {:create, _task, _request}
+      report = ended!(call)
+
+      assert report.status == "dispatch_unknown"
+      assert report.failure_reason =~ "create_stopped"
+      assert report.failure_reason =~ "{:create_stopped, {:shutdown, {:function_clause, [{"
+
+      for secret <- ["sk-invented-phone-key", "invented-trunk-secret", "5550101", "Calloway"],
+          do: refute(report.failure_reason =~ secret, secret)
+    end
+
     test "a dispatch claim that times out dials nothing and says so", ctx do
       Fakes.script({:ledger, :claim_dispatch}, {:result, {:error, :timeout}})
       call = start!(ctx)
@@ -811,6 +834,24 @@ defmodule FermixCore.PhoneCalls.CallTest do
       report = ended!(call)
       assert report.status == "closure_unconfirmed"
       assert report.failure_reason == "sideband_lost"
+    end
+
+    test "a sideband that crashes is logged by the crash's codes, never the frame it held",
+         ctx do
+      call = live!(ctx)
+      quiet!(ctx, call)
+      frame = {Fakes.Sideband, :handle_frame, ["It ends 4417"], [line: 1]}
+
+      log =
+        capture_log(fn ->
+          send(call.sideband, {:exit, {:function_clause, [frame]}})
+          assert_receive {:hangup, _task, @session}
+        end)
+
+      assert ended!(call).failure_reason == "sideband_lost"
+      assert log =~ "sideband lost: {:exited, {:function_clause, [{"
+      assert log =~ ":handle_frame, 1,"
+      refute log =~ "4417"
     end
   end
 
@@ -1772,8 +1813,10 @@ defmodule FermixCore.PhoneCalls.CallTest do
          {:event,
           {:transcript,
            %{speaker: :remote, text: "It ends 4417", start_ms: 1, end_ms: 2, event_id: nil}}}},
-        {:"$gen_call", {self(), make_ref()}, {:press_keys, request.handle, "4417"}},
-        {:"$gen_call", {self(), make_ref()}, {:finish, request.handle, :done, "Calloway 4417"}}
+        {:press_keys, request.handle, "4417"},
+        {:finish, request.handle, :done, "Calloway 4417"},
+        {:DOWN, make_ref(), :process, self(),
+         {:function_clause, [{Call, :extract, ["+12125550101", "It ends 4417"], []}]}}
       ]
 
       # What `format_status/1` hands on carries none of them in its very bytes,
@@ -1945,6 +1988,28 @@ defmodule FermixCore.PhoneCalls.CallTest do
     # The transcript dies with the worker: when the outcome was not read, the
     # last words each side said are what tells the owner whether anything was
     # agreed.
+    test "a reading that crashed is logged by the crash's codes, never what was said", ctx do
+      crash = fn _facts ->
+        exit({:shutdown, {:function_clause, [{Outcome, :extract, ["a table at eight"], []}]}})
+      end
+
+      Fakes.script(:extract, {:by, crash})
+
+      log =
+        capture_log(fn ->
+          call = live!(ctx)
+          said!(call, :remote, "We have a table at eight.")
+          closed!(call, 9, "remote_hangup")
+          assert ended!(call).outcome_facts["reason"] == "extraction_crashed"
+        end)
+
+      assert log =~
+               "outcome not read: {:error, {:extraction_stopped, {:shutdown, {:function_clause"
+
+      assert log =~ ":extract, 1,"
+      refute log =~ "table at eight"
+    end
+
     test "an outcome that was not read keeps each side's last words as evidence", ctx do
       Fakes.script(:extract, :crash)
 
