@@ -5,6 +5,8 @@ defmodule FermixCore.Tools.PhoneCallTest do
   # exec event assertion pins the test's own session id.
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias FermixCore.Agents.RequestIdentity
   alias FermixCore.Capabilities.AccessGate
   alias FermixCore.Capabilities.AccessGate.Pending
@@ -51,6 +53,20 @@ defmodule FermixCore.Tools.PhoneCallTest do
       send(test, {:cancel, call_id, owner_id})
       {:reply, {:ok, :stopping}, state}
     end
+  end
+
+  # A Manager that exits under the call, as one that crashed does: it has a
+  # clause for no request the tool makes, and its supervisor restarts it.
+  defmodule ExitingManager do
+    use GenServer
+
+    def start_link(_arg), do: GenServer.start_link(__MODULE__, nil)
+
+    @impl true
+    def init(nil), do: {:ok, nil}
+
+    @impl true
+    def handle_call(:never_asked, _from, state), do: {:reply, :ok, state}
   end
 
   # A worker no test here starts: the real Manager below only boots.
@@ -502,6 +518,48 @@ defmodule FermixCore.Tools.PhoneCallTest do
       assert refusal(PhoneCall.execute(%{"action" => "redial"}, owner_turn(ctx))) =~
                "start, status or cancel"
     end
+  end
+
+  # A Manager that times out, restarts or crashed under the call exits its
+  # caller: the tool answers in words, so the turn goes on, and the call is
+  # still exactly one exec event. The log names the exit by its shape alone,
+  # a crash's frames by arity, since the start's request carries the brief.
+  describe "a Manager that exits under the call" do
+    test "a start is answered as an error that says asking again is safe", ctx do
+      gone = start_supervised!(ExitingManager, id: :exiting_on_start)
+      turn = owner_turn(ctx, %{phone_call_manager: gone})
+
+      {result, log} = with_log(fn -> PhoneCall.execute(start_args(), turn) end)
+
+      assert {:ok, %{success: false, error: text}} = result
+      assert text =~ "did not answer"
+      assert text =~ "Asking again is safe"
+      refute text =~ "Nothing was dialed"
+      assert_exec_once("start")
+      assert log =~ ~r/phone_call start: the call manager exited: \{:function_clause, /
+      assert log =~ ":handle_call, 3,"
+    end
+
+    test "a cancel is answered as an error that says the call may still be going", ctx do
+      gone = start_supervised!(ExitingManager, id: :exiting_on_cancel)
+      turn = owner_turn(ctx, %{phone_call_manager: gone})
+      args = %{"action" => "cancel", "call_id" => "pc_0a1b2c3d4e5f"}
+
+      {result, log} = with_log(fn -> PhoneCall.execute(args, turn) end)
+
+      assert {:ok, %{success: false, error: text}} = result
+      assert text =~ "did not answer"
+      assert text =~ "may not have been stopped"
+      assert_exec_once("cancel")
+      assert log =~ "phone_call cancel: the call manager exited"
+    end
+  end
+
+  defp assert_exec_once(action) do
+    assert_receive {:telemetry, [:fermix, :tool, :exec], _m,
+                    %{tool: "phone_call", success: false, action: ^action}}
+
+    refute_received {:telemetry, [:fermix, :tool, :exec], _m, _meta}
   end
 
   describe "telemetry" do

@@ -2,7 +2,9 @@ defmodule FermixCore.Tools.PhoneCall do
   @moduledoc """
   `phone_call` (M94 §06): start one outbound phone call, check one, or stop
   one. One tool, three actions; one `[:fermix, :tool, :exec]` event per model
-  call under this name, refusals included.
+  call under this name, refusals included, and a Manager that exits under a
+  start or a stop (a timeout, a restart, a crash) is answered as a refusal
+  too, never an exit through the owner's turn.
 
   The barrier is at execute time, never `advertise?/1`:
 
@@ -48,6 +50,8 @@ defmodule FermixCore.Tools.PhoneCall do
   @behaviour FermixCore.Capabilities.Builtin.Tool
   @behaviour FermixCore.Capabilities.ExternalEffect
 
+  require Logger
+
   alias FermixCore.Agents.RequestIdentity
   alias FermixCore.Capabilities.AccessGate
   alias FermixCore.Capabilities.Builtin.Tool
@@ -56,6 +60,7 @@ defmodule FermixCore.Tools.PhoneCall do
   alias FermixCore.Memory.Repo
   alias FermixCore.PhoneCalls.Brief
   alias FermixCore.PhoneCalls.BriefText
+  alias FermixCore.PhoneCalls.Call.Printable
   alias FermixCore.PhoneCalls.Config
   alias FermixCore.PhoneCalls.Delivery
   alias FermixCore.PhoneCalls.Grants
@@ -452,8 +457,7 @@ defmodule FermixCore.Tools.PhoneCall do
 
   defp act("start", args, context) do
     with {:ok, %{brief: brief, snapshot: snapshot, ids: ids}} <- admissible(args, context),
-         {:ok, started} <-
-           Manager.start_call(request(brief, snapshot, ids, context), manager(context)) do
+         {:ok, started} <- start_call(request(brief, snapshot, ids, context), context) do
       {:ok, started_result(started, snapshot)}
     else
       {:error, reason} -> error(reason)
@@ -473,11 +477,36 @@ defmodule FermixCore.Tools.PhoneCall do
   defp act("cancel", args, context) do
     case fetch_call_id(args) do
       {:ok, call_id} ->
-        call_id |> Manager.cancel(owner(context), manager(context)) |> cancelled(call_id, context)
+        call_id |> cancel_call(context) |> cancelled(call_id, context)
 
       {:error, reason} ->
         error(reason)
     end
+  end
+
+  # The Manager, asked under its bound. One that times out, restarts or
+  # crashed under the call exits its caller; that is answered here, so the
+  # turn goes on and its one exec event is emitted. The log names the exit by
+  # its shape alone (`Call.Printable.reason/1`): the start's request carries
+  # the brief, and a crash's frames carry their arguments.
+  defp start_call(request, context) do
+    Manager.start_call(request, manager(context))
+  catch
+    :exit, {reason, _call} -> manager_exited(:start, reason)
+  end
+
+  defp cancel_call(call_id, context) do
+    Manager.cancel(call_id, owner(context), manager(context))
+  catch
+    :exit, {reason, _call} -> manager_exited(:cancel, reason)
+  end
+
+  defp manager_exited(action, reason) do
+    Logger.error(
+      "phone_call #{action}: the call manager exited: #{inspect(Printable.reason(reason))}"
+    )
+
+    {:error, {:manager_exited, action}}
   end
 
   # Everything a start's admission can already know, by the functions
@@ -700,6 +729,20 @@ defmodule FermixCore.Tools.PhoneCall do
 
   defp sentence({:call_start_failed, _reason}),
     do: "The call could not start; nothing was dialed."
+
+  # Whether the Manager admitted the call before it exited is not known, so
+  # this says nothing about dialing. Asking again finds this request's own
+  # call, and the one call slot refuses any other while it runs.
+  defp sentence({:manager_exited, :start}),
+    do:
+      "The part of Fermix that places calls did not answer, so whether this call was " <>
+        "accepted is not known. Asking again is safe: it finds a call this request already " <>
+        "started instead of placing a second."
+
+  defp sentence({:manager_exited, :cancel}),
+    do:
+      "The part of Fermix that places calls did not answer, so the call may not have been " <>
+        "stopped. Check it with status, and ask again to stop it."
 
   defp sentence({:authorization_evidence, field}),
     do: "The request carries no #{field} to authorize it." <> @nothing
