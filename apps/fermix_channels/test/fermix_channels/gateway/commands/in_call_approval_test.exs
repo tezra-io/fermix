@@ -129,7 +129,7 @@ defmodule FermixChannels.Gateway.Commands.InCallApprovalTest do
       command_allowlist: []
     )
 
-    Process.register(self(), __MODULE__)
+    FermixTestSupport.NamedTest.register!(__MODULE__)
 
     on_exit(fn ->
       Application.put_env(:fermix_channels, :telegram, previous_telegram)

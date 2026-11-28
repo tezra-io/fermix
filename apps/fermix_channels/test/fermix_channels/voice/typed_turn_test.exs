@@ -146,7 +146,7 @@ defmodule FermixChannels.Voice.TypedTurnTest do
         end
       end)
 
-      Process.register(self(), :typed_turn_test)
+      FermixTestSupport.NamedTest.register!(:typed_turn_test)
       start_supervised!(Turns)
       chat_key = Companion.chat_conversation_key()
       :ok = ConversationStore.clear(chat_key)

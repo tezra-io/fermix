@@ -29,7 +29,7 @@ defmodule FermixCore.Cues.NoticesTest do
   end
 
   setup do
-    Process.register(self(), @sink)
+    FermixTestSupport.NamedTest.register!(@sink)
     %{repo: repo, conn: conn} = CueFixtures.start_repo("notices")
     watcher = watcher!(repo, "market-news")
     %{repo: repo, conn: conn, watcher: watcher}

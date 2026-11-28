@@ -240,7 +240,7 @@ defmodule FermixCore.Browser.BrowserObserveTest do
   end
 
   setup do
-    Process.register(self(), @collector)
+    FermixTestSupport.NamedTest.register!(@collector)
     {:ok, config} = Config.current()
 
     pid =
@@ -253,8 +253,6 @@ defmodule FermixCore.Browser.BrowserObserveTest do
          launcher: NoLauncher,
          connection: Page}
       )
-
-    on_exit(fn -> if Process.whereis(@collector), do: Process.unregister(@collector) end)
 
     %{pid: pid, config: config}
   end

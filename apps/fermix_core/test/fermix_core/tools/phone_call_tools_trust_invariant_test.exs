@@ -138,7 +138,7 @@ defmodule FermixCore.Tools.PhoneCallToolsTrustInvariantTest do
   end
 
   setup do
-    Process.register(self(), :phone_call_invariant_test)
+    FermixTestSupport.NamedTest.register!(:phone_call_invariant_test)
     saved = Application.fetch_env(:fermix_core, :phone_calls)
     Application.put_env(:fermix_core, :phone_calls, [])
 

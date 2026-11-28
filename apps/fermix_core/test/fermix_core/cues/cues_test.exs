@@ -39,7 +39,7 @@ defmodule FermixCore.CuesTest do
     assert Cues.enabled?()
     refute Cues.running?()
 
-    true = Process.register(self(), FermixCore.Cues.Supervisor)
+    true = FermixTestSupport.NamedTest.register!(FermixCore.Cues.Supervisor)
     assert Cues.running?()
 
     Application.put_env(:fermix_core, :cues, enabled: false)

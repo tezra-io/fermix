@@ -148,7 +148,7 @@ defmodule FermixCore.Browser.ProfileServerGuardsTest do
   @owner "owner-guards"
 
   setup do
-    Process.register(self(), :browser_guard_collector)
+    FermixTestSupport.NamedTest.register!(:browser_guard_collector)
 
     # A throwaway FERMIX_HOME: the workspace root the upload guard confines to
     # and the download directory the byte ceiling deletes from both hang off it,
@@ -162,11 +162,6 @@ defmodule FermixCore.Browser.ProfileServerGuardsTest do
 
     on_exit(fn ->
       restore_home(previous_home)
-
-      if Process.whereis(:browser_guard_collector) do
-        Process.unregister(:browser_guard_collector)
-      end
-
       SafeRm.rm_rf!(home)
     end)
 

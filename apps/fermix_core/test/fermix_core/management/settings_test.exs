@@ -2644,7 +2644,6 @@ defmodule FermixCore.Management.SettingsTest do
     test "presence comes from the settings file alone, never a keychain read" do
       Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.CountingSecretWriter)
       :ok = FermixTestSupport.CountingSecretWriter.watch()
-      on_exit(fn -> FermixTestSupport.CountingSecretWriter.unwatch() end)
 
       rows = env_rows(sandbox_with_every_shape())
 

@@ -70,7 +70,7 @@ defmodule FermixCore.Temporal.DeliveryTest do
 
   defp recipient! do
     name = :"temporal_delivery_opts_#{System.unique_integer([:positive])}"
-    Process.register(self(), name)
+    FermixTestSupport.NamedTest.register!(name)
     Atom.to_string(name)
   end
 

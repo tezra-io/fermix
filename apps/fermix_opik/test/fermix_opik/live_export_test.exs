@@ -11,15 +11,16 @@ defmodule FermixOpik.LiveExportTest do
 
   defmodule CaptureClient do
     @moduledoc false
-    def send_trace(_config, closed, _opts \\ []) do
-      send(:live_export_test, {:exported, closed})
+    # The sender hands the client the config it was started with, so the test
+    # that built the config is in it.
+    def send_trace(%{test: test}, closed, _opts \\ []) do
+      send(test, {:exported, closed})
       :ok
     end
   end
 
   setup do
-    Process.register(self(), :live_export_test)
-    config = %{base_url: "http://localhost:5173/api", api_key: nil, workspace: nil}
+    config = %{base_url: "http://localhost:5173/api", api_key: nil, workspace: nil, test: self()}
 
     sender =
       start_supervised!({Sender, config: config, client: CaptureClient, name: :live_sender})

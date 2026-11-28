@@ -33,10 +33,7 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
   # very tool tasks and casts it was waiting for.
   @observer :screen_test_observer
 
-  defp observe do
-    Process.register(self(), @observer)
-    on_exit(fn -> if Process.whereis(@observer), do: Process.unregister(@observer) end)
-  end
+  defp observe, do: FermixTestSupport.NamedTest.register!(@observer)
 
   defmodule FakeOpenAIClient do
     def start_link(opts), do: Agent.start_link(fn -> %{opts: opts, events: []} end)

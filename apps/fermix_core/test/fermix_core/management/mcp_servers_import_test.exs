@@ -116,7 +116,7 @@ defmodule FermixCore.Management.McpServersImportTest do
     )
 
     start_supervised!({RuntimeStatus, name: @status})
-    Process.register(self(), @listener)
+    FermixTestSupport.NamedTest.register!(@listener)
 
     bin = Path.join(import_home, "bin")
     File.mkdir_p!(bin)

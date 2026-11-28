@@ -86,13 +86,7 @@ defmodule FermixCore.Browser.TabAffinityTest do
   @job_run {:scheduled_job, "job-1", "run-1"}
 
   setup do
-    Process.register(self(), :tab_affinity_collector)
-
-    on_exit(fn ->
-      if Process.whereis(:tab_affinity_collector),
-        do: Process.unregister(:tab_affinity_collector)
-    end)
-
+    FermixTestSupport.NamedTest.register!(:tab_affinity_collector)
     :ok
   end
 

@@ -51,7 +51,10 @@ defmodule FermixCore.TestLoadSafetyTest do
     hand_started_named_agent:
       "start it as the test's own with FermixTestSupport.NamedAgent.start!/2, or from a " <>
         "function a child spec under start_supervised! starts; one linked to its test is " <>
-        "still registered, on its way out, when the next test looks for it"
+        "still registered, on its way out, when the next test looks for it",
+    hand_registered_test:
+      "register the test with FermixTestSupport.NamedTest.register!/1; ExUnit starts the " <>
+        "next test once this one reports, while its process may still hold the name"
   }
 
   @rules Map.keys(@fixes)
@@ -115,6 +118,10 @@ defmodule FermixCore.TestLoadSafetyTest do
 
   test "hand_started_named_agent: no named Agent is linked to the test that started it", ctx do
     assert_within_budget(:hand_started_named_agent, ctx)
+  end
+
+  test "hand_registered_test: no test registers its own process by hand", ctx do
+    assert_within_budget(:hand_registered_test, ctx)
   end
 
   # -- the ratchet ------------------------------------------------------------
@@ -204,6 +211,9 @@ defmodule FermixCore.TestLoadSafetyTest do
     String.contains?(source, "capture_io") and String.contains?(source, "async: true")
   end
 
+  defp spelled?(:hand_registered_test, source),
+    do: String.contains?(source, "Process.register(self()")
+
   defp spelled?(:hand_started_named_agent, source) do
     String.contains?(source, "Agent.start_link") and String.contains?(source, "name:")
   end
@@ -215,6 +225,7 @@ defmodule FermixCore.TestLoadSafetyTest do
   defp ast_rule(:unpinned_telemetry_attach, ast), do: in_async_modules(ast, &telemetry_attach?/1)
   defp ast_rule(:async_stderr_capture, ast), do: in_async_modules(ast, &stderr_capture?/1)
   defp ast_rule(:hand_started_named_agent, ast), do: hand_started_named_agents(ast)
+  defp ast_rule(:hand_registered_test, ast), do: hand_registered_tests(ast)
 
   # -- text rules -------------------------------------------------------------
 
@@ -328,6 +339,25 @@ defmodule FermixCore.TestLoadSafetyTest do
        do: device in @stderr_devices
 
   defp stderr_capture?(_node), do: false
+
+  # `Process.register(self(), name)` in a test's own flow. Inside an anonymous
+  # function it is a process the test spawned naming itself, which is left out.
+  defp hand_registered_tests(ast) do
+    ast
+    |> Macro.prewalk(fn
+      {:fn, _meta, _clauses} -> nil
+      node -> node
+    end)
+    |> lines_where(&registers_self?/1)
+  end
+
+  defp registers_self?(
+         {{:., _meta, [{:__aliases__, _alias_meta, [:Process]}, :register]}, _call_meta,
+          [{:self, _self_meta, []}, _name]}
+       ),
+       do: true
+
+  defp registers_self?(_node), do: false
 
   # A named Agent started where the caller is linked to it. A function a child
   # spec starts is the other case, and is left out: one named `start_link`

@@ -95,7 +95,7 @@ defmodule FermixCore.Tools.ManageWatcherTest do
       refute ManageWatcher.advertise?(turn(ctx, []))
 
       # A stand-in for the tree's supervisor, registered by this test's process.
-      true = Process.register(self(), FermixCore.Cues.Supervisor)
+      true = FermixTestSupport.NamedTest.register!(FermixCore.Cues.Supervisor)
       Application.put_env(:fermix_core, :cues, enabled: false)
       assert ManageWatcher.advertise?(turn(ctx, []))
       refute ManageWatcher.advertise?(turn(ctx, source_trust: :guest))

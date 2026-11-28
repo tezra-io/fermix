@@ -4442,7 +4442,7 @@ defmodule FermixWebWeb.SetupLiveTest do
   describe "Import Claude Code login" do
     setup do
       Application.put_env(:fermix_web, :anthropic_login_impl, ObservedAnthropicLogin)
-      Process.register(self(), ObservedAnthropicLogin)
+      FermixTestSupport.NamedTest.register!(ObservedAnthropicLogin)
 
       Application.put_env(:fermix_core, :providers,
         anthropic: [api_key: "sk-ant", primary: true, default_model: "claude-opus-4-8"]

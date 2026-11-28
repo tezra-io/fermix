@@ -34,7 +34,7 @@ defmodule FermixCore.PhoneCalls.SupervisorTest do
   end
 
   setup do
-    Process.register(self(), @sink)
+    FermixTestSupport.NamedTest.register!(@sink)
     unique = System.unique_integer([:positive])
     db_path = Path.join(System.tmp_dir!(), "fermix-phone-sup-#{unique}.db")
     repo = :"phone_sup_repo_#{unique}"

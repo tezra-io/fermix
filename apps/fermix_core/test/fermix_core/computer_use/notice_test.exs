@@ -14,7 +14,7 @@ defmodule FermixCore.ComputerUse.NoticeTest do
   @sink :computer_use_notice_sink
 
   setup do
-    Process.register(self(), @sink)
+    FermixTestSupport.NamedTest.register!(@sink)
     on_exit(fn -> :ok end)
     :ok
   end

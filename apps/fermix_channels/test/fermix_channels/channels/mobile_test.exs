@@ -661,7 +661,7 @@ defmodule FermixChannels.Channels.MobileTest do
   # even while it waits behind another turn. A stop that drops it must settle
   # it, or it stays `running` and is re-run at the next boot.
   test "a stop settles the queued request it drops as failed, not left running" do
-    Process.register(self(), :mobile_settlement_test)
+    FermixTestSupport.NamedTest.register!(:mobile_settlement_test)
     Application.put_env(:fermix_channels, :mobile_store, SettlementStore)
 
     store =

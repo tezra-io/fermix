@@ -223,7 +223,7 @@ defmodule FermixChannels.Desktop.ReminderUplinkTest do
     end
 
     test "a snooze's answer reaches the reminder uplink", ctx do
-      Process.register(self(), ctx.uplink)
+      FermixTestSupport.NamedTest.register!(ctx.uplink)
       fields = %{"id" => "snz-0a", "status" => "ok", "duration_ms" => 1}
 
       Invoke.handle(ctx.admission, "invoke_result", fields, ~s({"status":"existing"}))
@@ -231,7 +231,7 @@ defmodule FermixChannels.Desktop.ReminderUplinkTest do
     end
 
     test "a history answer reaches the history uplink's waiter", ctx do
-      Process.register(self(), HistoryUplink.Waiter)
+      FermixTestSupport.NamedTest.register!(HistoryUplink.Waiter)
       fields = %{"id" => "hist-0a", "status" => "ok", "duration_ms" => 1}
 
       Invoke.handle(ctx.admission, "invoke_result", fields, "{}")

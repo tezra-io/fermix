@@ -235,20 +235,11 @@ defmodule FermixTestSupport.CountingSecretWriter do
 
   @observer __MODULE__.Observer
 
-  @doc "Registers the calling process as the one told about every read."
+  @doc "Registers the calling test as the one told about every read, until it ends."
   @spec watch() :: :ok
   def watch do
-    Process.register(self(), @observer)
+    FermixTestSupport.NamedTest.register!(@observer)
     :ok
-  end
-
-  @doc "Stops reporting. Safe to call when no process is registered."
-  @spec unwatch() :: :ok
-  def unwatch do
-    case Process.whereis(@observer) do
-      nil -> :ok
-      _pid -> unregister()
-    end
   end
 
   @impl true
@@ -288,11 +279,6 @@ defmodule FermixTestSupport.CountingSecretWriter do
       pid -> send(pid, message)
     end
   end
-
-  defp unregister do
-    Process.unregister(@observer)
-    :ok
-  end
 end
 
 defmodule FermixTestSupport.TreeLessSecretWriter do
@@ -327,10 +313,10 @@ defmodule FermixTestSupport.TreeLessSecretWriter do
   # Nothing ever starts a process under this name: it is the absent host.
   @absent_command_host __MODULE__.AbsentCommandHostSupervisor
 
-  @doc "Registers the calling process as the one told about every call that ran."
+  @doc "Registers the calling test as the one told about every call that ran, until it ends."
   @spec watch() :: :ok
   def watch do
-    Process.register(self(), @observer)
+    FermixTestSupport.NamedTest.register!(@observer)
     :ok
   end
 

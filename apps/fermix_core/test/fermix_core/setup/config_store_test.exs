@@ -3757,7 +3757,6 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       File.write!(path, @retired_fcm_toml)
       Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.CountingSecretWriter)
       :ok = FermixTestSupport.CountingSecretWriter.watch()
-      on_exit(&FermixTestSupport.CountingSecretWriter.unwatch/0)
 
       {result, log} = with_log(fn -> ConfigStore.load_runtime_config() end)
 

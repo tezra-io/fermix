@@ -141,7 +141,7 @@ defmodule FermixChannels.Channels.VoiceTest do
     setup do
       env = ~w(companion_store mobile_media_resolver mobile_event_sink)a
       previous = Map.new(env, &{&1, Application.fetch_env(:fermix_channels, &1)})
-      Process.register(self(), :voice_media_test)
+      FermixTestSupport.NamedTest.register!(:voice_media_test)
 
       dir = FermixTestSupport.SafeRm.make_tmp_dir!("voice-media")
       path = Path.join(dir, "dog.png")

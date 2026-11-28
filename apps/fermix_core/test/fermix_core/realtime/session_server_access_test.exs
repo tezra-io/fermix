@@ -93,7 +93,7 @@ defmodule FermixCore.Realtime.SessionServerAccessTest do
     :ok = CapabilityRegistry.register(registry, unlock)
     :ok = CapabilityRegistry.register(registry, trunk)
     :ok = CapabilityRegistry.register(registry, honk)
-    Process.register(self(), @observer)
+    FermixTestSupport.NamedTest.register!(@observer)
     task_supervisor = start_supervised!({Task.Supervisor, []})
     scope = "session:access-#{System.unique_integer([:positive])}"
 

@@ -388,7 +388,7 @@ defmodule FermixCore.Computers.SwitchesTest do
     end
 
     test "a write to the running home is applied at once and tells the reporter", ctx do
-      Process.register(self(), Switches.listener())
+      FermixTestSupport.NamedTest.register!(Switches.listener())
 
       assert :ok = Switches.write(ctx.home, Switches.only([:browser]))
       assert Switches.on?(Switches.current(), :browser)

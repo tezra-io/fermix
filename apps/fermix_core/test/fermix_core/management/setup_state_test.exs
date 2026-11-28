@@ -343,7 +343,6 @@ defmodule FermixCore.Management.SetupStateTest do
       CountingSecretWriter.watch()
 
       on_exit(fn ->
-        CountingSecretWriter.unwatch()
         restore(:fermix_core, :secret_writer, writer)
 
         case home do

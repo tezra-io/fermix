@@ -531,7 +531,7 @@ defmodule FermixCore.Management.McpServersTest do
 
   describe "add with a draft_id" do
     setup do
-      Process.register(self(), :mcp_servers_test_starts)
+      FermixTestSupport.NamedTest.register!(:mcp_servers_test_starts)
       :ok
     end
 

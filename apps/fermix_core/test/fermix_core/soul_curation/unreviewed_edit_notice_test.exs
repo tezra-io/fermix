@@ -17,7 +17,7 @@ defmodule FermixCore.SoulCuration.UnreviewedEditNoticeTest do
   @event %{path: "/home/owner/.fermix/bootstrap/main/SOUL.md", revision: 4}
 
   setup do
-    Process.register(self(), __MODULE__)
+    FermixTestSupport.NamedTest.register!(__MODULE__)
     :ok
   end
 

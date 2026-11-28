@@ -188,14 +188,7 @@ defmodule FermixCore.Browser.BrowserWebmcpTest do
   end
 
   setup do
-    Process.register(self(), :browser_webmcp_collector)
-
-    on_exit(fn ->
-      if Process.whereis(:browser_webmcp_collector) do
-        Process.unregister(:browser_webmcp_collector)
-      end
-    end)
-
+    FermixTestSupport.NamedTest.register!(:browser_webmcp_collector)
     :ok
   end
 

@@ -162,7 +162,7 @@ defmodule FermixCore.PhoneCalls.ManagerTest do
   end
 
   setup do
-    Process.register(self(), @sink)
+    FermixTestSupport.NamedTest.register!(@sink)
     unique = System.unique_integer([:positive])
     db_path = Path.join(System.tmp_dir!(), "fermix-phone-manager-#{unique}.db")
     repo = :"phone_manager_repo_#{unique}"

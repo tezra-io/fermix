@@ -122,7 +122,7 @@ defmodule FermixCore.Management.PhoneCallsTest do
   end
 
   setup do
-    Process.register(self(), @sink)
+    FermixTestSupport.NamedTest.register!(@sink)
     envs = for app <- @apps, do: {app, Application.get_all_env(app)}
     fermix_home = System.get_env("FERMIX_HOME")
     home = SafeRm.make_tmp_dir!("management_phone_calls")

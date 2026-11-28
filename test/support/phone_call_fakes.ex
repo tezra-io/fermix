@@ -63,7 +63,7 @@ defmodule FermixTestSupport.PhoneCallFakes do
 
   @doc "Registers the calling test as the sink every fake reports to."
   @spec register_sink!() :: true
-  def register_sink!, do: Process.register(self(), @sink)
+  def register_sink!, do: FermixTestSupport.NamedTest.register!(@sink)
 
   @doc "The script's child spec, for `start_supervised!/1`."
   @spec script_spec() :: Supervisor.child_spec()

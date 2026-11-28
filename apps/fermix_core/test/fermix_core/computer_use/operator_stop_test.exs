@@ -194,7 +194,7 @@ defmodule FermixCore.ComputerUse.OperatorStopTest do
     end
 
     test "the interrupted caller is answered while the channel is still blocked" do
-      Process.register(self(), :operator_stop_sink)
+      FermixTestSupport.NamedTest.register!(:operator_stop_sink)
       previous_jobs = Application.get_env(:fermix_core, :jobs, [])
 
       Application.put_env(

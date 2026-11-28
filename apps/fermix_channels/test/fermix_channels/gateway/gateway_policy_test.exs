@@ -487,7 +487,7 @@ defmodule FermixChannels.Gateway.PolicyTest do
     # request. Through the spec the gateway builds for the real adapter, a
     # reply whose last edit already shows all of it is still sealed.
     test "a phone's streamed reply is stored when its last edit already shows all of it" do
-      Process.register(self(), :phone_timeline_test)
+      FermixTestSupport.NamedTest.register!(:phone_timeline_test)
       test_pid = self()
       put_channels_env(:mobile_store, PhoneTimeline)
       put_channels_env(:link_preview_launcher, fn _resolution -> :ok end)

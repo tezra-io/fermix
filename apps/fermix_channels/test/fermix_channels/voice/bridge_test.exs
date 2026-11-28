@@ -697,7 +697,7 @@ defmodule FermixChannels.Voice.BridgeTest do
     setup do
       previous = Application.fetch_env(:fermix_channels, :companion_store)
       Application.put_env(:fermix_channels, :companion_store, RecordingTimeline)
-      Process.register(self(), :voice_bridge_show_test)
+      FermixTestSupport.NamedTest.register!(:voice_bridge_show_test)
 
       on_exit(fn ->
         case previous do
@@ -844,7 +844,7 @@ defmodule FermixChannels.Voice.BridgeTest do
     setup do
       previous = Application.fetch_env(:fermix_channels, :companion_store)
       Application.put_env(:fermix_channels, :companion_store, RecordingTimeline)
-      Process.register(self(), :voice_bridge_show_test)
+      FermixTestSupport.NamedTest.register!(:voice_bridge_show_test)
 
       on_exit(fn ->
         case previous do

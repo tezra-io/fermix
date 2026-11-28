@@ -12,6 +12,7 @@
   empty_monitors_assert: %{
     "apps/fermix_core/test/fermix_core/capabilities/mcp/remote/proxy_test.exs" => 1
   },
+  hand_registered_test: %{},
   hand_started_named_agent: %{},
   short_assert_receive: %{
     "apps/fermix_channels/test/fermix_channels/channels/voice_test.exs" => 8,

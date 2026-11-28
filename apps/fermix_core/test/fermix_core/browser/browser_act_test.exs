@@ -175,7 +175,7 @@ defmodule FermixCore.Browser.BrowserActTest do
   end
 
   setup do
-    Process.register(self(), :fake_cdp_collector)
+    FermixTestSupport.NamedTest.register!(:fake_cdp_collector)
     {:ok, config} = Config.current()
 
     pid =
@@ -188,10 +188,6 @@ defmodule FermixCore.Browser.BrowserActTest do
          launcher: NoLauncher,
          connection: FakeConnection}
       )
-
-    on_exit(fn ->
-      if Process.whereis(:fake_cdp_collector), do: Process.unregister(:fake_cdp_collector)
-    end)
 
     %{pid: pid}
   end

@@ -6,7 +6,7 @@ defmodule FermixCore.Meetings.SessionTest.Observer do
 
   @name :meetings_session_test_observer
 
-  def register, do: Process.register(self(), @name)
+  def register, do: FermixTestSupport.NamedTest.register!(@name)
 
   def notify(message) do
     case Process.whereis(@name) do

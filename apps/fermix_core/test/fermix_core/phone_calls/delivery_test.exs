@@ -63,7 +63,7 @@ defmodule FermixCore.PhoneCalls.DeliveryTest do
   end
 
   setup do
-    Process.register(self(), @sink)
+    FermixTestSupport.NamedTest.register!(@sink)
     unique = System.unique_integer([:positive])
     db_path = Path.join(System.tmp_dir!(), "fermix-phone-delivery-#{unique}.db")
     repo = :"phone_delivery_repo_#{unique}"

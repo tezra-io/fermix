@@ -84,7 +84,7 @@ defmodule FermixWebWeb.SetupLiveModelSourceTest do
     tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-live-model-source")
     System.put_env("FERMIX_HOME", tmp_home)
     SecretWriterStub.reset()
-    Process.register(self(), __MODULE__)
+    FermixTestSupport.NamedTest.register!(__MODULE__)
 
     Application.put_env(:fermix_core, :secret_writer, SecretWriterStub)
     Application.put_env(:fermix_core, :tools, [])

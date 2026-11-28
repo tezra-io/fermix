@@ -406,7 +406,7 @@ defmodule FermixCore.Temporal.DeliveryWorkerTest do
   # and the row is left `delivering` for the boot sweep.
   describe "supervision teardown" do
     test "a worker torn down mid-send takes its send with it", ctx do
-      Process.register(self(), ctx.channel)
+      FermixTestSupport.NamedTest.register!(ctx.channel)
       create!(ctx, birthday_spec(day_of_rules()))
       row = claim!(ctx, @day_of_due)
 

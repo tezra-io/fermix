@@ -823,7 +823,7 @@ defmodule FermixChannels.Companion.TurnsTest do
 
   describe "a command that replies after ingest returns (R2-1)" do
     setup do
-      Process.register(self(), :companion_turns_test)
+      FermixTestSupport.NamedTest.register!(:companion_turns_test)
       work = start_supervised!({Task.Supervisor, []}, id: :background_work)
       start_supervised!({WorkRegistry, name: @work_registry, work_supervisor: work})
       :ok
@@ -1100,7 +1100,7 @@ defmodule FermixChannels.Companion.TurnsTest do
   # again (R3-4).
   describe "an inline settlement that fails" do
     setup do
-      Process.register(self(), :companion_turns_test)
+      FermixTestSupport.NamedTest.register!(:companion_turns_test)
       :ok
     end
 

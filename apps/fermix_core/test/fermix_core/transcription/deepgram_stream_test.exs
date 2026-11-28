@@ -112,7 +112,7 @@ defmodule FermixCore.Transcription.DeepgramStreamTest do
     # an earlier module left behind.
     Application.put_env(:fermix_core, :telemetry, capture_content: false)
     Application.put_env(:fermix_core, :transcription, [])
-    Process.register(self(), @observer)
+    FermixTestSupport.NamedTest.register!(@observer)
 
     on_exit(fn ->
       restore(:telemetry, telemetry)

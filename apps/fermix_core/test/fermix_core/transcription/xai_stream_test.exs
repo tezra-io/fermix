@@ -116,7 +116,7 @@ defmodule FermixCore.Transcription.XAIStreamTest do
     Application.put_env(:fermix_core, :telemetry, capture_content: false)
     Application.put_env(:fermix_core, :transcription, [])
     Application.put_env(:fermix_core, :providers, [])
-    Process.register(self(), @observer)
+    FermixTestSupport.NamedTest.register!(@observer)
 
     on_exit(fn ->
       restore(:telemetry, telemetry)

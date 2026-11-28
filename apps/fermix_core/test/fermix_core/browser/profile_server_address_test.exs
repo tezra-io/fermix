@@ -171,7 +171,7 @@ defmodule FermixCore.Browser.ProfileServerAddressTest do
   @metadata {169, 254, 169, 254}
 
   setup do
-    Process.register(self(), @collector)
+    FermixTestSupport.NamedTest.register!(@collector)
     home = SafeRm.make_tmp_dir!("browser-address")
     File.mkdir_p!(Path.join(home, "workspace"))
     previous_home = System.get_env("FERMIX_HOME")
@@ -179,7 +179,6 @@ defmodule FermixCore.Browser.ProfileServerAddressTest do
 
     on_exit(fn ->
       restore_home(previous_home)
-      if Process.whereis(@collector), do: Process.unregister(@collector)
       SafeRm.rm_rf!(home)
     end)
 

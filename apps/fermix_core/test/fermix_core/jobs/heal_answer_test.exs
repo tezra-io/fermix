@@ -90,7 +90,7 @@ defmodule FermixCore.Jobs.HealAnswerTest do
   describe "apply" do
     test "makes exactly the recorded change, and records the answer and where it came from",
          ctx do
-      Process.register(self(), ctx.scheduler)
+      FermixTestSupport.NamedTest.register!(ctx.scheduler)
       TelemetryCapture.attach([@heal_event], :emitter)
 
       change = %{

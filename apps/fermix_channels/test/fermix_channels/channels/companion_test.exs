@@ -139,7 +139,7 @@ defmodule FermixChannels.Channels.CompanionTest do
       )
 
     Application.put_env(:fermix_channels, :companion_approvals, approvals)
-    Process.register(self(), :companion_adapter_test)
+    FermixTestSupport.NamedTest.register!(:companion_adapter_test)
     {:ok, _owner} = Registry.register(Companion.registry(), "main", nil)
     start_supervised!(Turns)
 

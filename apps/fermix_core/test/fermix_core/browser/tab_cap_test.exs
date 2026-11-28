@@ -82,8 +82,7 @@ defmodule FermixCore.Browser.TabCapTest do
   end
 
   setup do
-    Process.register(self(), :cap_collector)
-    on_exit(fn -> if Process.whereis(:cap_collector), do: Process.unregister(:cap_collector) end)
+    FermixTestSupport.NamedTest.register!(:cap_collector)
     :ok
   end
 
