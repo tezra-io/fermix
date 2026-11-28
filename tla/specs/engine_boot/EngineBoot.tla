@@ -64,7 +64,7 @@
 (* worker, or the end of a process.                                        *)
 (***************************************************************************)
 
-\* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,start_holding_home_lock,take_home_lock,acquire_home_lock,start_holding,release_home_lock,start_tree,stop,supervision_children,every_boot_children,daemon_children,maybe_daemon_socket,daemon_boot? @ 24f5eb5f14c2
+\* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,start_holding_home_lock,take_home_lock,acquire_home_lock,start_holding,release_home_lock,start_tree,stop,supervision_children,every_boot_children,daemon_children,maybe_daemon_socket,daemon_boot? @ b94d874cc4e9
 \* SOURCE: apps/fermix_core/lib/fermix/cli/daemon/lock.ex @ c68d18c190c1
 \* SOURCE: apps/fermix_core/lib/fermix/cli/daemon.ex#init,bind,clear_stale_socket,terminate @ 851bd39720d1
 

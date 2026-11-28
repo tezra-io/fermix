@@ -79,7 +79,7 @@
 (***************************************************************************)
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/token_manager.ex @ f031202edfcd
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/token_supervisor.ex @ c1ed62e990f3
-\* SOURCE: apps/fermix_core/lib/fermix_core/auth/store.ex @ ac98d4c99741
+\* SOURCE: apps/fermix_core/lib/fermix_core/auth/store.ex @ c6617fa0b868
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/refresh_client.ex @ 5ceb88dad81f
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/token_expiry.ex @ 8373575105e9
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/xai_login.ex @ 65d372661f4f
@@ -95,8 +95,8 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/chatgpt/registration.ex#read,signed_in?,@profile @ 4283f894c7cf
 \* SOURCE: apps/fermix_core/lib/fermix/cli/plugins_command.ex @ be9afb0398a5
 \* SOURCE: apps/fermix_core/lib/fermix/cli/auth_command.ex @ 464083735b2d
-\* SOURCE: apps/fermix_core/lib/fermix/cli/daemon.ex @ fe3900a7219d
-\* SOURCE: apps/fermix_core/lib/fermix/cli/daemon/client.ex @ d8237e7757e7
+\* SOURCE: apps/fermix_core/lib/fermix/cli/daemon.ex @ 9b94c77370d0
+\* SOURCE: apps/fermix_core/lib/fermix/cli/daemon/client.ex @ 748ba7222679
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS
