@@ -253,10 +253,31 @@ defmodule FermixChannels.Mobile.AttestationTest do
     test "a signing certificate not in the pinned list is refused", ctx do
       stranger = :crypto.hash(:sha256, "a rebuilt app")
 
-      for digests <- [[stranger], [Chain.signer_digest(), stranger], []] do
+      for {digests, detail} <- [
+            {[stranger], :unknown_signer},
+            {[Chain.signer_digest(), stranger], :unknown_signer},
+            {[], :no_signer}
+          ] do
         chain = Chain.chain(ctx.pairing, signature_digests: digests)
-        assert_refused(chain, ctx, :application)
+        assert assert_refused(chain, ctx, :application) == detail
       end
+    end
+
+    test "an app signed with the pinned release key pairs as the release build", ctx do
+      chain = Chain.chain(ctx.pairing)
+      trust = Chain.trust(chain, %{signers: %{Chain.signer_digest() => :release}})
+
+      assert {:ok, %{signer_role: :release}} = verify(chain, ctx, trust)
+    end
+
+    test "an app signed with both the development and the release key is refused", ctx do
+      release = :crypto.hash(:sha256, "fermix test release signer")
+      digests = [Chain.signer_digest(), release]
+      chain = Chain.chain(ctx.pairing, signature_digests: digests)
+      signers = %{Chain.signer_digest() => :development, release => :release}
+      trust = Chain.trust(chain, %{signers: signers})
+
+      assert assert_refused(chain, ctx, :application, trust) == :mixed_signers
     end
   end
 
@@ -636,11 +657,13 @@ defmodule FermixChannels.Mobile.AttestationTest do
     Attestation.verify(Chain.evidence(chain, ctx.pairing), trust || Chain.trust(chain), ctx.now)
   end
 
+  # The refusal's detail, for a test that names which reason the check gave.
   defp assert_refused(chain, ctx, check, trust \\ nil) do
     assert {:error, %{reason: :attestation, check: ^check, detail: detail}} =
              verify(chain, ctx, trust)
 
     refute holds_bytes?(detail)
+    detail
   end
 
   # A refusal's detail is logged: it names a reason, never the phone's bytes.
