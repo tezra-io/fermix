@@ -53,7 +53,10 @@ description: >
   proof, whatever the words around it. It sets up and removes a job, so it is
   `isolated_mutation` and runs only under `--profile isolated_mutation`, and a
   job that names the browser is set up only on the owner's attended turn: run
-  it from a terminal too.
+  it from a terminal too. Its home needs `confirm_sign_in_jobs = false` under
+  `[fermix_core.jobs]` (the capability seeder writes it): a turn that reads the
+  page before it sets the job up is otherwise asked a question nobody answers
+  during a run, and the set-up is refused.
 defaults:
   timeout_ms: 180000
   judge: true

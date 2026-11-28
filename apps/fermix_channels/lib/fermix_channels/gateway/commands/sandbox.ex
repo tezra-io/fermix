@@ -24,9 +24,12 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   # or is already running); the confirm's twin is core's own sentence.
   @access_deny_not_found "That request expired or was already handled."
 
-  # `/always` answers nothing but a waiting follow-up's card.
-  @always_cards_only "Nothing here offers Always allow: only a follow-up's card waiting in " <>
-                       "this chat does."
+  # `/always` answers a waiting follow-up's card, and a question waiting in its
+  # call that offers it (`AccessGate.ask_in_call/4`); for anything else, this.
+  @always_cards_only "Nothing waiting in this chat offers Always allow."
+
+  # A question that offers Always allow, answered with it.
+  @always_approved "Approved. Fermix will not ask this again."
 
   # What the owner is told when a confirmed access-sensitive run crashed.
   @access_outcome_unknown "Confirmed, but the command failed before it reported, so whether it " <>
@@ -159,9 +162,9 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   # follow-up's card, or a heal's proposal, M106 §5.7) is core's, by its `cp_`
   # token or its id: durable in `memory.db`, and core checks the message's
   # origin against the chat it was sent to. Every other token is this store's.
-  # `/always` answers a follow-up's card alone: Run, and no card for its later
-  # items (the 2026-10-31 revision of M60_WATCHER_CODING_RUNS.md §3.4);
-  # nothing in this store takes it.
+  # `/always` answers a follow-up's card: Run, and no card for its later items
+  # (the 2026-10-31 revision of M60_WATCHER_CODING_RUNS.md §3.4). In this
+  # store it takes only a question waiting in its call that offers it.
   defp dispatch("confirm", [token], message, reply_fn, context) do
     if Proposals.answerable?(token),
       do: confirm_proposal(token, message, reply_fn, context),
@@ -177,7 +180,7 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   defp dispatch("always", [token], message, reply_fn, context) do
     if Proposals.answerable?(token),
       do: always_allow_proposal(token, message, reply_fn, context),
-      else: reply(reply_fn, @always_cards_only)
+      else: always(token, message, reply_fn, context)
   end
 
   defp dispatch(command, [], message, reply_fn, context)
@@ -542,6 +545,40 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   defp access_outcome_text({:ok, outcome}), do: "Confirmed. #{outcome}"
   defp access_outcome_text({:error, reason}), do: "Confirmed, but #{reason}"
 
+  # Always allow for a call waiting in its own process that offers it (the
+  # question about a job that signs in): the token is checked as a confirm
+  # checks it, and taken only once the gate has answered the call, so a token
+  # whose call offers no Always allow, and that call, are left as they were.
+  defp always(token, message, reply_fn, context) do
+    with {:ok, %{mutation: {:access_sensitive, intent_id}} = record} <- Confirmations.peek(token),
+         {:ok, ^record} <- validate_pending(record, message),
+         :ok <- AccessGate.always_in_call(intent_id) do
+      :ok = take_answered(token)
+      :ok = notify_approval(context, :sandbox, token, :approved)
+      reply(reply_fn, @always_approved)
+    else
+      {:error, reason} ->
+        Logger.info("sandbox: /always answered nothing: #{inspect(reason)}")
+        reply(reply_fn, @always_cards_only)
+
+      _unknown_token_or_other_kind ->
+        reply(reply_fn, @always_cards_only)
+    end
+  end
+
+  # The call was answered first; a token a racing answer took meanwhile is
+  # already spent, which is what this wants.
+  defp take_answered(token) do
+    case Confirmations.take(token) do
+      {:ok, _record} ->
+        :ok
+
+      :error ->
+        Logger.info("sandbox: /always found its token already taken")
+        :ok
+    end
+  end
+
   # The confirmed call runs its HTTP request, so it runs on the task supervisor
   # (the `spawn_access_confirm/3` hop) and replies once with core's words.
   defp confirm_proposal(token, message, reply_fn, context) do
@@ -584,10 +621,10 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
 
   # A bare `/confirm` or `/deny` answers the one thing waiting in this chat: a
   # card held in core (a watcher's, or a heal's proposal), or a parked command
-  # or sandbox change held here. A bare `/always` answers the one follow-up's
-  # card waiting, the only thing that takes it. With more than one it answers
-  # none, and lists each with the command that answers it
-  # (M60_WATCHER_CODING_RUNS.md §6.2).
+  # or sandbox change held here. A bare `/always` answers the one thing waiting
+  # that takes it: a follow-up's card, or a question waiting in its call that
+  # offers it. With more than one it answers none, and lists each with the
+  # command that answers it (M60_WATCHER_CODING_RUNS.md §6.2).
   defp answer_bare(command, message, reply_fn, context) do
     case Proposals.waiting_in_chat(proposal_origin(message), proposal_opts(context)) do
       {:ok, cards} ->
@@ -599,10 +636,15 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
     end
   end
 
-  defp answerable_by("always", cards, _held),
-    do: {Enum.filter(cards, &(&1.kind == :follow_up)), []}
+  defp answerable_by("always", cards, held),
+    do: {Enum.filter(cards, &(&1.kind == :follow_up)), Enum.filter(held, &offers_always?/1)}
 
   defp answerable_by(_command, cards, held), do: {cards, held}
+
+  defp offers_always?({_token, %{mutation: {:access_sensitive, intent_id}}}),
+    do: AccessGate.offers_always?(intent_id)
+
+  defp offers_always?(_held), do: false
 
   defp answer_one("confirm", [card], [], message, reply_fn, context),
     do: confirm_proposal(card.id, message, reply_fn, context)

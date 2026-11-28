@@ -28,6 +28,7 @@ defmodule FermixChannels.Gateway.Commands.InCallApprovalTest do
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.ConversationStore
+  alias FermixCore.Memory.Repo
   alias FermixCore.Timeouts
 
   @owner "111"
@@ -46,6 +47,18 @@ defmodule FermixChannels.Gateway.Commands.InCallApprovalTest do
 
     def send_approval(_message, text, token) do
       send(FermixChannels.Gateway.Commands.InCallApprovalTest, {:inbox_prompt, text, token})
+      :ok
+    end
+  end
+
+  # An owner-inbox adapter that draws a card, as Telegram does: it is handed
+  # the whole approval spec.
+  defmodule CardInboxAdapter do
+    def build_text_reply(_message), do: fn _text -> :ok end
+    def build_media_reply(_message), do: fn _part -> :ok end
+
+    def send_approval(_message, spec) do
+      send(FermixChannels.Gateway.Commands.InCallApprovalTest, {:inbox_card, spec})
       :ok
     end
   end
@@ -368,6 +381,142 @@ defmodule FermixChannels.Gateway.Commands.InCallApprovalTest do
       assert_receive {:command_reply, @parked_denied}
       assert {:error, "that request expired or was already handled"} = AccessGate.confirm(id)
       refute_received {:unlocked, _args}
+    end
+  end
+
+  @job_prompt ~s(Let the new job "Order check" sign in to websites with your saved logins on its own?)
+  @always_approved "Approved. Fermix will not ask this again."
+  @always_cards_only "Nothing waiting in this chat offers Always allow."
+
+  # The question about a job that signs in offers a third answer, Always allow
+  # (`AccessGate.confirm_sign_in_job/4` asks it this way).
+  defp wait_always(context) do
+    task =
+      Task.async(fn ->
+        AccessGate.ask_in_call(@job_prompt, context, Timeouts.sign_in_approval(), always: true)
+      end)
+
+    assert_receive {:owner_prompt, {:approval_prompt, %{kind: :sandbox, token: token} = spec}}
+    {task, token, intent(token), spec}
+  end
+
+  # A bare command reads what waits in the chat from memory, here a store of
+  # the test's own.
+  defp bare_context do
+    unique = System.unique_integer([:positive])
+    db_path = Path.join(System.tmp_dir!(), "fermix-in-call-bare-#{unique}.db")
+    repo = :"in_call_bare_repo_#{unique}"
+    start_supervised!({Repo, name: repo, enabled: true, database_path: db_path})
+
+    on_exit(fn ->
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
+    end)
+
+    %{cue_proposal_opts: [repo: repo]}
+  end
+
+  describe "always" do
+    test "/always answers a question that offers it, once, and says it will not ask again" do
+      {task, token, id, spec} = wait_always(turn_context(chat_origin()))
+      assert spec.text =~ "`/always #{token}` approves and stops this question."
+
+      assert :ok = dispatch(telegram("/always #{token}"))
+      assert_receive {:command_reply, @always_approved}
+      assert result(task) == {:ok, :always}
+      assert :error = Confirmations.peek(token)
+      assert {:error, :not_in_call} = AccessGate.always_in_call(id)
+    end
+
+    test "Telegram's Always allow button answers it" do
+      {task, token, _id, _spec} = wait_always(turn_context(chat_origin()))
+
+      {:ok, [tap]} = Telegram.parse_update(callback("always:" <> token))
+      assert tap.content == "/always #{token}"
+      assert :ok = dispatch(tap)
+      assert_receive {:command_reply, @always_approved}
+      assert result(task) == {:ok, :always}
+    end
+
+    test "a bare /always answers the one question waiting that offers it" do
+      {task, _token, _id, _spec} = wait_always(turn_context(chat_origin()))
+
+      assert :ok = dispatch(telegram("/always"), bare_context())
+      assert_receive {:command_reply, @always_approved}
+      assert result(task) == {:ok, :always}
+    end
+
+    test "/always leaves the sign-in's question, its token and its wait untouched" do
+      {task, token, id, _text} = wait_in_call(turn_context(chat_origin()))
+
+      assert :ok = dispatch(telegram("/always #{token}"))
+      assert_receive {:command_reply, @always_cards_only}
+      assert {:ok, %{mutation: {:access_sensitive, ^id}}} = Confirmations.peek(token)
+
+      assert :ok = dispatch(telegram("/always"), bare_context())
+      assert_receive {:command_reply, @always_cards_only}
+
+      assert :ok = dispatch(telegram("/confirm #{token}"))
+      assert_receive {:command_reply, "Approved."}
+      assert result(task) == {:ok, :confirmed}
+    end
+
+    test "/confirm and /deny still answer a question that offers always" do
+      {task, token, _id, _spec} = wait_always(turn_context(chat_origin()))
+      assert :ok = dispatch(telegram("/confirm #{token}"))
+      assert_receive {:command_reply, "Approved."}
+      assert result(task) == {:ok, :confirmed}
+
+      {task, token, _id, _spec} = wait_always(turn_context(chat_origin()))
+      assert :ok = dispatch(telegram("/deny #{token}"))
+      assert_receive {:command_reply, @denied}
+      assert result(task) == {:error, :denied}
+    end
+
+    # The Mac app's and the phone's card keeps its two answers, and its text
+    # still names `/always`, which the owner can type in the app's chat.
+    test "the app's card keeps Approve and Deny, and its text names /always" do
+      origin =
+        Map.put(chat_origin("companion", "main", nil), :ingress_context, %{transport: :companion})
+
+      {task, token, _id, spec} = wait_always(turn_context(origin))
+      card = Output.approval(spec)
+
+      assert card["approve_command"] == "/confirm #{token}"
+      assert card["deny_command"] == "/deny #{token}"
+      assert card["text"] =~ "/always #{token}"
+      refute Map.has_key?(card, "always_command")
+
+      assert :ok = dispatch(app_message("companion", "/always #{token}"))
+      assert_receive {:command_reply, @always_approved}
+      assert result(task) == {:ok, :always}
+    end
+
+    test "the owner's own inbox carries the third answer" do
+      inbox = [
+        jobs_config: [],
+        configured_owners: %{"telegram" => @owner},
+        adapter: CardInboxAdapter
+      ]
+
+      context =
+        chat_origin("acp", "session-1", nil)
+        |> turn_context()
+        |> Map.delete(:approval_fn)
+        |> Map.put(:owner_inbox_approval_fn, &OwnerInboxApproval.request(&1, inbox))
+
+      task =
+        Task.async(fn ->
+          AccessGate.ask_in_call(@job_prompt, context, Timeouts.sign_in_approval(), always: true)
+        end)
+
+      assert_receive {:inbox_card, %{kind: :sandbox, text: text, token: token, actions: actions}}
+      assert text =~ @job_prompt
+      assert text =~ "`/always #{token}` approves and stops this question."
+      assert actions.always_allow == "Always allow"
+
+      assert :ok = dispatch(telegram("/always #{token}", @owner))
+      assert_receive {:command_reply, @always_approved}
+      assert result(task) == {:ok, :always}
     end
   end
 

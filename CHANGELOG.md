@@ -152,13 +152,21 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   set up, changed, resumed or run by hand only from your own chat, app or
   voice turn, or by a run of a job that itself names the browser: never by a
   delegated worker, a background run, a watcher's cue run or a shared
-  channel. The password still never leaves the app, which types it only into
-  the site it was saved for. Where no login is saved for the site, the run
-  tells you where to add one and never asks for the password. A job with no
-  tool list of its own, a guest's job, a watcher's cue run and a delegated
-  worker still never sign in, and your own turns still ask before a password
-  is typed. A run while the Mac is locked or its display sleeps uses Chrome,
-  where saved logins are not typed.
+  channel. When your turn has read outside content first, setting up such a
+  job, or changing what one is told to do (its task or its skill), asks you
+  first in your chat: Approve, Deny, or Always allow, which stops that
+  question for every job from then on (`confirm_sign_in_jobs = false` under
+  `[fermix_core.jobs]` does the same). Telegram draws all three as buttons;
+  in the Mac app and on the phone the card has Approve and Deny, and you type
+  `/always`. A voice call cannot be asked, so there such a set-up is refused
+  until you ask from your chat. A job's own runs, resuming a job and running
+  one by hand never ask. The password still never leaves the app, which types
+  it only into the site it was saved for. Where no login is saved for the
+  site, the run tells you where to add one and never asks for the password. A
+  job with no tool list of its own, a guest's job, a watcher's cue run and a
+  delegated worker still never sign in, and your own turns still ask before a
+  password is typed. A run while the Mac is locked or its display sleeps uses
+  Chrome, where saved logins are not typed.
 
 - **Open loops are on by default.** Fermix keeps track of what you say you
   will do, decide or are waiting on, and may check in on it, without being

@@ -89,8 +89,12 @@ defmodule FermixCore.Capabilities.AccessGate do
   (`job_sign_in?/1`): the login typed is one the owner saved in the Fermix app
   for the page's own site, and a job naming `browser` is set up, changed or
   started only from a turn that could sign in itself (`check_job_tools/3`).
+  When that turn read outside content, setting such a job up or changing its
+  task asks the owner first, in the call (`confirm_sign_in_job/4`), with
+  Always allow as a third answer, which turns that question off.
   Every confirm and deny path answers a waiting record by message
-  (`confirm_in_call/2`, `deny/2`) instead of running a recorded call.
+  (`confirm_in_call/2`, `deny/2`, `always_in_call/2`) instead of running a
+  recorded call.
 
   Two related questions live here too: `owner_consent_turn?/1`, whether a turn
   may change what a watcher reads or what a task may do (with
@@ -135,6 +139,7 @@ defmodule FermixCore.Capabilities.AccessGate do
   alias FermixCore.Cues.MandateGate
   alias FermixCore.Harness.Authorization
   alias FermixCore.Harness.Ledger
+  alias FermixCore.Jobs.SignInConfirm
   alias FermixCore.Memory.Repo
   alias FermixCore.Sandbox.CommandTool
   alias FermixCore.Sandbox.OsSandbox
@@ -155,6 +160,7 @@ defmodule FermixCore.Capabilities.AccessGate do
   @max_command_chars 2_000
   @max_outcome_chars 400
   @max_source_labels 5
+  @max_job_name_chars 60
   # The stamp a decided call carries once a scheduled run's job row let it
   # through (`dispatch_label/1`), which `job_sign_in?/1` reads back.
   @scheduled_label "scheduled"
@@ -240,7 +246,8 @@ defmodule FermixCore.Capabilities.AccessGate do
   @type decision :: :dispatch | :chained | {:confirm, surface()} | {:refuse, refusal()}
   @type gate_kind :: :access_sensitive | :host_command | :external_effect | :sign_in | nil
   @type in_call_result ::
-          {:ok, :confirmed} | {:error, :denied | :unanswered | {:not_delivered, term()}}
+          {:ok, :confirmed | :always}
+          | {:error, :denied | :unanswered | {:not_delivered, term()}}
 
   @doc """
   Called by `Capability.execute/3` before the executor. `{:dispatch, context}`
@@ -447,6 +454,13 @@ defmodule FermixCore.Capabilities.AccessGate do
   token}`) or the owner's own inbox (`owner_inbox_approval_fn`, the request
   marked `in_call: true`).
 
+  `opts`: `always: true` offers Always allow as a third answer
+  (`always_in_call/2`, which answers `{:ok, :always}`): the approval line
+  names `/always` too, this chat is sent the prompt as a spec whose
+  `actions` carry the three answers' words (`always_actions/0`), and the
+  inbox request is marked `always: true`. Without it the question offers
+  none, and `always_in_call/2` leaves it waiting.
+
   The record (`Pending.park_in_call/3`, in the context's `:access_pending`
   store) names this process, which then waits at most `timeout_ms`, no longer
   than the confirmation window (`Pending.ttl_ms/0`; a longer bound raises), for
@@ -460,16 +474,19 @@ defmodule FermixCore.Capabilities.AccessGate do
   could not be asked (`:no_surface`, `:voice`, `:too_many_pending`, the owner
   inbox's own reason); the record is dropped first.
   """
-  @spec ask_in_call(String.t(), map(), pos_integer()) :: in_call_result()
-  def ask_in_call(prompt, context, timeout_ms)
+  @spec ask_in_call(String.t(), map(), pos_integer(), keyword()) :: in_call_result()
+  def ask_in_call(prompt, context, timeout_ms, opts \\ [])
       when is_binary(prompt) and prompt != "" and is_map(context) and is_integer(timeout_ms) and
-             timeout_ms > 0 do
+             timeout_ms > 0 and is_list(opts) do
     if timeout_ms > Pending.ttl_ms(),
       do: raise(ArgumentError, "ask_in_call waits at most #{Pending.ttl_ms()} ms")
 
+    always = Keyword.get(opts, :always, false)
+    unless is_boolean(always), do: raise(ArgumentError, "always must be a boolean")
+
     with {:ok, surface} <- in_call_surface(context),
-         {:ok, id} <- park_in_call(context),
-         :ok <- deliver_in_call(surface, id, visible(prompt), context) do
+         {:ok, id} <- park_in_call(context, always),
+         :ok <- deliver_in_call(surface, id, visible(prompt), context, always) do
       await_answer(id, context, timeout_ms)
     end
   end
@@ -490,6 +507,39 @@ defmodule FermixCore.Capabilities.AccessGate do
         {:error, :not_in_call}
     end
   end
+
+  @doc """
+  The owner's Always allow to a call waiting in `ask_in_call/4` that offers
+  it: its process is answered `:always` and its record ends.
+  `{:error, :not_offered}` when the waiting call offers no Always allow (a
+  sign-in's): nothing changes, and it keeps waiting for a yes or a no.
+  `{:error, :not_in_call}` when `id` names no such live wait.
+  """
+  @spec always_in_call(String.t(), GenServer.server()) ::
+          :ok | {:error, :not_offered | :not_in_call}
+  def always_in_call(id, pending \\ Pending) when is_binary(id) do
+    case Pending.always_in_call(id, pending) do
+      :ok ->
+        Logger.info("access_gate: intent #{id} always allowed in its call")
+        :ok
+
+      {:error, reason} when reason in [:not_offered, :not_in_call] ->
+        {:error, reason}
+    end
+  end
+
+  @doc "Whether `id` names a call waiting in `ask_in_call/4` that offers Always allow."
+  @spec offers_always?(String.t(), GenServer.server()) :: boolean()
+  def offers_always?(id, pending \\ Pending) when is_binary(id),
+    do: Pending.offers_always?(id, pending)
+
+  @doc """
+  The words of the three answers a question that offers Always allow shows
+  where a chat draws buttons: the two-button prompt's Approve and Deny, and
+  Always allow.
+  """
+  @spec always_actions() :: %{confirm: String.t(), deny: String.t(), always_allow: String.t()}
+  def always_actions, do: %{confirm: "Approve", deny: "Deny", always_allow: "Always allow"}
 
   @doc """
   The owner's no, from any deny path, answered with the kind of request it
@@ -552,12 +602,27 @@ defmodule FermixCore.Capabilities.AccessGate do
   nothing resumes; for a call waiting in `ask_in_call/3` (`:in_call`) that call
   goes ahead only on a yes; for a parked effect outside the machine
   (`{:effect, promise}`) the line ends with what its own rendering promises,
-  and says the longer window it waits for.
+  and says the longer window it waits for. `opts`: `always: true` names
+  `/always` beside `/confirm`, for a call waiting in `ask_in_call/4` that
+  offers it.
   """
-  @spec approval_line(String.t(), map(), :parked | :in_call | {:effect, String.t()}) ::
-          String.t()
-  def approval_line(token, context, kind \\ :parked) when is_binary(token) and is_map(context),
-    do: RequestDirectoryAccess.approval_line(token, context, after_confirm(kind), expires(kind))
+  @spec approval_line(
+          String.t(),
+          map(),
+          :parked | :in_call | {:effect, String.t()},
+          keyword()
+        ) :: String.t()
+  def approval_line(token, context, kind \\ :parked, opts \\ [])
+      when is_binary(token) and is_map(context) and is_list(opts) do
+    always = Keyword.get(opts, :always, false)
+
+    if always and kind != :in_call,
+      do: raise(ArgumentError, "only a call waiting in ask_in_call/4 offers always")
+
+    RequestDirectoryAccess.approval_line(token, context, after_confirm(kind), expires(kind),
+      always: always
+    )
+  end
 
   defp after_confirm(:parked), do: @after_confirm
   defp after_confirm(:in_call), do: @after_confirm_in_call
@@ -665,6 +730,117 @@ defmodule FermixCore.Capabilities.AccessGate do
     registry
     |> CapabilityRegistry.list()
     |> Enum.filter(&(gate_kind(&1, %{}) == :host_command))
+  end
+
+  @doc """
+  For `schedule_job`, and `update_job` when it changes what the job is told to
+  do (its task, or the skill its runs follow), once every other check of the
+  call has passed, the job's own validity included: the owner's question about a job of
+  theirs that names `browser`, whose runs sign in to websites with the logins
+  they saved, asking no one. A page the owner's own turn read could have asked
+  for such a job, so after outside content the owner is asked once, in the
+  call (`ask_in_call/4`, offering Always allow). A yes sets the job up or
+  changes it; Always allow does too, and turns the question off for every job
+  from then on (`Jobs.SignInConfirm.stop_asking/1`, or the context's
+  `:stop_sign_in_confirm_fn` when a caller hands one in); a write that fails
+  is logged, and the job still goes ahead. A no, no answer in the window, or a
+  turn that cannot be asked (a voice call) leaves the job as it was, and the
+  sentence says so.
+
+  Asked only when all hold: the job runs at operator trust (`:job_trust`, as
+  `check_job_tools/3` takes it) and `names` holds the built-in `browser` (a
+  job with no list never signs in); the turn is not a scheduled run's; the
+  turn read outside content (a context the loop never stamped counts as
+  having read); and the setting says ask (`Jobs.SignInConfirm.asks?/1`).
+  Running or resuming a job never asks. `:change` (`:set_up`, the default, or
+  `:changed`) picks the sentences.
+  """
+  @spec confirm_sign_in_job(String.t(), [String.t()], map(), keyword()) ::
+          :ok | {:error, String.t()}
+  def confirm_sign_in_job(job_name, names, context, opts \\ [])
+      when is_binary(job_name) and is_list(names) and is_map(context) and is_list(opts) do
+    change = Keyword.get(opts, :change, :set_up)
+    job_trust = Keyword.get(opts, :job_trust)
+
+    unless change in [:set_up, :changed] and job_trust in [:operator, :guest, nil],
+      do: raise(ArgumentError, "bad options: #{inspect(opts)}")
+
+    if sign_in_job_question?(names, context, job_trust) do
+      change
+      |> sign_in_job_question(shown_job_name(job_name))
+      |> ask_in_call(context, Timeouts.sign_in_approval(), always: true)
+      |> sign_in_job_answer(change, context)
+    else
+      :ok
+    end
+  end
+
+  # A new job is called new, and a change is called a change, so a job the
+  # owner already allowed is never changed behind the question they know.
+  defp sign_in_job_question(:set_up, name),
+    do: ~s(Let the new job "#{name}" sign in to websites with your saved logins on its own?)
+
+  defp sign_in_job_question(:changed, name) do
+    ~s(Change what the job "#{name}" does? It signs in to websites with your saved ) <>
+      "logins on its own."
+  end
+
+  # The name is the model's words inside the owner's question: escaped, cut
+  # short, and with no double quote of its own, so it stays one quoted span and
+  # cannot carry a sentence.
+  defp shown_job_name(name),
+    do: name |> visible() |> String.replace("\"", "'") |> bounded(@max_job_name_chars)
+
+  defp sign_in_job_question?(names, context, job_trust) do
+    (job_trust || CapabilityRegistry.run_trust(context)) == :operator and
+      Enum.any?(names, &builtin_browser?(registry(context), &1)) and
+      not Authorization.scheduled?(context) and not read_nothing?(context) and
+      SignInConfirm.asks?(context)
+  end
+
+  # The match the job rule makes (`blocked_job_tool?/4`): the built-in's
+  # module, so no plugin tool of that name is one.
+  defp builtin_browser?(registry, name) when is_binary(name),
+    do:
+      match?(
+        {:ok, %Capability{metadata: %{tool_module: Browser}}},
+        CapabilityRegistry.find(registry, name)
+      )
+
+  defp builtin_browser?(_registry, _name), do: false
+
+  defp sign_in_job_answer({:ok, :confirmed}, _change, _context), do: :ok
+
+  defp sign_in_job_answer({:ok, :always}, _change, context) do
+    stop = Map.get(context, :stop_sign_in_confirm_fn, &SignInConfirm.stop_asking/0)
+
+    case stop.() do
+      :ok ->
+        Logger.info("access_gate: the owner turned off the question about jobs that sign in")
+
+      {:error, reason} ->
+        Logger.warning(
+          "access_gate: the owner's Always allow for jobs that sign in was not saved: " <>
+            inspect(reason)
+        )
+    end
+
+    :ok
+  end
+
+  defp sign_in_job_answer({:error, :denied}, change, _context),
+    do: {:error, sign_in_job_denied_text(change)}
+
+  defp sign_in_job_answer({:error, :unanswered}, change, _context),
+    do: {:error, sign_in_job_unanswered_text(change)}
+
+  defp sign_in_job_answer({:error, {:not_delivered, reason}}, change, _context) do
+    Logger.info(
+      "access_gate: the question about a job that signs in was not delivered: " <>
+        inspect(reason)
+    )
+
+    {:error, sign_in_job_not_delivered_text(change)}
   end
 
   @doc """
@@ -1275,9 +1451,9 @@ defmodule FermixCore.Capabilities.AccessGate do
     end
   end
 
-  defp park_in_call(context) do
+  defp park_in_call(context, always) do
     case Pending.park_in_call(
-           %{session_id: Map.get(context, :session_id)},
+           %{session_id: Map.get(context, :session_id), always: always},
            self(),
            pending(context)
          ) do
@@ -1292,11 +1468,11 @@ defmodule FermixCore.Capabilities.AccessGate do
 
   # A fresh id has no live token, so the channel store answers `:new`; anything
   # else, or an inbox that cannot be reached, ends the ask before it waits.
-  defp deliver_in_call(:this_chat, id, prompt, context) do
+  defp deliver_in_call(:this_chat, id, prompt, context, always) do
     case context.approval_fn.(%{access_sensitive: id}) do
       {:ok, token, :new} ->
-        text = prompt <> "\n\n" <> approval_line(token, context, :in_call)
-        context.reply_fn.({:approval_prompt, text, token})
+        text = prompt <> "\n\n" <> approval_line(token, context, :in_call, always: always)
+        context.reply_fn.(in_call_prompt(text, token, always))
         :ok
 
       {:ok, _token, :existing} ->
@@ -1304,13 +1480,26 @@ defmodule FermixCore.Capabilities.AccessGate do
     end
   end
 
-  defp deliver_in_call(:owner_inbox, id, prompt, context) do
-    case context.owner_inbox_approval_fn.(%{access_sensitive: id, prompt: prompt, in_call: true}) do
+  defp deliver_in_call(:owner_inbox, id, prompt, context, always) do
+    case context.owner_inbox_approval_fn.(in_call_request(id, prompt, always)) do
       {:ok, _token, :new} -> :ok
       {:ok, _token, :existing} -> not_delivered(id, context, :existing_token)
       {:error, reason} -> not_delivered(id, context, reason)
     end
   end
+
+  defp in_call_request(id, prompt, false),
+    do: %{access_sensitive: id, prompt: prompt, in_call: true}
+
+  defp in_call_request(id, prompt, true),
+    do: %{access_sensitive: id, prompt: prompt, in_call: true, always: true}
+
+  # A question that offers Always allow goes as a spec whose `actions` a chat
+  # with buttons draws; every other as the two-button prompt.
+  defp in_call_prompt(text, token, false), do: {:approval_prompt, text, token}
+
+  defp in_call_prompt(text, token, true),
+    do: {:approval_prompt, %{kind: :sandbox, text: text, token: token, actions: always_actions()}}
 
   defp not_delivered(id, context, reason) do
     Logger.warning("access_gate: intent #{id} not delivered: #{inspect(reason)}")
@@ -1371,6 +1560,11 @@ defmodule FermixCore.Capabilities.AccessGate do
   defp answered(id, :denied) do
     Logger.info("access_gate: intent #{id} denied by the owner")
     {:error, :denied}
+  end
+
+  defp answered(id, :always) do
+    Logger.info("access_gate: intent #{id} always allowed by the owner")
+    {:ok, :always}
   end
 
   defp unanswered(id, context, timeout_ms) do
@@ -2024,6 +2218,24 @@ defmodule FermixCore.Capabilities.AccessGate do
       "chat, app or voice. Ask again directly. A job that does not use the browser can be " <>
       "given allowed tools that leave it out."
   end
+
+  defp sign_in_job_denied_text(change) do
+    "The owner said no, so the job was not #{undone(change)}. Do not ask again; tell the " <>
+      "owner it was not done."
+  end
+
+  defp sign_in_job_unanswered_text(change) do
+    "The owner did not answer within #{div(Timeouts.sign_in_approval(), 1_000)} seconds, so " <>
+      "the job was not #{undone(change)}. Tell the owner, and ask again once they are back."
+  end
+
+  defp sign_in_job_not_delivered_text(change) do
+    "Fermix could not ask the owner about this job here, so it was not #{undone(change)}. " <>
+      "Ask the owner to make the request from their own chat or the Fermix app."
+  end
+
+  defp undone(:set_up), do: "set up"
+  defp undone(:changed), do: "changed"
 
   defp job_refusal(tool) do
     "A scheduled job that may run #{tool} can be set up, changed or run now only when you " <>

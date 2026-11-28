@@ -1286,6 +1286,32 @@ defmodule FermixChannels.Channels.TelegramTest do
       assert soul["text"] =~ "/soul apply SOUL-T"
     end
 
+    # The question about a job that signs in offers Always allow: it rides a
+    # row of its own under the two-button prompt's Approve and Deny.
+    test "a sandbox approval that offers Always allow draws it on a row of its own" do
+      stub_telegram(self(), 200, %{"ok" => true})
+
+      assert :ok =
+               Telegram.send_approval(card_message(), %{
+                 kind: :sandbox,
+                 text:
+                   "Approve with `/confirm TOK12345`. `/always TOK12345` approves and stops this question.",
+                 token: "TOK12345",
+                 actions: %{confirm: "Approve", deny: "Deny", always_allow: "Always allow"}
+               })
+
+      assert_received {:telegram_request, "/bottest-bot-token/sendMessage", body}
+      assert body["text"] =~ "/always TOK12345"
+
+      assert body["reply_markup"]["inline_keyboard"] == [
+               [
+                 %{"text" => "✅ Approve", "callback_data" => "grant:TOK12345"},
+                 %{"text" => "❌ Deny", "callback_data" => "deny:TOK12345"}
+               ],
+               [%{"text" => "Always allow", "callback_data" => "always:TOK12345"}]
+             ]
+    end
+
     test "a tapped card is edited to its answer's line, its buttons gone" do
       stub_telegram(self(), 200, %{"ok" => true})
 

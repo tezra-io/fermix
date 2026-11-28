@@ -999,4 +999,16 @@ defmodule FermixCore.Jobs.Registry do
     [server: Keyword.get(opts, :repo, Keyword.get(opts, :server, Repo))] ++
       Keyword.take(opts, [:timeout, :on_timeout])
   end
+
+  @doc """
+  Whether `create_job/2` would take `attrs`, writing nothing: the checks it
+  makes before it inserts. For a caller that asks the owner about a job before
+  it is created, so nobody is asked about one that would then be refused. The
+  twin of `check_update/3`.
+  """
+  @spec check_create(map(), keyword()) :: :ok | {:error, term()}
+  def check_create(attrs, opts \\ []) when is_map(attrs) and is_list(opts) do
+    now = Keyword.get(opts, :now, DateTime.utc_now())
+    with {:ok, _normalized} <- normalize_create_attrs(attrs, now), do: :ok
+  end
 end

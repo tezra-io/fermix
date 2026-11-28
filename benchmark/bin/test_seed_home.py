@@ -966,6 +966,8 @@ def test_owner_inbox_cli_makes_the_local_chat_the_default_target(tmp_path, monke
     assert on["fermix_core"]["jobs"]["default_delivery_target"] == {"platform": "cli",
                                                                      "chat_id": "cli"}
     assert on["fermix_core"]["jobs"]["default_delivery_mode"] == "channel"
+    # The question about a job that signs in is pre-granted: no eval run can answer it.
+    assert on["fermix_core"]["jobs"]["confirm_sign_in_jobs"] is False
     # The Telegram owner id stays: only the configured rung moves.
     assert on["fermix_channels"]["telegram"] == {"owner_user_id": "100001"}
     manifest = json.loads((home / seed.owner_inbox.MANIFEST).read_text())

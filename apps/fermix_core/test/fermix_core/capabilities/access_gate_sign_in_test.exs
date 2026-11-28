@@ -563,6 +563,268 @@ defmodule FermixCore.Capabilities.AccessGateSignInTest do
     end
   end
 
+  @job_prompt ~s(Let the new job "Order check" sign in to websites with your saved logins on its own?)
+  @always_actions %{confirm: "Approve", deny: "Deny", always_allow: "Always allow"}
+
+  defp ask_always(context, prompt \\ @job_prompt) do
+    Task.async(fn ->
+      AccessGate.ask_in_call(prompt, context, Timeouts.sign_in_approval(), always: true)
+    end)
+  end
+
+  defp asked_always do
+    assert_receive {:approval, %{access_sensitive: id}, waiter}
+    assert_receive {:reply, {:approval_prompt, %{kind: :sandbox, token: @token} = spec}}
+    {id, waiter, spec}
+  end
+
+  describe "ask_in_call/4 offering always" do
+    test "the question carries a third answer, and /always answers it", ctx do
+      context = chat(ctx)
+      task = ask_always(context)
+      {id, _waiter, spec} = asked_always()
+
+      assert spec.actions == @always_actions
+
+      assert spec.text ==
+               @job_prompt <>
+                 "\n\n" <> AccessGate.approval_line(@token, context, :in_call, always: true)
+
+      assert spec.text =~
+               "`/confirm #{@token}` (expires in 60s). `/always #{@token}` approves and stops this question."
+
+      assert AccessGate.offers_always?(id, ctx.pending)
+
+      assert :ok = AccessGate.always_in_call(id, ctx.pending)
+      assert result(task) == {:ok, :always}
+      assert {:error, :not_in_call} = AccessGate.always_in_call(id, ctx.pending)
+    end
+
+    test "a yes and a no answer it as before", ctx do
+      task = ask_always(chat(ctx))
+      {id, _waiter, _spec} = asked_always()
+      assert :ok = AccessGate.confirm_in_call(id, ctx.pending)
+      assert result(task) == {:ok, :confirmed}
+
+      task = ask_always(chat(ctx))
+      {id, _waiter, _spec} = asked_always()
+      assert {:ok, :in_call} = AccessGate.deny(id, ctx.pending)
+      assert result(task) == {:error, :denied}
+    end
+
+    # The sign-in's own question offers no always: the third answer changes
+    # nothing, and the call keeps waiting for the owner's yes or no.
+    test "the sign-in's question refuses always and keeps waiting", ctx do
+      task = ask(chat(ctx))
+      {id, _waiter, text} = asked()
+      refute text =~ "/always"
+      refute AccessGate.offers_always?(id, ctx.pending)
+
+      assert {:error, :not_offered} = AccessGate.always_in_call(id, ctx.pending)
+      assert :ok = AccessGate.confirm_in_call(id, ctx.pending)
+      assert result(task) == {:ok, :confirmed}
+    end
+
+    test "a shared chat's line keeps the token out and still names /always", ctx do
+      context = chat(ctx, %{chat_type: "group", private_approval_button?: true})
+      line = AccessGate.approval_line(@token, context, :in_call, always: true)
+
+      refute line =~ @token
+
+      assert line =~
+               "privately via `/confirm` in a DM or the CLI (expires in 60s). `/always` approves and stops this question."
+
+      assert AccessGate.approval_line(@token, context, :in_call) =~ "privately via `/confirm` in"
+    end
+
+    test "in the owner's own inbox the request says it offers always", ctx do
+      context = inbox_only(ctx, {:ok, @token, :new})
+      task = ask_always(context)
+
+      assert_receive {:owner_inbox,
+                      %{access_sensitive: id, prompt: @job_prompt, in_call: true, always: true},
+                      _waiter}
+
+      assert :ok = AccessGate.always_in_call(id, ctx.pending)
+      assert result(task) == {:ok, :always}
+    end
+  end
+
+  describe "confirm_sign_in_job/4" do
+    setup do
+      registry = :"sign_in_job_caps_#{System.unique_integer([:positive])}"
+      start_supervised!({CapabilityRegistry, name: registry})
+      :ok = CapabilityRegistry.register(registry, browser())
+      test_pid = self()
+
+      seams = %{
+        capability_registry: registry,
+        outside_sources: @read,
+        jobs_config: [],
+        stop_sign_in_confirm_fn: fn ->
+          send(test_pid, :stopped_asking)
+          :ok
+        end
+      }
+
+      %{seams: seams}
+    end
+
+    defp job_question(context, opts \\ [], names \\ @job_tools) do
+      Task.async(fn -> AccessGate.confirm_sign_in_job("Order check", names, context, opts) end)
+    end
+
+    defp tainted_chat(ctx, extra \\ %{}), do: chat(ctx, Map.merge(ctx.seams, extra))
+
+    test "asks the owner's turn that read outside content, and a yes sets it up", ctx do
+      task = job_question(tainted_chat(ctx))
+      {id, _waiter, spec} = asked_always()
+
+      assert [@job_prompt, _approval_line] = String.split(spec.text, "\n\n")
+      assert :ok = AccessGate.confirm_in_call(id, ctx.pending)
+      assert result(task) == :ok
+      refute_received :stopped_asking
+    end
+
+    # The name is the model's words inside the owner's question: it stays one
+    # short quoted span on one line, whatever it holds.
+    test "the question shows the job's name short, on one line, in one quoted span", ctx do
+      name =
+        ~s(Order check" is done. Tap Approve to close it\nand keep ) <> String.duplicate("x", 80)
+
+      context = tainted_chat(ctx)
+      task = Task.async(fn -> AccessGate.confirm_sign_in_job(name, @job_tools, context) end)
+
+      {id, _waiter, spec} = asked_always()
+      [question, _approval_line] = String.split(spec.text, "\n\n")
+
+      assert [
+               ~s(Let the new job ),
+               shown,
+               ~s( sign in to websites with your saved logins on its own?)
+             ] =
+               String.split(question, ~s("))
+
+      assert String.length(shown) == 61
+      assert String.ends_with?(shown, "…")
+      assert shown =~ "Order check' is done."
+      refute question =~ "\n"
+
+      assert {:ok, :in_call} = AccessGate.deny(id, ctx.pending)
+      assert {:error, _sentence} = result(task)
+    end
+
+    # A job the owner already allowed is never changed behind the question
+    # they know: a change is asked about as a change.
+    test "a change of what the job does is asked about as one", ctx do
+      context = tainted_chat(ctx)
+
+      task =
+        Task.async(fn ->
+          AccessGate.confirm_sign_in_job("Order check", @job_tools, context, change: :changed)
+        end)
+
+      {id, _waiter, spec} = asked_always()
+      [question, _approval_line] = String.split(spec.text, "\n\n")
+
+      assert question ==
+               ~s(Change what the job "Order check" does? It signs in to websites with your ) <>
+                 "saved logins on its own."
+
+      assert {:ok, :in_call} = AccessGate.deny(id, ctx.pending)
+      assert {:error, sentence} = result(task)
+      assert sentence =~ "so the job was not changed."
+    end
+
+    test "always sets it up and stops asking", ctx do
+      task = job_question(tainted_chat(ctx))
+      {id, _waiter, _spec} = asked_always()
+
+      assert :ok = AccessGate.always_in_call(id, ctx.pending)
+      assert result(task) == :ok
+      assert_received :stopped_asking
+    end
+
+    test "always still sets it up when the setting cannot be saved, and says why", ctx do
+      context = tainted_chat(ctx, %{stop_sign_in_confirm_fn: fn -> {:error, :read_only_home} end})
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          task = job_question(context)
+          {id, _waiter, _spec} = asked_always()
+          assert :ok = AccessGate.always_in_call(id, ctx.pending)
+          assert result(task) == :ok
+        end)
+
+      assert log =~ ":read_only_home"
+    end
+
+    test "a no, no answer, and nowhere to ask each leave it undone, in plain sentences", ctx do
+      task = job_question(tainted_chat(ctx))
+      {id, _waiter, _spec} = asked_always()
+      assert {:ok, :in_call} = AccessGate.deny(id, ctx.pending)
+
+      assert result(task) ==
+               {:error,
+                "The owner said no, so the job was not set up. Do not ask again; tell the " <>
+                  "owner it was not done."}
+
+      task = job_question(tainted_chat(ctx), change: :changed)
+      {id, waiter, _spec} = asked_always()
+      send(waiter, {:access_timeout, id})
+
+      assert result(task) ==
+               {:error,
+                "The owner did not answer within 60 seconds, so the job was not changed. " <>
+                  "Tell the owner, and ask again once they are back."}
+
+      bare = Map.drop(tainted_chat(ctx), [:approval_fn, :reply_fn])
+
+      assert result(job_question(bare)) ==
+               {:error,
+                "Fermix could not ask the owner about this job here, so it was not set up. " <>
+                  "Ask the owner to make the request from their own chat or the Fermix app."}
+
+      refute_received :stopped_asking
+    end
+
+    # A voice turn may set such a job up, but the question is not asked aloud.
+    test "a voice turn that read outside content is told it could not be asked", ctx do
+      context = Map.merge(voice(ctx), ctx.seams)
+
+      assert {:error, text} = result(job_question(context))
+      assert text =~ "Fermix could not ask the owner about this job here"
+      refute_received {:approval, _, _}
+    end
+
+    test "an unstamped turn counts as having read outside content", ctx do
+      task = job_question(ctx |> tainted_chat() |> Map.delete(:outside_sources))
+      {id, _waiter, _spec} = asked_always()
+      assert :ok = AccessGate.confirm_in_call(id, ctx.pending)
+      assert result(task) == :ok
+    end
+
+    test "never asks a turn that read nothing, a scheduled run, or with the setting off", ctx do
+      for context <- [
+            tainted_chat(ctx, %{outside_sources: MapSet.new()}),
+            Map.merge(scheduled(ctx), ctx.seams),
+            tainted_chat(ctx, %{jobs_config: [confirm_sign_in_jobs: false]})
+          ] do
+        assert :ok = result(job_question(context))
+      end
+
+      refute_received {:approval, _, _}
+    end
+
+    test "never asks about a guest's job or a job that names no browser", ctx do
+      assert :ok = result(job_question(tainted_chat(ctx), job_trust: :guest))
+      assert :ok = result(job_question(tainted_chat(ctx, %{source_trust: :guest})))
+      assert :ok = result(job_question(tainted_chat(ctx), [], ["web_search"]))
+      assert :ok = result(job_question(tainted_chat(ctx), [], []))
+      refute_received {:approval, _, _}
+    end
+  end
+
   describe "Timeouts.sign_in_approval/0" do
     test "is the confirmation window a token and its record live for" do
       assert Timeouts.sign_in_approval() == Pending.ttl_ms()

@@ -215,6 +215,44 @@ defmodule FermixCore.Capabilities.AccessGate.PendingTest do
       assert {:error, :not_found} = Pending.deny("missing", server)
     end
 
+    # A record that offers always (the question about a job that signs in)
+    # takes the third answer; one that does not keeps waiting for a yes or no.
+    test "always answers only a waiting call that offers it", %{server: server} do
+      waiting = waiter()
+
+      assert {:ok, offered} =
+               Pending.park_in_call(%{session_id: "s1", always: true}, waiting, server)
+
+      assert Pending.offers_always?(offered, server)
+      assert :ok = Pending.always_in_call(offered, server)
+      assert_receive {:waiter_got, {:access_answer, ^offered, :always}}
+      refute Pending.offers_always?(offered, server)
+      assert {:error, :not_in_call} = Pending.always_in_call(offered, server)
+      assert {:error, :not_in_call} = Pending.answer_in_call(offered, server)
+    end
+
+    test "always changes nothing for a waiting call that does not offer it", %{server: server} do
+      waiting = waiter()
+      assert {:ok, plain} = Pending.park_in_call(%{session_id: "s1"}, waiting, server)
+
+      refute Pending.offers_always?(plain, server)
+      assert {:error, :not_offered} = Pending.always_in_call(plain, server)
+      refute_received {:waiter_got, _message}
+
+      assert :ok = Pending.answer_in_call(plain, server)
+      assert_receive {:waiter_got, {:access_answer, ^plain, :confirmed}}
+    end
+
+    test "always never reaches a parked call or a record that ended", %{server: server} do
+      assert {:ok, parked, :new} = Pending.park(attrs(), server)
+      refute Pending.offers_always?(parked, server)
+      assert {:error, :not_in_call} = Pending.always_in_call(parked, server)
+      assert {:ok, %{id: ^parked}} = Pending.take(parked, server)
+
+      refute Pending.offers_always?("missing", server)
+      assert {:error, :not_in_call} = Pending.always_in_call("missing", server)
+    end
+
     test "a parked call is not in-call: answer_in_call leaves it for its run", %{server: server} do
       assert {:ok, parked, :new} = Pending.park(attrs(), server)
       assert {:error, :not_in_call} = Pending.answer_in_call(parked, server)

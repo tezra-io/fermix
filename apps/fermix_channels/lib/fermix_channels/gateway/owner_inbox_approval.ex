@@ -26,11 +26,14 @@ defmodule FermixChannels.Gateway.OwnerInboxApproval do
 
   A failed delivery takes the token back, so no confirmable record exists that
   the owner never saw. A request marked `in_call: true` is a call that waits in
-  its own process for the answer (`AccessGate.ask_in_call/3`), so its prompt
-  ends with that promise instead of the daemon running a command. A request
-  carrying `after_confirm` and `ttl_ms` is an effect outside the machine (a
-  phone call's start): its prompt ends with the promise its own rendering
-  makes, and its token and card live for its own window.
+  its own process for the answer (`AccessGate.ask_in_call/4`), so its prompt
+  ends with that promise instead of the daemon running a command; one also
+  marked `always: true` offers Always allow, so its prompt names `/always`
+  and it goes as a card whose answers name it too, as the turn's own chat
+  would draw it. A request carrying `after_confirm` and `ttl_ms` is an effect
+  outside the machine (a phone call's start): its prompt ends with the
+  promise its own rendering makes, and its token and card live for its own
+  window.
   """
 
   alias FermixChannels.Gateway.ChannelRegistry
@@ -54,6 +57,7 @@ defmodule FermixChannels.Gateway.OwnerInboxApproval do
           required(:access_sensitive) => String.t(),
           required(:prompt) => String.t(),
           optional(:in_call) => true,
+          optional(:always) => true,
           optional(:after_confirm) => String.t(),
           optional(:ttl_ms) => pos_integer()
         }
@@ -88,11 +92,26 @@ defmodule FermixChannels.Gateway.OwnerInboxApproval do
      %{kind: :sandbox, text: prompt_text(request, token), token: token, ttl_s: div(ttl_ms, 1_000)}}
   end
 
+  defp approval(%{in_call: true, always: true} = request, token) do
+    {:approval_prompt,
+     %{
+       kind: :sandbox,
+       text: prompt_text(request, token),
+       token: token,
+       actions: AccessGate.always_actions()
+     }}
+  end
+
   defp approval(request, token), do: {:approval_prompt, prompt_text(request, token), token}
 
-  defp prompt_text(%{prompt: prompt} = request, token),
-    do:
-      prompt <> "\n\n" <> AccessGate.approval_line(token, %{chat_type: "private"}, kind(request))
+  defp prompt_text(%{prompt: prompt} = request, token) do
+    line =
+      AccessGate.approval_line(token, %{chat_type: "private"}, kind(request),
+        always: Map.get(request, :always, false)
+      )
+
+    prompt <> "\n\n" <> line
+  end
 
   defp kind(%{in_call: true}), do: :in_call
   defp kind(%{after_confirm: promise}) when is_binary(promise), do: {:effect, promise}

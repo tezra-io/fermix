@@ -55,6 +55,25 @@ defmodule FermixCore.Jobs.RegistryTest do
     %{repo: repo_name}
   end
 
+  test "check_create answers as create_job would and writes nothing", %{repo: repo} do
+    attrs = %{
+      created_by_trust: "operator",
+      name: "Order check",
+      schedule: "every 15 minutes",
+      task_prompt: "Read the newest order."
+    }
+
+    assert :ok = Registry.check_create(attrs)
+
+    assert {:error, {:invalid_schedule, _expr}} =
+             Registry.check_create(%{attrs | schedule: "every blue moon"})
+
+    assert Registry.check_create(Map.delete(attrs, :task_prompt)) ==
+             Registry.create_job(Map.delete(attrs, :task_prompt), repo: repo)
+
+    assert {:ok, []} = Repo.list_scheduled_jobs(%{}, server: repo)
+  end
+
   test "creates a scheduled job and matching memory source", %{repo: repo} do
     assert {:ok, job} =
              Registry.create_job(

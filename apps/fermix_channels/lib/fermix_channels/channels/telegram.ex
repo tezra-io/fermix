@@ -237,23 +237,27 @@ defmodule FermixChannels.Channels.Telegram do
     # inline keyboard is the additive one-tap affordance. callback_data carries
     # namespaced token payloads; an 8-char token is far under Telegram's 64-byte
     # callback_data cap.
-    markup = %{
-      inline_keyboard: [
-        [
-          %{text: "✅ Approve", callback_data: ApprovalButton.approve_payload(token)},
-          %{text: "❌ Deny", callback_data: ApprovalButton.deny_payload(token)}
-        ]
-      ]
-    }
+    send_sandbox_approval(reply_target, thread_ts, text, [sandbox_answers(token)])
+  end
 
-    opts = [reply_markup: markup]
+  defp send_sandbox_approval(reply_target, thread_ts, text, rows) do
+    opts = [reply_markup: %{inline_keyboard: rows}]
     opts = if thread_ts, do: Keyword.put(opts, :message_thread_id, thread_ts), else: opts
     send_message(reply_target, text, opts)
   end
 
+  defp sandbox_answers(token) do
+    [
+      %{text: "✅ Approve", callback_data: ApprovalButton.approve_payload(token)},
+      %{text: "❌ Deny", callback_data: ApprovalButton.deny_payload(token)}
+    ]
+  end
+
   @doc """
   Deliver a kind-aware approval. A sandbox approval gets the one-tap buttons
-  `send_approval/3` draws. A SOUL.md change is answered with its own `/soul`
+  `send_approval/3` draws, and one whose `actions` name Always allow (a
+  question waiting in its call that offers it) a row of its own under them,
+  whose tap sends `/always`. A SOUL.md change is answered with its own `/soul`
   commands, never `/confirm`, so it goes as its text alone. A watcher's card
   (`:follow_up`, `:mandate`; M60_WATCHER_CODING_RUNS.md §6.2) and a heal's
   proposal for a job (`:job_change`, M106 §5.7) go as raw HTML: its lines,
@@ -264,6 +268,15 @@ defmodule FermixChannels.Channels.Telegram do
   """
   @impl true
   @spec send_approval(Message.t(), map()) :: :ok | {:error, term()}
+  def send_approval(
+        %Message{reply_target: reply_target, thread_ts: thread_ts},
+        %{kind: :sandbox, text: text, token: token, actions: %{always_allow: words}}
+      )
+      when is_binary(text) and is_binary(token) and is_binary(words) do
+    always = [%{text: words, callback_data: ApprovalButton.always_payload(token)}]
+    send_sandbox_approval(reply_target, thread_ts, text, [sandbox_answers(token), always])
+  end
+
   def send_approval(%Message{} = message, %{kind: :sandbox, text: text, token: token}),
     do: send_approval(message, text, token)
 

@@ -380,6 +380,112 @@ defmodule FermixChannels.BrowserHost.SignInEndToEndTest do
     assert request_types(connection) == ["tab.open"]
   end
 
+  # ── a job set up after a page ────────────────────────────────────────────
+
+  # The owner's decision: a turn that read outside content and then sets up a
+  # job that signs in asks the owner once, with Always allow as a third
+  # answer, which turns the question off for every job after it. The setting
+  # is read from what runs, as the owner's own settings are; the turn's
+  # Always allow applies it there (the write to the home's file is
+  # `SignInConfirmTest`'s).
+  test "after a page, the owner's /always sets the job up and the next one is not asked", ctx do
+    previous_jobs = Application.get_env(:fermix_core, :jobs, [])
+    Application.put_env(:fermix_core, :jobs, Keyword.delete(previous_jobs, :confirm_sign_in_jobs))
+    on_exit(fn -> Application.put_env(:fermix_core, :jobs, previous_jobs) end)
+
+    repo = start_jobs_repo()
+    :ok = register_job_tools(ctx)
+
+    turn =
+      start_job_turn(ctx, repo, [
+        [{"read_page", %{}}],
+        [{"schedule_job", browser_job("Order check")}],
+        [{"schedule_job", browser_job("Order check, weekly")}]
+      ])
+
+    assert_receive {:asked, _waiter, %{access_sensitive: _id}}
+    assert_receive {:prompt, {:approval_prompt, %{text: text, token: token, actions: actions}}}
+
+    assert text =~
+             ~s(Let the new job "Order check" sign in to websites with your saved logins on its own?)
+
+    assert text =~ "`/always #{token}` approves and stops this question."
+    assert actions.always_allow == "Always allow"
+
+    assert :ok = chat("/always #{token}")
+    assert_receive {:chat_reply, "Approved. Fermix will not ask this again."}
+
+    assert {{:ok, %{response: "Done."}}, results} = Task.await(turn, 10_000)
+    refute_received {:asked, _waiter, _request}
+
+    assert [_read, first, second] = Enum.map(results, &Map.fetch!(&1, :output))
+    assert Jason.decode!(first)["name"] == "Order check"
+    assert Jason.decode!(second)["name"] == "Order check, weekly"
+
+    assert {:ok, jobs} = FermixCore.Jobs.Registry.list_jobs(repo: repo)
+    assert jobs |> Enum.map(& &1.name) |> Enum.sort() == ["Order check", "Order check, weekly"]
+    assert Enum.all?(jobs, &(&1.allowed_tools == ["browser"]))
+  end
+
+  # Stands in for a tool that reads a page someone else wrote.
+  def read_page(_args, _context),
+    do: {:ok, %{success: true, output: "A page someone else wrote.", error: nil}}
+
+  defp register_job_tools(ctx) do
+    read_page =
+      Capability.new(%{
+        name: "read_page",
+        description: "Read a page.",
+        parameters: %{"type" => "object"},
+        kind: :builtin,
+        executor: {__MODULE__, :read_page, []},
+        policy_class: :network
+      })
+
+    for tool <- [FermixCore.Tools.Browser, FermixCore.Tools.ScheduleJob] do
+      :ok = CapabilityRegistry.register(ctx.registry, BuiltinCapability.from_tool_module(tool))
+    end
+
+    CapabilityRegistry.register(ctx.registry, read_page)
+  end
+
+  defp browser_job(name) do
+    %{
+      "name" => name,
+      "schedule" => "every 15 minutes",
+      "task" => "Read the newest order on the account page.",
+      "allowed_tools" => ["browser"]
+    }
+  end
+
+  defp start_jobs_repo do
+    unique = System.unique_integer([:positive])
+    db_path = Path.join(System.tmp_dir!(), "fermix-sign-in-job-#{unique}.db")
+    repo = :"sign_in_job_repo_#{unique}"
+    start_supervised!({FermixCore.Memory.Repo, name: repo, enabled: true, database_path: db_path})
+
+    on_exit(fn ->
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
+    end)
+
+    repo
+  end
+
+  # The owner's chat turn of `start_turn/3`, with the jobs store it sets jobs
+  # up in, and an Always allow that applies the setting to what runs.
+  defp start_job_turn(ctx, repo, steps) do
+    stop_asking = fn ->
+      jobs = Application.get_env(:fermix_core, :jobs, [])
+      Application.put_env(:fermix_core, :jobs, Keyword.put(jobs, :confirm_sign_in_jobs, false))
+    end
+
+    start_turn(ctx, session(), steps, %{
+      memory_repo: repo,
+      memory_agent_id: "main",
+      stop_sign_in_confirm_fn: stop_asking
+    })
+  end
+
   # A run of the owner's job `job_e2e`, in its own process as the runner runs
   # one: no chat, no approval closure, and its job's row behind `jobs`.
   defp start_run(ctx, session, jobs, steps) do
@@ -421,7 +527,7 @@ defmodule FermixChannels.BrowserHost.SignInEndToEndTest do
   # The owner's own chat turn, in its own process as the queue runs one: the
   # approval closure is the gateway's, and it reports the waiting call and its
   # record; the reply closure reports what the owner is shown.
-  defp start_turn(ctx, session, steps) do
+  defp start_turn(ctx, session, steps, extra \\ %{}) do
     test = self()
 
     origin = %{
@@ -432,20 +538,24 @@ defmodule FermixChannels.BrowserHost.SignInEndToEndTest do
       resume: nil
     }
 
-    context = %{
-      agent_name: "main",
-      session_id: session,
-      source_trust: :operator,
-      computer_use_origin: :interactive,
-      conversation_key: ctx.conversation,
-      chat_type: "private",
-      capability_registry: ctx.registry,
-      reply_fn: fn part -> send(test, {:prompt, part}) end,
-      approval_fn: fn request ->
-        send(test, {:asked, self(), request})
-        SandboxCommand.store_pending_grant(request, origin)
-      end
-    }
+    context =
+      Map.merge(
+        %{
+          agent_name: "main",
+          session_id: session,
+          source_trust: :operator,
+          computer_use_origin: :interactive,
+          conversation_key: ctx.conversation,
+          chat_type: "private",
+          capability_registry: ctx.registry,
+          reply_fn: fn part -> send(test, {:prompt, part}) end,
+          approval_fn: fn request ->
+            send(test, {:asked, self(), request})
+            SandboxCommand.store_pending_grant(request, origin)
+          end
+        },
+        extra
+      )
 
     Task.Supervisor.async_nolink(ctx.turns, fn ->
       Process.put(:script, steps ++ [:done])

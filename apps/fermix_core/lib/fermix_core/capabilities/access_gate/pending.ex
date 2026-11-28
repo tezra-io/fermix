@@ -31,6 +31,8 @@ defmodule FermixCore.Capabilities.AccessGate.Pending do
   kills the turn it waits in, and the `:DOWN` drops the record. An in-call
   record is never taken, never matched by a park, and never reported by
   `pending_from/2` or `voice_pending/2`, so nothing can run it as a call.
+  One may offer a third answer, Always allow (`always_in_call/2`); one that
+  does not is left waiting by it.
   """
 
   use GenServer
@@ -50,6 +52,7 @@ defmodule FermixCore.Capabilities.AccessGate.Pending do
           session_id: String.t() | nil,
           waiter: pid(),
           monitor: reference(),
+          always: boolean(),
           seq: non_neg_integer(),
           expires_at_ms: integer(),
           status: :in_call
@@ -134,14 +137,23 @@ defmodule FermixCore.Capabilities.AccessGate.Pending do
 
   @doc """
   Record a call that waits for the owner inside its own process, `waiter`, and
-  monitor it. `attrs` names the turn (`:session_id`) for the log. The id is the
-  one the owner's prompt is bound to.
+  monitor it. `attrs` names the turn (`:session_id`) for the log, and whether
+  the question offers Always allow (`:always`, false when absent). The id is
+  the one the owner's prompt is bound to.
   """
-  @spec park_in_call(%{session_id: String.t() | nil}, pid(), GenServer.server()) ::
-          {:ok, String.t()} | {:error, :too_many_pending}
-  def park_in_call(%{session_id: session_id}, waiter, server \\ __MODULE__)
+  @spec park_in_call(
+          %{required(:session_id) => String.t() | nil, optional(:always) => boolean()},
+          pid(),
+          GenServer.server()
+        ) :: {:ok, String.t()} | {:error, :too_many_pending}
+  def park_in_call(%{session_id: session_id} = attrs, waiter, server \\ __MODULE__)
       when (is_binary(session_id) or is_nil(session_id)) and is_pid(waiter) do
-    GenServer.call(server, {:park_in_call, session_id, waiter})
+    always = Map.get(attrs, :always, false)
+
+    unless is_boolean(always),
+      do: raise(ArgumentError, "an in-call record's always must be a boolean: #{inspect(always)}")
+
+    GenServer.call(server, {:park_in_call, session_id, waiter, always})
   end
 
   @doc """
@@ -153,6 +165,23 @@ defmodule FermixCore.Capabilities.AccessGate.Pending do
   @spec answer_in_call(String.t(), GenServer.server()) :: :ok | {:error, :not_in_call}
   def answer_in_call(id, server \\ __MODULE__) when is_binary(id),
     do: GenServer.call(server, {:answer_in_call, id})
+
+  @doc """
+  The owner's Always allow to an in-call record that offers it: sends
+  `{:access_answer, id, :always}` to its waiting process and ends the record.
+  `{:error, :not_offered}` for a live in-call record that does not offer it,
+  which is left as it was, still waiting; `{:error, :not_in_call}` when `id`
+  names no live in-call record (as `answer_in_call/2`).
+  """
+  @spec always_in_call(String.t(), GenServer.server()) ::
+          :ok | {:error, :not_offered | :not_in_call}
+  def always_in_call(id, server \\ __MODULE__) when is_binary(id),
+    do: GenServer.call(server, {:always_in_call, id})
+
+  @doc "Whether `id` names a live in-call record that offers Always allow."
+  @spec offers_always?(String.t(), GenServer.server()) :: boolean()
+  def offers_always?(id, server \\ __MODULE__) when is_binary(id),
+    do: GenServer.call(server, {:offers_always, id})
 
   @doc """
   The owner's no, answered with the kind of record it reached: an in-call
@@ -271,7 +300,7 @@ defmodule FermixCore.Capabilities.AccessGate.Pending do
   defp handle({:discard, id}, state),
     do: {:ok, %{state | records: Map.delete(state.records, id)}}
 
-  defp handle({:park_in_call, session_id, waiter}, state) do
+  defp handle({:park_in_call, session_id, waiter, always}, state) do
     if map_size(state.records) >= @max_live do
       {{:error, :too_many_pending}, state}
     else
@@ -280,6 +309,7 @@ defmodule FermixCore.Capabilities.AccessGate.Pending do
         session_id: session_id,
         waiter: waiter,
         monitor: Process.monitor(waiter),
+        always: always,
         seq: state.seq,
         expires_at_ms: state.clock.() + @ttl_ms,
         status: :in_call
@@ -295,6 +325,17 @@ defmodule FermixCore.Capabilities.AccessGate.Pending do
       {_not_waiting, state} -> {{:error, :not_in_call}, state}
     end
   end
+
+  defp handle({:always_in_call, id}, state) do
+    case Map.fetch(state.records, id) do
+      {:ok, %{status: :in_call, always: true}} -> answer_always(state, id)
+      {:ok, %{status: :in_call}} -> {{:error, :not_offered}, state}
+      _parked_or_missing -> {{:error, :not_in_call}, state}
+    end
+  end
+
+  defp handle({:offers_always, id}, state),
+    do: {match?({:ok, %{status: :in_call, always: true}}, Map.fetch(state.records, id)), state}
 
   defp handle({:deny, id}, state) do
     case answer_waiter(state, id, :denied) do
@@ -358,6 +399,13 @@ defmodule FermixCore.Capabilities.AccessGate.Pending do
 
       _parked_or_missing ->
         {:not_in_call, state}
+    end
+  end
+
+  defp answer_always(state, id) do
+    case answer_waiter(state, id, :always) do
+      {:answered, state} -> {:ok, state}
+      {:gone, state} -> {{:error, :not_in_call}, state}
     end
   end
 

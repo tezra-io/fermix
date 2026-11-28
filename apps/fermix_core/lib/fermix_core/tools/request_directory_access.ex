@@ -290,22 +290,37 @@ defmodule FermixCore.Tools.RequestDirectoryAccess do
   `after_confirm` says what happens once the owner confirms: a resumed request
   here, or the daemon running the command itself (`Capabilities.AccessGate`).
   `expires` is how long the token lives, as the line says it (`"60s"`, unless
-  the request named a longer window).
+  the request named a longer window). `opts`: `always: true` names `/always`
+  beside `/confirm`, for a question that offers Always allow
+  (`Capabilities.AccessGate.ask_in_call/4`).
   """
-  @spec approval_line(String.t(), map(), String.t(), String.t()) :: String.t()
-  def approval_line(token, context, after_confirm \\ @resume_note, expires \\ "60s")
+  @spec approval_line(String.t(), map(), String.t(), String.t(), keyword()) :: String.t()
+  def approval_line(
+        token,
+        context,
+        after_confirm \\ @resume_note,
+        expires \\ "60s",
+        opts \\ []
+      )
       when is_binary(token) and is_map(context) and is_binary(after_confirm) and
-             is_binary(expires) do
+             is_binary(expires) and is_list(opts) do
     chat_type = Map.get(context, :chat_type)
     private_button? = Map.get(context, :private_approval_button?, false)
+    always? = Keyword.get(opts, :always, false)
 
     if omit_token?(chat_type, private_button?) do
       "Approve with the button below, or privately via `/confirm` in a DM or the CLI " <>
-        "(expires in #{expires}). " <> after_confirm
+        "(expires in #{expires}). " <> always_clause("`/always`", always?) <> after_confirm
     else
-      "Approve with `/confirm #{token}` (expires in #{expires}). " <> after_confirm
+      "Approve with `/confirm #{token}` (expires in #{expires}). " <>
+        always_clause("`/always #{token}`", always?) <> after_confirm
     end
   end
+
+  # A sentence of its own, so it reads whole where a surface takes the
+  # `/confirm` command out of the text and draws a button for it instead.
+  defp always_clause(_command, false), do: ""
+  defp always_clause(command, true), do: "#{command} approves and stops this question. "
 
   defp omit_token?(chat_type, private_button?) do
     private_button? and shared_chat?(chat_type)

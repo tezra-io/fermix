@@ -4,6 +4,7 @@ defmodule FermixCore.Tools.JobsTest do
   alias FermixCore.AgentLoop
   alias FermixCore.Agents.AgentDefinition
   alias FermixCore.Agents.RuntimeContext
+  alias FermixCore.Capabilities.AccessGate
   alias FermixCore.Capabilities.Builtin, as: BuiltinCapability
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
@@ -1612,7 +1613,13 @@ defmodule FermixCore.Tools.JobsTest do
           chat_type: "private"
         })
 
-      tainted = Map.put(direct, :outside_sources, MapSet.new([{:tool, "web_fetch"}]))
+      # With the owner's question about such a job turned off, so the tests that
+      # use it hold the job rule alone; `asking` below has it on.
+      tainted =
+        Map.merge(direct, %{
+          outside_sources: MapSet.new([{:tool, "web_fetch"}]),
+          jobs_config: [confirm_sign_in_jobs: false]
+        })
 
       job = %{
         "name" => "Order check",
@@ -1623,6 +1630,41 @@ defmodule FermixCore.Tools.JobsTest do
 
       %{direct: direct, tainted: tainted, registry: registry, job: job}
     end
+
+    # The owner's own chat turn after reading outside content, with the
+    # question on: its approval and reply closures report to the test, it
+    # parks in a store of its own, and its Always allow reports instead of
+    # writing the home's settings.
+    defp asking(tainted) do
+      test_pid = self()
+      pending = :"job_question_pending_#{System.unique_integer([:positive])}"
+      start_supervised!({FermixCore.Capabilities.AccessGate.Pending, name: pending})
+
+      Map.merge(tainted, %{
+        jobs_config: [],
+        access_pending: pending,
+        reply_fn: fn part -> send(test_pid, {:reply, part}) end,
+        approval_fn: fn request ->
+          send(test_pid, {:approval, request})
+          {:ok, "TOKEN123", :new}
+        end,
+        stop_sign_in_confirm_fn: fn ->
+          send(test_pid, :stopped_asking)
+          :ok
+        end
+      })
+    end
+
+    # The tool call waits in its own process for the owner, as in a turn.
+    defp in_call(fun), do: Task.async(fun)
+
+    defp question do
+      assert_receive {:approval, %{access_sensitive: id}}
+      assert_receive {:reply, {:approval_prompt, %{text: text, actions: %{always_allow: _}}}}
+      {id, text}
+    end
+
+    defp answered(task), do: Task.await(task, 10_000)
 
     defp browser_job(direct, job) do
       assert {:ok, %{success: true} = created} = ScheduleJob.execute(job, direct)
@@ -1739,6 +1781,175 @@ defmodule FermixCore.Tools.JobsTest do
                ScheduleJob.execute(Map.put(digest, "allowed_tools", ["web_search"]), worker)
 
       assert Jason.decode!(created.output)["allowed_tools"] == ["web_search"]
+    end
+
+    # The owner's decision: a turn that read outside content could have been
+    # steered by it, so it asks the owner once before such a job exists.
+    test "schedule_job after reading outside content asks first, and a no creates nothing", %{
+      tainted: tainted,
+      job: job
+    } do
+      context = asking(tainted)
+
+      task = in_call(fn -> ScheduleJob.execute(job, context) end)
+      {id, text} = question()
+
+      assert text =~
+               ~s(Let the new job "Order check" sign in to websites with your saved logins on its own?)
+
+      assert {:ok, :in_call} = AccessGate.deny(id, context.access_pending)
+      assert {:ok, %{success: false, error: error}} = answered(task)
+      assert error =~ "The owner said no, so the job was not set up."
+      assert {:ok, []} = Repo.list_scheduled_jobs(%{}, server: context.memory_repo)
+
+      task = in_call(fn -> ScheduleJob.execute(job, context) end)
+      {id, _text} = question()
+      send(task.pid, {:access_timeout, id})
+      assert {:ok, %{success: false, error: error}} = answered(task)
+      assert error =~ "The owner did not answer within 60 seconds, so the job was not set up."
+      assert {:ok, []} = Repo.list_scheduled_jobs(%{}, server: context.memory_repo)
+      refute_received :stopped_asking
+    end
+
+    test "schedule_job after reading outside content sets it up on a yes or an always", %{
+      tainted: tainted,
+      job: job
+    } do
+      context = asking(tainted)
+
+      task = in_call(fn -> ScheduleJob.execute(job, context) end)
+      {id, _text} = question()
+      assert :ok = AccessGate.confirm_in_call(id, context.access_pending)
+      assert {:ok, %{success: true}} = answered(task)
+      refute_received :stopped_asking
+
+      task =
+        in_call(fn -> ScheduleJob.execute(Map.put(job, "name", "Order check 2"), context) end)
+
+      {id, _text} = question()
+      assert :ok = AccessGate.always_in_call(id, context.access_pending)
+      assert {:ok, %{success: true}} = answered(task)
+      assert_received :stopped_asking
+
+      assert {:ok, jobs} = Repo.list_scheduled_jobs(%{}, server: context.memory_repo)
+      assert Enum.sort(Enum.map(jobs, & &1.name)) == ["Order check", "Order check 2"]
+    end
+
+    # Nothing is asked about a job the rest of the call refuses anyway.
+    test "schedule_job asks nothing about a job it refuses for another reason", %{
+      tainted: tainted,
+      job: job
+    } do
+      context = asking(tainted)
+
+      # A route pin needs a model with its provider, and a schedule must parse:
+      # the job's own validity comes before the owner is asked anything.
+      for args <- [
+            Map.put(job, "provider", "openai"),
+            Map.put(job, "schedule", "every blue moon")
+          ] do
+        assert {:ok, %{success: false}} = ScheduleJob.execute(args, context)
+      end
+
+      refute_received {:approval, _request}
+      assert {:ok, []} = Repo.list_scheduled_jobs(%{}, server: context.memory_repo)
+    end
+
+    test "update_job asks nothing about an edit it refuses for another reason", %{
+      direct: direct,
+      tainted: tainted,
+      job: job
+    } do
+      job_id = browser_job(direct, job)
+
+      assert {:ok, %{success: false}} =
+               UpdateJob.execute(
+                 %{"job_id" => job_id, "task" => "Buy it.", "schedule" => "every blue moon"},
+                 asking(tainted)
+               )
+
+      refute_received {:approval, _request}
+      assert {:ok, stored} = Repo.get_scheduled_job(job_id, server: direct.memory_repo)
+      assert stored.task_prompt == job["task"]
+    end
+
+    # The skill a job is bound to is what its runs are told to do, as its task is.
+    test "update_job asks when it binds such a job to another skill; a no binds nothing", %{
+      direct: direct,
+      tainted: tainted,
+      job: job
+    } do
+      job_id = browser_job(direct, job)
+      {:ok, skills} = SkillRegistryStub.start_link([{"orders", ["browser"]}])
+      context = Map.put(asking(tainted), :skill_registry, skills)
+
+      task =
+        in_call(fn ->
+          UpdateJob.execute(%{"job_id" => job_id, "skill_name" => "orders"}, context)
+        end)
+
+      {id, text} = question()
+      assert text =~ ~s(Change what the job "Order check" does?)
+      assert {:ok, :in_call} = AccessGate.deny(id, context.access_pending)
+      assert {:ok, %{success: false, error: error}} = answered(task)
+      assert error =~ "The owner said no, so the job was not changed."
+      assert {:ok, stored} = Repo.get_scheduled_job(job_id, server: direct.memory_repo)
+      assert stored.skill_name == nil
+    end
+
+    test "update_job asks only when it changes such a job's task; a no changes nothing", %{
+      direct: direct,
+      tainted: tainted,
+      job: job
+    } do
+      job_id = browser_job(direct, job)
+      context = asking(tainted)
+
+      task =
+        in_call(fn ->
+          UpdateJob.execute(%{"job_id" => job_id, "task" => "Buy the first item."}, context)
+        end)
+
+      {id, text} = question()
+
+      assert text =~
+               ~s(Change what the job "Order check" does? It signs in to websites with your ) <>
+                 "saved logins on its own."
+
+      assert {:ok, :in_call} = AccessGate.deny(id, context.access_pending)
+      assert {:ok, %{success: false, error: error}} = answered(task)
+      assert error =~ "The owner said no, so the job was not changed."
+      assert {:ok, stored} = Repo.get_scheduled_job(job_id, server: direct.memory_repo)
+      assert stored.task_prompt == job["task"]
+
+      # A change that leaves the task as it is asks nothing.
+      for args <- [%{"schedule" => "every 30 minutes"}, %{"task" => job["task"]}] do
+        assert {:ok, %{success: true}} =
+                 UpdateJob.execute(Map.put(args, "job_id", job_id), context)
+      end
+
+      refute_received {:approval, _request}
+
+      task =
+        in_call(fn ->
+          UpdateJob.execute(%{"job_id" => job_id, "task" => "Read the two newest."}, context)
+        end)
+
+      {id, _text} = question()
+      assert :ok = AccessGate.confirm_in_call(id, context.access_pending)
+      assert {:ok, %{success: true}} = answered(task)
+      assert {:ok, stored} = Repo.get_scheduled_job(job_id, server: direct.memory_repo)
+      assert stored.task_prompt == "Read the two newest."
+    end
+
+    test "resume_job and run_job_now ask nothing", %{direct: direct, tainted: tainted, job: job} do
+      job_id = browser_job(direct, job)
+      context = asking(tainted)
+
+      assert {:ok, %{success: true}} = PauseJob.execute(%{"job_id" => job_id}, context)
+      assert {:ok, %{success: true}} = ResumeJob.execute(%{"job_id" => job_id}, context)
+      assert past_the_gate?(RunJobNow.execute(%{"job_id" => job_id}, context))
+      refute_received {:approval, _request}
     end
 
     test "jobs that do not name it behave as before from any turn", %{direct: direct} do

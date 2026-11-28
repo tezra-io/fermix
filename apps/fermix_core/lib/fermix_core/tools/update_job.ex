@@ -7,11 +7,13 @@ defmodule FermixCore.Tools.UpdateJob do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.Capabilities.AccessGate
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Cues.Mandates
   alias FermixCore.Cues.Pins
   alias FermixCore.Jobs.DeliveryDefaults
   alias FermixCore.Jobs.Registry
+  alias FermixCore.Jobs.Runner
   alias FermixCore.Kept.Access, as: KeptAccess
   alias FermixCore.Tools.JobRegistrySupport, as: Support
 
@@ -182,6 +184,8 @@ defmodule FermixCore.Tools.UpdateJob do
          :ok <- Support.check_within_run_tools(job, skill, context),
          :ok <- Support.check_watcher_consent(job_id, context),
          :ok <- Mandates.check_update_consent(job_id, context),
+         {:ok, _patch} <- Registry.check_update(job_id, attrs, repo: Support.repo(context)),
+         :ok <- confirm_change(job, attrs, context),
          :ok <- disable_mandates(job_id, context) do
       case Registry.update_job(job_id, attrs, repo: Support.repo(context)) do
         {:ok, job} ->
@@ -197,6 +201,28 @@ defmodule FermixCore.Tools.UpdateJob do
       {:error, reason} when is_binary(reason) -> {:ok, Tool.error(reason)}
       {:error, reason} -> Support.error(reason)
     end
+  end
+
+  # New instructions for a job that signs in ask the owner after outside
+  # content (`AccessGate.confirm_sign_in_job/4`), once the edit itself is
+  # valid, judged at the trust the job runs at, as `Support.check_job_access/2`
+  # judges it. Every other edit asks nothing.
+  defp confirm_change(job, attrs, context) do
+    if new_instructions?(job, attrs) do
+      AccessGate.confirm_sign_in_job(job.name, Map.get(job, :allowed_tools) || [], context,
+        job_trust: Runner.effective_trust(job),
+        change: :changed
+      )
+    else
+      :ok
+    end
+  end
+
+  # What a run is told to do: its task, and the skill whose instructions its
+  # runs follow.
+  defp new_instructions?(job, attrs) do
+    Map.get(attrs, :task_prompt, job.task_prompt) != job.task_prompt or
+      Map.get(attrs, :skill_name, job.skill_name) != job.skill_name
   end
 
   # M60 §10.4: a job a mandate names changes only with the mandate disabled

@@ -360,9 +360,7 @@ defmodule FermixChannels.Gateway.Commands.SandboxTest do
 
       assert :ok = dispatch_proposal(dm("/always"), ctx)
 
-      assert_receive {:sandbox_reply,
-                      "Nothing here offers Always allow: only a follow-up's card waiting in " <>
-                        "this chat does."}
+      assert_receive {:sandbox_reply, "Nothing waiting in this chat offers Always allow."}
 
       assert :ok = dispatch_proposal(dm("/confirm #{ctx.token}"), ctx)
       assert_receive {:sandbox_reply, "Confirmed. github_create_issue ran:\n" <> _framed}
@@ -394,17 +392,13 @@ defmodule FermixChannels.Gateway.Commands.SandboxTest do
 
       assert :ok = dispatch_proposal(dm("/always"), ctx)
 
-      assert_receive {:sandbox_reply,
-                      "Nothing here offers Always allow: only a follow-up's card waiting in " <>
-                        "this chat does."}
+      assert_receive {:sandbox_reply, "Nothing waiting in this chat offers Always allow."}
     end
 
     test "a token this store holds is not a card, and takes no Always allow", ctx do
       assert :ok = dispatch_proposal(dm("/always AB12CD34"), ctx)
 
-      assert_receive {:sandbox_reply,
-                      "Nothing here offers Always allow: only a follow-up's card waiting in " <>
-                        "this chat does."}
+      assert_receive {:sandbox_reply, "Nothing waiting in this chat offers Always allow."}
 
       assert {:ok, false} = Watchers.always_allowed(ctx.watcher, repo: ctx.repo)
     end
@@ -465,9 +459,7 @@ defmodule FermixChannels.Gateway.Commands.SandboxTest do
 
       assert :ok = dispatch_proposal(dm("/always"), ctx)
 
-      assert_receive {:sandbox_reply,
-                      "Nothing here offers Always allow: only a follow-up's card waiting in " <>
-                        "this chat does."}
+      assert_receive {:sandbox_reply, "Nothing waiting in this chat offers Always allow."}
 
       assert {:ok, %{state: "waiting"}} =
                Repo.job_heals_call({:get, ctx.heal.id}, server: ctx.repo)

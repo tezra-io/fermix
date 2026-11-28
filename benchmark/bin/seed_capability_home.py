@@ -540,7 +540,12 @@ def render_config(
     # event acceptance only checks that the adapter module resolves, and if an
     # eval-window reminder ever came due, the unconfigured adapter terminates
     # the attempt first-try as adapter_unavailable without touching the network.
-    lines += ["[fermix_core.jobs]", 'default_delivery_mode = "channel"', ""]
+    # `confirm_sign_in_jobs = false` pre-grants the question a turn that read
+    # outside content is asked before it sets up a job that signs in to websites:
+    # nobody answers a question during an eval run, so an unseeded home would
+    # refuse the set-up as unanswered and score the job's own work 0.
+    lines += ["[fermix_core.jobs]", 'default_delivery_mode = "channel"',
+              "confirm_sign_in_jobs = false", ""]
     # With --owner-inbox-cli the target is the local chat instead: a local channel
     # is the owner's own at rung one, and its adapter sends with no credentials, so
     # a message to the owner's inbox lands (`evallib.owner_inbox`).

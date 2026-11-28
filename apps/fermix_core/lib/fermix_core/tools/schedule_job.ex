@@ -201,19 +201,28 @@ defmodule FermixCore.Tools.ScheduleJob do
         created_by_trust: created_by_trust
       }
 
-      case Registry.create_job(attrs, repo: Support.repo(context)) do
-        {:ok, job} ->
-          job
-          |> Support.job_payload(Support.repo(context))
-          |> put_run_tools_note(requested_tools, allowed_tools, context)
-          |> Support.put_skill_tools_note(skill, context)
-          |> Support.success_json()
-
-        {:error, reason} ->
-          Support.error(reason)
-      end
+      create(attrs, requested_tools, skill, context)
     else
       {:error, reason} when is_binary(reason) -> {:ok, Tool.error(reason)}
+      {:error, reason} -> Support.error(reason)
+    end
+  end
+
+  # The job's own validity first (its schedule, its dates), so the owner is
+  # asked about a job that signs in (`AccessGate.confirm_sign_in_job/4`) only
+  # when their yes is all that is left before it is created.
+  defp create(attrs, requested_tools, skill, context) do
+    repo = Support.repo(context)
+
+    with :ok <- Registry.check_create(attrs),
+         :ok <- AccessGate.confirm_sign_in_job(attrs.name, attrs.allowed_tools, context),
+         {:ok, job} <- Registry.create_job(attrs, repo: repo) do
+      job
+      |> Support.job_payload(repo)
+      |> put_run_tools_note(requested_tools, attrs.allowed_tools, context)
+      |> Support.put_skill_tools_note(skill, context)
+      |> Support.success_json()
+    else
       {:error, reason} -> Support.error(reason)
     end
   end

@@ -3456,6 +3456,10 @@ defmodule FermixCore.Setup.ConfigStore do
       :network_readiness_enabled,
       normalize_boolean(lookup(config, "network_readiness_enabled", :network_readiness_enabled))
     )
+    |> put_if_present(
+      :confirm_sign_in_jobs,
+      normalize_boolean(lookup(config, "confirm_sign_in_jobs", :confirm_sign_in_jobs))
+    )
   end
 
   defp normalize_routing(nil), do: []

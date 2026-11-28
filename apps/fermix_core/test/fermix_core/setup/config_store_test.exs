@@ -4667,6 +4667,54 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(jobs, :network_readiness_enabled) == false
   end
 
+  test "save/load round-trips the question about jobs that sign in" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    for value <- [false, true] do
+      snapshot = %{
+        fermix_core: [
+          providers: [openai: []],
+          agent: [name: "fermix"],
+          jobs: [default_delivery_mode: "origin", confirm_sign_in_jobs: value]
+        ],
+        fermix_channels: [],
+        fermix_web: []
+      }
+
+      assert :ok = ConfigStore.save_snapshot(snapshot)
+
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ "confirm_sign_in_jobs = #{value}"
+
+      assert {:ok, loaded} = ConfigStore.load_runtime_config()
+      jobs = Keyword.get(loaded.fermix_core, :jobs, [])
+
+      assert Keyword.get(jobs, :confirm_sign_in_jobs) == value
+      assert Keyword.get(jobs, :default_delivery_mode) == "origin"
+    end
+  end
+
+  test "a home that never set the question about jobs that sign in loads without it" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.jobs]
+    default_delivery_mode = "origin"
+    """)
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    refute Keyword.has_key?(Keyword.get(loaded.fermix_core, :jobs, []), :confirm_sign_in_jobs)
+  end
+
   test "save/load round-trips per-channel command authorization config" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
